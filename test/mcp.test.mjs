@@ -200,6 +200,11 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     });
     assert.equal(ranked.structuredContent?.command, "search");
     assert.equal(ranked.structuredContent?.matches?.[0]?.path, "protocol.md");
+    assert.deepEqual(ranked.structuredContent?.matches?.[0]?.fieldMatches?.tags, ["mcp"]);
+    assert.doesNotMatch(
+      String(ranked.structuredContent?.matches?.[0]?.snippets?.map((snippet) => snippet.text).join("\n")),
+      /title:|tags:/i
+    );
 
     const read = await client.callTool({
       name: "read",

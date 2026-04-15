@@ -83,6 +83,8 @@ optsidian search query="alpha rollout" path=Projects
 optsidian search query="#project alpha" format=json
 ```
 
+Search output includes note title, aliases, tags, matched fields with matching query terms, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. JSON output also includes `scope` when `path=` is used and per-result `fieldMatches`.
+
 The search index is cached outside the vault and rebuilt automatically when stale. Use `index` for manual cache management:
 
 ```bash

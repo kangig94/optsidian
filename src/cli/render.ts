@@ -45,16 +45,20 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
+  const header = [`query: ${result.query}`, `count: ${result.matches.length}`];
+  if (result.scope) header.push(`scope: ${result.scope}`);
+  header.push(`index: ${result.index.status}`);
   if (result.matches.length === 0) {
-    return `query: ${result.query}\ncount: 0\nindex: ${result.index.status}\n\nNo matches found.\n`;
+    return `${header.join("\n")}\n\nNo matches found.\n`;
   }
-  const out = [`query: ${result.query}`, `count: ${result.matches.length}`, `index: ${result.index.status}`, ""];
+  const out = [...header, ""];
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`score: ${match.score}`);
     out.push(`title: ${match.title}`);
+    if (match.aliases.length > 0) out.push(`aliases: ${match.aliases.join(", ")}`);
     if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
-    if (match.matchedFields.length > 0) out.push(`matched: ${match.matchedFields.join(", ")}`);
+    if (match.matchedFields.length > 0) out.push(`matched: ${renderFieldMatches(match.fieldMatches)}`);
     if (match.snippets.length > 0) {
       out.push("snippets:");
       for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
@@ -62,6 +66,12 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
     out.push("");
   });
   return `${out.join("\n")}`;
+}
+
+function renderFieldMatches(fieldMatches: Record<string, string[]>): string {
+  return Object.entries(fieldMatches)
+    .map(([field, terms]) => `${field}(${terms.join(", ")})`)
+    .join(", ");
 }
 
 export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexMutationResult): string {

@@ -158,6 +158,8 @@ optsidian search query="alpha rollout" path=Projects
 optsidian search query="#project alpha" format=json
 ```
 
+Text output includes title, aliases, tags, matched fields with matching query terms, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. JSON output also includes `scope` when `path=` is used and `fieldMatches` for each result.
+
 The search index is stored outside the vault under the OS cache directory. Missing or stale indexes are rebuilt automatically.
 
 ```bash

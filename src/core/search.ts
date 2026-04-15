@@ -82,6 +82,7 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
     command: "search",
     query: params.query,
     count: matches.length,
+    scope: pathFilter?.rel || undefined,
     index: {
       status: loaded.status,
       documents: loaded.manifest.documents,
@@ -291,18 +292,20 @@ function matchesPathFilter(relPath: string, filter: PathFilter): boolean {
 }
 
 function rankedMatch(vaultRoot: string, query: string, doc: SearchDocument, baseScore: number): SearchMatch {
-  const matchedFields = matchedSearchFields(query, doc);
+  const fieldMatches = matchedSearchFields(query, doc);
   return {
     path: doc.path,
     score: roundScore(baseScore + postBoost(query, doc)),
     title: doc.title,
+    aliases: doc.aliases,
     tags: doc.tags,
-    matchedFields,
+    matchedFields: Object.keys(fieldMatches),
+    fieldMatches,
     snippets: snippetsForDocument(vaultRoot, doc.path, query)
   };
 }
 
-function matchedSearchFields(query: string, doc: SearchDocument): string[] {
+function matchedSearchFields(query: string, doc: SearchDocument): Record<string, string[]> {
   const fields: Array<[string, string | string[]]> = [
     ["title", doc.title],
     ["aliases", doc.aliases],
@@ -312,10 +315,11 @@ function matchedSearchFields(query: string, doc: SearchDocument): string[] {
     ["body", doc.body]
   ];
   const queryTokens = queryTerms(query);
-  const result: string[] = [];
+  const result: Record<string, string[]> = {};
   for (const [name, value] of fields) {
     const values = Array.isArray(value) ? value : [value];
-    if (values.some((item) => textMatchesTerms(item, queryTokens))) result.push(name);
+    const matches = queryTokens.filter((term) => values.some((item) => normalizeText(item).includes(term)));
+    if (matches.length > 0) result[name] = matches;
   }
   return result;
 }
@@ -337,18 +341,53 @@ function snippetsForDocument(vaultRoot: string, relPath: string, query: string):
     const abs = resolveVaultPath(vaultRoot, relPath, { mustExist: true }).abs;
     const lines = splitText(decodeUtf8(fs.readFileSync(abs), relPath)).lines;
     const terms = queryTerms(query);
-    const snippets: SearchSnippet[] = [];
-    for (let index = 0; index < lines.length && snippets.length < 3; index += 1) {
-      if (textMatchesTerms(lines[index], terms)) snippets.push({ line: index + 1, text: lines[index] });
-    }
+    const bodyStart = bodyStartLine(lines);
+    const headingSnippets = matchingSnippets(lines, terms, bodyStart, (line) => /^#{1,6}\s+/.test(line));
+    const bodySnippets = matchingSnippets(lines, terms, bodyStart, (line) => !/^#{1,6}\s+/.test(line));
+    const snippets = uniqueSnippets(bodySnippets.length > 0 ? [...headingSnippets.slice(0, 1), ...bodySnippets] : headingSnippets).slice(
+      0,
+      3
+    );
     if (snippets.length > 0) return snippets;
-    const headingIndex = lines.findIndex((line) => /^#{1,6}\s+/.test(line));
+    const headingIndex = lines.findIndex((line, index) => index >= bodyStart && /^#{1,6}\s+/.test(line));
     if (headingIndex >= 0) return [{ line: headingIndex + 1, text: lines[headingIndex] }];
-    const nonEmptyIndex = lines.findIndex((line) => line.trim().length > 0);
-    return nonEmptyIndex >= 0 ? [{ line: nonEmptyIndex + 1, text: lines[nonEmptyIndex] }] : [];
+    const nonEmptyIndex = lines.findIndex((line, index) => index >= bodyStart && line.trim().length > 0);
+    if (nonEmptyIndex >= 0) return [{ line: nonEmptyIndex + 1, text: lines[nonEmptyIndex] }];
+    return [];
   } catch {
     return [];
   }
+}
+
+function bodyStartLine(lines: string[]): number {
+  if (lines[0]?.trim() !== "---") return 0;
+  for (let index = 1; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (trimmed === "---" || trimmed === "...") return index + 1;
+  }
+  return 0;
+}
+
+function matchingSnippets(lines: string[], terms: string[], start: number, predicate: (line: string) => boolean): SearchSnippet[] {
+  const snippets: SearchSnippet[] = [];
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (predicate(line) && textMatchesTerms(line, terms)) {
+      snippets.push({ line: index + 1, text: line });
+    }
+  }
+  return snippets;
+}
+
+function uniqueSnippets(snippets: SearchSnippet[]): SearchSnippet[] {
+  const seen = new Set<number>();
+  const result: SearchSnippet[] = [];
+  for (const snippet of snippets) {
+    if (seen.has(snippet.line)) continue;
+    seen.add(snippet.line);
+    result.push(snippet);
+  }
+  return result;
 }
 
 function queryTerms(query: string): string[] {

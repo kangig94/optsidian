@@ -74,8 +74,10 @@ export type SearchMatch = {
   path: string;
   score: number;
   title: string;
+  aliases: string[];
   tags: string[];
   matchedFields: string[];
+  fieldMatches: Record<string, string[]>;
   snippets: SearchSnippet[];
 };
 
@@ -84,8 +86,9 @@ export type SearchResult = {
   command: "search";
   query: string;
   count: number;
+  scope?: string;
   index: {
-    status: "fresh" | "rebuilt" | "scoped";
+    status: "fresh" | "rebuilt";
     documents: number;
     builtAt?: string;
   };

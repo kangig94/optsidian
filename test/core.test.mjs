@@ -97,8 +97,16 @@ The rollout is blocked by review.
     assert.equal(result.command, "search");
     assert.equal(result.index.status, "rebuilt");
     assert.equal(result.matches[0].path, "Projects/Alpha.md");
+    assert.deepEqual(result.matches[0].aliases, ["Project Alpha"]);
     assert.ok(result.matches[0].matchedFields.includes("tags"));
+    assert.deepEqual(result.matches[0].fieldMatches.aliases, ["project", "alpha"]);
+    assert.deepEqual(result.matches[0].fieldMatches.tags, ["project", "alpha"]);
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
+    assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
+
+    const scoped = await searchVault(vault, { query: "project alpha", path: "Projects", limit: 2 });
+    assert.equal(scoped.scope, "Projects");
+    assert.deepEqual(scoped.matches.map((match) => match.path), ["Projects/Alpha.md"]);
 
     const status = getSearchIndexStatus(vault);
     assert.equal(status.ready, true);

@@ -135,7 +135,7 @@ test("search ranks notes and index commands manage cache", () => {
   fs.mkdirSync(path.join(vault, "Projects"), { recursive: true });
   fs.writeFileSync(
     path.join(vault, "Projects", "Alpha.md"),
-    "---\ntitle: Alpha\ntags: [project, alpha]\n---\n# Rollout\n\nBlocked by review.\n"
+    "---\ntitle: Alpha\ntags: [project, alpha]\naliases:\n  - Project Alpha\n---\n# Rollout\n\nBlocked by review.\n"
   );
   fs.writeFileSync(path.join(vault, "body.md"), "project alpha is mentioned only in body\n");
 
@@ -144,7 +144,16 @@ test("search ranks notes and index commands manage cache", () => {
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
+  assert.deepEqual(payload.matches[0].aliases, ["Project Alpha"]);
+  assert.deepEqual(payload.matches[0].fieldMatches.tags, ["project", "alpha"]);
+  assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
   assert.equal(payload.index.status, "rebuilt");
+
+  result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /scope: Projects/);
+  assert.match(result.stdout, /aliases: Project Alpha/);
+  assert.match(result.stdout, /matched: .*tags\(project, alpha\)/);
 
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
