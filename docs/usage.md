@@ -38,7 +38,7 @@ optsidian raw read path=README.md
 
 ```bash
 optsidian read vault=Work path=README.md head=20
-optsidian search vault=Work query=TODO
+optsidian grep vault=Work query=TODO
 ```
 
 Optimized commands resolve paths relative to the selected vault root.
@@ -71,23 +71,17 @@ optsidian read path=note.md format=json
 
 Only one of `lines=`, `head=`, `tail=`, and `around=` may be used at a time.
 
-## Searching
+## Grep
 
 ```bash
-optsidian search query=TODO
-optsidian search query=TODO context=2 limit=20
-optsidian search query=TODO path=Projects
-optsidian search query="TODO|FIXME" regex
-optsidian search query=todo case
-optsidian search query=needle all
-optsidian search query=needle include-hidden
-optsidian search query=needle format=json
-```
-
-`search:context` is an alias for optimized search with default context lines:
-
-```bash
-optsidian search:context query=TODO
+optsidian grep query=TODO
+optsidian grep query=TODO context=2 limit=20
+optsidian grep query=TODO path=Projects
+optsidian grep query="TODO|FIXME" regex
+optsidian grep query=todo case
+optsidian grep query=needle all
+optsidian grep query=needle include-hidden
+optsidian grep query=needle format=json
 ```
 
 ## Editing
@@ -181,11 +175,11 @@ optsidian copy from=a.md to=b.md overwrite
 
 ## JSON Output
 
-The optimized `read` and `search` commands support `format=json`.
+The `read` and `grep` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
-optsidian search query=TODO format=json
+optsidian grep query=TODO format=json
 ```
 
 Native delegated commands keep their original output formats.
@@ -195,7 +189,7 @@ Native delegated commands keep their original output formats.
 `optsidian-mcp` exposes the core tools over stdio for MCP clients:
 
 ```text
-read, search, write, edit, apply_patch, copy, mkdir
+read, grep, write, edit, apply_patch, copy, mkdir
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.

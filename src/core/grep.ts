@@ -2,11 +2,11 @@ import fs from "node:fs";
 import { UsageError } from "../errors.js";
 import { resolveVaultPath, vaultRelative, walkFiles } from "./path.js";
 import { decodeUtf8, splitText } from "./text.js";
-import type { SearchLine, SearchParams, SearchResult } from "./types.js";
+import type { GrepLine, GrepParams, GrepResult } from "./types.js";
 import { assertOptionalNonNegativeInteger, assertOptionalPositiveInteger } from "./validation.js";
 
-export function searchVault(vaultRoot: string, params: SearchParams): SearchResult {
-  validateSearchParams(params);
+export function grepVault(vaultRoot: string, params: GrepParams): GrepResult {
+  validateGrepParams(params);
   const start = resolveVaultPath(vaultRoot, params.path ?? ".", { mustExist: true });
   const context = params.context ?? 0;
   const limit = params.limit ?? 50;
@@ -14,7 +14,7 @@ export function searchVault(vaultRoot: string, params: SearchParams): SearchResu
   const files = stat.isDirectory()
     ? walkFiles(vaultRoot, start.abs, { includeHidden: Boolean(params.includeHidden), all: Boolean(params.all) })
     : [start.abs];
-  const matches: SearchResult["matches"] = [];
+  const matches: GrepResult["matches"] = [];
   const matcher = buildMatcher(params.query, {
     regexMode: Boolean(params.regex),
     caseSensitive: Boolean(params.caseSensitive)
@@ -42,10 +42,10 @@ export function searchVault(vaultRoot: string, params: SearchParams): SearchResu
     }
   }
 
-  return { ok: true, command: "search", query: params.query, matches, count: matches.length };
+  return { ok: true, command: "grep", query: params.query, matches, count: matches.length };
 }
 
-function validateSearchParams(params: SearchParams): void {
+function validateGrepParams(params: GrepParams): void {
   assertOptionalNonNegativeInteger(params.context, "context");
   assertOptionalPositiveInteger(params.limit, "limit");
 }
@@ -64,8 +64,8 @@ function buildMatcher(query: string, options: { regexMode: boolean; caseSensitiv
   return (line) => (options.caseSensitive ? line : line.toLowerCase()).includes(needle);
 }
 
-function contextLines(lines: string[], start: number, end: number): SearchLine[] {
-  const result: SearchLine[] = [];
+function contextLines(lines: string[], start: number, end: number): GrepLine[] {
+  const result: GrepLine[] = [];
   for (let index = start; index < end; index += 1) {
     result.push({ line: index + 1, text: lines[index] });
   }

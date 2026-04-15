@@ -8,9 +8,9 @@ import { resolveVaultRoot } from "./cli/vault.js";
 import { runApplyPatch } from "./cli/commands/apply-patch.js";
 import { runCopy } from "./cli/commands/copy.js";
 import { runEdit } from "./cli/commands/edit.js";
+import { runGrep } from "./cli/commands/grep.js";
 import { runMkdir } from "./cli/commands/mkdir.js";
 import { runRead } from "./cli/commands/read.js";
-import { runSearch } from "./cli/commands/search.js";
 import { runWrite } from "./cli/commands/write.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
@@ -40,11 +40,8 @@ async function main(): Promise<void> {
     case "read":
       runRead(args, vaultRoot);
       return;
-    case "search":
-      runSearch(args, vaultRoot, 0);
-      return;
-    case "search:context":
-      runSearch(args, vaultRoot, 2);
+    case "grep":
+      runGrep(args, vaultRoot);
       return;
     case "edit":
       runEdit(args, vaultRoot);

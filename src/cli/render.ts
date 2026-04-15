@@ -1,5 +1,5 @@
 import { UsageError } from "../errors.js";
-import type { MutationResult, ReadResult, SearchResult } from "../core/types.js";
+import type { GrepResult, MutationResult, ReadResult } from "../core/types.js";
 
 export type OutputFormat = "text" | "json";
 
@@ -25,7 +25,7 @@ export function renderRead(result: ReadResult, format: OutputFormat): string {
   return `path: ${result.path}\nlines: ${result.range.start}-${result.range.end}/${result.range.total}\ntruncated: ${result.truncated}\n\n${result.numberedText}\n`;
 }
 
-export function renderSearch(result: SearchResult, format: OutputFormat): string {
+export function renderGrep(result: GrepResult, format: OutputFormat): string {
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }

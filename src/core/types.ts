@@ -27,7 +27,7 @@ export type ReadResult = {
   numberedText: string;
 };
 
-export type SearchParams = {
+export type GrepParams = {
   query: string;
   path?: string;
   context?: number;
@@ -38,24 +38,24 @@ export type SearchParams = {
   includeHidden?: boolean;
 };
 
-export type SearchLine = {
+export type GrepLine = {
   line: number;
   text: string;
 };
 
-export type SearchMatch = {
+export type GrepMatch = {
   path: string;
   line: number;
   text: string;
-  contextBefore: SearchLine[];
-  contextAfter: SearchLine[];
+  contextBefore: GrepLine[];
+  contextAfter: GrepLine[];
 };
 
-export type SearchResult = {
+export type GrepResult = {
   ok: true;
-  command: "search";
+  command: "grep";
   query: string;
-  matches: SearchMatch[];
+  matches: GrepMatch[];
   count: number;
 };
 

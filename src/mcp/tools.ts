@@ -5,9 +5,9 @@ import {
   applyVaultPatch,
   copyVaultPath,
   editVaultFile,
+  grepVault,
   mkdirVaultPath,
   readVaultFile,
-  searchVault,
   writeVaultFile
 } from "../core/index.js";
 import type { EditParams, EditSelector, LineRange } from "../core/index.js";
@@ -29,9 +29,9 @@ const readArgsSchema = z.object({
   maxChars: z.number().int().positive().optional().describe("Maximum returned characters")
 });
 
-const searchArgsSchema = z.object({
+const grepArgsSchema = z.object({
   query: z.string().describe("Text or regex query"),
-  path: z.string().min(1).optional().describe("Vault-relative file or directory search root"),
+  path: z.string().min(1).optional().describe("Vault-relative file or directory grep root"),
   context: z.number().int().nonnegative().optional().describe("Context lines around matches"),
   limit: z.number().int().positive().optional().describe("Maximum number of matches"),
   case: z.boolean().optional().describe("Use case-sensitive matching"),
@@ -78,7 +78,7 @@ const mkdirArgsSchema = z.object({
 });
 
 export type ReadToolArgs = z.infer<typeof readArgsSchema>;
-export type SearchToolArgs = z.infer<typeof searchArgsSchema>;
+export type GrepToolArgs = z.infer<typeof grepArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
 export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
@@ -87,7 +87,7 @@ export type MkdirToolArgs = z.infer<typeof mkdirArgsSchema>;
 
 export type OptsidianToolHandlers = {
   read(args: ReadToolArgs): CallToolResult;
-  search(args: SearchToolArgs): CallToolResult;
+  grep(args: GrepToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
   apply_patch(args: PatchToolArgs): CallToolResult;
@@ -98,9 +98,9 @@ export type OptsidianToolHandlers = {
 export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
     read: (args) => runTool(() => readVaultFile(vaultRoot, args)),
-    search: (args) =>
+    grep: (args) =>
       runTool(() =>
-        searchVault(vaultRoot, {
+        grepVault(vaultRoot, {
           query: args.query,
           path: args.path,
           context: args.context,
@@ -131,13 +131,13 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
     async (args) => handlers.read(args)
   );
   server.registerTool(
-    "search",
+    "grep",
     {
-      description: "Search text inside the configured Obsidian vault with line-oriented match output.",
-      inputSchema: searchArgsSchema.shape,
+      description: "Find exact or regex line matches inside the configured Obsidian vault.",
+      inputSchema: grepArgsSchema.shape,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    async (args) => handlers.search(args)
+    async (args) => handlers.grep(args)
   );
   server.registerTool(
     "write",

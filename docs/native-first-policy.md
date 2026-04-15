@@ -30,20 +30,21 @@ MCP does not expose a native passthrough tool in V1. Native-first delegation is 
 The following native command names are intentionally optimized:
 
 - `read`: native `read` has no line ranges, bounded output, or line-numbered context.
-- `search`: native `search` is useful, but lacks strict output caps, regex mode, hidden/default exclusions, and line-oriented context control.
-- `search:context`: optimized as `search` with a context default.
 
 This is the only intentional native-name replacement in V1.
 
 ## Extended Commands
 
-These commands are added because the native CLI does not provide an equivalent generic editing surface:
+These commands are added because the native CLI does not provide an equivalent LLM-oriented tool surface:
 
+- `grep`
 - `edit`
 - `write`
 - `apply_patch`
 - `copy`
 - `mkdir`
+
+`grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. A future `search` implementation can use note-level ranking without overloading grep semantics.
 
 ## Guardrail
 

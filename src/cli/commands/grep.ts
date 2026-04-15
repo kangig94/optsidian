@@ -1,11 +1,11 @@
 import { getValue, hasFlag, parsePositiveInt, ParsedArgs, requireValue } from "../args.js";
-import { searchVault } from "../../core/search.js";
-import { parseFormat, renderSearch } from "../render.js";
+import { grepVault } from "../../core/grep.js";
+import { parseFormat, renderGrep } from "../render.js";
 
-export function runSearch(args: ParsedArgs, vaultRoot: string, defaultContext = 0): void {
-  const context = parsePositiveInt(getValue(args, "context"), "context") ?? defaultContext;
+export function runGrep(args: ParsedArgs, vaultRoot: string): void {
+  const context = parsePositiveInt(getValue(args, "context"), "context") ?? 0;
   const limit = parsePositiveInt(getValue(args, "limit"), "limit") ?? 50;
-  const result = searchVault(vaultRoot, {
+  const result = grepVault(vaultRoot, {
     query: requireValue(args, "query"),
     path: getValue(args, "path"),
     context,
@@ -15,5 +15,5 @@ export function runSearch(args: ParsedArgs, vaultRoot: string, defaultContext = 
     caseSensitive: hasFlag(args, "case"),
     regex: hasFlag(args, "regex")
   });
-  process.stdout.write(renderSearch(result, parseFormat(getValue(args, "format"))));
+  process.stdout.write(renderGrep(result, parseFormat(getValue(args, "format"))));
 }

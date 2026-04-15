@@ -14,7 +14,7 @@ async function core() {
 
 test("core write/read preserves shell-sensitive raw payloads", async () => {
   const vault = tempVault();
-  const { readVaultFile, searchVault, writeVaultFile } = await core();
+  const { grepVault, readVaultFile, writeVaultFile } = await core();
   const raw = [
     "literal $HOME",
     "subshell $(echo hacked)",
@@ -38,9 +38,9 @@ test("core write/read preserves shell-sensitive raw payloads", async () => {
   assert.match(read.content, /\$\(echo hacked\)/);
   assert.match(read.content, /`uname -a`/);
 
-  const search = searchVault(vault, { query: "$(whoami)" });
-  assert.equal(search.count, 1);
-  assert.equal(search.matches[0].text, "echo \"$HOME\" && echo $(whoami)");
+  const grep = grepVault(vault, { query: "$(whoami)" });
+  assert.equal(grep.count, 1);
+  assert.equal(grep.matches[0].text, "echo \"$HOME\" && echo $(whoami)");
 });
 
 test("core edit treats replacement and selectors as literal data", async () => {
@@ -84,12 +84,12 @@ test("core apply_patch accepts raw patch text without shell staging", async () =
 
 test("core validates adapter-independent numeric parameters", async () => {
   const vault = tempVault();
-  const { editVaultFile, readVaultFile, searchVault, writeVaultFile } = await core();
+  const { editVaultFile, grepVault, readVaultFile, writeVaultFile } = await core();
   writeVaultFile(vault, { path: "note.md", content: "one\ntwo\n" });
 
   assert.throws(() => readVaultFile(vault, { path: "note.md", head: 0 }), /head must be a positive integer/);
   assert.throws(() => readVaultFile(vault, { path: "note.md", lines: { start: 3, end: 2 } }), /lines\.end must be >= lines\.start/);
-  assert.throws(() => searchVault(vault, { query: "one", context: -1 }), /context must be a non-negative integer/);
+  assert.throws(() => grepVault(vault, { query: "one", context: -1 }), /context must be a non-negative integer/);
   assert.throws(
     () => editVaultFile(vault, { path: "note.md", selector: { kind: "range", value: { start: 2, end: 1 } }, replacement: "x" }),
     /range\.end must be >= range\.start/

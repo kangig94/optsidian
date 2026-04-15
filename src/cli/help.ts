@@ -22,9 +22,10 @@ Optimized:
     max-chars=<n>       Output cap (default: 20000)
     format=text|json    Output format (default: text)
 
-  search                Search vault text with line-oriented output
+Extended:
+  grep                  Find exact or regex line matches in vault text
     query=<text>        Query text or regex
-    path=<dir|file>     Vault-relative search root
+    path=<dir|file>     Vault-relative grep root
     context=<n>         Context lines
     limit=<n>           Max matches (default: 50)
     case                Case-sensitive
@@ -33,7 +34,6 @@ Optimized:
     include-hidden      Include hidden directories except protected internals
     format=text|json    Output format (default: text)
 
-Extended:
   edit                  Exact, regex, line, or range replacement
   apply_patch           Codex-compatible patch application
   write                 Whole-file write with overwrite guard

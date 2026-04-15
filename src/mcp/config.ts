@@ -71,6 +71,6 @@ Vault resolution:
   OPTSIDIAN_OBSIDIAN_BIN Override native obsidian binary path
 
 Tools:
-  read, search, write, edit, apply_patch, copy, mkdir
+  read, grep, write, edit, apply_patch, copy, mkdir
 `;
 }

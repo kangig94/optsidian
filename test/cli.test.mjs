@@ -115,13 +115,13 @@ test("read caps JSON output and reports empty files as zero lines", () => {
   assert.match(payload.content, /truncated/);
 });
 
-test("search is markdown-first and supports context", () => {
+test("grep is markdown-first and supports context", () => {
   const { vault, env } = setup();
   fs.mkdirSync(path.join(vault, ".obsidian"));
   fs.writeFileSync(path.join(vault, "a.md"), "before\nneedle\nnext\n");
   fs.writeFileSync(path.join(vault, "b.js"), "needle in js\n");
   fs.writeFileSync(path.join(vault, ".obsidian", "ignored.md"), "needle hidden\n");
-  const result = run(["search", "query=needle", "context=1"], { env });
+  const result = run(["grep", "query=needle", "context=1"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /a\.md:1- \| before/);
   assert.match(result.stdout, /a\.md:2: \| needle/);

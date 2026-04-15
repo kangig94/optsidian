@@ -2,7 +2,7 @@
 
 `optsidian` is an LLM-optimized wrapper around the Obsidian CLI.
 
-It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, precise search output, safe edits, and patch application inside the active vault.
+It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, exact grep output, safe edits, and patch application inside the active vault.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 `optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes shell-independent JSON tools:
 
 ```text
-read, search, write, edit, apply_patch, copy, mkdir
+read, grep, write, edit, apply_patch, copy, mkdir
 ```
 
 Example MCP client config:
@@ -145,20 +145,19 @@ truncated: false
 3 | `optsidian` is an LLM-optimized wrapper...
 ```
 
-### `search`
+## Extended Commands
 
-Search vault text with compact, line-oriented output.
+### `grep`
+
+Find exact or regex line matches in vault text with compact output.
 
 ```bash
-optsidian search query=TODO context=2 limit=20
-optsidian search query="status: active" path=Projects
-optsidian search query="foo\\d+" regex case format=json
-optsidian search:context query=Dataview limit=10
+optsidian grep query=TODO context=2 limit=20
+optsidian grep query="status: active" path=Projects
+optsidian grep query="foo\\d+" regex case format=json
 ```
 
-By default, search includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals.
-
-## Extended Commands
+By default, grep includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals.
 
 ### `edit`
 

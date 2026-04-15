@@ -74,7 +74,7 @@ test("mcp tool handlers preserve raw JSON payloads without shell staging", async
   assert.match(payload(result).content, /\$\(echo hacked\)/);
   assert.match(payload(result).content, /`uname -a`/);
 
-  result = tools.search({ query: "$(whoami)" });
+  result = tools.grep({ query: "$(whoami)" });
   assert.equal(payload(result).count, 1);
 });
 
@@ -148,7 +148,7 @@ test("optsidian-mcp help is available outside protocol mode", () => {
   const result = spawnSync(process.execPath, [mcpBin, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /optsidian-mcp/);
-  assert.match(result.stdout, /read, search, write, edit, apply_patch, copy, mkdir/);
+  assert.match(result.stdout, /read, grep, write, edit, apply_patch, copy, mkdir/);
 });
 
 test("optsidian-mcp version flag reports package version", () => {
@@ -183,6 +183,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     const listed = await client.listTools();
     assert.ok(listed.tools.some((tool) => tool.name === "write"));
     assert.ok(listed.tools.some((tool) => tool.name === "read"));
+    assert.ok(listed.tools.some((tool) => tool.name === "grep"));
 
     const write = await client.callTool({
       name: "write",
