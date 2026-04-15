@@ -1,5 +1,5 @@
 import { UsageError } from "../errors.js";
-import type { GrepResult, MutationResult, ReadResult } from "../core/types.js";
+import type { GrepResult, MutationResult, ReadResult, SearchIndexMutationResult, SearchIndexStatusResult, SearchResult } from "../core/types.js";
 
 export type OutputFormat = "text" | "json";
 
@@ -39,6 +39,49 @@ export function renderGrep(result: GrepResult, format: OutputFormat): string {
     for (const after of match.contextAfter) out.push(`${match.path}:${after.line}+ | ${after.text}`);
   }
   return `${out.join("\n")}\n`;
+}
+
+export function renderSearch(result: SearchResult, format: OutputFormat): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
+  if (result.matches.length === 0) {
+    return `query: ${result.query}\ncount: 0\nindex: ${result.index.status}\n\nNo matches found.\n`;
+  }
+  const out = [`query: ${result.query}`, `count: ${result.matches.length}`, `index: ${result.index.status}`, ""];
+  result.matches.forEach((match, index) => {
+    out.push(`${index + 1}. ${match.path}`);
+    out.push(`score: ${match.score}`);
+    out.push(`title: ${match.title}`);
+    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
+    if (match.matchedFields.length > 0) out.push(`matched: ${match.matchedFields.join(", ")}`);
+    if (match.snippets.length > 0) {
+      out.push("snippets:");
+      for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
+    }
+    out.push("");
+  });
+  return `${out.join("\n")}`;
+}
+
+export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexMutationResult): string {
+  if (result.action === "status") {
+    return [
+      `index: ${result.ready ? "ready" : "missing"}`,
+      `stale: ${result.stale}`,
+      `documents: ${result.documents}`,
+      result.builtAt ? `built: ${result.builtAt}` : undefined,
+      `cache: ${result.cacheDir}`,
+      result.reason ? `reason: ${result.reason}` : undefined
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n")
+      .concat("\n");
+  }
+  if (result.action === "rebuild") {
+    return `index: rebuilt\ndocuments: ${result.documents}\nbuilt: ${result.builtAt ?? ""}\ncache: ${result.cacheDir}\n`;
+  }
+  return `index: cleared\ncache: ${result.cacheDir}\n`;
 }
 
 export function renderMutation(result: MutationResult): string {

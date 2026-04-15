@@ -4,6 +4,7 @@ export { editVaultFile } from "./edit.js";
 export { grepVault } from "./grep.js";
 export { mkdirVaultPath } from "./mkdir.js";
 export { readVaultFile, DEFAULT_READ_MAX_CHARS } from "./read.js";
+export { clearSearchIndex, getSearchIndexStatus, rebuildSearchIndex, searchVault } from "./search.js";
 export { writeVaultFile } from "./write.js";
 export type {
   ChangeCode,
@@ -21,5 +22,11 @@ export type {
   PatchParams,
   ReadParams,
   ReadResult,
+  SearchIndexMutationResult,
+  SearchIndexStatusResult,
+  SearchMatch,
+  SearchParams,
+  SearchResult,
+  SearchSnippet,
   WriteParams
 } from "./types.js";

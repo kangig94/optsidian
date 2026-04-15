@@ -12,6 +12,29 @@ async function core() {
   return import(path.resolve("src/core/index.ts"));
 }
 
+test("markdown search parser extracts title aliases tags headings and body", async () => {
+  const { parseMarkdownNote } = await import(path.resolve("src/core/search-parse.ts"));
+  const doc = parseMarkdownNote(
+    "Projects/alpha.md",
+    `---
+title: Alpha Project
+aliases:
+  - Project A
+tags: [project, alpha]
+---
+# Alpha Heading
+
+Body with #rollout tag.
+`
+  );
+
+  assert.equal(doc.title, "Alpha Project");
+  assert.deepEqual(doc.aliases, ["Project A"]);
+  assert.deepEqual(doc.tags.sort(), ["alpha", "project", "rollout"]);
+  assert.deepEqual(doc.headings, ["Alpha Heading"]);
+  assert.match(doc.body, /Body with #rollout tag/);
+});
+
 test("core write/read preserves shell-sensitive raw payloads", async () => {
   const vault = tempVault();
   const { grepVault, readVaultFile, writeVaultFile } = await core();
@@ -41,6 +64,51 @@ test("core write/read preserves shell-sensitive raw payloads", async () => {
   const grep = grepVault(vault, { query: "$(whoami)" });
   assert.equal(grep.count, 1);
   assert.equal(grep.matches[0].text, "echo \"$HOME\" && echo $(whoami)");
+});
+
+test("core ranked search uses metadata fields and external cache", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = cache;
+  try {
+    const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
+    writeVaultFile(vault, {
+      path: "Projects/Alpha.md",
+      content: `---
+title: Alpha
+tags:
+  - project
+  - alpha
+aliases:
+  - Project Alpha
+---
+# Rollout
+
+The rollout is blocked by review.
+`
+    });
+    writeVaultFile(vault, {
+      path: "Archive/body.md",
+      content: "This note only mentions project alpha in passing.\n"
+    });
+
+    const result = await searchVault(vault, { query: "project alpha", limit: 2 });
+    assert.equal(result.command, "search");
+    assert.equal(result.index.status, "rebuilt");
+    assert.equal(result.matches[0].path, "Projects/Alpha.md");
+    assert.ok(result.matches[0].matchedFields.includes("tags"));
+    assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
+
+    const status = getSearchIndexStatus(vault);
+    assert.equal(status.ready, true);
+    assert.equal(status.stale, false);
+    assert.match(status.cacheDir, new RegExp(`^${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.equal(status.cacheDir.startsWith(vault), false);
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
 });
 
 test("core edit treats replacement and selectors as literal data", async () => {

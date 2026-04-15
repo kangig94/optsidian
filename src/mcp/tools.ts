@@ -8,11 +8,12 @@ import {
   grepVault,
   mkdirVaultPath,
   readVaultFile,
+  searchVault,
   writeVaultFile
 } from "../core/index.js";
 import type { EditParams, EditSelector, LineRange } from "../core/index.js";
 import { UsageError } from "../errors.js";
-import { runTool } from "./result.js";
+import { runAsyncTool, runTool } from "./result.js";
 
 const lineRangeSchema = z.object({
   start: z.number().int().positive().describe("1-based inclusive start line"),
@@ -38,6 +39,12 @@ const grepArgsSchema = z.object({
   regex: z.boolean().optional().describe("Treat query as a regular expression"),
   all: z.boolean().optional().describe("Include non-Markdown files"),
   includeHidden: z.boolean().optional().describe("Include hidden directories except protected internals")
+});
+
+const searchArgsSchema = z.object({
+  query: z.string().min(1).describe("Ranked note search query"),
+  path: z.string().min(1).optional().describe("Vault-relative file or directory search scope"),
+  limit: z.number().int().positive().optional().describe("Maximum number of ranked notes")
 });
 
 const writeArgsSchema = z.object({
@@ -78,6 +85,7 @@ const mkdirArgsSchema = z.object({
 });
 
 export type ReadToolArgs = z.infer<typeof readArgsSchema>;
+export type SearchToolArgs = z.infer<typeof searchArgsSchema>;
 export type GrepToolArgs = z.infer<typeof grepArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
@@ -87,6 +95,7 @@ export type MkdirToolArgs = z.infer<typeof mkdirArgsSchema>;
 
 export type OptsidianToolHandlers = {
   read(args: ReadToolArgs): CallToolResult;
+  search(args: SearchToolArgs): Promise<CallToolResult>;
   grep(args: GrepToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
@@ -98,6 +107,7 @@ export type OptsidianToolHandlers = {
 export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
     read: (args) => runTool(() => readVaultFile(vaultRoot, args)),
+    search: (args) => runAsyncTool(() => searchVault(vaultRoot, args)),
     grep: (args) =>
       runTool(() =>
         grepVault(vaultRoot, {
@@ -129,6 +139,15 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (args) => handlers.read(args)
+  );
+  server.registerTool(
+    "search",
+    {
+      description: "Rank Obsidian notes by title, tags, aliases, headings, path, and body.",
+      inputSchema: searchArgsSchema.shape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async (args) => handlers.search(args)
   );
   server.registerTool(
     "grep",

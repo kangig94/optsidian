@@ -23,6 +23,17 @@ Optimized:
     format=text|json    Output format (default: text)
 
 Extended:
+  search                Ranked note search over title, tags, aliases, headings, path, and body
+    query=<text>        Search query
+    path=<dir|file>     Vault-relative search scope
+    limit=<n>           Max notes (default: 10)
+    format=text|json    Output format (default: text)
+
+  index                 Manage the ranked search cache
+    status              Show cache status (default)
+    rebuild             Rebuild search cache
+    clear               Delete search cache
+
   grep                  Find exact or regex line matches in vault text
     query=<text>        Query text or regex
     path=<dir|file>     Vault-relative grep root

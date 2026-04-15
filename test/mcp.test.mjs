@@ -148,7 +148,7 @@ test("optsidian-mcp help is available outside protocol mode", () => {
   const result = spawnSync(process.execPath, [mcpBin, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /optsidian-mcp/);
-  assert.match(result.stdout, /read, grep, write, edit, apply_patch, copy, mkdir/);
+  assert.match(result.stdout, /read, search, grep, write, edit, apply_patch, copy, mkdir/);
 });
 
 test("optsidian-mcp version flag reports package version", () => {
@@ -161,6 +161,7 @@ test("optsidian-mcp version flag reports package version", () => {
 test("optsidian-mcp serves tools over stdio protocol", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
+  const cache = path.join(dir, "cache");
   fs.mkdirSync(vault, { recursive: true });
   const fake = makeFakeObsidian(dir, vault);
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -172,7 +173,8 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     env: {
       ...process.env,
       OPTSIDIAN_OBSIDIAN_BIN: fake,
-      FAKE_VAULT: vault
+      FAKE_VAULT: vault,
+      XDG_CACHE_HOME: cache
     },
     stderr: "pipe"
   });
@@ -183,13 +185,21 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     const listed = await client.listTools();
     assert.ok(listed.tools.some((tool) => tool.name === "write"));
     assert.ok(listed.tools.some((tool) => tool.name === "read"));
+    assert.ok(listed.tools.some((tool) => tool.name === "search"));
     assert.ok(listed.tools.some((tool) => tool.name === "grep"));
 
     const write = await client.callTool({
       name: "write",
-      arguments: { path: "protocol.md", content: "hello $HOME\n" }
+      arguments: { path: "protocol.md", content: "---\ntitle: Protocol\nTags: [mcp]\n---\n# Protocol\n\nhello $HOME\n" }
     });
     assert.equal(write.structuredContent?.command, "write");
+
+    const ranked = await client.callTool({
+      name: "search",
+      arguments: { query: "protocol mcp" }
+    });
+    assert.equal(ranked.structuredContent?.command, "search");
+    assert.equal(ranked.structuredContent?.matches?.[0]?.path, "protocol.md");
 
     const read = await client.callTool({
       name: "read",

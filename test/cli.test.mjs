@@ -129,6 +129,33 @@ test("grep is markdown-first and supports context", () => {
   assert.doesNotMatch(result.stdout, /ignored/);
 });
 
+test("search ranks notes and index commands manage cache", () => {
+  const { vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  fs.mkdirSync(path.join(vault, "Projects"), { recursive: true });
+  fs.writeFileSync(
+    path.join(vault, "Projects", "Alpha.md"),
+    "---\ntitle: Alpha\ntags: [project, alpha]\n---\n# Rollout\n\nBlocked by review.\n"
+  );
+  fs.writeFileSync(path.join(vault, "body.md"), "project alpha is mentioned only in body\n");
+
+  let result = run(["search", "query=project alpha", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.command, "search");
+  assert.equal(payload.matches[0].path, "Projects/Alpha.md");
+  assert.equal(payload.index.status, "rebuilt");
+
+  result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /index: ready/);
+  assert.match(result.stdout, /stale: false/);
+
+  result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /index: cleared/);
+});
+
 test("write and edit mutate only optimized commands", () => {
   const { vault, env } = setup();
   let result = run(["write", "path=note.md", "content=hello\\nthere"], { env });

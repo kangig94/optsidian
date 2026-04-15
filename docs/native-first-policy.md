@@ -38,13 +38,15 @@ This is the only intentional native-name replacement in V1.
 These commands are added because the native CLI does not provide an equivalent LLM-oriented tool surface:
 
 - `grep`
+- `search`
+- `index`
 - `edit`
 - `write`
 - `apply_patch`
 - `copy`
 - `mkdir`
 
-`grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. A future `search` implementation can use note-level ranking without overloading grep semantics.
+`grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
 
 ## Guardrail
 

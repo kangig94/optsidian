@@ -59,6 +59,60 @@ export type GrepResult = {
   count: number;
 };
 
+export type SearchParams = {
+  query: string;
+  path?: string;
+  limit?: number;
+};
+
+export type SearchSnippet = {
+  line: number;
+  text: string;
+};
+
+export type SearchMatch = {
+  path: string;
+  score: number;
+  title: string;
+  tags: string[];
+  matchedFields: string[];
+  snippets: SearchSnippet[];
+};
+
+export type SearchResult = {
+  ok: true;
+  command: "search";
+  query: string;
+  count: number;
+  index: {
+    status: "fresh" | "rebuilt" | "scoped";
+    documents: number;
+    builtAt?: string;
+  };
+  matches: SearchMatch[];
+};
+
+export type SearchIndexStatusResult = {
+  ok: true;
+  command: "index";
+  action: "status";
+  ready: boolean;
+  stale: boolean;
+  cacheDir: string;
+  documents: number;
+  builtAt?: string;
+  reason?: string;
+};
+
+export type SearchIndexMutationResult = {
+  ok: true;
+  command: "index";
+  action: "rebuild" | "clear";
+  cacheDir: string;
+  documents: number;
+  builtAt?: string;
+};
+
 export type ChangeCode = "A" | "M" | "D";
 
 export type FileChange = {

@@ -9,8 +9,10 @@ import { runApplyPatch } from "./cli/commands/apply-patch.js";
 import { runCopy } from "./cli/commands/copy.js";
 import { runEdit } from "./cli/commands/edit.js";
 import { runGrep } from "./cli/commands/grep.js";
+import { runIndex } from "./cli/commands/index.js";
 import { runMkdir } from "./cli/commands/mkdir.js";
 import { runRead } from "./cli/commands/read.js";
+import { runSearch } from "./cli/commands/search.js";
 import { runWrite } from "./cli/commands/write.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
@@ -42,6 +44,12 @@ async function main(): Promise<void> {
       return;
     case "grep":
       runGrep(args, vaultRoot);
+      return;
+    case "search":
+      await runSearch(args, vaultRoot);
+      return;
+    case "index":
+      await runIndex(args, vaultRoot);
       return;
     case "edit":
       runEdit(args, vaultRoot);

@@ -2,7 +2,7 @@
 
 `optsidian` is an LLM-optimized wrapper around the Obsidian CLI.
 
-It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, exact grep output, safe edits, and patch application inside the active vault.
+It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, ranked note search, exact grep output, safe edits, and patch application inside the active vault.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 `optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes shell-independent JSON tools:
 
 ```text
-read, grep, write, edit, apply_patch, copy, mkdir
+read, search, grep, write, edit, apply_patch, copy, mkdir
 ```
 
 Example MCP client config:
@@ -146,6 +146,25 @@ truncated: false
 ```
 
 ## Extended Commands
+
+### `search`
+
+Rank notes by title, tags, aliases, headings, path, and body.
+
+```bash
+optsidian search query="alpha rollout"
+optsidian search query="alpha rollout" limit=10
+optsidian search query="alpha rollout" path=Projects
+optsidian search query="#project alpha" format=json
+```
+
+The search index is stored outside the vault under the OS cache directory. Missing or stale indexes are rebuilt automatically.
+
+```bash
+optsidian index status
+optsidian index rebuild
+optsidian index clear
+```
 
 ### `grep`
 

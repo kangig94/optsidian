@@ -16,6 +16,8 @@ src/native/obsidian.ts             shared native Obsidian process helpers
 src/core/index.ts                  public core API for future non-shell adapters
 src/core/path.ts                   vault path safety
 src/core/read.ts                   bounded file reads
+src/core/search.ts                 ranked note search and cache management
+src/core/search-parse.ts           Markdown metadata extraction for search
 src/core/grep.ts                   line-oriented vault grep
 src/core/edit.ts                   exact/regex/line/range edits
 src/core/write.ts                  whole-file writes

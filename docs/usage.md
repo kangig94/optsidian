@@ -38,6 +38,7 @@ optsidian raw read path=README.md
 
 ```bash
 optsidian read vault=Work path=README.md head=20
+optsidian search vault=Work query=TODO
 optsidian grep vault=Work query=TODO
 ```
 
@@ -71,7 +72,24 @@ optsidian read path=note.md format=json
 
 Only one of `lines=`, `head=`, `tail=`, and `around=` may be used at a time.
 
-## Grep
+## Search and Grep
+
+`search` ranks notes. `grep` finds exact line evidence.
+
+```bash
+optsidian search query="alpha rollout"
+optsidian search query="alpha rollout" limit=10
+optsidian search query="alpha rollout" path=Projects
+optsidian search query="#project alpha" format=json
+```
+
+The search index is cached outside the vault and rebuilt automatically when stale. Use `index` for manual cache management:
+
+```bash
+optsidian index status
+optsidian index rebuild
+optsidian index clear
+```
 
 ```bash
 optsidian grep query=TODO
@@ -175,10 +193,11 @@ optsidian copy from=a.md to=b.md overwrite
 
 ## JSON Output
 
-The `read` and `grep` commands support `format=json`.
+The `read`, `search`, and `grep` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
+optsidian search query=TODO format=json
 optsidian grep query=TODO format=json
 ```
 
@@ -189,7 +208,7 @@ Native delegated commands keep their original output formats.
 `optsidian-mcp` exposes the core tools over stdio for MCP clients:
 
 ```text
-read, grep, write, edit, apply_patch, copy, mkdir
+read, search, grep, write, edit, apply_patch, copy, mkdir
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.

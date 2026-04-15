@@ -31,6 +31,14 @@ export function runTool(fn: () => ToolPayload): CallToolResult {
   }
 }
 
+export async function runAsyncTool(fn: () => ToolPayload | Promise<ToolPayload>): Promise<CallToolResult> {
+  try {
+    return toolResult(await fn());
+  } catch (error) {
+    return toolError(error);
+  }
+}
+
 function errorType(error: unknown): "usage" | "runtime" | "internal" {
   if (error instanceof UsageError) return "usage";
   if (error instanceof RuntimeError) return "runtime";
