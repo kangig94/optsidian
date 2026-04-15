@@ -1,0 +1,81 @@
+import { UsageError } from "../errors.js";
+import type { MutationResult, ReadResult, SearchResult } from "../core/types.js";
+
+export type OutputFormat = "text" | "json";
+
+export function parseFormat(value: string | undefined): OutputFormat {
+  const format = value ?? "text";
+  if (format !== "text" && format !== "json") {
+    throw new UsageError("format must be text or json");
+  }
+  return format;
+}
+
+export function renderRead(result: ReadResult, format: OutputFormat): string {
+  if (format === "json") {
+    return `${JSON.stringify({
+      ok: result.ok,
+      command: result.command,
+      path: result.path,
+      range: result.range,
+      truncated: result.truncated,
+      content: result.content
+    })}\n`;
+  }
+  return `path: ${result.path}\nlines: ${result.range.start}-${result.range.end}/${result.range.total}\ntruncated: ${result.truncated}\n\n${result.numberedText}\n`;
+}
+
+export function renderSearch(result: SearchResult, format: OutputFormat): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
+  if (result.matches.length === 0) {
+    return "No matches found.\n";
+  }
+  const out: string[] = [`matches: ${result.matches.length}`];
+  for (const match of result.matches) {
+    for (const before of match.contextBefore) out.push(`${match.path}:${before.line}- | ${before.text}`);
+    out.push(`${match.path}:${match.line}: | ${match.text}`);
+    for (const after of match.contextAfter) out.push(`${match.path}:${after.line}+ | ${after.text}`);
+  }
+  return `${out.join("\n")}\n`;
+}
+
+export function renderMutation(result: MutationResult): string {
+  if (result.message && result.changes.length === 0) {
+    return `${result.message}\n`;
+  }
+
+  if (result.dryRun) {
+    if (result.command === "copy") {
+      const change = result.changes[0];
+      const source = change?.from ? `${change.from} to ` : "";
+      return `Dry run. Would copy ${source}${change?.path ?? ""}\n`;
+    }
+    if (result.command === "mkdir") {
+      const target = result.changes[0]?.path ?? "";
+      return `Dry run. Would create directory ${target}\n`;
+    }
+    if (result.command === "apply_patch") {
+      return renderDryRunPatch(result);
+    }
+    const change = result.changes[0];
+    const verb = result.command === "write" && change?.code === "A" ? "create" : "update";
+    const diff = result.changes.map((item) => item.diff).filter(Boolean).join("\n");
+    return `Dry run. Would ${verb} ${change?.path ?? ""}\n${diff}\n`;
+  }
+
+  if (result.command === "mkdir") {
+    return `Success. Created directory:\n${result.changes.map((change) => `${change.code} ${change.path}`).join("\n")}\n`;
+  }
+
+  return `Success. Updated the following files:\n${result.changes.map((change) => `${change.code} ${change.path}`).join("\n")}\n`;
+}
+
+function renderDryRunPatch(result: MutationResult): string {
+  const out = ["Dry run. Would update the following files:", ...result.changes.map((change) => `${change.code} ${change.path}`)];
+  for (const change of result.changes) {
+    if (change.diff) out.push(change.diff);
+  }
+  return `${out.join("\n")}\n`;
+}

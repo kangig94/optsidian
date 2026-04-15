@@ -1,0 +1,32 @@
+{
+  "name": "optsidian",
+  "version": "0.1.0",
+  "description": "LLM-optimized Obsidian CLI wrapper with Codex-style editing tools",
+  "type": "module",
+  "bin": {
+    "optsidian": "./dist/optsidian",
+    "optsidian-mcp": "./dist/optsidian-mcp"
+  },
+  "files": [
+    "dist",
+    "docs"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-bundle.mjs",
+    "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  }
+}
