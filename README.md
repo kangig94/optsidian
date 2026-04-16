@@ -2,7 +2,7 @@
 
 `optsidian` is an LLM-optimized wrapper around the Obsidian CLI.
 
-It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, ranked note search, exact grep output, structured frontmatter edits, safe edits, and patch application inside the active vault.
+It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style CLI tools for bounded reads, ranked note search, exact grep output, structured frontmatter edits, safe edits, and patch application inside the active vault. `optsidian-mcp` stays small and exposes only shell-safe mutation tools plus a routing helper.
 
 ## Requirements
 
@@ -38,6 +38,7 @@ Then check:
 
 ```bash
 optsidian --help
+optsidian search --help
 optsidian-mcp --help
 ```
 
@@ -49,10 +50,10 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 
 ## MCP Server
 
-`optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes shell-independent JSON tools:
+`optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes a small shell-independent JSON mutation surface:
 
 ```text
-read, search, grep, frontmatter_read, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove, write, edit, apply_patch, copy, mkdir
+usage, write, edit, apply_patch, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove
 ```
 
 Example MCP client config:
@@ -97,7 +98,7 @@ For a non-default Obsidian binary:
 }
 ```
 
-MCP tool arguments are JSON, so content strings are passed directly without shell expansion.
+MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `usage` MCP tool for routing first; it tells agents to prefer MCP tools when available because structured JSON avoids shell expansion, quoting bugs, and CLI parsing edge cases. Get detailed syntax from `optsidian --help` or `optsidian <command> --help`.
 
 ## Native-First Policy
 
@@ -121,6 +122,12 @@ optsidian raw search query=foo format=json
 ```
 
 ## Optimized Commands
+
+Detailed syntax for any implemented command:
+
+```bash
+optsidian <command> --help
+```
 
 ### `read`
 

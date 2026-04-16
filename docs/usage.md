@@ -12,6 +12,13 @@ Values with spaces should be quoted by the shell:
 optsidian read path="Projects/My Note.md" head=20
 ```
 
+Detailed syntax is always available from the CLI:
+
+```bash
+optsidian --help
+optsidian <command> --help
+```
+
 ## Command Routing
 
 Most Obsidian commands are delegated directly:
@@ -31,6 +38,11 @@ Use `raw` when you explicitly want native Obsidian behavior:
 optsidian raw --help
 optsidian raw read path=README.md
 ```
+
+Command routing in V1:
+
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `frontmatter read`, native passthrough
+- MCP tools: `usage`, `write`, `edit`, `apply_patch`, `frontmatter_set`, `frontmatter_delete`, `frontmatter_add`, `frontmatter_remove`
 
 ## Vault Selection
 
@@ -225,13 +237,20 @@ Native delegated commands keep their original output formats.
 
 ## MCP Usage
 
-`optsidian-mcp` exposes the core tools over stdio for MCP clients:
+`optsidian-mcp` exposes a small mutation-oriented tool surface over stdio for MCP clients:
 
 ```text
-read, search, grep, frontmatter_read, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove, write, edit, apply_patch, copy, mkdir
+usage, write, edit, apply_patch, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
+
+Call `usage` first when the agent only sees MCP tools. It returns the CLI-only split, the available MCP tools, and an explicit preference rule: use MCP first whenever an equivalent MCP tool exists, because structured JSON avoids shell expansion, quoting bugs, and CLI parsing edge cases. It then points detailed syntax back to:
+
+```text
+optsidian --help
+optsidian <command> --help
+```
 
 Example `edit` arguments:
 

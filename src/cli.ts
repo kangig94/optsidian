@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { parseArgs } from "./cli/args.js";
+import { hasFlag, parseArgs } from "./cli/args.js";
 import { delegateToObsidian } from "./cli/delegate.js";
 import { isCliError } from "./errors.js";
-import { helpText } from "./cli/help.js";
+import { commandHelpText, helpText } from "./cli/help.js";
 import { commandPolicy } from "./cli/policy.js";
 import { resolveVaultRoot } from "./cli/vault.js";
 import { runApplyPatch } from "./cli/commands/apply-patch.js";
@@ -34,6 +34,17 @@ async function main(): Promise<void> {
 
   const args = parseArgs(argv);
   const command = args.command;
+  if (command && hasFlag(args, "help")) {
+    if (commandPolicy(command) === "delegate") {
+      delegateToObsidian(argv);
+    }
+    const text = commandHelpText(command);
+    if (!text) {
+      throw new Error(`Missing help text for implemented command: ${command}`);
+    }
+    process.stdout.write(text);
+    return;
+  }
   if (commandPolicy(command) === "delegate") {
     delegateToObsidian(argv);
   }

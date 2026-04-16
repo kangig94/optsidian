@@ -1,7 +1,10 @@
 export type CommandPolicy = "delegate" | "optimize" | "extend";
 
-const OPTIMIZED = new Set(["read"]);
-const EXTENDED = new Set(["search", "index", "grep", "frontmatter", "edit", "apply_patch", "write", "copy", "mkdir"]);
+export const OPTIMIZED_COMMANDS = ["read"] as const;
+export const EXTENDED_COMMANDS = ["search", "index", "grep", "frontmatter", "edit", "apply_patch", "write", "copy", "mkdir"] as const;
+
+const OPTIMIZED = new Set<string>(OPTIMIZED_COMMANDS);
+const EXTENDED = new Set<string>(EXTENDED_COMMANDS);
 
 export function commandPolicy(command: string | undefined): CommandPolicy {
   if (command && OPTIMIZED.has(command)) return "optimize";
@@ -112,5 +115,5 @@ export const NATIVE_SUFFICIENT_COMMANDS = new Set([
 ]);
 
 export function implementedCommands(): string[] {
-  return [...OPTIMIZED, ...EXTENDED].sort();
+  return [...OPTIMIZED_COMMANDS, ...EXTENDED_COMMANDS].sort();
 }

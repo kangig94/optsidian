@@ -1,5 +1,6 @@
 import { UsageError } from "../errors.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
+import { MCP_TOOL_NAMES } from "../cli/help.js";
 
 export type McpConfig = {
   help: boolean;
@@ -71,6 +72,10 @@ Vault resolution:
   OPTSIDIAN_OBSIDIAN_BIN Override native obsidian binary path
 
 Tools:
-  read, search, grep, frontmatter_read, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove, write, edit, apply_patch, copy, mkdir
+  ${MCP_TOOL_NAMES.join(", ")}
+
+Detailed CLI help:
+  optsidian --help
+  optsidian <command> --help
 `;
 }

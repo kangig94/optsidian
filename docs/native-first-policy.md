@@ -23,7 +23,7 @@ V1 treats these command families as native-sufficient:
 
 These commands are delegated exactly unless explicitly moved into the optimized set later.
 
-MCP does not expose a native passthrough tool in V1. Native-first delegation is a CLI behavior; MCP exposes only the implemented structured tools.
+MCP does not expose a native passthrough tool in V1. Native-first delegation is a CLI behavior; MCP stays intentionally small and exposes only shell-safe mutation tools plus a routing helper.
 
 ## Optimized Native Names
 
@@ -49,7 +49,7 @@ These commands are added because the native CLI does not provide an equivalent L
 
 `grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
 
-`frontmatter` does not replace native `property:*` commands. It provides an LLM-oriented structured editing surface with dry-run diffs, JSON values, MCP support, and direct file fallback when native Obsidian vault resolution is unavailable.
+`frontmatter` does not replace native `property:*` commands. It provides an LLM-oriented structured editing surface with dry-run diffs, JSON values, MCP mutation support, and direct file fallback when native Obsidian vault resolution is unavailable.
 
 ## Guardrail
 

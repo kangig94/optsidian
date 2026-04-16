@@ -66,11 +66,38 @@ test("version flag reports package version", () => {
   assert.equal(result.stdout.trim(), packageJson.version);
 });
 
+test("top-level and implemented command help stay local", () => {
+  const result = run(["--help"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Detailed help:/);
+  assert.match(result.stdout, /optsidian <command> --help/);
+  assert.match(result.stdout, /MCP tools: usage, write, edit, apply_patch/);
+
+  const searchHelp = run(["search", "--help"]);
+  assert.equal(searchHelp.status, 0, searchHelp.stderr);
+  assert.match(searchHelp.stdout, /Command: search/);
+  assert.match(searchHelp.stdout, /query=<text>/);
+
+  const frontmatterHelp = run(["frontmatter", "--help"]);
+  assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
+  assert.match(frontmatterHelp.stdout, /Command: frontmatter/);
+  assert.match(frontmatterHelp.stdout, /frontmatter read is CLI-only/);
+});
+
 test("policy table does not implement native-sufficient commands", async () => {
   const policy = await import(path.resolve("src/cli/policy.ts"));
   for (const command of policy.implementedCommands()) {
     assert.equal(policy.NATIVE_SUFFICIENT_COMMANDS.has(command), false, `${command} must not be both implemented and native-sufficient`);
   }
+});
+
+test("native command help is delegated unchanged", () => {
+  const { env, log } = setup();
+  const result = run(["files", "--help"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "native files --help");
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["files", "--help"]);
 });
 
 test("delete remains delegated to native Obsidian", () => {

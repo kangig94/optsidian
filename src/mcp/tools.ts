@@ -4,59 +4,25 @@ import * as z from "zod/v4";
 import {
   applyVaultPatch,
   addFrontmatterValue,
-  copyVaultPath,
   deleteFrontmatter,
   editVaultFile,
-  grepVault,
-  mkdirVaultPath,
-  readFrontmatter,
-  readVaultFile,
   removeFrontmatterValue,
-  searchVault,
   setFrontmatter,
   writeVaultFile
 } from "../core/index.js";
 import type { EditParams, EditSelector, FrontmatterValue, LineRange } from "../core/index.js";
+import { usagePayload } from "../cli/help.js";
 import { UsageError } from "../errors.js";
-import { runAsyncTool, runTool } from "./result.js";
+import { runTool } from "./result.js";
+
+const usageArgsSchema = z.object({});
 
 const lineRangeSchema = z.object({
   start: z.number().int().positive().describe("1-based inclusive start line"),
   end: z.number().int().positive().describe("1-based inclusive end line")
 });
 
-const readArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative file path"),
-  lines: lineRangeSchema.optional().describe("1-based inclusive line range"),
-  head: z.number().int().positive().optional().describe("First n lines"),
-  tail: z.number().int().positive().optional().describe("Last n lines"),
-  around: z.string().optional().describe("First line containing this text plus context"),
-  context: z.number().int().nonnegative().optional().describe("Context lines for around"),
-  maxChars: z.number().int().positive().optional().describe("Maximum returned characters")
-});
-
-const grepArgsSchema = z.object({
-  query: z.string().describe("Text or regex query"),
-  path: z.string().min(1).optional().describe("Vault-relative file or directory grep root"),
-  context: z.number().int().nonnegative().optional().describe("Context lines around matches"),
-  limit: z.number().int().positive().optional().describe("Maximum number of matches"),
-  case: z.boolean().optional().describe("Use case-sensitive matching"),
-  regex: z.boolean().optional().describe("Treat query as a regular expression"),
-  all: z.boolean().optional().describe("Include non-Markdown files"),
-  includeHidden: z.boolean().optional().describe("Include hidden directories except protected internals")
-});
-
-const searchArgsSchema = z.object({
-  query: z.string().min(1).describe("Ranked note search query"),
-  path: z.string().min(1).optional().describe("Vault-relative file or directory search scope"),
-  limit: z.number().int().positive().optional().describe("Maximum number of ranked notes")
-});
-
 const frontmatterValueSchema = z.json().describe("JSON-compatible frontmatter value");
-
-const frontmatterReadArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative Markdown file path")
-});
 
 const frontmatterSetArgsSchema = z.object({
   path: z.string().min(1).describe("Vault-relative Markdown file path"),
@@ -101,54 +67,28 @@ const patchArgsSchema = z.object({
   dryRun: z.boolean().optional().describe("Return diff without writing")
 });
 
-const copyArgsSchema = z.object({
-  from: z.string().min(1).describe("Vault-relative source path"),
-  to: z.string().min(1).describe("Vault-relative destination path"),
-  recursive: z.boolean().optional().describe("Required for copying directories"),
-  overwrite: z.boolean().optional().describe("Allow replacing an existing destination"),
-  dryRun: z.boolean().optional().describe("Report copy without writing")
-});
-
-const mkdirArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative directory path"),
-  parents: z.boolean().optional().describe("Create parent directories; default true"),
-  dryRun: z.boolean().optional().describe("Report directory creation without writing")
-});
-
-export type ReadToolArgs = z.infer<typeof readArgsSchema>;
-export type SearchToolArgs = z.infer<typeof searchArgsSchema>;
-export type FrontmatterReadToolArgs = z.infer<typeof frontmatterReadArgsSchema>;
+export type UsageToolArgs = z.infer<typeof usageArgsSchema>;
 export type FrontmatterSetToolArgs = z.infer<typeof frontmatterSetArgsSchema>;
 export type FrontmatterDeleteToolArgs = z.infer<typeof frontmatterDeleteArgsSchema>;
 export type FrontmatterListMutationToolArgs = z.infer<typeof frontmatterListMutationArgsSchema>;
-export type GrepToolArgs = z.infer<typeof grepArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
 export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
-export type CopyToolArgs = z.infer<typeof copyArgsSchema>;
-export type MkdirToolArgs = z.infer<typeof mkdirArgsSchema>;
 
 export type OptsidianToolHandlers = {
-  read(args: ReadToolArgs): CallToolResult;
-  search(args: SearchToolArgs): Promise<CallToolResult>;
-  frontmatter_read(args: FrontmatterReadToolArgs): CallToolResult;
+  usage(args: UsageToolArgs): CallToolResult;
   frontmatter_set(args: FrontmatterSetToolArgs): CallToolResult;
   frontmatter_delete(args: FrontmatterDeleteToolArgs): CallToolResult;
   frontmatter_add(args: FrontmatterListMutationToolArgs): CallToolResult;
   frontmatter_remove(args: FrontmatterListMutationToolArgs): CallToolResult;
-  grep(args: GrepToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
   apply_patch(args: PatchToolArgs): CallToolResult;
-  copy(args: CopyToolArgs): CallToolResult;
-  mkdir(args: MkdirToolArgs): CallToolResult;
 };
 
 export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
-    read: (args) => runTool(() => readVaultFile(vaultRoot, args)),
-    search: (args) => runAsyncTool(() => searchVault(vaultRoot, args)),
-    frontmatter_read: (args) => runTool(() => readFrontmatter(vaultRoot, args)),
+    usage: () => runTool(() => usagePayload()),
     frontmatter_set: (args) =>
       runTool(() => setFrontmatter(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
     frontmatter_delete: (args) => runTool(() => deleteFrontmatter(vaultRoot, args)),
@@ -156,55 +96,22 @@ export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
       runTool(() => addFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
     frontmatter_remove: (args) =>
       runTool(() => removeFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
-    grep: (args) =>
-      runTool(() =>
-        grepVault(vaultRoot, {
-          query: args.query,
-          path: args.path,
-          context: args.context,
-          limit: args.limit,
-          caseSensitive: args.case,
-          regex: args.regex,
-          all: args.all,
-          includeHidden: args.includeHidden
-        })
-      ),
     write: (args) => runTool(() => writeVaultFile(vaultRoot, args)),
     edit: (args) => runTool(() => editVaultFile(vaultRoot, editArgsToParams(args))),
-    apply_patch: (args) => runTool(() => applyVaultPatch(vaultRoot, args)),
-    copy: (args) => runTool(() => copyVaultPath(vaultRoot, args)),
-    mkdir: (args) => runTool(() => mkdirVaultPath(vaultRoot, args))
+    apply_patch: (args) => runTool(() => applyVaultPatch(vaultRoot, args))
   };
 }
 
 export function registerOptsidianTools(server: McpServer, vaultRoot: string): void {
   const handlers = createToolHandlers(vaultRoot);
   server.registerTool(
-    "read",
+    "usage",
     {
-      description: "Read a UTF-8 file inside the configured Obsidian vault with optional line range, head, tail, around, and output cap controls.",
-      inputSchema: readArgsSchema.shape,
+      description: "Return a short routing summary, tell agents to prefer MCP tools when available, and point detailed syntax to CLI help.",
+      inputSchema: usageArgsSchema.shape,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    async (args) => handlers.read(args)
-  );
-  server.registerTool(
-    "search",
-    {
-      description: "Rank Obsidian notes by title, tags, aliases, headings, path, and body.",
-      inputSchema: searchArgsSchema.shape,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-    },
-    async (args) => handlers.search(args)
-  );
-  server.registerTool(
-    "frontmatter_read",
-    {
-      description: "Read YAML frontmatter from a Markdown file inside the configured Obsidian vault.",
-      inputSchema: frontmatterReadArgsSchema.shape,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-    },
-    async (args) => handlers.frontmatter_read(args)
+    async (args) => handlers.usage(args)
   );
   server.registerTool(
     "frontmatter_set",
@@ -243,15 +150,6 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
     async (args) => handlers.frontmatter_remove(args)
   );
   server.registerTool(
-    "grep",
-    {
-      description: "Find exact or regex line matches inside the configured Obsidian vault.",
-      inputSchema: grepArgsSchema.shape,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-    },
-    async (args) => handlers.grep(args)
-  );
-  server.registerTool(
     "write",
     {
       description: "Write a whole UTF-8 file inside the configured Obsidian vault.",
@@ -277,24 +175,6 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },
     async (args) => handlers.apply_patch(args)
-  );
-  server.registerTool(
-    "copy",
-    {
-      description: "Copy a file or directory inside the configured Obsidian vault.",
-      inputSchema: copyArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
-    },
-    async (args) => handlers.copy(args)
-  );
-  server.registerTool(
-    "mkdir",
-    {
-      description: "Create a directory inside the configured Obsidian vault.",
-      inputSchema: mkdirArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-    },
-    async (args) => handlers.mkdir(args)
   );
 }
 
