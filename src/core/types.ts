@@ -60,10 +60,14 @@ export type GrepResult = {
 };
 
 export type SearchParams = {
-  query: string;
+  query?: string;
   path?: string;
+  tags?: string[];
+  fields?: string[];
   limit?: number;
 };
+
+export type SearchField = "title" | "aliases" | "tags" | "headings" | "path" | "body";
 
 export type SearchSnippet = {
   line: number;
@@ -84,9 +88,13 @@ export type SearchMatch = {
 export type SearchResult = {
   ok: true;
   command: "search";
-  query: string;
+  query?: string;
   count: number;
   scope?: string;
+  filters?: {
+    tags?: string[];
+    fields?: SearchField[];
+  };
   index: {
     status: "fresh" | "rebuilt";
     documents: number;

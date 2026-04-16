@@ -53,13 +53,15 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
-  const header = [`query: ${result.query}`, `count: ${result.matches.length}`];
+  const header = [result.query ? `query: ${result.query}` : undefined, `count: ${result.matches.length}`];
   if (result.scope) header.push(`scope: ${result.scope}`);
+  if (result.filters?.tags?.length) header.push(`tags: ${result.filters.tags.join(", ")}`);
+  if (result.filters?.fields?.length) header.push(`fields: ${result.filters.fields.join(", ")}`);
   header.push(`index: ${result.index.status}`);
   if (result.matches.length === 0) {
-    return `${header.join("\n")}\n\nNo matches found.\n`;
+    return `${header.filter((line): line is string => Boolean(line)).join("\n")}\n\nNo matches found.\n`;
   }
-  const out = [...header, ""];
+  const out = [...header.filter((line): line is string => Boolean(line)), ""];
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`score: ${match.score}`);
