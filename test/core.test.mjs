@@ -195,6 +195,65 @@ test("core search updates cache incrementally across add change rename delete an
   }
 });
 
+test("core reranking favors note identity over body-only mentions and respects field scope", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = cache;
+  try {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, {
+      path: "Notes/Project Alpha.md",
+      content: `---
+title: Project Alpha
+aliases:
+  - Launch Alpha
+---
+Minimal body.
+`
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Body Mention.md",
+      content: "project alpha appears repeatedly in the body.\nproject alpha appears repeatedly in the body.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Reference/Alpha Checklist.md",
+      content: "# Reference\nMinimal body.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Checklist Body.md",
+      content: "alpha checklist appears repeatedly in the body.\nalpha checklist appears repeatedly in the body.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Roadmap/Plan.md",
+      content: "# Plan\nMinimal body.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Roadmap Body.md",
+      content: "roadmap roadmap roadmap roadmap\n"
+    });
+
+    let result = await searchVault(vault, { query: "project alpha", limit: 3 });
+    assert.equal(result.matches[0].path, "Notes/Project Alpha.md");
+
+    result = await searchVault(vault, { query: "launch alpha", limit: 3 });
+    assert.equal(result.matches[0].path, "Notes/Project Alpha.md");
+
+    result = await searchVault(vault, { query: "alpha checklist", limit: 3 });
+    assert.equal(result.matches[0].path, "Reference/Alpha Checklist.md");
+
+    result = await searchVault(vault, { query: "roadmap", limit: 3 });
+    assert.equal(result.matches[0].path, "Notes/Roadmap Body.md");
+
+    result = await searchVault(vault, { query: "roadmap", fields: ["body"], limit: 3 });
+    assert.equal(result.matches[0].path, "Notes/Roadmap Body.md");
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
+});
+
 test("core frontmatter reads and mutates structured YAML while preserving body", async () => {
   const vault = tempVault();
   const {

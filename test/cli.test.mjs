@@ -281,6 +281,45 @@ test("search requires query or tag and validates fields", () => {
   assert.match(result.stderr, /field=<field> requires query=<text>/);
 });
 
+test("search favors exact note identity over body-only mentions and respects field scope", () => {
+  const { vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.mkdirSync(path.join(vault, "Reference"), { recursive: true });
+  fs.mkdirSync(path.join(vault, "Roadmap"), { recursive: true });
+  fs.writeFileSync(
+    path.join(vault, "Notes", "Project Alpha.md"),
+    "---\ntitle: Project Alpha\naliases:\n  - Launch Alpha\n---\nMinimal body.\n"
+  );
+  fs.writeFileSync(
+    path.join(vault, "Notes", "Body Mention.md"),
+    "project alpha appears repeatedly in the body.\nproject alpha appears repeatedly in the body.\n"
+  );
+  fs.writeFileSync(path.join(vault, "Reference", "Alpha Checklist.md"), "# Reference\nMinimal body.\n");
+  fs.writeFileSync(
+    path.join(vault, "Notes", "Checklist Body.md"),
+    "alpha checklist appears repeatedly in the body.\nalpha checklist appears repeatedly in the body.\n"
+  );
+  fs.writeFileSync(path.join(vault, "Roadmap", "Plan.md"), "# Plan\nMinimal body.\n");
+  fs.writeFileSync(path.join(vault, "Notes", "Roadmap Body.md"), "roadmap roadmap roadmap roadmap\n");
+
+  let result = run(["search", "query=launch alpha", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Project Alpha.md");
+
+  result = run(["search", "query=alpha checklist", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matches[0].path, "Reference/Alpha Checklist.md");
+
+  result = run(["search", "query=roadmap", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Roadmap Body.md");
+
+  result = run(["search", "query=roadmap", "field=body", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Roadmap Body.md");
+});
+
 test("frontmatter command reads and mutates structured metadata", () => {
   const { vault, env } = setup();
   fs.writeFileSync(path.join(vault, "note.md"), "# Note\n");

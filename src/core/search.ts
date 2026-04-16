@@ -80,16 +80,69 @@ type ManifestDiff = {
 
 type RankedCandidate = {
   path: string;
-  score: number;
   title: string;
   tags: string[];
+  bucket: number;
+  score: number;
+  baseRank: number;
+  exactPriority: number;
+  phrasePriority: number;
+  coverageTerms: number;
+  coverageFieldScore: number;
+};
+
+type QueryContext = {
+  phrase: string;
+  terms: string[];
+  allowed: Set<SearchField>;
+};
+
+type CoverageField = "title" | "aliases" | "tags" | "headings" | "path";
+
+const CANDIDATE_LIMIT_MIN = 50;
+const CANDIDATE_LIMIT_MULTIPLIER = 10;
+const RRF_K = 10;
+const RRF_WEIGHTS = {
+  identity: 4,
+  phrase: 3,
+  coverage: 2,
+  base: 1
+} as const;
+const RANK_BUCKET = {
+  exact: 0,
+  phrase: 1,
+  coverage: 2,
+  base: 3
+} as const;
+const EXACT_PRIORITY = {
+  title: 0,
+  alias: 1,
+  filenameStem: 2
+} as const;
+const PHRASE_PRIORITY = {
+  title: 0,
+  alias: 1,
+  filenameStem: 2,
+  heading: 3,
+  pathSegment: 4
+} as const;
+const COVERAGE_FIELD_WEIGHT: Record<CoverageField, number> = {
+  title: 5,
+  aliases: 4,
+  tags: 3,
+  headings: 2,
+  path: 1
 };
 
 export async function searchVault(vaultRoot: string, params: SearchParams): Promise<SearchResult> {
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
   const loaded = await loadOrBuildIndex(vaultRoot);
-  const rawLimit = pathFilter || search.tags ? Math.max(loaded.manifest.documents, search.limit) : search.limit;
+  const rawLimit = search.query
+    ? Math.min(loaded.manifest.documents, Math.max(search.limit * CANDIDATE_LIMIT_MULTIPLIER, CANDIDATE_LIMIT_MIN))
+    : pathFilter || search.tags
+      ? loaded.manifest.documents
+      : search.limit;
   const properties = search.fields ? [...search.fields] : [...SEARCH_PROPERTIES];
   const results = (await oramaSearch(loaded.db, {
     limit: rawLimit,
@@ -103,11 +156,19 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
       : {})
   })) as Results<SearchDocument>;
 
-  const matches = results.hits
-    .filter((hit) => (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) && matchesTagFilter(hit.document.tags, search.tags))
-    .map((hit) => rankedCandidate(search.query, hit.document, hit.score, search.fields))
-    .sort(search.query ? compareRankedMatches : compareTagOnlyMatches)
-    .slice(0, search.limit);
+  const filteredHits = results.hits.filter(
+    (hit) => (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) && matchesTagFilter(hit.document.tags, search.tags)
+  );
+  const matches = search.query
+    ? rerankCandidates(search.query, filteredHits, search.fields).slice(0, search.limit)
+    : filteredHits
+        .map((hit) => ({
+          path: hit.document.path,
+          title: hit.document.title,
+          tags: hit.document.tags
+        }))
+        .sort(compareTagOnlyMatches)
+        .slice(0, search.limit);
 
   const withSnippets = matches.map((match) => ({
     path: match.path,
@@ -393,26 +454,47 @@ function matchesPathFilter(relPath: string, filter: PathFilter): boolean {
   return relPath === filter.rel || relPath.startsWith(`${filter.rel}/`);
 }
 
-function rankedCandidate(query: string | undefined, doc: SearchDocument, baseScore: number, fields?: SearchField[]): RankedCandidate {
-  return {
-    path: doc.path,
-    score: roundScore(query ? baseScore + postBoost(query, doc, fields) : 0),
-    title: doc.title,
-    tags: doc.tags
-  };
+function rerankCandidates(
+  query: string,
+  hits: Array<{ document: SearchDocument; score: number }>,
+  fields?: SearchField[]
+): RankedCandidate[] {
+  const context = queryContext(query, fields);
+  const candidates = hits.map((hit, index) => rankedCandidate(hit.document, index + 1, context));
+  const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.exact), compareIdentityRank);
+  const phraseRanks = rankMap(
+    candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.phrase),
+    comparePhraseRank
+  );
+  const coverageRanks = rankMap(
+    candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.phrase || candidate.bucket === RANK_BUCKET.coverage),
+    compareCoverageRank
+  );
+
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: rerankScore(candidate, identityRanks, phraseRanks, coverageRanks)
+    }))
+    .sort(compareRankedMatches);
 }
 
-function postBoost(query: string, doc: SearchDocument, fields?: SearchField[]): number {
-  const allowed = new Set(searchFields(fields));
-  const terms = queryTerms(query);
-  const phrase = normalizeText(query).replace(/^#/, "");
-  let score = 0;
-  if (allowed.has("tags") && doc.tags.some((tag) => terms.includes(normalizeText(tag)))) score += 8;
-  if (allowed.has("title") && normalizeText(doc.title) === phrase) score += 6;
-  if (allowed.has("path") && normalizeText(path.basename(doc.path, path.extname(doc.path))) === phrase) score += 4;
-  if (allowed.has("title") && doc.title && normalizeText(doc.title).includes(phrase)) score += 4;
-  if (allowed.has("headings") && doc.headings.some((heading) => normalizeText(heading).includes(phrase))) score += 3;
-  return score;
+function rankedCandidate(doc: SearchDocument, baseRank: number, context: QueryContext): RankedCandidate {
+  const exactPriority = bestExactPriority(doc, context);
+  const phrasePriority = bestPhrasePriority(doc, context);
+  const coverage = metadataCoverage(doc, context);
+  return {
+    path: doc.path,
+    title: doc.title,
+    tags: doc.tags,
+    bucket: rankBucket(exactPriority, phrasePriority, coverage.terms),
+    score: 0,
+    baseRank,
+    exactPriority,
+    phrasePriority,
+    coverageTerms: coverage.terms,
+    coverageFieldScore: coverage.fieldScore
+  };
 }
 
 function snippetsForDocument(vaultRoot: string, relPath: string, query: string | undefined): SearchSnippet[] {
@@ -470,8 +552,9 @@ function uniqueSnippets(snippets: SearchSnippet[]): SearchSnippet[] {
 }
 
 function queryTerms(query: string): string[] {
-  const terms = normalizeQueryForOrama(query).match(/[\p{L}\p{N}_/-]+/gu) ?? [];
-  return [...new Set(terms.map(normalizeText).filter(Boolean))];
+  const normalized = normalizeIdentityText(query);
+  if (!normalized) return [];
+  return [...new Set(normalized.split(" ").filter(Boolean))];
 }
 
 function searchFields(fields: SearchField[] | undefined): SearchField[] {
@@ -515,11 +598,12 @@ function matchesTagFilter(docTags: string[], tags: string[] | undefined): boolea
 }
 
 function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): number {
+  if (left.bucket !== right.bucket) return left.bucket - right.bucket;
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
 }
 
-function compareTagOnlyMatches(left: RankedCandidate, right: RankedCandidate): number {
+function compareTagOnlyMatches(left: { path: string }, right: { path: string }): number {
   return left.path.localeCompare(right.path);
 }
 
@@ -532,10 +616,158 @@ function textMatchesTerms(value: string, terms: string[]): boolean {
   return terms.some((term) => normalized.includes(term));
 }
 
+function queryContext(query: string, fields?: SearchField[]): QueryContext {
+  return {
+    phrase: normalizeIdentityText(query),
+    terms: queryTerms(query),
+    allowed: new Set(searchFields(fields))
+  };
+}
+
+function bestExactPriority(doc: SearchDocument, context: QueryContext): number {
+  const priorities: number[] = [];
+  if (context.allowed.has("title") && normalizeIdentityText(doc.title) === context.phrase) priorities.push(EXACT_PRIORITY.title);
+  if (context.allowed.has("aliases") && doc.aliases.some((alias) => normalizeIdentityText(alias) === context.phrase)) {
+    priorities.push(EXACT_PRIORITY.alias);
+  }
+  if (context.allowed.has("path") && normalizeIdentityText(filenameStem(doc.path)) === context.phrase) {
+    priorities.push(EXACT_PRIORITY.filenameStem);
+  }
+  return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
+}
+
+function bestPhrasePriority(doc: SearchDocument, context: QueryContext): number {
+  if (!context.phrase) return Number.POSITIVE_INFINITY;
+  const priorities: number[] = [];
+  if (context.allowed.has("title") && containsNormalizedPhrase(doc.title, context.phrase)) priorities.push(PHRASE_PRIORITY.title);
+  if (context.allowed.has("aliases") && doc.aliases.some((alias) => containsNormalizedPhrase(alias, context.phrase))) {
+    priorities.push(PHRASE_PRIORITY.alias);
+  }
+  if (context.allowed.has("path") && containsNormalizedPhrase(filenameStem(doc.path), context.phrase)) {
+    priorities.push(PHRASE_PRIORITY.filenameStem);
+  }
+  if (context.allowed.has("path") && pathSegments(doc.path).some((segment) => containsNormalizedPhrase(segment, context.phrase))) {
+    priorities.push(PHRASE_PRIORITY.pathSegment);
+  }
+  if (context.allowed.has("headings") && doc.headings.some((heading) => containsNormalizedPhrase(heading, context.phrase))) {
+    priorities.push(PHRASE_PRIORITY.heading);
+  }
+  return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
+}
+
+function metadataCoverage(doc: SearchDocument, context: QueryContext): { terms: number; fieldScore: number } {
+  if (context.terms.length === 0) return { terms: 0, fieldScore: 0 };
+  const values: Array<[CoverageField, string[]]> = [
+    ["title", context.allowed.has("title") ? [doc.title] : []],
+    ["aliases", context.allowed.has("aliases") ? doc.aliases : []],
+    ["tags", context.allowed.has("tags") ? doc.tags : []],
+    ["headings", context.allowed.has("headings") ? doc.headings : []],
+    ["path", context.allowed.has("path") ? [filenameStem(doc.path), ...pathSegments(doc.path)] : []]
+  ];
+  const normalized = new Map<CoverageField, string[]>(
+    values.map(([field, entries]) => [field, entries.map(normalizeIdentityText).filter(Boolean)])
+  );
+
+  let matchedTerms = 0;
+  let fieldScore = 0;
+  for (const term of context.terms) {
+    let matched = false;
+    for (const [field, entries] of normalized) {
+      if (entries.some((entry) => entry.includes(term))) {
+        matched = true;
+        fieldScore += COVERAGE_FIELD_WEIGHT[field];
+      }
+    }
+    if (matched) matchedTerms += 1;
+  }
+
+  return { terms: matchedTerms, fieldScore };
+}
+
+function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {
+  if (Number.isFinite(exactPriority)) return RANK_BUCKET.exact;
+  if (Number.isFinite(phrasePriority)) return RANK_BUCKET.phrase;
+  if (coverageTerms > 0) return RANK_BUCKET.coverage;
+  return RANK_BUCKET.base;
+}
+
+function rankMap(candidates: RankedCandidate[], comparator: (left: RankedCandidate, right: RankedCandidate) => number): Map<string, number> {
+  const sorted = [...candidates].sort(comparator);
+  return new Map(sorted.map((candidate, index) => [candidate.path, index + 1]));
+}
+
+function rerankScore(
+  candidate: RankedCandidate,
+  identityRanks: Map<string, number>,
+  phraseRanks: Map<string, number>,
+  coverageRanks: Map<string, number>
+): number {
+  let score = rrfContribution(candidate.baseRank, RRF_WEIGHTS.base);
+  if (candidate.bucket === RANK_BUCKET.exact) {
+    const rank = identityRanks.get(candidate.path);
+    if (rank) score += rrfContribution(rank, RRF_WEIGHTS.identity);
+  } else if (candidate.bucket === RANK_BUCKET.phrase) {
+    const phraseRank = phraseRanks.get(candidate.path);
+    if (phraseRank) score += rrfContribution(phraseRank, RRF_WEIGHTS.phrase);
+    const coverageRank = coverageRanks.get(candidate.path);
+    if (coverageRank) score += rrfContribution(coverageRank, RRF_WEIGHTS.coverage);
+  } else if (candidate.bucket === RANK_BUCKET.coverage) {
+    const coverageRank = coverageRanks.get(candidate.path);
+    if (coverageRank) score += rrfContribution(coverageRank, RRF_WEIGHTS.coverage);
+  }
+  return score;
+}
+
+function compareIdentityRank(left: RankedCandidate, right: RankedCandidate): number {
+  if (left.exactPriority !== right.exactPriority) return left.exactPriority - right.exactPriority;
+  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
+  return left.path.localeCompare(right.path);
+}
+
+function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): number {
+  if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
+  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
+  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
+  return left.path.localeCompare(right.path);
+}
+
+function compareCoverageRank(left: RankedCandidate, right: RankedCandidate): number {
+  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
+  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
+  return left.path.localeCompare(right.path);
+}
+
+function rrfContribution(rank: number, weight: number): number {
+  return weight / (RRF_K + rank);
+}
+
+function containsNormalizedPhrase(value: string, phrase: string): boolean {
+  const normalized = normalizeIdentityText(value);
+  return normalized.length > 0 && normalized.includes(phrase);
+}
+
+function filenameStem(relPath: string): string {
+  return path.basename(relPath, path.extname(relPath));
+}
+
+function pathSegments(relPath: string): string[] {
+  const dirname = path.dirname(relPath);
+  if (!dirname || dirname === ".") return [];
+  return dirname.split(/[\\/]+/).filter(Boolean);
+}
+
 function normalizeText(value: string): string {
   return value.toLowerCase();
 }
 
-function roundScore(score: number): number {
-  return Math.round(score * 1000) / 1000;
+function normalizeIdentityText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/["']/g, "")
+    .replace(/#/g, " ")
+    .replace(/[._/\\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
