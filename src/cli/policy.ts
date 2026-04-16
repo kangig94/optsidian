@@ -1,7 +1,7 @@
 export type CommandPolicy = "delegate" | "optimize" | "extend";
 
 export const OPTIMIZED_COMMANDS = ["read"] as const;
-export const EXTENDED_COMMANDS = ["search", "index", "grep", "frontmatter", "edit", "apply_patch", "write", "copy", "mkdir"] as const;
+export const EXTENDED_COMMANDS = ["search", "index", "grep", "frontmatter", "edit", "apply_patch", "write", "copy", "mkdir", "update"] as const;
 
 const OPTIMIZED = new Set<string>(OPTIMIZED_COMMANDS);
 const EXTENDED = new Set<string>(EXTENDED_COMMANDS);

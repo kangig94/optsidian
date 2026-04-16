@@ -71,12 +71,18 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Detailed help:/);
   assert.match(result.stdout, /optsidian <command> --help/);
+  assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
   assert.match(result.stdout, /MCP tools: usage, write, edit, apply_patch/);
 
   const searchHelp = run(["search", "--help"]);
   assert.equal(searchHelp.status, 0, searchHelp.stderr);
   assert.match(searchHelp.stdout, /Command: search/);
   assert.match(searchHelp.stdout, /query=<text>/);
+
+  const updateHelp = run(["update", "--help"]);
+  assert.equal(updateHelp.status, 0, updateHelp.stderr);
+  assert.match(updateHelp.stdout, /Command: update/);
+  assert.match(updateHelp.stdout, /optsidian update/);
 
   const frontmatterHelp = run(["frontmatter", "--help"]);
   assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);

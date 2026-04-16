@@ -46,6 +46,7 @@ These commands are added because the native CLI does not provide an equivalent L
 - `apply_patch`
 - `copy`
 - `mkdir`
+- `update`
 
 `grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
 

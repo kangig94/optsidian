@@ -14,6 +14,7 @@ import { runIndex } from "./cli/commands/index.js";
 import { runMkdir } from "./cli/commands/mkdir.js";
 import { runRead } from "./cli/commands/read.js";
 import { runSearch } from "./cli/commands/search.js";
+import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
@@ -47,6 +48,11 @@ async function main(): Promise<void> {
   }
   if (commandPolicy(command) === "delegate") {
     delegateToObsidian(argv);
+  }
+
+  if (command === "update") {
+    await runUpdate(args);
+    return;
   }
 
   const vaultRoot = resolveVaultRoot(args);

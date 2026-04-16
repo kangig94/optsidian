@@ -15,7 +15,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "frontmatter read", "native passthrough"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter read", "native passthrough"] as const;
 export const MCP_TOOL_NAMES = [
   "usage",
   "write",
@@ -159,6 +159,16 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "path=<path>", description: "Vault-relative directory path" },
       { name: "parents=false", description: "Disable parent directory creation (default: true)" },
       { name: "dry-run", description: "Report directory creation without writing" }
+    ]
+  },
+  update: {
+    summary: "Update or repair the managed Optsidian install",
+    usage: ["optsidian update"],
+    options: [],
+    notes: [
+      "update is CLI-only.",
+      "Managed updates require an install manifest created by scripts/install.sh.",
+      "Run optsidian update at any time. It installs newer releases and repairs the current release when needed."
     ]
   }
 };

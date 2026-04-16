@@ -66,7 +66,7 @@ test("mcp usage and write handlers preserve routing, preference guidance, and ra
     ""
   ].join("\n");
 
-  assert.deepEqual(payload(usage).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "frontmatter read", "native passthrough"]);
+  assert.deepEqual(payload(usage).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter read", "native passthrough"]);
   assert.deepEqual(payload(usage).routing.mcpTools, [
     "usage",
     "write",
@@ -243,6 +243,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       "index",
       "copy",
       "mkdir",
+      "update",
       "frontmatter read",
       "native passthrough"
     ]);

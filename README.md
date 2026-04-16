@@ -7,9 +7,10 @@ It follows a native-first policy: commands that Obsidian already handles well ar
 ## Requirements
 
 - Node.js 20 or newer
-- `git` and `npm`
-- Codex CLI or Claude Code for automatic MCP registration
+- `curl` for the release installer
+- Codex CLI and Claude Code are optional; detected clients are registered automatically
 - A working `obsidian` CLI on `PATH` for native vault resolution
+- Linux or macOS for managed install/update
 
 The real Obsidian binary can be overridden with:
 
@@ -19,13 +20,13 @@ OPTSIDIAN_OBSIDIAN_BIN=/path/to/obsidian optsidian read path=README.md head=20
 
 ## Install
 
-Install from the canonical script:
+Install the latest published release from the canonical script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-The script clones the repo, builds bundled standalone commands, copies them into `~/.local/bin`, and registers `optsidian` as an MCP server in any detected Codex/Claude client.
+The script downloads the latest stable GitHub release assets, verifies downloaded checksums, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 20 or newer and does not invoke the native `obsidian` CLI during installation.
 
 If native Obsidian vault lookup is unavailable when the MCP client starts, install with a fallback vault path:
 
@@ -40,6 +41,12 @@ Then check:
 optsidian --help
 optsidian search --help
 optsidian-mcp --help
+```
+
+Update an existing managed install:
+
+```bash
+optsidian update
 ```
 
 Uninstall:

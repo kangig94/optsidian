@@ -10,6 +10,7 @@ src/cli/delegate.ts                native Obsidian process delegation
 src/cli/vault.ts                   vault root resolution through native Obsidian
 src/cli/render.ts                  CLI text/json rendering
 src/cli/commands/*.ts              thin CLI adapters
+src/update/installer.ts            release lookup, managed install state, and updater
 src/mcp.ts                         MCP stdio binary entrypoint
 src/mcp/*.ts                       MCP tool registration, config, result mapping
 src/native/obsidian.ts             shared native Obsidian process helpers
@@ -26,6 +27,7 @@ src/core/apply-patch.ts            Codex-compatible patch engine
 test/cli.test.mjs                  end-to-end tests with fake Obsidian
 test/core.test.mjs                 direct core API tests
 test/mcp.test.mjs                  MCP adapter and tool handler tests
+test/release.test.mjs              release packaging, installer, and updater tests
 ```
 
 The core layer must not depend on `process.argv`, `process.stdin`, `process.stdout`, or native Obsidian process delegation. CLI and MCP adapters only translate external inputs into core params and render returned results.
@@ -35,6 +37,7 @@ The core layer must not depend on `process.argv`, `process.stdin`, `process.stdo
 ```bash
 npm install
 npm run build
+npm run package:release
 npm test
 npm pack --dry-run
 ```
@@ -58,6 +61,22 @@ npm run build
 ```
 
 `npm version` updates `package.json` and `package-lock.json`. The build reads `package.json` and embeds that version into `optsidian --version`, `optsidian-mcp --version`, help output, and MCP server metadata.
+
+## Release Flow
+
+Published installs and updates come from GitHub Releases, not source clones.
+
+Release checklist:
+
+```bash
+npm version patch --no-git-tag-version
+npm test
+git commit -am "Release vX.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+```
+
+The `release.yml` workflow validates that the pushed tag matches `package.json`, runs the full test suite, builds `dist/`, emits `release/optsidian-vX.Y.Z`, `release/optsidian-mcp-vX.Y.Z`, and `release/checksums-vX.Y.Z.txt`, and publishes the GitHub Release. If the same tag is force-moved and pushed again, the workflow cancels any in-flight run for that tag and refreshes the existing release assets in place with `gh release upload --clobber`.
 
 ## Native Obsidian Binary
 

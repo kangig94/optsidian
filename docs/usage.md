@@ -41,7 +41,7 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `frontmatter read`, native passthrough
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter read`, native passthrough
 - MCP tools: `usage`, `write`, `edit`, `apply_patch`, `frontmatter_set`, `frontmatter_delete`, `frontmatter_add`, `frontmatter_remove`
 
 ## Vault Selection
@@ -69,6 +69,25 @@ If Obsidian GUI may be closed, provide a fallback path. The fallback is used onl
 optsidian-mcp --vault-path /path/to/vault
 OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian-mcp
 ```
+
+## Install and Update
+
+Install the latest stable release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
+```
+
+The installer does not invoke the native `obsidian` CLI. Native vault resolution still happens later when `optsidian` or `optsidian-mcp` actually run.
+It requires Node.js 20 or newer plus `curl`.
+
+Check or apply managed updates:
+
+```bash
+optsidian update
+```
+
+Managed updates require the install manifest created by `install.sh`. The installer and updater currently support Linux and macOS.
 
 ## Reading
 

@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package version
+        run: |
+          node -e 'const fs=require("node:fs"); const pkg=JSON.parse(fs.readFileSync("package.json","utf8")); const expected=`v${pkg.version}`; const actual=process.env.GITHUB_REF_NAME; if (actual !== expected) { console.error(`Tag ${actual} does not match package version ${expected}`); process.exit(1); }'
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Package release assets
+        run: npm run package:release
+
+      - name: Publish or refresh GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              "release/optsidian-${GITHUB_REF_NAME}" \
+              "release/optsidian-mcp-${GITHUB_REF_NAME}" \
+              "release/checksums-${GITHUB_REF_NAME}.txt" \
+              --clobber
+            gh release edit "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "release/optsidian-${GITHUB_REF_NAME}" \
+              "release/optsidian-mcp-${GITHUB_REF_NAME}" \
+              "release/checksums-${GITHUB_REF_NAME}.txt" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
