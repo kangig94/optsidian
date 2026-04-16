@@ -53,22 +53,14 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
-  const header = [result.query ? `query: ${result.query}` : undefined, `count: ${result.matches.length}`];
-  if (result.scope) header.push(`scope: ${result.scope}`);
-  if (result.filters?.tags?.length) header.push(`tags: ${result.filters.tags.join(", ")}`);
-  if (result.filters?.fields?.length) header.push(`fields: ${result.filters.fields.join(", ")}`);
-  header.push(`index: ${result.index.status}`);
   if (result.matches.length === 0) {
-    return `${header.filter((line): line is string => Boolean(line)).join("\n")}\n\nNo matches found.\n`;
+    return "No matches found.\n";
   }
-  const out = [...header.filter((line): line is string => Boolean(line)), ""];
+  const out: string[] = [];
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
-    out.push(`score: ${match.score}`);
     out.push(`title: ${match.title}`);
-    if (match.aliases.length > 0) out.push(`aliases: ${match.aliases.join(", ")}`);
     if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
-    if (match.matchedFields.length > 0) out.push(`matched: ${renderFieldMatches(match.fieldMatches)}`);
     if (match.snippets.length > 0) {
       out.push("snippets:");
       for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
@@ -90,30 +82,17 @@ export function renderFrontmatterRead(result: FrontmatterReadResult, format: Out
   ].join("\n").concat("\n");
 }
 
-function renderFieldMatches(fieldMatches: Record<string, string[]>): string {
-  return Object.entries(fieldMatches)
-    .map(([field, terms]) => `${field}(${terms.join(", ")})`)
-    .join(", ");
-}
-
-export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexMutationResult): string {
+export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexMutationResult, format: OutputFormat = "text"): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
   if (result.action === "status") {
-    return [
-      `index: ${result.ready ? "ready" : "missing"}`,
-      `stale: ${result.stale}`,
-      `documents: ${result.documents}`,
-      result.builtAt ? `built: ${result.builtAt}` : undefined,
-      `cache: ${result.cacheDir}`,
-      result.reason ? `reason: ${result.reason}` : undefined
-    ]
-      .filter((line): line is string => Boolean(line))
-      .join("\n")
-      .concat("\n");
+    return result.ready ? "Index ready.\n" : "Index missing.\n";
   }
   if (result.action === "rebuild") {
-    return `index: rebuilt\ndocuments: ${result.documents}\nbuilt: ${result.builtAt ?? ""}\ncache: ${result.cacheDir}\n`;
+    return "Index rebuilt.\n";
   }
-  return `index: cleared\ncache: ${result.cacheDir}\n`;
+  return "Index cleared.\n";
 }
 
 export function renderMutation(result: MutationResult, format: OutputFormat = "text"): string {

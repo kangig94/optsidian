@@ -188,16 +188,18 @@ test("search ranks notes and index commands manage cache", () => {
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
-  assert.deepEqual(payload.matches[0].aliases, ["Project Alpha"]);
-  assert.deepEqual(payload.matches[0].fieldMatches.tags, ["project", "alpha"]);
+  assert.equal(payload.matches[0].title, "Alpha");
+  assert.deepEqual(payload.matches[0].tags.sort(), ["alpha", "project"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["command", "matches", "ok"]);
+  assert.deepEqual(Object.keys(payload.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
-  assert.equal(payload.index.status, "rebuilt");
 
   result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /scope: Projects/);
-  assert.match(result.stdout, /aliases: Project Alpha/);
-  assert.match(result.stdout, /matched: .*tags\(project, alpha\)/);
+  assert.match(result.stdout, /1\. Projects\/Alpha\.md/);
+  assert.match(result.stdout, /title: Alpha/);
+  assert.match(result.stdout, /tags: project, alpha/);
+  assert.doesNotMatch(result.stdout, /scope:|aliases:|matched:|score:/);
 
   result = run(["search", "query=review", "field=title", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
@@ -206,25 +208,30 @@ test("search ranks notes and index commands manage cache", () => {
   result = run(["search", "tag=#project,#alpha", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const tagOnly = JSON.parse(result.stdout);
-  assert.deepEqual(tagOnly.filters.tags, ["project", "alpha"]);
-  assert.equal(tagOnly.filters.fields, undefined);
-  assert.equal(tagOnly.query, undefined);
   assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
-  assert.equal(tagOnly.matches[0].score, 0);
+  assert.deepEqual(Object.keys(tagOnly).sort(), ["command", "matches", "ok"]);
 
   result = run(["search", "tag=project", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /scope: Projects/);
-  assert.match(result.stdout, /tags: project/);
+  assert.match(result.stdout, /1\. Projects\/Alpha\.md/);
+  assert.match(result.stdout, /tags: project, alpha/);
+  assert.doesNotMatch(result.stdout, /scope:|index:/);
 
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /index: ready/);
-  assert.match(result.stdout, /stale: false/);
+  assert.equal(result.stdout, "Index ready.\n");
+
+  result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "status", ready: true });
 
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /index: cleared/);
+  assert.equal(result.stdout, "Index cleared.\n");
+
+  result = run(["index", "clear", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "clear" });
 });
 
 test("search requires query or tag and validates fields", () => {

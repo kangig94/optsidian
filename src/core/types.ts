@@ -76,30 +76,14 @@ export type SearchSnippet = {
 
 export type SearchMatch = {
   path: string;
-  score: number;
   title: string;
-  aliases: string[];
   tags: string[];
-  matchedFields: string[];
-  fieldMatches: Record<string, string[]>;
   snippets: SearchSnippet[];
 };
 
 export type SearchResult = {
   ok: true;
   command: "search";
-  query?: string;
-  count: number;
-  scope?: string;
-  filters?: {
-    tags?: string[];
-    fields?: SearchField[];
-  };
-  index: {
-    status: "fresh" | "rebuilt";
-    documents: number;
-    builtAt?: string;
-  };
   matches: SearchMatch[];
 };
 
@@ -108,20 +92,12 @@ export type SearchIndexStatusResult = {
   command: "index";
   action: "status";
   ready: boolean;
-  stale: boolean;
-  cacheDir: string;
-  documents: number;
-  builtAt?: string;
-  reason?: string;
 };
 
 export type SearchIndexMutationResult = {
   ok: true;
   command: "index";
   action: "rebuild" | "clear";
-  cacheDir: string;
-  documents: number;
-  builtAt?: string;
 };
 
 export type FrontmatterValue = null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };

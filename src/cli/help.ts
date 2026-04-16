@@ -62,14 +62,18 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     notes: [
       "Search is CLI-only. Use MCP usage for routing and CLI help discovery.",
       "query is required unless tag= is provided.",
-      "field= is only valid when query= is present."
+      "field= is only valid when query= is present.",
+      "Search output returns note path, title, tags, and body snippets only."
     ]
   },
   index: {
     summary: "Manage the ranked search cache",
-    usage: ["optsidian index [status]", "optsidian index rebuild", "optsidian index clear"],
-    options: [],
-    notes: ["The search cache lives outside the vault and is rebuilt automatically when stale."]
+    usage: ["optsidian index [status] [format=text|json]", "optsidian index rebuild [format=text|json]", "optsidian index clear [format=text|json]"],
+    options: [{ name: "format=text|json", description: "Output format (default: text)" }],
+    notes: [
+      "The search cache lives outside the vault and is rebuilt automatically as needed.",
+      "status only reports whether a usable cache exists."
+    ]
   },
   grep: {
     summary: "Find exact or regex line matches in vault text",

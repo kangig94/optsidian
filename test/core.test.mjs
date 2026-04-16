@@ -95,31 +95,25 @@ The rollout is blocked by review.
 
     const result = await searchVault(vault, { query: "project alpha", limit: 2 });
     assert.equal(result.command, "search");
-    assert.equal(result.index.status, "rebuilt");
     assert.equal(result.matches[0].path, "Projects/Alpha.md");
-    assert.deepEqual(result.matches[0].aliases, ["Project Alpha"]);
-    assert.ok(result.matches[0].matchedFields.includes("tags"));
-    assert.deepEqual(result.matches[0].fieldMatches.aliases, ["project", "alpha"]);
-    assert.deepEqual(result.matches[0].fieldMatches.tags, ["project", "alpha"]);
+    assert.equal(result.matches[0].title, "Alpha");
+    assert.deepEqual(result.matches[0].tags.sort(), ["alpha", "project"]);
+    assert.deepEqual(Object.keys(result).sort(), ["command", "matches", "ok"]);
+    assert.deepEqual(Object.keys(result.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
     assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
     const scoped = await searchVault(vault, { query: "project alpha", path: "Projects", limit: 2 });
-    assert.equal(scoped.scope, "Projects");
     assert.deepEqual(scoped.matches.map((match) => match.path), ["Projects/Alpha.md"]);
 
     const fieldFiltered = await searchVault(vault, { query: "review", fields: ["title"], limit: 2 });
     assert.equal(fieldFiltered.matches.length, 0);
 
     const tagFiltered = await searchVault(vault, { query: "project alpha", tags: ["project", "alpha"], limit: 2 });
-    assert.deepEqual(tagFiltered.filters, { tags: ["project", "alpha"], fields: undefined });
     assert.deepEqual(tagFiltered.matches.map((match) => match.path), ["Projects/Alpha.md"]);
 
     const tagOnly = await searchVault(vault, { tags: ["project"], limit: 2 });
-    assert.equal(tagOnly.query, undefined);
-    assert.equal(tagOnly.matches[0].score, 0);
     assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
-    assert.equal(tagOnly.matches[0].matchedFields.length, 0);
 
     writeVaultFile(vault, {
       path: "Projects/Beta.md",
@@ -150,13 +144,51 @@ Another project note.
 
     const status = getSearchIndexStatus(vault);
     assert.equal(status.ready, true);
-    assert.equal(status.stale, false);
-    assert.match(status.cacheDir, new RegExp(`^${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-    assert.equal(status.cacheDir.startsWith(vault), false);
 
     await assert.rejects(() => searchVault(vault, { path: "Projects", limit: 2 }), /query=<text> or tag=<tag>/);
     await assert.rejects(() => searchVault(vault, { query: "review", fields: ["unknown"], limit: 2 }), /field must be one of/);
     await assert.rejects(() => searchVault(vault, { tags: ["project"], fields: ["title"], limit: 2 }), /field=<field> requires query=<text>/);
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
+});
+
+test("core search updates cache incrementally across add change rename delete and parse failure", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = cache;
+  try {
+    const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\nproject alpha\n" });
+    let result = await searchVault(vault, { query: "alpha", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Alpha.md"]);
+
+    writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\nproject beta\n" });
+    result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+
+    writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Gamma\nproject gamma\n", overwrite: true });
+    result = await searchVault(vault, { query: "gamma", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+
+    fs.renameSync(path.join(vault, "Notes", "Beta.md"), path.join(vault, "Notes", "Renamed.md"));
+    result = await searchVault(vault, { query: "gamma", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Renamed.md"]);
+
+    fs.rmSync(path.join(vault, "Notes", "Renamed.md"));
+    result = await searchVault(vault, { query: "gamma", limit: 5 });
+    assert.equal(result.matches.length, 0);
+
+    fs.writeFileSync(path.join(vault, "Notes", "Alpha.md"), Buffer.from([0xc3, 0x28]));
+    result = await searchVault(vault, { query: "alpha", limit: 5 });
+    assert.equal(result.matches.length, 0);
+    result = await searchVault(vault, { query: "alpha", limit: 5 });
+    assert.equal(result.matches.length, 0);
+
+    assert.equal(getSearchIndexStatus(vault).ready, true);
   } finally {
     if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = previousCache;

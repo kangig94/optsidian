@@ -175,9 +175,9 @@ optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Text output includes title, aliases, tags, matched fields with matching query terms, applied `tag`/`field` filters, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. JSON output also includes `scope`, `filters`, and `fieldMatches` for each result. `field=` is only valid when `query=` is present.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `field=` is only valid when `query=` is present.
 
-The search index is stored outside the vault under the OS cache directory. Missing or stale indexes are rebuilt automatically.
+The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. `index status` only reports whether a usable cache exists.
 
 ```bash
 optsidian index status
