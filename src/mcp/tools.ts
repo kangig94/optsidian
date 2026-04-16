@@ -1,16 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
-import {
-  applyVaultPatch,
-  addFrontmatterValue,
-  deleteFrontmatter,
-  editVaultFile,
-  removeFrontmatterValue,
-  setFrontmatter,
-  writeVaultFile
-} from "../core/index.js";
-import type { EditParams, EditSelector, FrontmatterValue, LineRange } from "../core/index.js";
+import { applyVaultPatch, editVaultFile, writeVaultFile } from "../core/index.js";
+import type { EditParams, EditSelector, LineRange } from "../core/index.js";
 import { usagePayload } from "../cli/help.js";
 import { UsageError } from "../errors.js";
 import { runTool } from "./result.js";
@@ -20,28 +12,6 @@ const usageArgsSchema = z.object({});
 const lineRangeSchema = z.object({
   start: z.number().int().positive().describe("1-based inclusive start line"),
   end: z.number().int().positive().describe("1-based inclusive end line")
-});
-
-const frontmatterValueSchema = z.json().describe("JSON-compatible frontmatter value");
-
-const frontmatterSetArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative Markdown file path"),
-  key: z.string().min(1).describe("Top-level frontmatter key"),
-  value: frontmatterValueSchema,
-  dryRun: z.boolean().optional().describe("Return diff without writing")
-});
-
-const frontmatterDeleteArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative Markdown file path"),
-  key: z.string().min(1).describe("Top-level frontmatter key"),
-  dryRun: z.boolean().optional().describe("Return diff without writing")
-});
-
-const frontmatterListMutationArgsSchema = z.object({
-  path: z.string().min(1).describe("Vault-relative Markdown file path"),
-  key: z.string().min(1).describe("Top-level frontmatter list key"),
-  value: frontmatterValueSchema,
-  dryRun: z.boolean().optional().describe("Return diff without writing")
 });
 
 const writeArgsSchema = z.object({
@@ -68,19 +38,12 @@ const patchArgsSchema = z.object({
 });
 
 export type UsageToolArgs = z.infer<typeof usageArgsSchema>;
-export type FrontmatterSetToolArgs = z.infer<typeof frontmatterSetArgsSchema>;
-export type FrontmatterDeleteToolArgs = z.infer<typeof frontmatterDeleteArgsSchema>;
-export type FrontmatterListMutationToolArgs = z.infer<typeof frontmatterListMutationArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
 export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
 
 export type OptsidianToolHandlers = {
   usage(args: UsageToolArgs): CallToolResult;
-  frontmatter_set(args: FrontmatterSetToolArgs): CallToolResult;
-  frontmatter_delete(args: FrontmatterDeleteToolArgs): CallToolResult;
-  frontmatter_add(args: FrontmatterListMutationToolArgs): CallToolResult;
-  frontmatter_remove(args: FrontmatterListMutationToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
   apply_patch(args: PatchToolArgs): CallToolResult;
@@ -89,13 +52,6 @@ export type OptsidianToolHandlers = {
 export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
     usage: () => runTool(() => usagePayload()),
-    frontmatter_set: (args) =>
-      runTool(() => setFrontmatter(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
-    frontmatter_delete: (args) => runTool(() => deleteFrontmatter(vaultRoot, args)),
-    frontmatter_add: (args) =>
-      runTool(() => addFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
-    frontmatter_remove: (args) =>
-      runTool(() => removeFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
     write: (args) => runTool(() => writeVaultFile(vaultRoot, args)),
     edit: (args) => runTool(() => editVaultFile(vaultRoot, editArgsToParams(args))),
     apply_patch: (args) => runTool(() => applyVaultPatch(vaultRoot, args))
@@ -112,42 +68,6 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (args) => handlers.usage(args)
-  );
-  server.registerTool(
-    "frontmatter_set",
-    {
-      description: "Set a top-level YAML frontmatter key in a Markdown file inside the configured Obsidian vault.",
-      inputSchema: frontmatterSetArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
-    },
-    async (args) => handlers.frontmatter_set(args)
-  );
-  server.registerTool(
-    "frontmatter_delete",
-    {
-      description: "Delete a top-level YAML frontmatter key from a Markdown file inside the configured Obsidian vault.",
-      inputSchema: frontmatterDeleteArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
-    },
-    async (args) => handlers.frontmatter_delete(args)
-  );
-  server.registerTool(
-    "frontmatter_add",
-    {
-      description: "Append a JSON-compatible value to a top-level YAML frontmatter list key.",
-      inputSchema: frontmatterListMutationArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
-    },
-    async (args) => handlers.frontmatter_add(args)
-  );
-  server.registerTool(
-    "frontmatter_remove",
-    {
-      description: "Remove a JSON-compatible value from a top-level YAML frontmatter list key.",
-      inputSchema: frontmatterListMutationArgsSchema.shape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
-    },
-    async (args) => handlers.frontmatter_remove(args)
   );
   server.registerTool(
     "write",

@@ -60,7 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 `optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes a small shell-independent JSON mutation surface:
 
 ```text
-usage, write, edit, apply_patch, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove
+usage, write, edit, apply_patch
 ```
 
 Example MCP client config:

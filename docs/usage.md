@@ -41,8 +41,8 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter read`, native passthrough
-- MCP tools: `usage`, `write`, `edit`, `apply_patch`, `frontmatter_set`, `frontmatter_delete`, `frontmatter_add`, `frontmatter_remove`
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter`, native passthrough
+- MCP tools: `usage`, `write`, `edit`, `apply_patch`
 
 ## Vault Selection
 
@@ -262,7 +262,7 @@ Native delegated commands keep their original output formats.
 `optsidian-mcp` exposes a small mutation-oriented tool surface over stdio for MCP clients:
 
 ```text
-usage, write, edit, apply_patch, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove
+usage, write, edit, apply_patch
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
@@ -281,16 +281,6 @@ Example `edit` arguments:
   "path": "note.md",
   "replace": "status: draft",
   "with": "status: done"
-}
-```
-
-Example `frontmatter_set` arguments:
-
-```json
-{
-  "path": "note.md",
-  "key": "aliases",
-  "value": ["Project Alpha", "Alpha"]
 }
 ```
 

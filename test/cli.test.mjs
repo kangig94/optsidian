@@ -110,7 +110,7 @@ test("top-level and implemented command help stay local", () => {
   const frontmatterHelp = run(["frontmatter", "--help"]);
   assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
   assert.match(frontmatterHelp.stdout, /Command: frontmatter/);
-  assert.match(frontmatterHelp.stdout, /frontmatter read is CLI-only/);
+  assert.match(frontmatterHelp.stdout, /frontmatter is CLI-only/);
 });
 
 test("top-level help includes native passthrough error verbatim when command listing fails", () => {

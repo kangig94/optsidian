@@ -16,17 +16,8 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter read", "native passthrough"] as const;
-export const MCP_TOOL_NAMES = [
-  "usage",
-  "write",
-  "edit",
-  "apply_patch",
-  "frontmatter_set",
-  "frontmatter_delete",
-  "frontmatter_add",
-  "frontmatter_remove"
-] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter", "native passthrough"] as const;
+export const MCP_TOOL_NAMES = ["usage", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   read: {
@@ -111,8 +102,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
-      "frontmatter read is CLI-only.",
-      "frontmatter set/delete/add/remove are also exposed over MCP as frontmatter_* tools."
+      "frontmatter is CLI-only."
     ]
   },
   edit: {
