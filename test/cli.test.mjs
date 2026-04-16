@@ -12,11 +12,29 @@ function tempRoot() {
 }
 
 function makeFakeObsidian(dir, vaultRoot) {
-  const fake = path.join(dir, "obsidian-fake.cjs");
+const fake = path.join(dir, "obsidian-fake.cjs");
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (process.env.FAKE_OBSIDIAN_LOG) fs.appendFileSync(process.env.FAKE_OBSIDIAN_LOG, JSON.stringify(args) + "\\n");
+if (args[0] === "help") {
+  if (process.env.FAKE_OBSIDIAN_HELP_FAIL) {
+    console.error(process.env.FAKE_OBSIDIAN_HELP_FAIL);
+    process.exit(9);
+  }
+  console.log(\`Obsidian CLI
+
+Commands:
+  files                 List files
+  links                 List outgoing links
+  read                  Read file contents
+  search                Search vault for text
+  version               Show version
+
+Developer:
+  dev:console           Show captured console messages\`);
+  process.exit(0);
+}
 if (args[0] === "vault" && args[1] === "info=path") {
   console.log(process.env.FAKE_VAULT);
   process.exit(0);
@@ -67,11 +85,14 @@ test("version flag reports package version", () => {
 });
 
 test("top-level and implemented command help stay local", () => {
-  const result = run(["--help"]);
+  const { env } = setup();
+  const result = run(["--help"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Detailed help:/);
   assert.match(result.stdout, /optsidian <command> --help/);
   assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
+  assert.match(result.stdout, /Native passthrough:/);
+  assert.match(result.stdout, /files, links, version, dev:console/);
   assert.match(result.stdout, /MCP tools: usage, write, edit, apply_patch/);
 
   const searchHelp = run(["search", "--help"]);
@@ -90,6 +111,14 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
   assert.match(frontmatterHelp.stdout, /Command: frontmatter/);
   assert.match(frontmatterHelp.stdout, /frontmatter read is CLI-only/);
+});
+
+test("top-level help includes native passthrough error verbatim when command listing fails", () => {
+  const { env } = setup();
+  const result = run(["--help"], { env: { ...env, FAKE_OBSIDIAN_HELP_FAIL: "Start the Obsidian GUI to use native help." } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Native passthrough:/);
+  assert.match(result.stdout, /Start the Obsidian GUI to use native help\./);
 });
 
 test("policy table does not implement native-sufficient commands", async () => {

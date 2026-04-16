@@ -30,6 +30,22 @@ export function captureObsidian(args: string[], env: NodeJS.ProcessEnv = process
   };
 }
 
+export function listObsidianCommands(env: NodeJS.ProcessEnv = process.env): string[] {
+  const result = captureObsidian(["help"], env);
+  if (result.status !== 0) {
+    const details = (result.stderr || result.stdout).trim();
+    throw new RuntimeError(details || "Failed to list Obsidian commands");
+  }
+
+  const commands: string[] = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = /^ {2}([a-z0-9][a-z0-9:_-]*)\s{2,}\S/.exec(line);
+    if (!match) continue;
+    commands.push(match[1]);
+  }
+  return commands;
+}
+
 export function resolveObsidianVaultRoot(options: { vault?: string; env?: NodeJS.ProcessEnv } = {}): string {
   const argv = ["vault", "info=path"];
   if (options.vault) argv.push(`vault=${options.vault}`);

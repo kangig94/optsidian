@@ -1,4 +1,5 @@
-import { EXTENDED_COMMANDS, OPTIMIZED_COMMANDS } from "./policy.js";
+import { listObsidianCommands } from "../native/obsidian.js";
+import { EXTENDED_COMMANDS, OPTIMIZED_COMMANDS, implementedCommands } from "./policy.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
 type ImplementedCommand = (typeof OPTIMIZED_COMMANDS)[number] | (typeof EXTENDED_COMMANDS)[number];
@@ -187,6 +188,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
 };
 
 export function helpText(): string {
+  const nativePassthrough = nativePassthroughCommands();
   const lines = [
     `optsidian ${OPTSIDIAN_VERSION}`,
     "",
@@ -215,8 +217,19 @@ export function helpText(): string {
     "",
     `CLI-only: ${CLI_ONLY_COMMANDS.join(", ")}`,
     `MCP tools: ${MCP_TOOL_NAMES.join(", ")}`,
-    ""
+    "",
+    "Native passthrough:"
   );
+
+  if (nativePassthrough.commands.length > 0) {
+    lines.push(...formatCommandList(nativePassthrough.commands));
+  } else if (nativePassthrough.error) {
+    lines.push(...formatHelpMessage(nativePassthrough.error));
+  } else {
+    lines.push("  unavailable");
+  }
+
+  lines.push("");
 
   return lines.join("\n");
 }
@@ -284,4 +297,43 @@ export function usagePayload(): {
 
 function isImplementedCommand(command: string): command is ImplementedCommand {
   return Object.prototype.hasOwnProperty.call(COMMAND_HELP, command);
+}
+
+function nativePassthroughCommands(): { commands: string[]; error?: string } {
+  try {
+    const blocked = new Set<string>([...implementedCommands(), "help"]);
+    return {
+      commands: listObsidianCommands().filter((command) => !blocked.has(command))
+    };
+  } catch (error) {
+    return {
+      commands: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function formatCommandList(commands: string[]): string[] {
+  const lines: string[] = [];
+  let current = "  ";
+  for (const command of commands) {
+    const token = current.trim().length === 0 ? command : `, ${command}`;
+    if (current.length + token.length > 100) {
+      lines.push(current);
+      current = `  ${command}`;
+      continue;
+    }
+    current += token;
+  }
+  if (current.trim().length > 0) {
+    lines.push(current);
+  }
+  return lines;
+}
+
+function formatHelpMessage(message: string): string[] {
+  return message
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+    .map((line) => `  ${line}`);
 }
