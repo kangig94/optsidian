@@ -191,6 +191,9 @@ NODE
 
 echo "==> Verifying downloaded asset versions"
 node - "${RELEASE_VERSION}" "${OPTSIDIAN_ASSET_NAME}" "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}" "${OPTSIDIAN_MCP_ASSET_PATH}" <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const expectedVersion = process.argv[2];
@@ -200,17 +203,27 @@ const assets = [
 ];
 
 for (const asset of assets) {
-  const result = spawnSync(process.execPath, [asset.filePath, "--version"], { encoding: "utf8" });
-  if (result.error) throw new Error(`Failed to execute ${asset.name}: ${result.error.message}`);
-  if ((result.status ?? 1) !== 0) {
-    throw new Error((result.stderr || result.stdout || `Failed to execute ${asset.name}`).trim());
-  }
-  const actualVersion = String(result.stdout || "").trim();
-  if (!/^\d+\.\d+\.\d+$/.test(actualVersion)) {
-    throw new Error(`Invalid version output from ${asset.name}: ${actualVersion}`);
-  }
-  if (actualVersion !== expectedVersion) {
-    throw new Error(`${asset.name} version mismatch: expected ${expectedVersion}, got ${actualVersion}`);
+  const probePath = path.join(
+    os.tmpdir(),
+    `optsidian-install-version-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.mjs`
+  );
+  try {
+    fs.copyFileSync(asset.filePath, probePath);
+    fs.chmodSync(probePath, 0o755);
+    const result = spawnSync(process.execPath, [probePath, "--version"], { encoding: "utf8" });
+    if (result.error) throw new Error(`Failed to execute ${asset.name}: ${result.error.message}`);
+    if ((result.status ?? 1) !== 0) {
+      throw new Error((result.stderr || result.stdout || `Failed to execute ${asset.name}`).trim());
+    }
+    const actualVersion = String(result.stdout || "").trim();
+    if (!/^\d+\.\d+\.\d+$/.test(actualVersion)) {
+      throw new Error(`Invalid version output from ${asset.name}: ${actualVersion}`);
+    }
+    if (actualVersion !== expectedVersion) {
+      throw new Error(`${asset.name} version mismatch: expected ${expectedVersion}, got ${actualVersion}`);
+    }
+  } finally {
+    fs.rmSync(probePath, { force: true });
   }
 }
 NODE

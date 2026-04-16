@@ -557,20 +557,30 @@ function verifyExecutableVersion(filePath: string, expectedVersion: string, labe
 }
 
 function readExecutableVersion(filePath: string, label: string): string {
-  const result = spawnSync(process.execPath, [filePath, "--version"], {
-    encoding: "utf8"
-  });
-  if (result.error) {
-    throw new RuntimeError(`Failed to execute ${label}: ${result.error.message}`);
+  const probePath = path.join(
+    os.tmpdir(),
+    `optsidian-version-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.mjs`
+  );
+  try {
+    fs.copyFileSync(filePath, probePath);
+    fs.chmodSync(probePath, 0o755);
+    const result = spawnSync(process.execPath, [probePath, "--version"], {
+      encoding: "utf8"
+    });
+    if (result.error) {
+      throw new RuntimeError(`Failed to execute ${label}: ${result.error.message}`);
+    }
+    if ((result.status ?? 1) !== 0) {
+      throw new RuntimeError((result.stderr || result.stdout || `Failed to execute ${label}`).trim());
+    }
+    const version = (result.stdout || "").trim();
+    if (!/^\d+\.\d+\.\d+$/.test(version)) {
+      throw new RuntimeError(`Invalid version output from ${label}: ${version}`);
+    }
+    return version;
+  } finally {
+    fs.rmSync(probePath, { force: true });
   }
-  if ((result.status ?? 1) !== 0) {
-    throw new RuntimeError((result.stderr || result.stdout || `Failed to execute ${label}`).trim());
-  }
-  const version = (result.stdout || "").trim();
-  if (!/^\d+\.\d+\.\d+$/.test(version)) {
-    throw new RuntimeError(`Invalid version output from ${label}: ${version}`);
-  }
-  return version;
 }
 
 function installExecutable(sourcePath: string, destPath: string): void {

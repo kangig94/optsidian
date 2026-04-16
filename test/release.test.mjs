@@ -204,6 +204,24 @@ function makeReleaseBundle(dir, version, options = {}) {
   return { tag, version, assets: [optsidianAsset, optsidianMcpAsset, checksumsAsset] };
 }
 
+function makePackagedReleaseBundle(dir) {
+  const outDir = path.join(dir, "packaged-release");
+  const result = spawnSync(process.execPath, [packageScript, "--out-dir", outDir], {
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const tag = `v${packageVersion}`;
+  return {
+    tag,
+    version: packageVersion,
+    assets: [
+      { name: `optsidian-${tag}`, filePath: path.join(outDir, `optsidian-${tag}`) },
+      { name: `optsidian-mcp-${tag}`, filePath: path.join(outDir, `optsidian-mcp-${tag}`) },
+      { name: `checksums-${tag}.txt`, filePath: path.join(outDir, `checksums-${tag}.txt`) }
+    ]
+  };
+}
+
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
@@ -408,6 +426,29 @@ test("update installs a requested release into the managed bin dir and refreshes
   }
 });
 
+test("update installs actual packaged release assets", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makePackagedReleaseBundle(dir);
+  const server = await startReleaseServer([release], release.tag);
+  const fakeBin = createToolBin(dir, { name: "update-real-asset-bin", tools: UPDATE_TOOLS });
+  writeManagedInstall(cache, home, "0.0.9");
+
+  try {
+    const result = await runCliAsync([`update`, `version=v${packageVersion}`], {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      PATH: fakeBin
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`Updated Optsidian to v${packageVersion.replace(/\./g, "\\.")}\\.`));
+  } finally {
+    await server.close();
+  }
+});
+
 test("update repairs a broken managed install even when already on the latest version", async () => {
   const dir = tempRoot();
   const home = path.join(dir, "home");
@@ -583,6 +624,28 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
     assert.equal(manifest.codexRegistered, false);
     assert.equal(manifest.claudeRegistered, false);
     assert.equal(fs.existsSync(obsidianLog), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("install.sh installs actual packaged release assets", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makePackagedReleaseBundle(dir);
+  const server = await startReleaseServer([release], release.tag);
+  const toolBin = createToolBin(dir, { name: "install-real-asset-bin", tools: INSTALL_TOOLS });
+
+  try {
+    const result = await runBashAsync(installScript, {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      PATH: toolBin
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`Installed v${packageVersion.replace(/\./g, "\\.")}\\.`));
   } finally {
     await server.close();
   }
