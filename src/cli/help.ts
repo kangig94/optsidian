@@ -45,6 +45,19 @@ Extended:
     include-hidden      Include hidden directories except protected internals
     format=text|json    Output format (default: text)
 
+  frontmatter           Read or mutate YAML frontmatter in Markdown files
+    read                Show frontmatter as structured data
+    set                 Set a top-level key
+    delete              Delete a top-level key
+    add                 Append a value to a list key
+    remove              Remove a value from a list key
+    path=<path>         Vault-relative Markdown file
+    key=<name>          Frontmatter key for mutation actions
+    value=<text>        String value, or @file
+    value-json=<json>   JSON value, or @file
+    dry-run             Return diff without writing
+    format=text|json    Output format (default: text)
+
   edit                  Exact, regex, line, or range replacement
   apply_patch           Codex-compatible patch application
   write                 Whole-file write with overwrite guard

@@ -2,7 +2,7 @@
 
 `optsidian` is an LLM-optimized wrapper around the Obsidian CLI.
 
-It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, ranked note search, exact grep output, safe edits, and patch application inside the active vault.
+It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style tools for bounded reads, ranked note search, exact grep output, structured frontmatter edits, safe edits, and patch application inside the active vault.
 
 ## Requirements
 
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 `optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes shell-independent JSON tools:
 
 ```text
-read, search, grep, write, edit, apply_patch, copy, mkdir
+read, search, grep, frontmatter_read, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove, write, edit, apply_patch, copy, mkdir
 ```
 
 Example MCP client config:
@@ -179,6 +179,21 @@ optsidian grep query="foo\\d+" regex case format=json
 ```
 
 By default, grep includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals.
+
+### `frontmatter`
+
+Read and mutate YAML frontmatter in Markdown files without editing raw text.
+
+```bash
+optsidian frontmatter read path=note.md
+optsidian frontmatter set path=note.md key=status value=active
+optsidian frontmatter set path=note.md key=priority value-json=3
+optsidian frontmatter add path=note.md key=tags value=project
+optsidian frontmatter remove path=note.md key=tags value=old
+optsidian frontmatter delete path=note.md key=status dry-run
+```
+
+`value=` is stored as a string. Use `value-json=` for numbers, booleans, arrays, objects, or null. Both value forms support `@file`. Frontmatter mutations preserve the Markdown body exactly and reject invalid YAML, duplicate keys, and non-mapping frontmatter roots.
 
 ### `edit`
 

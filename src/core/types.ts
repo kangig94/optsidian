@@ -116,6 +116,28 @@ export type SearchIndexMutationResult = {
   builtAt?: string;
 };
 
+export type FrontmatterValue = null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };
+
+export type FrontmatterReadParams = {
+  path: string;
+};
+
+export type FrontmatterMutationParams = {
+  path: string;
+  key: string;
+  value?: FrontmatterValue;
+  dryRun?: boolean;
+};
+
+export type FrontmatterReadResult = {
+  ok: true;
+  command: "frontmatter";
+  action: "read";
+  path: string;
+  hasFrontmatter: boolean;
+  frontmatter: Record<string, FrontmatterValue>;
+};
+
 export type ChangeCode = "A" | "M" | "D";
 
 export type FileChange = {
@@ -129,7 +151,7 @@ export type FileChange = {
 
 export type MutationResult = {
   ok: true;
-  command: "edit" | "write" | "copy" | "mkdir" | "apply_patch";
+  command: "edit" | "write" | "copy" | "mkdir" | "apply_patch" | "frontmatter";
   dryRun: boolean;
   changes: FileChange[];
   message?: string;

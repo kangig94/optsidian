@@ -1,5 +1,13 @@
 import { UsageError } from "../errors.js";
-import type { GrepResult, MutationResult, ReadResult, SearchIndexMutationResult, SearchIndexStatusResult, SearchResult } from "../core/types.js";
+import type {
+  FrontmatterReadResult,
+  GrepResult,
+  MutationResult,
+  ReadResult,
+  SearchIndexMutationResult,
+  SearchIndexStatusResult,
+  SearchResult
+} from "../core/types.js";
 
 export type OutputFormat = "text" | "json";
 
@@ -68,6 +76,18 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   return `${out.join("\n")}`;
 }
 
+export function renderFrontmatterRead(result: FrontmatterReadResult, format: OutputFormat): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
+  return [
+    `path: ${result.path}`,
+    `frontmatter: ${result.hasFrontmatter ? "present" : "missing"}`,
+    "",
+    JSON.stringify(result.frontmatter, null, 2)
+  ].join("\n").concat("\n");
+}
+
 function renderFieldMatches(fieldMatches: Record<string, string[]>): string {
   return Object.entries(fieldMatches)
     .map(([field, terms]) => `${field}(${terms.join(", ")})`)
@@ -94,7 +114,11 @@ export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexM
   return `index: cleared\ncache: ${result.cacheDir}\n`;
 }
 
-export function renderMutation(result: MutationResult): string {
+export function renderMutation(result: MutationResult, format: OutputFormat = "text"): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
+
   if (result.message && result.changes.length === 0) {
     return `${result.message}\n`;
   }

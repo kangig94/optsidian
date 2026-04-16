@@ -8,6 +8,7 @@ import { resolveVaultRoot } from "./cli/vault.js";
 import { runApplyPatch } from "./cli/commands/apply-patch.js";
 import { runCopy } from "./cli/commands/copy.js";
 import { runEdit } from "./cli/commands/edit.js";
+import { runFrontmatter } from "./cli/commands/frontmatter.js";
 import { runGrep } from "./cli/commands/grep.js";
 import { runIndex } from "./cli/commands/index.js";
 import { runMkdir } from "./cli/commands/mkdir.js";
@@ -44,6 +45,9 @@ async function main(): Promise<void> {
       return;
     case "grep":
       runGrep(args, vaultRoot);
+      return;
+    case "frontmatter":
+      runFrontmatter(args, vaultRoot);
       return;
     case "search":
       await runSearch(args, vaultRoot);

@@ -82,6 +82,15 @@ test("delete remains delegated to native Obsidian", () => {
   assert.deepEqual(calls.at(-1), ["delete", "path=note.md"]);
 });
 
+test("native property commands remain delegated", () => {
+  const { env, log } = setup();
+  const result = run(["property:set", "path=note.md", "name=status", "value=active"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "native property:set path=note.md name=status value=active");
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["property:set", "path=note.md", "name=status", "value=active"]);
+});
+
 test("raw preserves native exit code", () => {
   const { env } = setup();
   const result = run(["raw", "fail"], { env });
@@ -163,6 +172,44 @@ test("search ranks notes and index commands manage cache", () => {
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /index: cleared/);
+});
+
+test("frontmatter command reads and mutates structured metadata", () => {
+  const { vault, env } = setup();
+  fs.writeFileSync(path.join(vault, "note.md"), "# Note\n");
+  const values = path.join(vault, "aliases.json");
+  fs.writeFileSync(values, "[\"Project Alpha\",\"Alpha\"]\n");
+
+  let result = run(["frontmatter", "set", "path=note.md", "key=priority", "value-json=3", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).command, "frontmatter");
+  assert.match(fs.readFileSync(path.join(vault, "note.md"), "utf8"), /priority: 3/);
+
+  result = run(["frontmatter", "set", "path=note.md", "key=aliases", `value-json=@${values}`], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  result = run(["frontmatter", "set", "path=note.md", "key=meta", 'value-json={"text":"a\\nb"}'], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  result = run(["frontmatter", "add", "path=note.md", "key=tags", "value=project"], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  result = run(["frontmatter", "read", "path=note.md", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  const read = JSON.parse(result.stdout);
+  assert.deepEqual(read.frontmatter.aliases, ["Project Alpha", "Alpha"]);
+  assert.deepEqual(read.frontmatter.meta, { text: "a\nb" });
+  assert.deepEqual(read.frontmatter.tags, ["project"]);
+  assert.equal(read.frontmatter.priority, 3);
+
+  result = run(["frontmatter", "remove", "path=note.md", "key=tags", "value=project", "dry-run"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Dry run/);
+  assert.deepEqual(JSON.parse(run(["frontmatter", "read", "path=note.md", "format=json"], { env }).stdout).frontmatter.tags, ["project"]);
+
+  result = run(["frontmatter", "delete", "path=note.md", "key=priority"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(run(["frontmatter", "read", "path=note.md", "format=json"], { env }).stdout).frontmatter.priority, undefined);
 });
 
 test("write and edit mutate only optimized commands", () => {

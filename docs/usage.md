@@ -104,6 +104,23 @@ optsidian grep query=needle include-hidden
 optsidian grep query=needle format=json
 ```
 
+## Frontmatter
+
+`frontmatter` reads and mutates top-level YAML frontmatter keys in Markdown files.
+
+```bash
+optsidian frontmatter read path=note.md
+optsidian frontmatter read path=note.md format=json
+optsidian frontmatter set path=note.md key=status value=active
+optsidian frontmatter set path=note.md key=priority value-json=3
+optsidian frontmatter set path=note.md key=aliases value-json=@aliases.json
+optsidian frontmatter add path=note.md key=tags value=project
+optsidian frontmatter remove path=note.md key=tags value=project
+optsidian frontmatter delete path=note.md key=status dry-run
+```
+
+`value=` is stored as a string. `value-json=` stores JSON-compatible values such as numbers, booleans, arrays, objects, and null. Mutations preserve the Markdown body exactly and reject invalid YAML, duplicate keys, and non-mapping frontmatter roots.
+
 ## Editing
 
 Exact replacement:
@@ -195,12 +212,13 @@ optsidian copy from=a.md to=b.md overwrite
 
 ## JSON Output
 
-The `read`, `search`, and `grep` commands support `format=json`.
+The `read`, `search`, `grep`, and `frontmatter` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
 optsidian search query=TODO format=json
 optsidian grep query=TODO format=json
+optsidian frontmatter read path=note.md format=json
 ```
 
 Native delegated commands keep their original output formats.
@@ -210,7 +228,7 @@ Native delegated commands keep their original output formats.
 `optsidian-mcp` exposes the core tools over stdio for MCP clients:
 
 ```text
-read, search, grep, write, edit, apply_patch, copy, mkdir
+read, search, grep, frontmatter_read, frontmatter_set, frontmatter_delete, frontmatter_add, frontmatter_remove, write, edit, apply_patch, copy, mkdir
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
@@ -222,6 +240,16 @@ Example `edit` arguments:
   "path": "note.md",
   "replace": "status: draft",
   "with": "status: done"
+}
+```
+
+Example `frontmatter_set` arguments:
+
+```json
+{
+  "path": "note.md",
+  "key": "aliases",
+  "value": ["Project Alpha", "Alpha"]
 }
 ```
 

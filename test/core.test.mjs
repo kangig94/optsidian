@@ -119,6 +119,67 @@ The rollout is blocked by review.
   }
 });
 
+test("core frontmatter reads and mutates structured YAML while preserving body", async () => {
+  const vault = tempVault();
+  const {
+    addFrontmatterValue,
+    deleteFrontmatter,
+    readFrontmatter,
+    removeFrontmatterValue,
+    setFrontmatter
+  } = await core();
+  fs.writeFileSync(
+    path.join(vault, "note.md"),
+    "\uFEFF---\r\nstatus: draft\r\ntags:\r\n  - project\r\n---\r\n# Title\r\nBody\r\n"
+  );
+
+  let read = readFrontmatter(vault, { path: "note.md" });
+  assert.equal(read.hasFrontmatter, true);
+  assert.equal(read.frontmatter.status, "draft");
+  assert.deepEqual(read.frontmatter.tags, ["project"]);
+
+  const set = setFrontmatter(vault, { path: "note.md", key: "priority", value: 3 });
+  assert.equal(set.command, "frontmatter");
+  let content = fs.readFileSync(path.join(vault, "note.md"), "utf8");
+  assert.ok(content.startsWith("\uFEFF---\r\n"));
+  assert.match(content, /priority: 3\r\n/);
+  assert.ok(content.endsWith("# Title\r\nBody\r\n"));
+
+  addFrontmatterValue(vault, { path: "note.md", key: "tags", value: "alpha" });
+  const duplicate = addFrontmatterValue(vault, { path: "note.md", key: "tags", value: "alpha" });
+  assert.equal(duplicate.changes.length, 0);
+  removeFrontmatterValue(vault, { path: "note.md", key: "tags", value: "project" });
+  deleteFrontmatter(vault, { path: "note.md", key: "priority" });
+
+  read = readFrontmatter(vault, { path: "note.md" });
+  assert.deepEqual(read.frontmatter.tags, ["alpha"]);
+  assert.equal(read.frontmatter.priority, undefined);
+});
+
+test("core frontmatter creates blocks and rejects unsafe YAML shapes", async () => {
+  const vault = tempVault();
+  const { addFrontmatterValue, readFrontmatter, setFrontmatter } = await core();
+  fs.writeFileSync(path.join(vault, "plain.md"), "# Plain\n");
+
+  setFrontmatter(vault, { path: "plain.md", key: "status", value: "active", dryRun: true });
+  assert.equal(fs.readFileSync(path.join(vault, "plain.md"), "utf8"), "# Plain\n");
+  setFrontmatter(vault, { path: "plain.md", key: "status", value: "active" });
+  assert.equal(fs.readFileSync(path.join(vault, "plain.md"), "utf8"), "---\nstatus: active\n---\n# Plain\n");
+  assert.deepEqual(readFrontmatter(vault, { path: "plain.md" }).frontmatter, { status: "active" });
+
+  fs.writeFileSync(path.join(vault, "duplicate.md"), "---\na: 1\na: 2\n---\nBody\n");
+  assert.throws(() => setFrontmatter(vault, { path: "duplicate.md", key: "b", value: true }), /Map keys must be unique/);
+
+  fs.writeFileSync(path.join(vault, "list-root.md"), "---\n- a\n---\nBody\n");
+  assert.throws(() => setFrontmatter(vault, { path: "list-root.md", key: "b", value: true }), /YAML mapping/);
+
+  fs.writeFileSync(path.join(vault, "scalar-list.md"), "---\ntags: project\n---\nBody\n");
+  assert.throws(() => addFrontmatterValue(vault, { path: "scalar-list.md", key: "tags", value: "alpha" }), /not a list/);
+
+  fs.writeFileSync(path.join(vault, "note.txt"), "status: active\n");
+  assert.throws(() => readFrontmatter(vault, { path: "note.txt" }), /Markdown files/);
+});
+
 test("core edit treats replacement and selectors as literal data", async () => {
   const vault = tempVault();
   const { editVaultFile, writeVaultFile } = await core();

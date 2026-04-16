@@ -48,8 +48,13 @@ export function hasFlag(args: ParsedArgs, key: string): boolean {
 }
 
 export function readValueOrFile(value: string, cwd = process.cwd()): string {
+  const raw = readRawValueOrFile(value, cwd);
+  return value.startsWith("@") ? raw : decodeCliEscapes(raw);
+}
+
+export function readRawValueOrFile(value: string, cwd = process.cwd()): string {
   if (!value.startsWith("@")) {
-    return decodeCliEscapes(value);
+    return value;
   }
   const filePath = value.slice(1);
   if (!filePath) {

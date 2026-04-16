@@ -18,6 +18,7 @@ src/core/path.ts                   vault path safety
 src/core/read.ts                   bounded file reads
 src/core/search.ts                 ranked note search and cache management
 src/core/search-parse.ts           Markdown metadata extraction for search
+src/core/frontmatter.ts            YAML frontmatter parsing and mutation
 src/core/grep.ts                   line-oriented vault grep
 src/core/edit.ts                   exact/regex/line/range edits
 src/core/write.ts                  whole-file writes

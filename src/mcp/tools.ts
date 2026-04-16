@@ -3,15 +3,20 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import {
   applyVaultPatch,
+  addFrontmatterValue,
   copyVaultPath,
+  deleteFrontmatter,
   editVaultFile,
   grepVault,
   mkdirVaultPath,
+  readFrontmatter,
   readVaultFile,
+  removeFrontmatterValue,
   searchVault,
+  setFrontmatter,
   writeVaultFile
 } from "../core/index.js";
-import type { EditParams, EditSelector, LineRange } from "../core/index.js";
+import type { EditParams, EditSelector, FrontmatterValue, LineRange } from "../core/index.js";
 import { UsageError } from "../errors.js";
 import { runAsyncTool, runTool } from "./result.js";
 
@@ -45,6 +50,32 @@ const searchArgsSchema = z.object({
   query: z.string().min(1).describe("Ranked note search query"),
   path: z.string().min(1).optional().describe("Vault-relative file or directory search scope"),
   limit: z.number().int().positive().optional().describe("Maximum number of ranked notes")
+});
+
+const frontmatterValueSchema = z.json().describe("JSON-compatible frontmatter value");
+
+const frontmatterReadArgsSchema = z.object({
+  path: z.string().min(1).describe("Vault-relative Markdown file path")
+});
+
+const frontmatterSetArgsSchema = z.object({
+  path: z.string().min(1).describe("Vault-relative Markdown file path"),
+  key: z.string().min(1).describe("Top-level frontmatter key"),
+  value: frontmatterValueSchema,
+  dryRun: z.boolean().optional().describe("Return diff without writing")
+});
+
+const frontmatterDeleteArgsSchema = z.object({
+  path: z.string().min(1).describe("Vault-relative Markdown file path"),
+  key: z.string().min(1).describe("Top-level frontmatter key"),
+  dryRun: z.boolean().optional().describe("Return diff without writing")
+});
+
+const frontmatterListMutationArgsSchema = z.object({
+  path: z.string().min(1).describe("Vault-relative Markdown file path"),
+  key: z.string().min(1).describe("Top-level frontmatter list key"),
+  value: frontmatterValueSchema,
+  dryRun: z.boolean().optional().describe("Return diff without writing")
 });
 
 const writeArgsSchema = z.object({
@@ -86,6 +117,10 @@ const mkdirArgsSchema = z.object({
 
 export type ReadToolArgs = z.infer<typeof readArgsSchema>;
 export type SearchToolArgs = z.infer<typeof searchArgsSchema>;
+export type FrontmatterReadToolArgs = z.infer<typeof frontmatterReadArgsSchema>;
+export type FrontmatterSetToolArgs = z.infer<typeof frontmatterSetArgsSchema>;
+export type FrontmatterDeleteToolArgs = z.infer<typeof frontmatterDeleteArgsSchema>;
+export type FrontmatterListMutationToolArgs = z.infer<typeof frontmatterListMutationArgsSchema>;
 export type GrepToolArgs = z.infer<typeof grepArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
@@ -96,6 +131,11 @@ export type MkdirToolArgs = z.infer<typeof mkdirArgsSchema>;
 export type OptsidianToolHandlers = {
   read(args: ReadToolArgs): CallToolResult;
   search(args: SearchToolArgs): Promise<CallToolResult>;
+  frontmatter_read(args: FrontmatterReadToolArgs): CallToolResult;
+  frontmatter_set(args: FrontmatterSetToolArgs): CallToolResult;
+  frontmatter_delete(args: FrontmatterDeleteToolArgs): CallToolResult;
+  frontmatter_add(args: FrontmatterListMutationToolArgs): CallToolResult;
+  frontmatter_remove(args: FrontmatterListMutationToolArgs): CallToolResult;
   grep(args: GrepToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
@@ -108,6 +148,14 @@ export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
     read: (args) => runTool(() => readVaultFile(vaultRoot, args)),
     search: (args) => runAsyncTool(() => searchVault(vaultRoot, args)),
+    frontmatter_read: (args) => runTool(() => readFrontmatter(vaultRoot, args)),
+    frontmatter_set: (args) =>
+      runTool(() => setFrontmatter(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
+    frontmatter_delete: (args) => runTool(() => deleteFrontmatter(vaultRoot, args)),
+    frontmatter_add: (args) =>
+      runTool(() => addFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
+    frontmatter_remove: (args) =>
+      runTool(() => removeFrontmatterValue(vaultRoot, { path: args.path, key: args.key, value: args.value as FrontmatterValue, dryRun: args.dryRun })),
     grep: (args) =>
       runTool(() =>
         grepVault(vaultRoot, {
@@ -148,6 +196,51 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (args) => handlers.search(args)
+  );
+  server.registerTool(
+    "frontmatter_read",
+    {
+      description: "Read YAML frontmatter from a Markdown file inside the configured Obsidian vault.",
+      inputSchema: frontmatterReadArgsSchema.shape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async (args) => handlers.frontmatter_read(args)
+  );
+  server.registerTool(
+    "frontmatter_set",
+    {
+      description: "Set a top-level YAML frontmatter key in a Markdown file inside the configured Obsidian vault.",
+      inputSchema: frontmatterSetArgsSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    async (args) => handlers.frontmatter_set(args)
+  );
+  server.registerTool(
+    "frontmatter_delete",
+    {
+      description: "Delete a top-level YAML frontmatter key from a Markdown file inside the configured Obsidian vault.",
+      inputSchema: frontmatterDeleteArgsSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    async (args) => handlers.frontmatter_delete(args)
+  );
+  server.registerTool(
+    "frontmatter_add",
+    {
+      description: "Append a JSON-compatible value to a top-level YAML frontmatter list key.",
+      inputSchema: frontmatterListMutationArgsSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    async (args) => handlers.frontmatter_add(args)
+  );
+  server.registerTool(
+    "frontmatter_remove",
+    {
+      description: "Remove a JSON-compatible value from a top-level YAML frontmatter list key.",
+      inputSchema: frontmatterListMutationArgsSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    async (args) => handlers.frontmatter_remove(args)
   );
   server.registerTool(
     "grep",

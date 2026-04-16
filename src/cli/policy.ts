@@ -1,7 +1,7 @@
 export type CommandPolicy = "delegate" | "optimize" | "extend";
 
 const OPTIMIZED = new Set(["read"]);
-const EXTENDED = new Set(["search", "index", "grep", "edit", "apply_patch", "write", "copy", "mkdir"]);
+const EXTENDED = new Set(["search", "index", "grep", "frontmatter", "edit", "apply_patch", "write", "copy", "mkdir"]);
 
 export function commandPolicy(command: string | undefined): CommandPolicy {
   if (command && OPTIMIZED.has(command)) return "optimize";

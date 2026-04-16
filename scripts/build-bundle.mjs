@@ -19,6 +19,9 @@ function bundle(entryPoint, outfile) {
       target: "node20",
       format: "esm",
       packages: "bundle",
+      banner: {
+        js: 'import { createRequire as __optsidianCreateRequire } from "node:module";\nconst require = __optsidianCreateRequire(import.meta.url);'
+      },
       sourcemap: false,
       legalComments: "none",
       logLevel: "info"

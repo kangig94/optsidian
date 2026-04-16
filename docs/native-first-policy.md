@@ -40,6 +40,7 @@ These commands are added because the native CLI does not provide an equivalent L
 - `grep`
 - `search`
 - `index`
+- `frontmatter`
 - `edit`
 - `write`
 - `apply_patch`
@@ -47,6 +48,8 @@ These commands are added because the native CLI does not provide an equivalent L
 - `mkdir`
 
 `grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
+
+`frontmatter` does not replace native `property:*` commands. It provides an LLM-oriented structured editing surface with dry-run diffs, JSON values, MCP support, and direct file fallback when native Obsidian vault resolution is unavailable.
 
 ## Guardrail
 

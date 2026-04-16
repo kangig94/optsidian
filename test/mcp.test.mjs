@@ -113,6 +113,35 @@ test("mcp apply_patch copy and mkdir return structured results", async () => {
   assert.equal(fs.readFileSync(path.join(vault, "dir", "sub", "copy.md"), "utf8"), "$HOME\n`pwd`\n");
 });
 
+test("mcp frontmatter tools preserve structured JSON values", async () => {
+  const vault = tempVault();
+  const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
+  const tools = createToolHandlers(vault);
+  tools.write({ path: "note.md", content: "# Note\nliteral $HOME\n" });
+
+  let result = tools.frontmatter_set({
+    path: "note.md",
+    key: "aliases",
+    value: ["Project $HOME", { label: "Alpha", active: true }]
+  });
+  assert.equal(payload(result).command, "frontmatter");
+
+  result = tools.frontmatter_add({ path: "note.md", key: "tags", value: "project" });
+  assert.equal(payload(result).changes[0].path, "note.md");
+
+  result = tools.frontmatter_read({ path: "note.md" });
+  assert.deepEqual(payload(result).frontmatter.aliases, ["Project $HOME", { label: "Alpha", active: true }]);
+  assert.deepEqual(payload(result).frontmatter.tags, ["project"]);
+
+  result = tools.frontmatter_remove({ path: "note.md", key: "tags", value: "project", dryRun: true });
+  assert.equal(payload(result).dryRun, true);
+  assert.deepEqual(payload(tools.frontmatter_read({ path: "note.md" })).frontmatter.tags, ["project"]);
+
+  result = tools.frontmatter_delete({ path: "note.md", key: "aliases" });
+  assert.equal(payload(result).command, "frontmatter");
+  assert.equal(payload(tools.frontmatter_read({ path: "note.md" })).frontmatter.aliases, undefined);
+});
+
 test("mcp config and native vault resolution use fake obsidian", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
@@ -148,7 +177,8 @@ test("optsidian-mcp help is available outside protocol mode", () => {
   const result = spawnSync(process.execPath, [mcpBin, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /optsidian-mcp/);
-  assert.match(result.stdout, /read, search, grep, write, edit, apply_patch, copy, mkdir/);
+  assert.match(result.stdout, /frontmatter_read/);
+  assert.match(result.stdout, /frontmatter_remove/);
 });
 
 test("optsidian-mcp version flag reports package version", () => {
@@ -186,6 +216,8 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     assert.ok(listed.tools.some((tool) => tool.name === "write"));
     assert.ok(listed.tools.some((tool) => tool.name === "read"));
     assert.ok(listed.tools.some((tool) => tool.name === "search"));
+    assert.ok(listed.tools.some((tool) => tool.name === "frontmatter_set"));
+    assert.ok(listed.tools.some((tool) => tool.name === "frontmatter_read"));
     assert.ok(listed.tools.some((tool) => tool.name === "grep"));
 
     const write = await client.callTool({
@@ -205,6 +237,18 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       String(ranked.structuredContent?.matches?.[0]?.snippets?.map((snippet) => snippet.text).join("\n")),
       /title:|tags:/i
     );
+
+    const frontmatter = await client.callTool({
+      name: "frontmatter_set",
+      arguments: { path: "protocol.md", key: "aliases", value: ["Protocol $HOME"] }
+    });
+    assert.equal(frontmatter.structuredContent?.command, "frontmatter");
+
+    const frontmatterRead = await client.callTool({
+      name: "frontmatter_read",
+      arguments: { path: "protocol.md" }
+    });
+    assert.deepEqual(frontmatterRead.structuredContent?.frontmatter?.aliases, ["Protocol $HOME"]);
 
     const read = await client.callTool({
       name: "read",
