@@ -1,6 +1,6 @@
 {
   "name": "optsidian",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LLM-optimized Obsidian CLI wrapper with Codex-style editing tools",
   "type": "module",
   "bin": {
