@@ -28,6 +28,16 @@ function makeFakeObsidian(dir, vaultRoot) {
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (process.env.FAKE_OBSIDIAN_LOG) fs.appendFileSync(process.env.FAKE_OBSIDIAN_LOG, JSON.stringify(args) + "\\n");
+if (args[0] === "help") {
+  console.log(\`Obsidian CLI
+
+Commands:
+  files                 List files
+  links                 List outgoing links
+  version               Show version
+  dev:console           Show captured console messages\`);
+  process.exit(0);
+}
 if (args[0] === "vault" && args[1] === "info=path") {
   console.log(process.env.FAKE_VAULT);
   process.exit(0);
@@ -51,29 +61,45 @@ process.exit(7);
   return fake;
 }
 
-test("mcp usage and write handlers preserve routing, preference guidance, and raw JSON payloads", async () => {
-  const vault = tempVault();
+test("mcp command_map and write handlers preserve routing, preference guidance, and raw JSON payloads", async () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const fake = makeFakeObsidian(dir, vault);
+  const previousBin = process.env.OPTSIDIAN_OBSIDIAN_BIN;
+  const previousVault = process.env.FAKE_VAULT;
+  process.env.OPTSIDIAN_OBSIDIAN_BIN = fake;
+  process.env.FAKE_VAULT = vault;
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
-  const tools = createToolHandlers(vault);
-  const usage = tools.usage({});
-  const raw = [
-    "literal $HOME",
-    "subshell $(echo hacked)",
-    "backticks `uname -a`",
-    "```bash",
-    "echo \"$HOME\" && echo $(whoami)",
-    "```",
-    ""
-  ].join("\n");
+  try {
+    const tools = createToolHandlers(vault);
+    const commandMap = tools.command_map({});
+    const raw = [
+      "literal $HOME",
+      "subshell $(echo hacked)",
+      "backticks `uname -a`",
+      "```bash",
+      "echo \"$HOME\" && echo $(whoami)",
+      "```",
+      ""
+    ].join("\n");
 
-  assert.deepEqual(payload(usage).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter", "native passthrough"]);
-  assert.deepEqual(payload(usage).routing.mcpTools, ["usage", "write", "edit", "apply_patch"]);
-  assert.match(payload(usage).preference.rule, /Prefer MCP tools/);
-  assert.match(payload(usage).preference.reason, /structured JSON arguments directly/);
+    assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter"]);
+    assert.deepEqual(payload(commandMap).routing.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
+    assert.deepEqual(payload(commandMap).routing.nativeCommands, ["files", "links", "version", "dev:console"]);
+    assert.equal(payload(commandMap).routing.nativeCommandsError, undefined);
+    assert.match(payload(commandMap).preference.rule, /Prefer Optsidian for Obsidian vault work/);
+    assert.match(payload(commandMap).preference.reason, /keeps routing consistent and avoids shell expansion and quoting bugs/i);
 
-  let result = tools.write({ path: "raw.md", content: raw });
-  assert.equal(payload(result).ok, true);
-  assert.equal(fs.readFileSync(path.join(vault, "raw.md"), "utf8"), raw);
+    let result = tools.write({ path: "raw.md", content: raw });
+    assert.equal(payload(result).ok, true);
+    assert.equal(fs.readFileSync(path.join(vault, "raw.md"), "utf8"), raw);
+  } finally {
+    if (previousBin === undefined) delete process.env.OPTSIDIAN_OBSIDIAN_BIN;
+    else process.env.OPTSIDIAN_OBSIDIAN_BIN = previousBin;
+    if (previousVault === undefined) delete process.env.FAKE_VAULT;
+    else process.env.FAKE_VAULT = previousVault;
+  }
 });
 
 test("mcp edit uses flat fields and validates selector count", async () => {
@@ -139,7 +165,7 @@ test("optsidian-mcp help is available outside protocol mode", () => {
   const result = spawnSync(process.execPath, [mcpBin, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /optsidian-mcp/);
-  assert.match(result.stdout, /usage/);
+  assert.match(result.stdout, /command_map/);
   assert.doesNotMatch(result.stdout, /frontmatter_read/);
   assert.doesNotMatch(result.stdout, /search/);
   assert.doesNotMatch(result.stdout, /frontmatter_remove/);
@@ -179,28 +205,24 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ["apply_patch", "edit", "usage", "write"]
+      ["apply_patch", "command_map", "edit", "write"]
     );
 
-    const usage = await client.callTool({
-      name: "usage",
+    const commandMap = await client.callTool({
+      name: "command_map",
       arguments: {}
     });
-    assert.deepEqual(usage.structuredContent?.routing?.cliOnly, [
-      "read",
-      "search",
-      "grep",
-      "index",
-      "copy",
-      "mkdir",
-      "update",
-      "frontmatter",
-      "native passthrough"
-    ]);
-    assert.deepEqual(usage.structuredContent?.routing?.mcpTools, ["usage", "write", "edit", "apply_patch"]);
-    assert.match(String(usage.structuredContent?.preference?.rule), /Prefer MCP tools/);
-    assert.match(String(usage.structuredContent?.preference?.reason), /shell expansion, quoting issues, and CLI parsing edge cases/);
-    assert.equal(usage.structuredContent?.help?.command, "optsidian <command> --help");
+    assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.nativeCommands, ["files", "links", "version", "dev:console"]);
+    assert.equal(commandMap.structuredContent?.routing?.nativeCommandsError, undefined);
+    assert.match(String(commandMap.structuredContent?.preference?.rule), /Prefer Optsidian for Obsidian vault work/);
+    assert.match(
+      String(commandMap.structuredContent?.preference?.reason),
+      /keeps routing consistent and avoids shell expansion and quoting bugs/i
+    );
+    assert.equal(commandMap.structuredContent?.help?.command, "optsidian <command> --help");
+    assert.equal(commandMap.structuredContent?.help?.nativeCommand, "optsidian <native-command> [args]");
 
     const write = await client.callTool({
       name: "write",

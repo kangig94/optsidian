@@ -60,7 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 `optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes a small shell-independent JSON mutation surface:
 
 ```text
-usage, write, edit, apply_patch
+command_map, write, edit, apply_patch
 ```
 
 Example MCP client config:
@@ -105,7 +105,7 @@ For a non-default Obsidian binary:
 }
 ```
 
-MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `usage` MCP tool for routing first; it tells agents to prefer MCP tools when available because structured JSON avoids shell expansion, quoting bugs, and CLI parsing edge cases. Get detailed syntax from `optsidian --help` or `optsidian <command> --help`.
+MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `command_map` MCP tool for routing first when work goes beyond the MCP mutation tools; it returns the Optsidian CLI-only commands, the exposed MCP tools, and the current native delegated command list, then points detailed syntax to `optsidian --help` or `optsidian <command> --help`.
 
 ## Native-First Policy
 

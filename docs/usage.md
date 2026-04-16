@@ -41,8 +41,8 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter`, native passthrough
-- MCP tools: `usage`, `write`, `edit`, `apply_patch`
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter`
+- MCP tools: `command_map`, `write`, `edit`, `apply_patch`
 
 ## Vault Selection
 
@@ -262,12 +262,12 @@ Native delegated commands keep their original output formats.
 `optsidian-mcp` exposes a small mutation-oriented tool surface over stdio for MCP clients:
 
 ```text
-usage, write, edit, apply_patch
+command_map, write, edit, apply_patch
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
 
-Call `usage` first when the agent only sees MCP tools. It returns the CLI-only split, the available MCP tools, and an explicit preference rule: use MCP first whenever an equivalent MCP tool exists, because structured JSON avoids shell expansion, quoting bugs, and CLI parsing edge cases. It then points detailed syntax back to:
+Call `command_map` first when work goes beyond the MCP mutation tools. It returns the CLI-only split, the available MCP tools, the current native delegated command list, and an explicit preference rule: prefer Optsidian for Obsidian vault work and use Optsidian CLI commands for CLI-only and native passthrough operations. It then points detailed syntax back to:
 
 ```text
 optsidian --help

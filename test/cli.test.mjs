@@ -93,7 +93,7 @@ test("top-level and implemented command help stay local", () => {
   assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /files, links, version, dev:console/);
-  assert.match(result.stdout, /MCP tools: usage, write, edit, apply_patch/);
+  assert.match(result.stdout, /MCP tools: command_map, write, edit, apply_patch/);
 
   const searchHelp = run(["search", "--help"]);
   assert.equal(searchHelp.status, 0, searchHelp.stderr);

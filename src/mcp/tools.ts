@@ -43,7 +43,7 @@ export type EditToolArgs = z.infer<typeof editArgsSchema>;
 export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
 
 export type OptsidianToolHandlers = {
-  usage(args: UsageToolArgs): CallToolResult;
+  command_map(args: UsageToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
   apply_patch(args: PatchToolArgs): CallToolResult;
@@ -51,7 +51,7 @@ export type OptsidianToolHandlers = {
 
 export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
   return {
-    usage: () => runTool(() => usagePayload()),
+    command_map: () => runTool(() => usagePayload()),
     write: (args) => runTool(() => writeVaultFile(vaultRoot, args)),
     edit: (args) => runTool(() => editVaultFile(vaultRoot, editArgsToParams(args))),
     apply_patch: (args) => runTool(() => applyVaultPatch(vaultRoot, args))
@@ -61,18 +61,19 @@ export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
 export function registerOptsidianTools(server: McpServer, vaultRoot: string): void {
   const handlers = createToolHandlers(vaultRoot);
   server.registerTool(
-    "usage",
+    "command_map",
     {
-      description: "Return a short routing summary, tell agents to prefer MCP tools when available, and point detailed syntax to CLI help.",
+      description:
+        "Call this first when you need Optsidian commands beyond the MCP mutation tools. Shows which Optsidian commands are CLI-only and which tools are exposed over MCP.",
       inputSchema: usageArgsSchema.shape,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
-    async (args) => handlers.usage(args)
+    async (args) => handlers.command_map(args)
   );
   server.registerTool(
     "write",
     {
-      description: "Write a whole UTF-8 file inside the configured Obsidian vault.",
+      description: "Whole-file write inside the configured Obsidian vault.",
       inputSchema: writeArgsSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },
@@ -81,7 +82,7 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
   server.registerTool(
     "edit",
     {
-      description: "Edit one file inside the configured Obsidian vault using exactly one of replace, regex, line, or range.",
+      description: "Targeted file edit inside the configured Obsidian vault using exactly one of replace, regex, line, or range.",
       inputSchema: editArgsSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },
@@ -90,7 +91,7 @@ export function registerOptsidianTools(server: McpServer, vaultRoot: string): vo
   server.registerTool(
     "apply_patch",
     {
-      description: "Apply a Codex-style patch inside the configured Obsidian vault.",
+      description: "Patch-based mutation inside the configured Obsidian vault.",
       inputSchema: patchArgsSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
     },

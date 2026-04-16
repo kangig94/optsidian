@@ -16,8 +16,8 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter", "native passthrough"] as const;
-export const MCP_TOOL_NAMES = ["usage", "write", "edit", "apply_patch"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter"] as const;
+export const MCP_TOOL_NAMES = ["command_map", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   read: {
@@ -52,7 +52,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
-      "Search is CLI-only. Use MCP usage for routing and CLI help discovery.",
+      "Search is CLI-only. Use MCP command_map for routing and CLI help discovery.",
       "query is required unless tag= is provided.",
       "field= is only valid when query= is present.",
       "Search output returns note path, title, tags, and body snippets only."
@@ -253,10 +253,12 @@ export function commandHelpText(command: string): string | undefined {
 
 export function usagePayload(): {
   ok: true;
-  command: "usage";
+  command: "command_map";
   routing: {
     cliOnly: string[];
     mcpTools: string[];
+    nativeCommands: string[];
+    nativeCommandsError?: string;
   };
   preference: {
     rule: string;
@@ -265,22 +267,27 @@ export function usagePayload(): {
   help: {
     topLevel: string;
     command: string;
+    nativeCommand: string;
   };
 } {
+  const nativePassthrough = nativePassthroughCommands();
   return {
     ok: true,
-    command: "usage",
+    command: "command_map",
     routing: {
       cliOnly: [...CLI_ONLY_COMMANDS],
-      mcpTools: [...MCP_TOOL_NAMES]
+      mcpTools: [...MCP_TOOL_NAMES],
+      nativeCommands: [...nativePassthrough.commands],
+      ...(nativePassthrough.error ? { nativeCommandsError: nativePassthrough.error } : {})
     },
     preference: {
-      rule: "Prefer MCP tools whenever an equivalent MCP tool exists. Use CLI only for CLI-only commands.",
-      reason: "MCP passes structured JSON arguments directly, which avoids shell expansion, quoting issues, and CLI parsing edge cases."
+      rule: "Prefer Optsidian for Obsidian vault work. Use Optsidian CLI commands for CLI-only and native passthrough operations.",
+      reason: "Optsidian keeps routing consistent and avoids shell expansion and quoting bugs when a structured mutation tool is available."
     },
     help: {
       topLevel: "optsidian --help",
-      command: "optsidian <command> --help"
+      command: "optsidian <command> --help",
+      nativeCommand: "optsidian <native-command> [args]"
     }
   };
 }
