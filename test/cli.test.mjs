@@ -78,6 +78,8 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(searchHelp.status, 0, searchHelp.stderr);
   assert.match(searchHelp.stdout, /Command: search/);
   assert.match(searchHelp.stdout, /query=<text>/);
+  assert.match(searchHelp.stdout, /tag=<tag/);
+  assert.match(searchHelp.stdout, /field=<field/);
 
   const updateHelp = run(["update", "--help"]);
   assert.equal(updateHelp.status, 0, updateHelp.stderr);
@@ -197,6 +199,24 @@ test("search ranks notes and index commands manage cache", () => {
   assert.match(result.stdout, /aliases: Project Alpha/);
   assert.match(result.stdout, /matched: .*tags\(project, alpha\)/);
 
+  result = run(["search", "query=review", "field=title", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matches.length, 0);
+
+  result = run(["search", "tag=#project,#alpha", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  const tagOnly = JSON.parse(result.stdout);
+  assert.deepEqual(tagOnly.filters.tags, ["project", "alpha"]);
+  assert.equal(tagOnly.filters.fields, undefined);
+  assert.equal(tagOnly.query, undefined);
+  assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
+  assert.equal(tagOnly.matches[0].score, 0);
+
+  result = run(["search", "tag=project", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /scope: Projects/);
+  assert.match(result.stdout, /tags: project/);
+
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /index: ready/);
@@ -205,6 +225,24 @@ test("search ranks notes and index commands manage cache", () => {
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /index: cleared/);
+});
+
+test("search requires query or tag and validates fields", () => {
+  const { vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  fs.writeFileSync(path.join(vault, "note.md"), "alpha\n");
+
+  let result = run(["search", "path=note.md"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /query=<text> or tag=<tag>/);
+
+  result = run(["search", "query=alpha", "field=unknown"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /field must be one of/);
+
+  result = run(["search", "tag=project", "field=body"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /field=<field> requires query=<text>/);
 });
 
 test("frontmatter command reads and mutates structured metadata", () => {

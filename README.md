@@ -169,10 +169,13 @@ Rank notes by title, tags, aliases, headings, path, and body.
 optsidian search query="alpha rollout"
 optsidian search query="alpha rollout" limit=10
 optsidian search query="alpha rollout" path=Projects
+optsidian search query="review" field=body
+optsidian search query="rollout" tag=project path=Projects
+optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Text output includes title, aliases, tags, matched fields with matching query terms, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. JSON output also includes `scope` when `path=` is used and `fieldMatches` for each result.
+Text output includes title, aliases, tags, matched fields with matching query terms, applied `tag`/`field` filters, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. JSON output also includes `scope`, `filters`, and `fieldMatches` for each result. `field=` is only valid when `query=` is present.
 
 The search index is stored outside the vault under the OS cache directory. Missing or stale indexes are rebuilt automatically.
 

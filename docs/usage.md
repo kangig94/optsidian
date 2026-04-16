@@ -111,10 +111,13 @@ Only one of `lines=`, `head=`, `tail=`, and `around=` may be used at a time.
 optsidian search query="alpha rollout"
 optsidian search query="alpha rollout" limit=10
 optsidian search query="alpha rollout" path=Projects
+optsidian search query="review" field=body
+optsidian search query="rollout" tag=project path=Projects
+optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Search output includes note title, aliases, tags, matched fields with matching query terms, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. JSON output also includes `scope` when `path=` is used and per-result `fieldMatches`.
+Search output includes note title, aliases, tags, matched fields with matching query terms, applied `tag`/`field` filters, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. JSON output also includes `scope`, `filters`, and per-result `fieldMatches`. `field=` is only valid when `query=` is present.
 
 The search index is cached outside the vault and rebuilt automatically when stale. Use `index` for manual cache management:
 

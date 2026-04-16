@@ -47,14 +47,23 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   },
   search: {
     summary: "Ranked note search over title, tags, aliases, headings, path, and body",
-    usage: ["optsidian search query=<text> [path=<dir|file>] [limit=<n>] [format=text|json]"],
+    usage: [
+      "optsidian search query=<text> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [format=text|json]",
+      "optsidian search tag=<tag>[,<tag>...] [path=<dir|file>] [limit=<n>] [format=text|json]"
+    ],
     options: [
       { name: "query=<text>", description: "Ranked note search query" },
+      { name: "tag=<tag,...>", description: "Exact tag filter; multiple tags use AND semantics" },
       { name: "path=<dir|file>", description: "Vault-relative search scope" },
+      { name: "field=<field,...>", description: "Restrict query matching to title, aliases, tags, headings, path, or body" },
       { name: "limit=<n>", description: "Maximum notes to return (default: 10)" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
-    notes: ["Search is CLI-only. Use MCP usage for routing and CLI help discovery."]
+    notes: [
+      "Search is CLI-only. Use MCP usage for routing and CLI help discovery.",
+      "query is required unless tag= is provided.",
+      "field= is only valid when query= is present."
+    ]
   },
   index: {
     summary: "Manage the ranked search cache",

@@ -9,14 +9,22 @@ import { UsageError } from "../errors.js";
 import { resolveVaultPath, vaultRealpath, vaultRelative, walkFiles } from "./path.js";
 import { parseMarkdownNote, SearchDocument } from "./search-parse.js";
 import { decodeUtf8, splitText } from "./text.js";
-import type { SearchIndexMutationResult, SearchIndexStatusResult, SearchMatch, SearchParams, SearchResult, SearchSnippet } from "./types.js";
+import type {
+  SearchField,
+  SearchIndexMutationResult,
+  SearchIndexStatusResult,
+  SearchMatch,
+  SearchParams,
+  SearchResult,
+  SearchSnippet
+} from "./types.js";
 import { assertOptionalPositiveInteger } from "./validation.js";
 
 const SEARCH_SCHEMA_VERSION = 1;
 const SEARCH_ENGINE = "orama";
 const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
-const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const;
+const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_BOOST = {
   title: 8,
   tags: 7,
@@ -57,38 +65,58 @@ type PathFilter = {
   directory: boolean;
 };
 
+type NormalizedSearchParams = {
+  query?: string;
+  path?: string;
+  tags?: string[];
+  fields?: SearchField[];
+  limit: number;
+};
+
+type RankedCandidate = Omit<SearchMatch, "snippets">;
+
 export async function searchVault(vaultRoot: string, params: SearchParams): Promise<SearchResult> {
-  validateSearchParams(params);
-  const limit = params.limit ?? 10;
-  const pathFilter = params.path ? resolvePathFilter(vaultRoot, params.path) : undefined;
+  const search = normalizeSearchParams(params);
+  const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
   const loaded = await loadOrBuildIndex(vaultRoot);
-  const rawLimit = pathFilter ? Math.max(loaded.manifest.documents, limit) : limit;
+  const rawLimit = pathFilter || search.tags ? Math.max(loaded.manifest.documents, search.limit) : search.limit;
+  const properties = search.fields ? [...search.fields] : [...SEARCH_PROPERTIES];
   const results = (await oramaSearch(loaded.db, {
-    term: normalizeQueryForOrama(params.query),
-    properties: [...SEARCH_PROPERTIES],
-    boost: SEARCH_BOOST,
-    tolerance: 0,
-    limit: rawLimit
+    limit: rawLimit,
+    ...(search.query
+      ? {
+          term: normalizeQueryForOrama(search.query),
+          properties,
+          boost: boostForFields(search.fields),
+          tolerance: 0
+        }
+      : {})
   })) as Results<SearchDocument>;
 
   const matches = results.hits
-    .map((hit) => rankedMatch(vaultRoot, params.query, hit.document, hit.score))
-    .filter((match) => !pathFilter || matchesPathFilter(match.path, pathFilter))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .filter((hit) => (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) && matchesTagFilter(hit.document.tags, search.tags))
+    .map((hit) => rankedCandidate(search.query, hit.document, hit.score, search.fields))
+    .sort(search.query ? compareRankedMatches : compareTagOnlyMatches)
+    .slice(0, search.limit);
+
+  const withSnippets = matches.map((match) => ({
+    ...match,
+    snippets: snippetsForDocument(vaultRoot, match.path, search.query)
+  }));
 
   return {
     ok: true,
     command: "search",
-    query: params.query,
+    query: search.query,
     count: matches.length,
     scope: pathFilter?.rel || undefined,
+    filters: search.tags || search.fields ? { tags: search.tags, fields: search.fields } : undefined,
     index: {
       status: loaded.status,
       documents: loaded.manifest.documents,
       builtAt: loaded.manifest.builtAt
     },
-    matches
+    matches: withSnippets
   };
 }
 
@@ -272,11 +300,27 @@ function manifestStaleReason(manifest: SearchManifest, currentFiles: Record<stri
   return undefined;
 }
 
-function validateSearchParams(params: SearchParams): void {
-  if (!params.query.trim()) {
+function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {
+  assertOptionalPositiveInteger(params.limit, "limit");
+  const query = params.query?.trim();
+  if (params.query !== undefined && !query) {
     throw new UsageError("query must not be empty");
   }
-  assertOptionalPositiveInteger(params.limit, "limit");
+  const tags = normalizeTagFilters(params.tags);
+  const fields = normalizeSearchFields(params.fields);
+  if (fields && !query) {
+    throw new UsageError("field=<field> requires query=<text>");
+  }
+  if (!query && !tags) {
+    throw new UsageError("search requires query=<text> or tag=<tag>");
+  }
+  return {
+    query: query || undefined,
+    path: params.path,
+    tags,
+    fields,
+    limit: params.limit ?? 10
+  };
 }
 
 function resolvePathFilter(vaultRoot: string, input: string): PathFilter {
@@ -291,32 +335,32 @@ function matchesPathFilter(relPath: string, filter: PathFilter): boolean {
   return relPath === filter.rel || relPath.startsWith(`${filter.rel}/`);
 }
 
-function rankedMatch(vaultRoot: string, query: string, doc: SearchDocument, baseScore: number): SearchMatch {
-  const fieldMatches = matchedSearchFields(query, doc);
+function rankedCandidate(query: string | undefined, doc: SearchDocument, baseScore: number, fields?: SearchField[]): RankedCandidate {
+  const fieldMatches = matchedSearchFields(query, doc, fields);
   return {
     path: doc.path,
-    score: roundScore(baseScore + postBoost(query, doc)),
+    score: roundScore(query ? baseScore + postBoost(query, doc, fields) : 0),
     title: doc.title,
     aliases: doc.aliases,
     tags: doc.tags,
     matchedFields: Object.keys(fieldMatches),
-    fieldMatches,
-    snippets: snippetsForDocument(vaultRoot, doc.path, query)
+    fieldMatches
   };
 }
 
-function matchedSearchFields(query: string, doc: SearchDocument): Record<string, string[]> {
-  const fields: Array<[string, string | string[]]> = [
-    ["title", doc.title],
-    ["aliases", doc.aliases],
-    ["tags", doc.tags],
-    ["headings", doc.headings],
-    ["path", doc.path],
-    ["body", doc.body]
-  ];
+function matchedSearchFields(query: string | undefined, doc: SearchDocument, fields?: SearchField[]): Record<string, string[]> {
+  if (!query) return {};
+  const allowed = new Set(searchFields(fields));
+  const candidates: Array<[SearchField, string | string[]]> = [];
+  if (allowed.has("title")) candidates.push(["title", doc.title]);
+  if (allowed.has("aliases")) candidates.push(["aliases", doc.aliases]);
+  if (allowed.has("tags")) candidates.push(["tags", doc.tags]);
+  if (allowed.has("headings")) candidates.push(["headings", doc.headings]);
+  if (allowed.has("path")) candidates.push(["path", doc.path]);
+  if (allowed.has("body")) candidates.push(["body", doc.body]);
   const queryTokens = queryTerms(query);
   const result: Record<string, string[]> = {};
-  for (const [name, value] of fields) {
+  for (const [name, value] of candidates) {
     const values = Array.isArray(value) ? value : [value];
     const matches = queryTokens.filter((term) => values.some((item) => normalizeText(item).includes(term)));
     if (matches.length > 0) result[name] = matches;
@@ -324,23 +368,24 @@ function matchedSearchFields(query: string, doc: SearchDocument): Record<string,
   return result;
 }
 
-function postBoost(query: string, doc: SearchDocument): number {
+function postBoost(query: string, doc: SearchDocument, fields?: SearchField[]): number {
+  const allowed = new Set(searchFields(fields));
   const terms = queryTerms(query);
   const phrase = normalizeText(query).replace(/^#/, "");
   let score = 0;
-  if (doc.tags.some((tag) => terms.includes(normalizeText(tag)))) score += 8;
-  if (normalizeText(doc.title) === phrase) score += 6;
-  if (normalizeText(path.basename(doc.path, path.extname(doc.path))) === phrase) score += 4;
-  if (doc.title && normalizeText(doc.title).includes(phrase)) score += 4;
-  if (doc.headings.some((heading) => normalizeText(heading).includes(phrase))) score += 3;
+  if (allowed.has("tags") && doc.tags.some((tag) => terms.includes(normalizeText(tag)))) score += 8;
+  if (allowed.has("title") && normalizeText(doc.title) === phrase) score += 6;
+  if (allowed.has("path") && normalizeText(path.basename(doc.path, path.extname(doc.path))) === phrase) score += 4;
+  if (allowed.has("title") && doc.title && normalizeText(doc.title).includes(phrase)) score += 4;
+  if (allowed.has("headings") && doc.headings.some((heading) => normalizeText(heading).includes(phrase))) score += 3;
   return score;
 }
 
-function snippetsForDocument(vaultRoot: string, relPath: string, query: string): SearchSnippet[] {
+function snippetsForDocument(vaultRoot: string, relPath: string, query: string | undefined): SearchSnippet[] {
   try {
     const abs = resolveVaultPath(vaultRoot, relPath, { mustExist: true }).abs;
     const lines = splitText(decodeUtf8(fs.readFileSync(abs), relPath)).lines;
-    const terms = queryTerms(query);
+    const terms = query ? queryTerms(query) : [];
     const bodyStart = bodyStartLine(lines);
     const headingSnippets = matchingSnippets(lines, terms, bodyStart, (line) => /^#{1,6}\s+/.test(line));
     const bodySnippets = matchingSnippets(lines, terms, bodyStart, (line) => !/^#{1,6}\s+/.test(line));
@@ -393,6 +438,55 @@ function uniqueSnippets(snippets: SearchSnippet[]): SearchSnippet[] {
 function queryTerms(query: string): string[] {
   const terms = normalizeQueryForOrama(query).match(/[\p{L}\p{N}_/-]+/gu) ?? [];
   return [...new Set(terms.map(normalizeText).filter(Boolean))];
+}
+
+function searchFields(fields: SearchField[] | undefined): SearchField[] {
+  return fields ?? [...SEARCH_PROPERTIES];
+}
+
+function boostForFields(fields: SearchField[] | undefined): Record<SearchField, number> {
+  const allowed = new Set(searchFields(fields));
+  return Object.fromEntries(
+    SEARCH_PROPERTIES.filter((field) => allowed.has(field)).map((field) => [field, SEARCH_BOOST[field]])
+  ) as Record<SearchField, number>;
+}
+
+function normalizeTagFilters(tags: string[] | undefined): string[] | undefined {
+  if (tags === undefined) return undefined;
+  const normalized = [...new Set(tags.map((tag) => tag.replace(/^#+/, "").trim().toLowerCase()).filter(Boolean))];
+  if (normalized.length === 0) {
+    throw new UsageError("tag must include at least one non-empty tag");
+  }
+  return normalized;
+}
+
+function normalizeSearchFields(fields: string[] | undefined): SearchField[] | undefined {
+  if (fields === undefined) return undefined;
+  const normalized = [...new Set(fields.map((field) => field.trim().toLowerCase()).filter(Boolean))];
+  if (normalized.length === 0) {
+    throw new UsageError(`field must include at least one of: ${SEARCH_PROPERTIES.join(", ")}`);
+  }
+  for (const field of normalized) {
+    if (!SEARCH_PROPERTIES.includes(field as SearchField)) {
+      throw new UsageError(`field must be one of: ${SEARCH_PROPERTIES.join(", ")}`);
+    }
+  }
+  return normalized as SearchField[];
+}
+
+function matchesTagFilter(docTags: string[], tags: string[] | undefined): boolean {
+  if (!tags || tags.length === 0) return true;
+  const available = new Set(docTags.map((tag) => normalizeText(tag)));
+  return tags.every((tag) => available.has(normalizeText(tag)));
+}
+
+function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): number {
+  if (right.score !== left.score) return right.score - left.score;
+  return left.path.localeCompare(right.path);
+}
+
+function compareTagOnlyMatches(left: RankedCandidate, right: RankedCandidate): number {
+  return left.path.localeCompare(right.path);
 }
 
 function normalizeQueryForOrama(query: string): string {

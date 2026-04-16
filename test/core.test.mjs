@@ -108,11 +108,55 @@ The rollout is blocked by review.
     assert.equal(scoped.scope, "Projects");
     assert.deepEqual(scoped.matches.map((match) => match.path), ["Projects/Alpha.md"]);
 
+    const fieldFiltered = await searchVault(vault, { query: "review", fields: ["title"], limit: 2 });
+    assert.equal(fieldFiltered.matches.length, 0);
+
+    const tagFiltered = await searchVault(vault, { query: "project alpha", tags: ["project", "alpha"], limit: 2 });
+    assert.deepEqual(tagFiltered.filters, { tags: ["project", "alpha"], fields: undefined });
+    assert.deepEqual(tagFiltered.matches.map((match) => match.path), ["Projects/Alpha.md"]);
+
+    const tagOnly = await searchVault(vault, { tags: ["project"], limit: 2 });
+    assert.equal(tagOnly.query, undefined);
+    assert.equal(tagOnly.matches[0].score, 0);
+    assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
+    assert.equal(tagOnly.matches[0].matchedFields.length, 0);
+
+    writeVaultFile(vault, {
+      path: "Projects/Beta.md",
+      content: `---
+tags: [project]
+---
+# Beta
+
+Another project note.
+`
+    });
+    await searchVault(vault, { query: "project", limit: 5 });
+    const originalRead = fs.readFileSync;
+    const noteReads = [];
+    fs.readFileSync = function patchedRead(filePath, ...rest) {
+      if (typeof filePath === "string" && filePath.endsWith(".md")) {
+        noteReads.push(path.basename(filePath));
+      }
+      return originalRead.call(this, filePath, ...rest);
+    };
+    try {
+      const limitedTagOnly = await searchVault(vault, { tags: ["project"], limit: 1 });
+      assert.equal(limitedTagOnly.matches.length, 1);
+      assert.equal(noteReads.length, 1);
+    } finally {
+      fs.readFileSync = originalRead;
+    }
+
     const status = getSearchIndexStatus(vault);
     assert.equal(status.ready, true);
     assert.equal(status.stale, false);
     assert.match(status.cacheDir, new RegExp(`^${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.equal(status.cacheDir.startsWith(vault), false);
+
+    await assert.rejects(() => searchVault(vault, { path: "Projects", limit: 2 }), /query=<text> or tag=<tag>/);
+    await assert.rejects(() => searchVault(vault, { query: "review", fields: ["unknown"], limit: 2 }), /field must be one of/);
+    await assert.rejects(() => searchVault(vault, { tags: ["project"], fields: ["title"], limit: 2 }), /field=<field> requires query=<text>/);
   } finally {
     if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = previousCache;
