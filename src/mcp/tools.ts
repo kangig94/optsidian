@@ -49,17 +49,17 @@ export type OptsidianToolHandlers = {
   apply_patch(args: PatchToolArgs): CallToolResult;
 };
 
-export function createToolHandlers(vaultRoot: string): OptsidianToolHandlers {
+export function createToolHandlers(resolveVaultRoot: () => string): OptsidianToolHandlers {
   return {
     command_map: () => runTool(() => usagePayload()),
-    write: (args) => runTool(() => writeVaultFile(vaultRoot, args)),
-    edit: (args) => runTool(() => editVaultFile(vaultRoot, editArgsToParams(args))),
-    apply_patch: (args) => runTool(() => applyVaultPatch(vaultRoot, args))
+    write: (args) => runTool(() => writeVaultFile(resolveVaultRoot(), args)),
+    edit: (args) => runTool(() => editVaultFile(resolveVaultRoot(), editArgsToParams(args))),
+    apply_patch: (args) => runTool(() => applyVaultPatch(resolveVaultRoot(), args))
   };
 }
 
-export function registerOptsidianTools(server: McpServer, vaultRoot: string): void {
-  const handlers = createToolHandlers(vaultRoot);
+export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () => string): void {
+  const handlers = createToolHandlers(resolveVaultRoot);
   server.registerTool(
     "command_map",
     {

@@ -56,14 +56,9 @@ optsidian grep vault=Work query=TODO
 
 Optimized commands resolve paths relative to the selected vault root.
 
-For MCP, vault selection happens when `optsidian-mcp` starts. It first runs native `obsidian vault info=path`. Pass `--vault <name>` or set `OPTSIDIAN_VAULT=<name>` to forward a vault name to native Obsidian.
+For MCP, vault selection happens when a vault-dependent tool is called. Without a fixed path, each call runs native `obsidian vault info=path` and uses the current active vault.
 
-```bash
-optsidian-mcp --vault Work
-OPTSIDIAN_VAULT=Work optsidian-mcp
-```
-
-If Obsidian GUI may be closed, provide a fallback path. The fallback is used only when native vault resolution fails.
+If Obsidian GUI may be closed, provide a fixed vault path. When set, MCP stays pinned to that path and does not follow active vault changes in the GUI. Without a resolved vault, the MCP server still connects and mutation tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
 
 ```bash
 optsidian-mcp --vault-path /path/to/vault

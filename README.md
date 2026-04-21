@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/ins
 
 The script downloads the latest stable GitHub release assets, verifies downloaded checksums, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 20 or newer and does not invoke the native `obsidian` CLI during installation.
 
-If native Obsidian vault lookup is unavailable when the MCP client starts, install with a fallback vault path:
+If you want MCP to stay pinned to one vault regardless of the active GUI vault, install with a fixed vault path:
 
 ```bash
 export OPTSIDIAN_VAULT_PATH=/path/to/vault
@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uni
 
 ## MCP Server
 
-`optsidian-mcp` runs a local MCP server over stdio. It resolves the active vault through the native Obsidian CLI at startup, then exposes a small shell-independent JSON mutation surface:
+`optsidian-mcp` runs a local MCP server over stdio. It always starts and exposes a small shell-independent JSON mutation surface. Vault-dependent tools resolve the active vault through the native Obsidian CLI when they are called:
 
 ```text
 command_map, write, edit, apply_patch
@@ -75,7 +75,7 @@ Example MCP client config:
 }
 ```
 
-If Obsidian GUI may be closed when Codex starts, add a fallback path. Native vault resolution is still tried first.
+If Obsidian GUI may be closed when tools are called, add a fixed vault path. Without one, vault-dependent tools resolve the current active vault on every call. If no active vault is available, the MCP server still connects and vault-dependent tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
 
 ```json
 {

@@ -68,17 +68,17 @@ export function resolveObsidianVaultRootWithFallback(options: { vault?: string; 
     return resolveObsidianVaultRoot({ vault: options.vault, env: options.env });
   } catch (error) {
     if (!options.fallbackPath) throw error;
-    return resolveFallbackVaultPath(options.fallbackPath);
+    return resolveVaultPathInput(options.fallbackPath);
   }
 }
 
-function resolveFallbackVaultPath(input: string): string {
+export function resolveVaultPathInput(input: string): string {
   const resolved = path.resolve(input);
   if (!fs.existsSync(resolved)) {
-    throw new RuntimeError(`Fallback vault path does not exist: ${input}`);
+    throw new RuntimeError(`Vault path does not exist: ${input}`);
   }
   if (!fs.statSync(resolved).isDirectory()) {
-    throw new RuntimeError(`Fallback vault path is not a directory: ${input}`);
+    throw new RuntimeError(`Vault path is not a directory: ${input}`);
   }
   return fs.realpathSync(resolved);
 }

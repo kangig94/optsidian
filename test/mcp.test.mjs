@@ -61,6 +61,42 @@ process.exit(7);
   return fake;
 }
 
+function makeSwitchingObsidian(dir, stateFile) {
+  const fake = path.join(dir, "obsidian-switching.cjs");
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "help") {
+  console.log(\`Obsidian CLI
+
+Commands:
+  files                 List files
+  links                 List outgoing links
+  version               Show version
+  dev:console           Show captured console messages\`);
+  process.exit(0);
+}
+if (args[0] === "vault" && args[1] === "info=path") {
+  if (!fs.existsSync(${JSON.stringify(stateFile)})) {
+    console.error("Obsidian is not running");
+    process.exit(7);
+  }
+  const activeVault = fs.readFileSync(${JSON.stringify(stateFile)}, "utf8").trim();
+  if (!activeVault) {
+    console.error("Obsidian is not running");
+    process.exit(7);
+  }
+  console.log(activeVault);
+  process.exit(0);
+}
+console.error("unexpected args: " + args.join(" "));
+process.exit(9);
+`;
+  fs.writeFileSync(fake, script);
+  fs.chmodSync(fake, 0o755);
+  return fake;
+}
+
 test("mcp command_map and write handlers preserve routing, preference guidance, and raw JSON payloads", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
@@ -72,7 +108,7 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
   process.env.FAKE_VAULT = vault;
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
   try {
-    const tools = createToolHandlers(vault);
+    const tools = createToolHandlers(() => vault);
     const commandMap = tools.command_map({});
     const raw = [
       "literal $HOME",
@@ -105,7 +141,7 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
 test("mcp edit uses flat fields and validates selector count", async () => {
   const vault = tempVault();
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
-  const tools = createToolHandlers(vault);
+  const tools = createToolHandlers(() => vault);
   tools.write({ path: "note.md", content: "alpha\nbeta\n" });
 
   let result = tools.edit({ path: "note.md", replace: "alpha", with: "literal $(date)" });
@@ -121,7 +157,7 @@ test("mcp edit uses flat fields and validates selector count", async () => {
 test("mcp apply_patch returns structured results", async () => {
   const vault = tempVault();
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
-  const tools = createToolHandlers(vault);
+  const tools = createToolHandlers(() => vault);
 
   let result = tools.apply_patch({
     patch: "*** Begin Patch\n*** Add File: patch.md\n+$HOME\n+`pwd`\n*** End Patch\n"
@@ -140,16 +176,17 @@ test("mcp config and native vault resolution use fake obsidian", async () => {
   const { parseMcpArgs } = await import(path.resolve("src/mcp/config.ts"));
   const { resolveObsidianVaultRoot, resolveObsidianVaultRootWithFallback } = await import(path.resolve("src/native/obsidian.ts"));
 
-  assert.deepEqual(parseMcpArgs(["--vault", "Work"], env), { help: false, version: false, vault: "Work", vaultPath: undefined });
-  assert.deepEqual(parseMcpArgs([], { ...env, OPTSIDIAN_VAULT: "EnvVault" }), { help: false, version: false, vault: "EnvVault", vaultPath: undefined });
-  assert.deepEqual(parseMcpArgs(["--vault-path", vault], env), { help: false, version: false, vault: undefined, vaultPath: vault });
+  assert.deepEqual(parseMcpArgs([], { ...env, OPTSIDIAN_VAULT: "EnvVault" }), { help: false, version: false, vaultPath: undefined });
+  assert.deepEqual(parseMcpArgs(["--vault-path", vault], env), { help: false, version: false, vaultPath: vault });
+  assert.throws(() => parseMcpArgs(["--vault", "Work"], env), /Unknown optsidian-mcp argument: --vault/);
+  assert.throws(() => parseMcpArgs(["--vault=Work"], env), /Unknown optsidian-mcp argument: --vault=Work/);
   assert.equal(resolveObsidianVaultRoot({ vault: "Work", env }), vault);
   assert.equal(resolveObsidianVaultRootWithFallback({ vault: "Work", fallbackPath: path.join(dir, "missing"), env }), vault);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls.at(-1), ["vault", "info=path", "vault=Work"]);
 });
 
-test("mcp vault fallback path is used when native resolve fails", async () => {
+test("mcp fixed vault path is used when native resolve fails", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   fs.mkdirSync(vault, { recursive: true });
@@ -158,7 +195,7 @@ test("mcp vault fallback path is used when native resolve fails", async () => {
   const { resolveObsidianVaultRootWithFallback } = await import(path.resolve("src/native/obsidian.ts"));
 
   assert.equal(resolveObsidianVaultRootWithFallback({ fallbackPath: vault, env }), fs.realpathSync(vault));
-  assert.throws(() => resolveObsidianVaultRootWithFallback({ fallbackPath: path.join(dir, "missing"), env }), /Fallback vault path does not exist/);
+  assert.throws(() => resolveObsidianVaultRootWithFallback({ fallbackPath: path.join(dir, "missing"), env }), /Vault path does not exist/);
 });
 
 test("optsidian-mcp help is available outside protocol mode", () => {
@@ -248,7 +285,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
   }
 });
 
-test("optsidian-mcp stdio starts with fallback path when native is unavailable", async () => {
+test("optsidian-mcp stdio starts with a fixed vault path when native is unavailable", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   fs.mkdirSync(vault, { recursive: true });
@@ -276,6 +313,190 @@ test("optsidian-mcp stdio starts with fallback path when native is unavailable",
     });
     assert.equal(write.structuredContent?.command, "write");
     assert.equal(fs.readFileSync(path.join(vault, "fallback.md"), "utf8"), "works\n");
+  } finally {
+    await client.close();
+  }
+});
+
+test("optsidian-mcp recovers in the same session once native vault resolution becomes available", async () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  const state = path.join(dir, "active-vault.txt");
+  fs.mkdirSync(vault, { recursive: true });
+  const fake = makeSwitchingObsidian(dir, state);
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpBin],
+    cwd: path.resolve("."),
+    env: {
+      ...process.env,
+      OPTSIDIAN_OBSIDIAN_BIN: fake
+    },
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "optsidian-mcp-recovery-test", version: "1.0.0" });
+
+  await client.connect(transport);
+  try {
+    const first = await client.callTool({
+      name: "write",
+      arguments: { path: "late.md", content: "x\n" }
+    });
+    assert.equal(first.isError, true);
+    assert.equal(first.structuredContent?.errorType, "runtime");
+
+    fs.writeFileSync(state, `${vault}\n`);
+
+    const second = await client.callTool({
+      name: "write",
+      arguments: { path: "late.md", content: "x\n" }
+    });
+    assert.equal(second.structuredContent?.command, "write");
+    assert.equal(fs.readFileSync(path.join(vault, "late.md"), "utf8"), "x\n");
+  } finally {
+    await client.close();
+  }
+});
+
+test("optsidian-mcp follows the active vault on each tool call when no fixed vault path is configured", async () => {
+  const dir = tempRoot();
+  const firstVault = path.join(dir, "vault-a");
+  const secondVault = path.join(dir, "vault-b");
+  const state = path.join(dir, "active-vault.txt");
+  fs.mkdirSync(firstVault, { recursive: true });
+  fs.mkdirSync(secondVault, { recursive: true });
+  fs.writeFileSync(state, `${firstVault}\n`);
+  const fake = makeSwitchingObsidian(dir, state);
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpBin],
+    cwd: path.resolve("."),
+    env: {
+      ...process.env,
+      OPTSIDIAN_OBSIDIAN_BIN: fake
+    },
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "optsidian-mcp-switch-test", version: "1.0.0" });
+
+  await client.connect(transport);
+  try {
+    const first = await client.callTool({
+      name: "write",
+      arguments: { path: "switch.md", content: "first\n" }
+    });
+    assert.equal(first.structuredContent?.command, "write");
+    assert.equal(fs.readFileSync(path.join(firstVault, "switch.md"), "utf8"), "first\n");
+
+    fs.writeFileSync(state, `${secondVault}\n`);
+
+    const second = await client.callTool({
+      name: "write",
+      arguments: { path: "switch.md", content: "second\n" }
+    });
+    assert.equal(second.structuredContent?.command, "write");
+    assert.equal(fs.readFileSync(path.join(secondVault, "switch.md"), "utf8"), "second\n");
+    assert.equal(fs.readFileSync(path.join(firstVault, "switch.md"), "utf8"), "first\n");
+  } finally {
+    await client.close();
+  }
+});
+
+test("optsidian-mcp keeps using the configured vault path when the active vault changes", async () => {
+  const dir = tempRoot();
+  const fixedVault = path.join(dir, "fixed-vault");
+  const activeVault = path.join(dir, "active-vault");
+  const nextActiveVault = path.join(dir, "next-active-vault");
+  const state = path.join(dir, "active-vault.txt");
+  fs.mkdirSync(fixedVault, { recursive: true });
+  fs.mkdirSync(activeVault, { recursive: true });
+  fs.mkdirSync(nextActiveVault, { recursive: true });
+  fs.writeFileSync(state, `${activeVault}\n`);
+  const fake = makeSwitchingObsidian(dir, state);
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpBin],
+    cwd: path.resolve("."),
+    env: {
+      ...process.env,
+      OPTSIDIAN_OBSIDIAN_BIN: fake,
+      OPTSIDIAN_VAULT_PATH: fixedVault
+    },
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "optsidian-mcp-fixed-vault-test", version: "1.0.0" });
+
+  await client.connect(transport);
+  try {
+    const first = await client.callTool({
+      name: "write",
+      arguments: { path: "fixed.md", content: "one\n" }
+    });
+    assert.equal(first.structuredContent?.command, "write");
+    assert.equal(fs.readFileSync(path.join(fixedVault, "fixed.md"), "utf8"), "one\n");
+
+    fs.writeFileSync(state, `${nextActiveVault}\n`);
+
+    const second = await client.callTool({
+      name: "write",
+      arguments: { path: "fixed.md", content: "two\n", overwrite: true }
+    });
+    assert.equal(second.structuredContent?.command, "write");
+    assert.equal(fs.readFileSync(path.join(fixedVault, "fixed.md"), "utf8"), "two\n");
+    assert.equal(fs.existsSync(path.join(activeVault, "fixed.md")), false);
+    assert.equal(fs.existsSync(path.join(nextActiveVault, "fixed.md")), false);
+  } finally {
+    await client.close();
+  }
+});
+
+test("optsidian-mcp connects without a resolved vault and returns a runtime error on mutation tools", async () => {
+  const dir = tempRoot();
+  const state = path.join(dir, "active-vault.txt");
+  const fake = makeSwitchingObsidian(dir, state);
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpBin],
+    cwd: path.resolve("."),
+    env: {
+      ...process.env,
+      OPTSIDIAN_OBSIDIAN_BIN: fake
+    },
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "optsidian-mcp-no-vault-test", version: "1.0.0" });
+
+  await client.connect(transport);
+  try {
+    const listed = await client.listTools();
+    assert.deepEqual(
+      listed.tools.map((tool) => tool.name).sort(),
+      ["apply_patch", "command_map", "edit", "write"]
+    );
+
+    const commandMap = await client.callTool({
+      name: "command_map",
+      arguments: {}
+    });
+    assert.equal(commandMap.structuredContent?.command, "command_map");
+
+    const write = await client.callTool({
+      name: "write",
+      arguments: { path: "missing.md", content: "x\n" }
+    });
+    assert.equal(write.isError, true);
+    assert.equal(write.structuredContent?.ok, false);
+    assert.equal(write.structuredContent?.errorType, "runtime");
+    assert.match(String(write.structuredContent?.message), /Vault is not configured for this MCP session/);
+    assert.match(String(write.structuredContent?.message), /Launch the Obsidian GUI/);
   } finally {
     await client.close();
   }

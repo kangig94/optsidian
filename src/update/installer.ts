@@ -6,6 +6,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { RuntimeError, UsageError } from "../errors.js";
+import { resolveVaultPathInput } from "../native/obsidian.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
 const DEFAULT_RELEASE_API_BASE = "https://api.github.com/repos/kangig94/optsidian/releases";
@@ -598,14 +599,7 @@ function resolveManagedVaultPath(manifest: InstallManifest, env: NodeJS.ProcessE
   const override = env.OPTSIDIAN_VAULT_PATH;
   const candidate = override !== undefined && override !== "" ? override : manifest.vaultPath;
   if (!candidate) return undefined;
-  const resolved = path.resolve(candidate);
-  if (!fs.existsSync(resolved)) {
-    throw new RuntimeError(`Fallback vault path does not exist: ${candidate}`);
-  }
-  if (!fs.statSync(resolved).isDirectory()) {
-    throw new RuntimeError(`Fallback vault path is not a directory: ${candidate}`);
-  }
-  return fs.realpathSync(resolved);
+  return resolveVaultPathInput(candidate);
 }
 
 function refreshMcpRegistration(options: { mcpPath: string; vaultPath?: string; env?: NodeJS.ProcessEnv }): RegistrationResult {

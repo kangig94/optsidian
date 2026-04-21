@@ -92,7 +92,7 @@ Tests use this variable to point at a fake Obsidian executable.
 
 ## MCP Vault Resolution
 
-`optsidian-mcp` resolves the vault at startup with native `obsidian vault info=path`. If native resolution fails, it can use `--vault-path <path>` or `OPTSIDIAN_VAULT_PATH=<path>` as a fallback. The fallback exists because native Obsidian CLI may require the GUI to be running, while MCP file tools can operate directly on vault files.
+`optsidian-mcp` does not fail startup when vault resolution is unavailable. Vault-dependent tool calls resolve the current active vault with native `obsidian vault info=path` each time they run, unless `--vault-path <path>` or `OPTSIDIAN_VAULT_PATH=<path>` pins MCP to a fixed vault path. Without either, mutation tools return a runtime error that tells the client to launch Obsidian GUI or configure a fixed vault path.
 
 ## Exit Codes
 
