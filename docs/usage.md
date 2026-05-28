@@ -63,6 +63,8 @@ OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian search query=TODO
 
 Do not combine `vault=<name>` and `vault-path=<path>` in the same command. Native passthrough commands reject explicit `vault-path=<path>` and still require the Obsidian GUI/native CLI context.
 
+Native passthrough commands use the vault from the active Obsidian window. When multiple vault windows are open, changing window focus changes the native active vault. Use `open-gui vault-path=<path>` before native/plugin commands when you need to force a specific vault.
+
 Optimized commands resolve paths relative to the selected vault root.
 
 For MCP, vault selection happens when a vault-dependent tool is called. Without a fixed path, each call runs native `obsidian vault info=path` and uses the current active vault.
@@ -84,7 +86,7 @@ optsidian open-gui vault-path=/path/to/vault
 optsidian open-gui no-wait
 ```
 
-By default, `open-gui` waits up to 10 seconds for native vault resolution before returning. When `vault-path=<path>` is provided, readiness requires that path to become the active native vault. Opening a vault this way can change the active vault seen by later native commands. Use `no-wait` only when you want fire-and-forget launch behavior and will not immediately run native/plugin commands. If your system has no `obsidian://` URI opener, set `OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian`.
+By default, `open-gui` waits up to 10 seconds for native vault resolution before returning. When `vault-path=<path>` is provided, readiness requires that path to become the active native vault. Opening or focusing a vault this way can change the active vault seen by later native commands. Use `no-wait` only when you want fire-and-forget launch behavior and will not immediately run native/plugin commands. If your system has no `obsidian://` URI opener, set `OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian`.
 
 ## Install and Update
 

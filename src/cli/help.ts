@@ -322,7 +322,8 @@ function appendTopLevelVaultSelection(lines: string[]): void {
     "Vault selection:",
     "  vault-path=<path>   Fixed vault root for Optsidian-implemented commands",
     "  vault=<name>        Obsidian vault name resolved through native CLI",
-    "  OPTSIDIAN_VAULT_PATH=<path> Fixed vault root for Optsidian-implemented commands"
+    "  OPTSIDIAN_VAULT_PATH=<path> Fixed vault root for Optsidian-implemented commands",
+    "  Native passthrough uses the active Obsidian window's vault."
   );
 }
 
@@ -331,7 +332,8 @@ function appendOpenGuiVaultSelection(lines: string[]): void {
     "",
     "Vault selection:",
     "  vault-path=<path>   Vault root to open through the Obsidian URI handler",
-    "  OPTSIDIAN_VAULT_PATH=<path> Vault root to open when vault-path is omitted"
+    "  OPTSIDIAN_VAULT_PATH=<path> Vault root to open when vault-path is omitted",
+    "  Focusing an Obsidian window changes the active vault seen by native commands."
   );
 }
 
