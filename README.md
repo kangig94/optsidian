@@ -121,22 +121,24 @@ For a non-default Obsidian binary:
 }
 ```
 
-MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `command_map` MCP tool for routing first when work goes beyond the MCP mutation tools; it returns the Optsidian CLI-only commands, installed addons, exposed MCP tools, and the current native delegated command list, then points detailed syntax to `optsidian --help` or `optsidian <command> --help`.
+MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `command_map` MCP tool for routing first when work goes beyond the MCP mutation tools; it returns the Optsidian CLI-only commands, exposed MCP tools, and the current native delegated command list, then points detailed syntax to `optsidian --help` or `optsidian <command> --help`.
 
-## Addons
+## Plugin Installs
 
-Optsidian can register local addon repositories that expose top-level CLI commands:
+Obsidian marketplace plugin installs stay native:
 
 ```bash
-optsidian addon install ../optsidian-para-zk
-optsidian addon install https://github.com/user/optsidian-para-zk.git ref=main
-optsidian addon install github.com/user/optsidian-para-zk
-optsidian addon list
-optsidian para-zk ping
-optsidian addon remove para-zk
+optsidian plugin:install id=obsidian-git enable
 ```
 
-Addon registration supports local paths and git URLs. The registry lives under `${XDG_DATA_HOME:-~/.local/share}/optsidian/addons` by default and can be overridden with `OPTSIDIAN_ADDON_HOME`. Git installs are cloned under the same addon home and recorded in `registry.json`.
+Optsidian extends `plugin:install` for custom plugin sources that are not available through the native marketplace command:
+
+```bash
+optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable reload
+optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
+```
+
+Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. `reload` only runs when the target vault is the active native Obsidian vault; otherwise the install succeeds and reports that reload was skipped.
 
 ## Native-First Policy
 
@@ -311,7 +313,7 @@ optsidian copy from=Templates to=Backups/Templates recursive
 
 ## Architecture
 
-`src/core/*` is the shell-independent command layer. It accepts raw strings and returns structured results, so MCP tools can call it directly without command-line quoting or stdout parsing. `src/cli/*` is only the CLI adapter: argument parsing, native Obsidian delegation, vault discovery, and text/json rendering. `src/addons/*` manages local addon manifests, registry state, and addon routing. `src/mcp/*` is the stdio MCP adapter.
+`src/core/*` is the shell-independent command layer. It accepts raw strings and returns structured results, so MCP tools can call it directly without command-line quoting or stdout parsing. `src/cli/*` is only the CLI adapter: argument parsing, native Obsidian delegation, vault discovery, and text/json rendering. `src/cli/commands/plugin.ts` implements the custom-source `plugin:install` extension. `src/mcp/*` is the stdio MCP adapter.
 
 ## Development
 

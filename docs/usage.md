@@ -41,21 +41,21 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `addon`
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
 - MCP tools: `command_map`, `write`, `edit`, `apply_patch`
 
-Local addons can also become top-level Optsidian commands after registration:
+Marketplace plugin installs stay native:
 
 ```bash
-optsidian addon install ../optsidian-para-zk
-optsidian addon install https://github.com/user/optsidian-para-zk.git ref=main
-optsidian addon install github.com/user/optsidian-para-zk
-optsidian addon list
-optsidian para-zk ping
-optsidian addon remove para-zk
+optsidian plugin:install id=obsidian-git enable
 ```
 
-The default addon registry is `${XDG_DATA_HOME:-~/.local/share}/optsidian/addons`. Set `OPTSIDIAN_ADDON_HOME` to use a different registry location. Git installs are cloned under the addon home and recorded in `registry.json`.
+Optsidian extends `plugin:install` for custom plugin sources:
+
+```bash
+optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable reload
+optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
+```
 
 ## Vault Selection
 
@@ -275,33 +275,34 @@ optsidian copy from=Folder to=FolderCopy recursive
 optsidian copy from=a.md to=b.md overwrite
 ```
 
-## Addons
+## Plugin Installs
 
-`addon` manages local addon repositories and git URL installs. Addons must contain an `optsidian-addon.json` manifest with an id, name, version, and CLI entrypoint.
-
-```bash
-optsidian addon install ../optsidian-para-zk
-optsidian addon install git@github.com:user/optsidian-para-zk.git ref=main
-optsidian addon install github.com/user/optsidian-para-zk
-optsidian addon list
-optsidian addon remove para-zk
-```
-
-Installed addon ids become top-level commands. For example, an addon with id `para-zk` is invoked as:
+`plugin:install id=<plugin-id>` is delegated to native Obsidian unchanged. Use it for marketplace/community plugins:
 
 ```bash
-optsidian para-zk check vault-path=/path/to/vault
+optsidian plugin:install id=obsidian-git enable
 ```
+
+`url=` and `path=` are Optsidian custom-source extensions for plugins that are not available through the native marketplace install command:
+
+```bash
+optsidian plugin:install url=git@github.com:user/my-plugin.git ref=main vault-path=/path/to/vault enable reload
+optsidian plugin:install url=github.com/user/my-plugin vault-path=/path/to/vault
+optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
+```
+
+Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`. The source must contain `manifest.json` and `main.js`; use `dir=<subdir>` when a git repository stores the plugin artifact below the repository root. `enable` updates `community-plugins.json`. `reload` attempts native `plugin:reload` only when the target vault is the active native Obsidian vault.
 
 ## JSON Output
 
-The `read`, `search`, `grep`, `frontmatter`, and `addon` commands support `format=json`.
+The `read`, `search`, `grep`, `frontmatter`, and custom-source `plugin:install` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
 optsidian search query=TODO format=json
 optsidian grep query=TODO format=json
 optsidian frontmatter read path=note.md format=json
+optsidian plugin:install path=../my-plugin vault-path=/path/to/vault format=json
 ```
 
 Native delegated commands keep their original output formats.
@@ -316,7 +317,7 @@ command_map, write, edit, apply_patch
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
 
-Call `command_map` first when work goes beyond the MCP mutation tools. It returns the CLI-only split, installed addons, the available MCP tools, the current native delegated command list, and an explicit preference rule: prefer Optsidian for Obsidian vault work and use Optsidian CLI commands for CLI-only and native passthrough operations. It then points detailed syntax back to:
+Call `command_map` first when work goes beyond the MCP mutation tools. It returns the CLI-only split, the available MCP tools, the current native delegated command list, and an explicit preference rule: prefer Optsidian for Obsidian vault work and use Optsidian CLI commands for CLI-only and native passthrough operations. It then points detailed syntax back to:
 
 ```text
 optsidian --help

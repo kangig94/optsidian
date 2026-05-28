@@ -10,7 +10,6 @@ src/cli/delegate.ts                native Obsidian process delegation
 src/cli/vault.ts                   vault root resolution through native Obsidian
 src/cli/render.ts                  CLI text/json rendering
 src/cli/commands/*.ts              thin CLI adapters
-src/addons/*.ts                    local addon manifest, registry, and runner
 src/update/installer.ts            release lookup, managed install state, and updater
 src/mcp.ts                         MCP stdio binary entrypoint
 src/mcp/*.ts                       MCP tool registration, config, result mapping
@@ -101,15 +100,13 @@ Implemented file commands resolve `vault-path=<path>` first, then `OPTSIDIAN_VAU
 
 `optsidian-mcp` does not fail startup when vault resolution is unavailable. Vault-dependent tool calls resolve the current active vault with native `obsidian vault info=path` each time they run, unless `--vault-path <path>` or `OPTSIDIAN_VAULT_PATH=<path>` pins MCP to a fixed vault path. Without either, mutation tools return a runtime error that tells the client to launch Obsidian GUI or configure a fixed vault path.
 
-## Addons
+## Plugin Install Extension
 
-`addon` is a CLI-only lifecycle command for local addon repositories and git URL installs. The registry lives at `${XDG_DATA_HOME:-~/.local/share}/optsidian/addons` unless `OPTSIDIAN_ADDON_HOME` is set.
+`plugin:install` is extended only for custom plugin sources. Native marketplace installs such as `plugin:install id=<plugin-id>` are delegated unchanged.
 
-An addon root must contain `optsidian-addon.json` with `id`, `name`, `version`, and `cli`. Installed addon ids become top-level commands, and the CLI runner invokes the addon entrypoint with Node while preserving stdout, stderr, and exit code.
+Custom `url=<git-url>` and `path=<plugin-dir>` installs are implemented in `src/cli/commands/plugin.ts`. They read `manifest.json`, copy the plugin directory into `.obsidian/plugins/<manifest.id>`, optionally update `community-plugins.json` with `enable`, and optionally call native `plugin:reload` when the target vault is also the active native Obsidian vault.
 
-Local installs keep their source path. Git installs are cloned under `<addon-home>/sources/<addon-id>` and the registry records `{ root, source: { type: "git", url, ref? } }`. `addon remove` deletes managed git clones but never deletes local path addons.
-
-Addon ids must not conflict with implemented Optsidian commands, reserved commands, or native-sufficient Obsidian commands. MCP does not dynamically register addon tools in this version; `command_map` only reports installed addons.
+There is no custom registry or update command. Re-run `plugin:install url=...` or `plugin:install path=...` to replace the installed plugin with the current source.
 
 ## Exit Codes
 

@@ -64,7 +64,7 @@ export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () =
     "command_map",
     {
       description:
-        "Call this first when you need Optsidian commands beyond the MCP mutation tools. Shows CLI-only commands, installed addons, and MCP tools.",
+        "Call this first when you need Optsidian commands beyond the MCP mutation tools. Shows CLI-only commands, MCP tools, and native delegated commands.",
       inputSchema: usageArgsSchema.shape,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },

@@ -126,48 +126,24 @@ if (process.env.FAKE_APP_HANG === "1") setInterval(() => {}, 1000);
   return fake;
 }
 
-function makeFakeAddon(dir, id = "para-zk", manifestOverrides = {}) {
+function makeFakePlugin(dir, id = "sample-plugin", manifestOverrides = {}) {
   const root = path.join(dir, id);
   fs.mkdirSync(root, { recursive: true });
   const manifest = {
     id,
-    name: "Fake Addon",
+    name: "Fake Plugin",
     version: "0.0.1",
-    cli: "cli.cjs",
     ...manifestOverrides
   };
-  fs.writeFileSync(
-    path.join(root, "optsidian-addon.json"),
-    JSON.stringify(manifest, null, 2)
-  );
-  fs.writeFileSync(
-    path.join(root, "cli.cjs"),
-    `#!/usr/bin/env node
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-if (process.env.FAKE_ADDON_LOG) {
-  fs.appendFileSync(process.env.FAKE_ADDON_LOG, JSON.stringify({
-    addonId: process.env.OPTSIDIAN_ADDON_ID,
-    addonRoot: process.env.OPTSIDIAN_ADDON_ROOT,
-    optsidianBin: process.env.OPTSIDIAN_BIN,
-    args
-  }) + "\\n");
-}
-if (args[0] === "fail") {
-  console.error("addon failure");
-  process.exit(5);
-}
-console.log("addon " + process.env.OPTSIDIAN_ADDON_ID + " " + args.join(" "));
-`
-  );
-  if (manifest.cli !== "cli.cjs" && !String(manifest.cli).includes("..")) {
-    fs.copyFileSync(path.join(root, "cli.cjs"), path.join(root, String(manifest.cli)));
-  }
+  fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest, null, 2));
+  fs.writeFileSync(path.join(root, "main.js"), "module.exports = {};\n");
   return root;
 }
 
-function makeGitAddonRepo(dir, id = "para-zk") {
-  const root = makeFakeAddon(dir, id);
+function makeGitPluginRepo(dir, id = "sample-plugin") {
+  const root = path.join(dir, "plugin-repo");
+  const pluginRoot = path.join(root, "dist", "obsidian-plugin");
+  makeFakePlugin(path.dirname(pluginRoot), path.basename(pluginRoot), { id });
   runGit(["init", "-b", "main"], root);
   runGit(["config", "user.name", "Optsidian Test"], root);
   runGit(["config", "user.email", "optsidian@example.test"], root);
@@ -179,6 +155,11 @@ function makeGitAddonRepo(dir, id = "para-zk") {
 function runGit(args, cwd) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
+}
+
+function gitHead(cwd) {
+  return runGit(["rev-parse", "HEAD"], cwd);
 }
 
 function cleanupPidFile(pidFile) {
@@ -247,7 +228,7 @@ function setup() {
   fs.mkdirSync(vault, { recursive: true });
   const log = path.join(dir, "obsidian.log");
   const fake = makeFakeObsidian(dir, vault);
-  const env = { OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log, OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
+  const env = { OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log };
   return { dir, vault, env, log };
 }
 
@@ -273,9 +254,11 @@ test("top-level and implemented command help stay local", () => {
   assert.match(result.stdout, /Detailed help:/);
   assert.match(result.stdout, /optsidian <command> --help/);
   assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
+  assert.match(result.stdout, /plugin:install\s+Install marketplace or custom Obsidian plugins/);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /files, links, version, dev:console/);
   assert.match(result.stdout, /MCP tools: command_map, write, edit, apply_patch/);
+  assert.doesNotMatch(result.stdout, /Addons:/);
 
   const searchHelp = run(["search", "--help"]);
   assert.equal(searchHelp.status, 0, searchHelp.stderr);
@@ -293,6 +276,12 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
   assert.match(frontmatterHelp.stdout, /Command: frontmatter/);
   assert.match(frontmatterHelp.stdout, /frontmatter is CLI-only/);
+
+  const pluginInstallHelp = run(["plugin:install", "--help"]);
+  assert.equal(pluginInstallHelp.status, 0, pluginInstallHelp.stderr);
+  assert.match(pluginInstallHelp.stdout, /Command: plugin:install/);
+  assert.match(pluginInstallHelp.stdout, /url=<git-url>/);
+  assert.match(pluginInstallHelp.stdout, /id=<plugin-id> is native passthrough/);
 });
 
 test("top-level help includes native passthrough error verbatim when command listing fails", () => {
@@ -303,149 +292,140 @@ test("top-level help includes native passthrough error verbatim when command lis
   assert.match(result.stdout, /Start the Obsidian GUI to use native help\./);
 });
 
-test("addon install, list, route, and remove use a local addon registry", () => {
-  const dir = tempRoot();
-  const addonRoot = makeFakeAddon(dir);
-  const addonHome = path.join(dir, "addons");
-  const log = path.join(dir, "addon.log");
-  const env = { OPTSIDIAN_ADDON_HOME: addonHome, FAKE_ADDON_LOG: log };
-
-  let result = run(["addon", "install", addonRoot, "format=json"], { env });
+test("plugin:install id delegates unchanged to native Obsidian", () => {
+  const { env, log } = setup();
+  const result = run(["plugin:install", "id=community-plugin", "enable"], { env });
   assert.equal(result.status, 0, result.stderr);
-  let payload = JSON.parse(result.stdout);
-  assert.equal(payload.action, "install");
-  assert.equal(payload.addon.id, "para-zk");
-  assert.deepEqual(payload.addon.source, { type: "local" });
-  assert.equal(payload.addon.root, fs.realpathSync(addonRoot));
-  const registry = JSON.parse(fs.readFileSync(path.join(addonHome, "registry.json"), "utf8"));
-  assert.equal(registry.addons["para-zk"].root, fs.realpathSync(addonRoot));
-  assert.deepEqual(registry.addons["para-zk"].source, { type: "local" });
-
-  result = run(["addon", "list", "format=json"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  payload = JSON.parse(result.stdout);
-  assert.deepEqual(payload.addons.map((addon) => addon.id), ["para-zk"]);
-
-  result = run(["para-zk", "ping", "format=json"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "addon para-zk ping format=json");
-  const call = JSON.parse(fs.readFileSync(log, "utf8").trim());
-  assert.equal(call.addonId, "para-zk");
-  assert.equal(call.addonRoot, fs.realpathSync(addonRoot));
-  assert.equal(call.optsidianBin, cli);
-  assert.deepEqual(call.args, ["ping", "format=json"]);
-
-  result = run(["addon", "remove", "para-zk"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Removed addon para-zk/);
+  assert.equal(result.stdout.trim(), "native plugin:install id=community-plugin enable");
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["plugin:install", "id=community-plugin", "enable"]);
 });
 
-test("addon install supports git URLs and records git source metadata", () => {
-  const dir = tempRoot();
-  const repo = makeGitAddonRepo(dir);
-  const addonHome = path.join(dir, "addons");
-  const log = path.join(dir, "addon.log");
+test("plugin:install id rejects fixed vault paths before native passthrough", () => {
+  const { env, vault } = setup();
+  const result = run(["plugin:install", "id=community-plugin", `vault-path=${vault}`], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /vault-path=<path> only applies to custom plugin installs/);
+});
+
+test("plugin:install path installs and enables a local custom plugin", () => {
+  const { dir, vault } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"]);
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
+  assert.equal(payload.command, "plugin:install");
+  assert.equal(payload.plugin.id, "sample-plugin");
+  assert.equal(payload.plugin.name, "Fake Plugin");
+  assert.equal(payload.plugin.version, "0.0.1");
+  assert.equal(payload.plugin.path, target);
+  assert.deepEqual(payload.source, { type: "local", path: fs.realpathSync(pluginRoot) });
+  assert.equal(payload.enable.status, "enabled");
+  assert.equal(payload.enable.changed, true);
+  assert.equal(payload.reload.status, "skipped");
+  assert.equal(fs.existsSync(path.join(target, "manifest.json")), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
+});
+
+test("plugin:install validates enable config before copying plugin files", () => {
+  const { dir, vault } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const obsidianDir = path.join(vault, ".obsidian");
+  fs.mkdirSync(obsidianDir, { recursive: true });
+  fs.writeFileSync(path.join(obsidianDir, "community-plugins.json"), "not json");
+
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable"]);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Invalid community-plugins\.json/);
+  assert.equal(fs.existsSync(path.join(obsidianDir, "plugins", "sample-plugin")), false);
+});
+
+test("plugin:install url installs from a git subdirectory and reloads the active vault", () => {
+  const { dir, vault, env, log } = setup();
+  const repo = makeGitPluginRepo(dir);
   const url = pathToFileURL(repo).href;
-  const env = { OPTSIDIAN_ADDON_HOME: addonHome, FAKE_ADDON_LOG: log };
-
-  let result = run(["addon", "install", url, "ref=main", "format=json"], { env });
+  const expectedCommit = gitHead(repo);
+  const result = run([
+    "plugin:install",
+    `url=${url}`,
+    "ref=main",
+    "dir=dist/obsidian-plugin",
+    `vault-path=${vault}`,
+    "enable",
+    "reload",
+    "format=json"
+  ], { env });
   assert.equal(result.status, 0, result.stderr);
-  let payload = JSON.parse(result.stdout);
-  assert.equal(payload.addon.id, "para-zk");
-  assert.deepEqual(payload.addon.source, { type: "git", url, ref: "main" });
-  assert.match(payload.addon.root, /sources\/para-zk$/);
 
-  const registry = JSON.parse(fs.readFileSync(path.join(addonHome, "registry.json"), "utf8"));
-  assert.deepEqual(registry.addons["para-zk"].source, { type: "git", url, ref: "main" });
-  assert.equal(fs.existsSync(path.join(registry.addons["para-zk"].root, ".git")), true);
-
-  result = run(["para-zk", "ping"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "addon para-zk ping");
-  const call = JSON.parse(fs.readFileSync(log, "utf8").trim());
-  assert.equal(call.addonRoot, fs.realpathSync(path.join(addonHome, "sources", "para-zk")));
-
-  result = run(["addon", "remove", "para-zk", "format=json"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).removed, true);
-  assert.equal(fs.existsSync(path.join(addonHome, "sources", "para-zk")), false);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.source.type, "git");
+  assert.equal(payload.source.url, url);
+  assert.equal(payload.source.ref, "main");
+  assert.equal(payload.source.dir, "dist/obsidian-plugin");
+  assert.equal(payload.source.resolvedCommit, expectedCommit);
+  assert.equal(payload.reload.status, "reloaded");
+  assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "sample-plugin", "main.js")), true);
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-2), ["vault", "info=path"]);
+  assert.deepEqual(calls.at(-1), ["plugin:reload", "id=sample-plugin"]);
 });
 
-test("addon install normalizes scheme-less GitHub URLs", async () => {
-  const { normalizeGitSource } = await import(path.resolve("src/addons/registry.ts"));
-
-  assert.equal(normalizeGitSource("github.com/user/optsidian-para-zk"), "https://github.com/user/optsidian-para-zk");
-  assert.equal(normalizeGitSource("github.com/user/optsidian-para-zk.git"), "https://github.com/user/optsidian-para-zk.git");
-  assert.equal(normalizeGitSource("github:user/optsidian-para-zk"), "https://github.com/user/optsidian-para-zk");
-});
-
-test("addon route reports a broken registered addon instead of falling through to native", () => {
-  const dir = tempRoot();
-  const addonRoot = makeFakeAddon(dir);
-  const addonHome = path.join(dir, "addons");
-  const fakeNative = makeFakeObsidian(dir, path.join(dir, "vault"));
-  let result = run(["addon", "install", addonRoot], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
-  assert.equal(result.status, 0, result.stderr);
-  fs.rmSync(path.join(addonRoot, "cli.cjs"));
-
-  result = run(["para-zk", "ping"], {
-    env: {
-      OPTSIDIAN_ADDON_HOME: addonHome,
-      OPTSIDIAN_OBSIDIAN_BIN: fakeNative
-    }
+test("plugin:install reload is skipped when the active native vault differs", () => {
+  const { dir, vault, env, log } = setup();
+  const otherVault = path.join(dir, "other-vault");
+  fs.mkdirSync(otherVault, { recursive: true });
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "reload", "format=json"], {
+    env: { ...env, FAKE_VAULT: otherVault }
   });
-
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /Addon CLI entrypoint not found/);
-});
-
-test("addon route rejects registry entries whose manifest id changed", () => {
-  const dir = tempRoot();
-  const addonRoot = makeFakeAddon(dir);
-  const addonHome = path.join(dir, "addons");
-  let result = run(["addon", "install", addonRoot], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
-  assert.equal(result.status, 0, result.stderr);
-  fs.writeFileSync(
-    path.join(addonRoot, "optsidian-addon.json"),
-    JSON.stringify({ id: "renamed", name: "Fake Addon", version: "0.0.1", cli: "cli.cjs" }, null, 2)
-  );
-
-  result = run(["para-zk", "ping"], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
-
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /registry entry para-zk points to addon manifest id renamed/);
-});
-
-test("addon install rejects command id collisions", () => {
-  const dir = tempRoot();
-  const env = { OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
-
-  let result = run(["addon", "install", makeFakeAddon(dir, "files")], { env });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /conflicts with an existing optsidian or native command/);
-
-  result = run(["addon", "install", makeFakeAddon(dir, "read")], { env });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /conflicts with an existing optsidian or native command/);
-});
-
-test("addon manifest path validation accepts dot-prefixed filenames and rejects symlink escapes", () => {
-  const dir = tempRoot();
-  const env = { OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
-
-  const dotted = makeFakeAddon(dir, "dotted", { cli: "..cli.cjs" });
-  fs.copyFileSync(path.join(dotted, "cli.cjs"), path.join(dotted, "..cli.cjs"));
-  let result = run(["addon", "install", dotted], { env });
   assert.equal(result.status, 0, result.stderr);
 
-  const outside = path.join(dir, "outside.cjs");
-  fs.writeFileSync(outside, "#!/usr/bin/env node\n");
-  const escaped = makeFakeAddon(dir, "escaped", { cli: "linked.cjs" });
-  fs.rmSync(path.join(escaped, "linked.cjs"));
-  fs.symlinkSync(outside, path.join(escaped, "linked.cjs"));
-  result = run(["addon", "install", escaped], { env });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.reload.requested, true);
+  assert.equal(payload.reload.attempted, false);
+  assert.equal(payload.reload.status, "skipped");
+  assert.match(payload.reload.reason, /Native active vault is/);
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["vault", "info=path"]);
+});
+
+test("plugin:install rejects overlapping source and target directories", () => {
+  const { vault } = setup();
+  const targetRoot = makeFakePlugin(path.join(vault, ".obsidian", "plugins"));
+  const result = run(["plugin:install", `path=${targetRoot}`, `vault-path=${vault}`]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source and target directories overlap/);
+});
+
+test("plugin:install rejects git-only options for local path installs", () => {
+  const { dir, vault } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  let result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "ref=main"]);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /CLI entrypoint must stay inside the addon root/);
+  assert.match(result.stderr, /ref=<git-ref> only applies/);
+
+  result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "dir=dist"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /dir=<subdir> only applies/);
+});
+
+test("plugin:install rejects combining native ids with custom sources", () => {
+  const { dir, vault } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", "id=community-plugin", `path=${pluginRoot}`, `vault-path=${vault}`]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Use only one plugin source selector/);
+});
+
+test("plugin:install normalizes scheme-less GitHub URLs", async () => {
+  const { normalizeGitSource } = await import(path.resolve("src/cli/commands/plugin.ts"));
+
+  assert.equal(normalizeGitSource("github.com/user/sample-plugin"), "https://github.com/user/sample-plugin");
+  assert.equal(normalizeGitSource("github.com/user/sample-plugin.git"), "https://github.com/user/sample-plugin.git");
+  assert.equal(normalizeGitSource("github:user/sample-plugin"), "https://github.com/user/sample-plugin");
 });
 
 test("top-level help recovers GUI env from a running Obsidian process when the child env is stripped", async () => {

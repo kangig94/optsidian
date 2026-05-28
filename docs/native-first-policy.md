@@ -19,7 +19,7 @@ V1 treats these command families as native-sufficient:
 - Metadata and task tools: `properties`, `property:*`, `tasks`, `task`, `tags`
 - Link and outline tools: `links`, `backlinks`, `outline`, `unresolved`
 - Vault and workspace tools: `vault`, `vaults`, `workspace`
-- Plugin, theme, sync, history, template, hotkey, and developer commands
+- Plugin, theme, sync, history, template, hotkey, and developer commands, except custom-source `plugin:install`
 
 These commands are delegated exactly unless explicitly moved into the optimized set later.
 
@@ -35,7 +35,7 @@ This is the only intentional native-name replacement in V1.
 
 ## Extended Commands
 
-These commands are added because the native CLI does not provide an equivalent LLM-oriented tool surface:
+These commands are added or extended because the native CLI does not provide an equivalent LLM-oriented tool surface:
 
 - `grep`
 - `search`
@@ -48,7 +48,7 @@ These commands are added because the native CLI does not provide an equivalent L
 - `mkdir`
 - `open-gui`
 - `update`
-- `addon`
+- `plugin:install`
 
 `grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
 
