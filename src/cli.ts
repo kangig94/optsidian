@@ -17,7 +17,10 @@ import { runRead } from "./cli/commands/read.js";
 import { runSearch } from "./cli/commands/search.js";
 import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
+import { runAddon } from "./cli/commands/addon.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
+import { findInstalledAddonForRoute } from "./addons/registry.js";
+import { runInstalledAddon } from "./addons/runner.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -38,6 +41,9 @@ async function main(): Promise<void> {
   const command = args.command;
   if (command && hasFlag(args, "help")) {
     if (commandPolicy(command) === "delegate") {
+      if (findInstalledAddonForRoute(command)) {
+        runInstalledAddon(args);
+      }
       rejectVaultPathForNative(args);
       delegateToObsidian(argv);
     }
@@ -49,6 +55,9 @@ async function main(): Promise<void> {
     return;
   }
   if (commandPolicy(command) === "delegate") {
+    if (findInstalledAddonForRoute(command)) {
+      runInstalledAddon(args);
+    }
     rejectVaultPathForNative(args);
     delegateToObsidian(argv);
   }
@@ -59,6 +68,10 @@ async function main(): Promise<void> {
   }
   if (command === "open-gui") {
     await runOpenGui(args);
+    return;
+  }
+  if (command === "addon") {
+    runAddon(args);
     return;
   }
 

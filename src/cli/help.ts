@@ -1,6 +1,7 @@
 import { listObsidianCommands } from "../native/obsidian.js";
 import { EXTENDED_COMMANDS, OPTIMIZED_COMMANDS, implementedCommands } from "./policy.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
+import { listAddonSummariesSafe, type AddonSummary } from "../addons/registry.js";
 
 type ImplementedCommand = (typeof OPTIMIZED_COMMANDS)[number] | (typeof EXTENDED_COMMANDS)[number];
 
@@ -16,7 +17,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "addon"] as const;
 export const MCP_TOOL_NAMES = ["command_map", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
@@ -192,6 +193,26 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "Managed updates require an install manifest created by scripts/install.sh.",
       "Run optsidian update at any time. It installs newer releases and repairs the current release when needed."
     ]
+  },
+  addon: {
+    summary: "Install, list, and remove Optsidian addons",
+    usage: [
+      "optsidian addon install <path-or-git-url> [ref=<git-ref>] [format=text|json]",
+      "optsidian addon list [format=text|json]",
+      "optsidian addon remove <id> [format=text|json]"
+    ],
+    options: [
+      { name: "<path-or-git-url>", description: "Local addon root or git URL containing optsidian-addon.json" },
+      { name: "ref=<git-ref>", description: "Branch, tag, or commit to checkout for git installs" },
+      { name: "<id>", description: "Installed addon id" },
+      { name: "format=text|json", description: "Output format (default: text)" }
+    ],
+    notes: [
+      "addon is CLI-only.",
+      "Installed addon ids become top-level optsidian commands.",
+      "Git installs are cloned into Optsidian's managed addon source directory.",
+      "Set OPTSIDIAN_ADDON_HOME to override the addon registry location."
+    ]
   }
 };
 
@@ -221,10 +242,13 @@ export function helpText(): string {
     lines.push(`  ${command.padEnd(20)} ${COMMAND_HELP[command].summary}`);
   }
 
+  const addons = listAddonSummariesSafe();
+
   lines.push(
     "",
     `CLI-only: ${CLI_ONLY_COMMANDS.join(", ")}`,
     `MCP tools: ${MCP_TOOL_NAMES.join(", ")}`,
+    `Addons: ${formatAddonSummaryLine(addons)}`,
     "",
     "Native passthrough:"
   );
@@ -260,7 +284,7 @@ export function commandHelpText(command: string): string | undefined {
 
   if (command === "open-gui") {
     appendOpenGuiVaultSelection(lines);
-  } else if (command !== "update") {
+  } else if (command !== "update" && command !== "addon") {
     appendTopLevelVaultSelection(lines);
   }
 
@@ -283,6 +307,7 @@ export function usagePayload(): {
     mcpTools: string[];
     nativeCommands: string[];
     nativeCommandsError?: string;
+    addons: AddonSummary[];
   };
   preference: {
     rule: string;
@@ -302,6 +327,7 @@ export function usagePayload(): {
       cliOnly: [...CLI_ONLY_COMMANDS],
       mcpTools: [...MCP_TOOL_NAMES],
       nativeCommands: [...nativePassthrough.commands],
+      addons: listAddonSummariesSafe(),
       ...(nativePassthrough.error ? { nativeCommandsError: nativePassthrough.error } : {})
     },
     preference: {
@@ -314,6 +340,11 @@ export function usagePayload(): {
       nativeCommand: "optsidian <native-command> [args]"
     }
   };
+}
+
+function formatAddonSummaryLine(addons: AddonSummary[]): string {
+  if (addons.length === 0) return "none";
+  return addons.map((addon) => `${addon.id}@${addon.version}`).join(", ");
 }
 
 function appendTopLevelVaultSelection(lines: string[]): void {

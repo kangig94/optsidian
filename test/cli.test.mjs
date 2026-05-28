@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 const cli = path.resolve("dist/optsidian");
@@ -125,6 +126,61 @@ if (process.env.FAKE_APP_HANG === "1") setInterval(() => {}, 1000);
   return fake;
 }
 
+function makeFakeAddon(dir, id = "para-zk", manifestOverrides = {}) {
+  const root = path.join(dir, id);
+  fs.mkdirSync(root, { recursive: true });
+  const manifest = {
+    id,
+    name: "Fake Addon",
+    version: "0.0.1",
+    cli: "cli.cjs",
+    ...manifestOverrides
+  };
+  fs.writeFileSync(
+    path.join(root, "optsidian-addon.json"),
+    JSON.stringify(manifest, null, 2)
+  );
+  fs.writeFileSync(
+    path.join(root, "cli.cjs"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAKE_ADDON_LOG) {
+  fs.appendFileSync(process.env.FAKE_ADDON_LOG, JSON.stringify({
+    addonId: process.env.OPTSIDIAN_ADDON_ID,
+    addonRoot: process.env.OPTSIDIAN_ADDON_ROOT,
+    optsidianBin: process.env.OPTSIDIAN_BIN,
+    args
+  }) + "\\n");
+}
+if (args[0] === "fail") {
+  console.error("addon failure");
+  process.exit(5);
+}
+console.log("addon " + process.env.OPTSIDIAN_ADDON_ID + " " + args.join(" "));
+`
+  );
+  if (manifest.cli !== "cli.cjs" && !String(manifest.cli).includes("..")) {
+    fs.copyFileSync(path.join(root, "cli.cjs"), path.join(root, String(manifest.cli)));
+  }
+  return root;
+}
+
+function makeGitAddonRepo(dir, id = "para-zk") {
+  const root = makeFakeAddon(dir, id);
+  runGit(["init", "-b", "main"], root);
+  runGit(["config", "user.name", "Optsidian Test"], root);
+  runGit(["config", "user.email", "optsidian@example.test"], root);
+  runGit(["add", "."], root);
+  runGit(["commit", "-m", "initial"], root);
+  return root;
+}
+
+function runGit(args, cwd) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
 function cleanupPidFile(pidFile) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (fs.existsSync(pidFile)) {
@@ -191,7 +247,7 @@ function setup() {
   fs.mkdirSync(vault, { recursive: true });
   const log = path.join(dir, "obsidian.log");
   const fake = makeFakeObsidian(dir, vault);
-  const env = { OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log };
+  const env = { OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log, OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
   return { dir, vault, env, log };
 }
 
@@ -245,6 +301,151 @@ test("top-level help includes native passthrough error verbatim when command lis
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /Start the Obsidian GUI to use native help\./);
+});
+
+test("addon install, list, route, and remove use a local addon registry", () => {
+  const dir = tempRoot();
+  const addonRoot = makeFakeAddon(dir);
+  const addonHome = path.join(dir, "addons");
+  const log = path.join(dir, "addon.log");
+  const env = { OPTSIDIAN_ADDON_HOME: addonHome, FAKE_ADDON_LOG: log };
+
+  let result = run(["addon", "install", addonRoot, "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  let payload = JSON.parse(result.stdout);
+  assert.equal(payload.action, "install");
+  assert.equal(payload.addon.id, "para-zk");
+  assert.deepEqual(payload.addon.source, { type: "local" });
+  assert.equal(payload.addon.root, fs.realpathSync(addonRoot));
+  const registry = JSON.parse(fs.readFileSync(path.join(addonHome, "registry.json"), "utf8"));
+  assert.equal(registry.addons["para-zk"].root, fs.realpathSync(addonRoot));
+  assert.deepEqual(registry.addons["para-zk"].source, { type: "local" });
+
+  result = run(["addon", "list", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload.addons.map((addon) => addon.id), ["para-zk"]);
+
+  result = run(["para-zk", "ping", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "addon para-zk ping format=json");
+  const call = JSON.parse(fs.readFileSync(log, "utf8").trim());
+  assert.equal(call.addonId, "para-zk");
+  assert.equal(call.addonRoot, fs.realpathSync(addonRoot));
+  assert.equal(call.optsidianBin, cli);
+  assert.deepEqual(call.args, ["ping", "format=json"]);
+
+  result = run(["addon", "remove", "para-zk"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Removed addon para-zk/);
+});
+
+test("addon install supports git URLs and records git source metadata", () => {
+  const dir = tempRoot();
+  const repo = makeGitAddonRepo(dir);
+  const addonHome = path.join(dir, "addons");
+  const log = path.join(dir, "addon.log");
+  const url = pathToFileURL(repo).href;
+  const env = { OPTSIDIAN_ADDON_HOME: addonHome, FAKE_ADDON_LOG: log };
+
+  let result = run(["addon", "install", url, "ref=main", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  let payload = JSON.parse(result.stdout);
+  assert.equal(payload.addon.id, "para-zk");
+  assert.deepEqual(payload.addon.source, { type: "git", url, ref: "main" });
+  assert.match(payload.addon.root, /sources\/para-zk$/);
+
+  const registry = JSON.parse(fs.readFileSync(path.join(addonHome, "registry.json"), "utf8"));
+  assert.deepEqual(registry.addons["para-zk"].source, { type: "git", url, ref: "main" });
+  assert.equal(fs.existsSync(path.join(registry.addons["para-zk"].root, ".git")), true);
+
+  result = run(["para-zk", "ping"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "addon para-zk ping");
+  const call = JSON.parse(fs.readFileSync(log, "utf8").trim());
+  assert.equal(call.addonRoot, fs.realpathSync(path.join(addonHome, "sources", "para-zk")));
+
+  result = run(["addon", "remove", "para-zk", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).removed, true);
+  assert.equal(fs.existsSync(path.join(addonHome, "sources", "para-zk")), false);
+});
+
+test("addon install normalizes scheme-less GitHub URLs", async () => {
+  const { normalizeGitSource } = await import(path.resolve("src/addons/registry.ts"));
+
+  assert.equal(normalizeGitSource("github.com/user/optsidian-para-zk"), "https://github.com/user/optsidian-para-zk");
+  assert.equal(normalizeGitSource("github.com/user/optsidian-para-zk.git"), "https://github.com/user/optsidian-para-zk.git");
+  assert.equal(normalizeGitSource("github:user/optsidian-para-zk"), "https://github.com/user/optsidian-para-zk");
+});
+
+test("addon route reports a broken registered addon instead of falling through to native", () => {
+  const dir = tempRoot();
+  const addonRoot = makeFakeAddon(dir);
+  const addonHome = path.join(dir, "addons");
+  const fakeNative = makeFakeObsidian(dir, path.join(dir, "vault"));
+  let result = run(["addon", "install", addonRoot], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
+  assert.equal(result.status, 0, result.stderr);
+  fs.rmSync(path.join(addonRoot, "cli.cjs"));
+
+  result = run(["para-zk", "ping"], {
+    env: {
+      OPTSIDIAN_ADDON_HOME: addonHome,
+      OPTSIDIAN_OBSIDIAN_BIN: fakeNative
+    }
+  });
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Addon CLI entrypoint not found/);
+});
+
+test("addon route rejects registry entries whose manifest id changed", () => {
+  const dir = tempRoot();
+  const addonRoot = makeFakeAddon(dir);
+  const addonHome = path.join(dir, "addons");
+  let result = run(["addon", "install", addonRoot], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
+  assert.equal(result.status, 0, result.stderr);
+  fs.writeFileSync(
+    path.join(addonRoot, "optsidian-addon.json"),
+    JSON.stringify({ id: "renamed", name: "Fake Addon", version: "0.0.1", cli: "cli.cjs" }, null, 2)
+  );
+
+  result = run(["para-zk", "ping"], { env: { OPTSIDIAN_ADDON_HOME: addonHome } });
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /registry entry para-zk points to addon manifest id renamed/);
+});
+
+test("addon install rejects command id collisions", () => {
+  const dir = tempRoot();
+  const env = { OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
+
+  let result = run(["addon", "install", makeFakeAddon(dir, "files")], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /conflicts with an existing optsidian or native command/);
+
+  result = run(["addon", "install", makeFakeAddon(dir, "read")], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /conflicts with an existing optsidian or native command/);
+});
+
+test("addon manifest path validation accepts dot-prefixed filenames and rejects symlink escapes", () => {
+  const dir = tempRoot();
+  const env = { OPTSIDIAN_ADDON_HOME: path.join(dir, "addons") };
+
+  const dotted = makeFakeAddon(dir, "dotted", { cli: "..cli.cjs" });
+  fs.copyFileSync(path.join(dotted, "cli.cjs"), path.join(dotted, "..cli.cjs"));
+  let result = run(["addon", "install", dotted], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  const outside = path.join(dir, "outside.cjs");
+  fs.writeFileSync(outside, "#!/usr/bin/env node\n");
+  const escaped = makeFakeAddon(dir, "escaped", { cli: "linked.cjs" });
+  fs.rmSync(path.join(escaped, "linked.cjs"));
+  fs.symlinkSync(outside, path.join(escaped, "linked.cjs"));
+  result = run(["addon", "install", escaped], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /CLI entrypoint must stay inside the addon root/);
 });
 
 test("top-level help recovers GUI env from a running Obsidian process when the child env is stripped", async () => {

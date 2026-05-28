@@ -10,6 +10,7 @@ src/cli/delegate.ts                native Obsidian process delegation
 src/cli/vault.ts                   vault root resolution through native Obsidian
 src/cli/render.ts                  CLI text/json rendering
 src/cli/commands/*.ts              thin CLI adapters
+src/addons/*.ts                    local addon manifest, registry, and runner
 src/update/installer.ts            release lookup, managed install state, and updater
 src/mcp.ts                         MCP stdio binary entrypoint
 src/mcp/*.ts                       MCP tool registration, config, result mapping
@@ -99,6 +100,16 @@ Implemented file commands resolve `vault-path=<path>` first, then `OPTSIDIAN_VAU
 ## MCP Vault Resolution
 
 `optsidian-mcp` does not fail startup when vault resolution is unavailable. Vault-dependent tool calls resolve the current active vault with native `obsidian vault info=path` each time they run, unless `--vault-path <path>` or `OPTSIDIAN_VAULT_PATH=<path>` pins MCP to a fixed vault path. Without either, mutation tools return a runtime error that tells the client to launch Obsidian GUI or configure a fixed vault path.
+
+## Addons
+
+`addon` is a CLI-only lifecycle command for local addon repositories and git URL installs. The registry lives at `${XDG_DATA_HOME:-~/.local/share}/optsidian/addons` unless `OPTSIDIAN_ADDON_HOME` is set.
+
+An addon root must contain `optsidian-addon.json` with `id`, `name`, `version`, and `cli`. Installed addon ids become top-level commands, and the CLI runner invokes the addon entrypoint with Node while preserving stdout, stderr, and exit code.
+
+Local installs keep their source path. Git installs are cloned under `<addon-home>/sources/<addon-id>` and the registry records `{ root, source: { type: "git", url, ref? } }`. `addon remove` deletes managed git clones but never deletes local path addons.
+
+Addon ids must not conflict with implemented Optsidian commands, reserved commands, or native-sufficient Obsidian commands. MCP does not dynamically register addon tools in this version; `command_map` only reports installed addons.
 
 ## Exit Codes
 

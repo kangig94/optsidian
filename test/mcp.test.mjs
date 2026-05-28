@@ -153,8 +153,10 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
   const fake = makeFakeObsidian(dir, vault);
   const previousBin = process.env.OPTSIDIAN_OBSIDIAN_BIN;
   const previousVault = process.env.FAKE_VAULT;
+  const previousAddonHome = process.env.OPTSIDIAN_ADDON_HOME;
   process.env.OPTSIDIAN_OBSIDIAN_BIN = fake;
   process.env.FAKE_VAULT = vault;
+  process.env.OPTSIDIAN_ADDON_HOME = path.join(dir, "addons");
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
   try {
     const tools = createToolHandlers(() => vault);
@@ -169,10 +171,11 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
       ""
     ].join("\n");
 
-    assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter"]);
+    assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "addon"]);
     assert.deepEqual(payload(commandMap).routing.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
     assert.deepEqual(payload(commandMap).routing.nativeCommands, ["files", "links", "version", "dev:console"]);
     assert.equal(payload(commandMap).routing.nativeCommandsError, undefined);
+    assert.deepEqual(payload(commandMap).routing.addons, []);
     assert.match(payload(commandMap).preference.rule, /Prefer Optsidian for Obsidian vault work/);
     assert.match(payload(commandMap).preference.reason, /keeps routing consistent and avoids shell expansion and quoting bugs/i);
 
@@ -184,6 +187,8 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
     else process.env.OPTSIDIAN_OBSIDIAN_BIN = previousBin;
     if (previousVault === undefined) delete process.env.FAKE_VAULT;
     else process.env.FAKE_VAULT = previousVault;
+    if (previousAddonHome === undefined) delete process.env.OPTSIDIAN_ADDON_HOME;
+    else process.env.OPTSIDIAN_ADDON_HOME = previousAddonHome;
   }
 });
 
@@ -280,7 +285,8 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       ...process.env,
       OPTSIDIAN_OBSIDIAN_BIN: fake,
       FAKE_VAULT: vault,
-      XDG_CACHE_HOME: cache
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_ADDON_HOME: path.join(dir, "addons")
     },
     stderr: "pipe"
   });
@@ -298,9 +304,10 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       name: "command_map",
       arguments: {}
     });
-    assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "addon"]);
     assert.deepEqual(commandMap.structuredContent?.routing?.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
     assert.deepEqual(commandMap.structuredContent?.routing?.nativeCommands, ["files", "links", "version", "dev:console"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.addons, []);
     assert.equal(commandMap.structuredContent?.routing?.nativeCommandsError, undefined);
     assert.match(String(commandMap.structuredContent?.preference?.rule), /Prefer Optsidian for Obsidian vault work/);
     assert.match(
