@@ -80,11 +80,11 @@ Use `open-gui` when you want native/plugin/app commands and Obsidian is not alre
 
 ```bash
 optsidian open-gui
-optsidian open-gui wait
-optsidian open-gui vault-path=/path/to/vault wait
+optsidian open-gui vault-path=/path/to/vault
+optsidian open-gui no-wait
 ```
 
-Without `wait`, `open-gui` is fire-and-forget and may return before the native CLI is ready. Use `wait` before chaining native/plugin commands; when `vault-path=<path>` is provided, readiness requires that path to become the active native vault. Opening a vault this way can change the active vault seen by later native commands. If your system has no `obsidian://` URI opener, set `OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian`.
+By default, `open-gui` waits up to 10 seconds for native vault resolution before returning. When `vault-path=<path>` is provided, readiness requires that path to become the active native vault. Opening a vault this way can change the active vault seen by later native commands. Use `no-wait` only when you want fire-and-forget launch behavior and will not immediately run native/plugin commands. If your system has no `obsidian://` URI opener, set `OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian`.
 
 ## Install and Update
 

@@ -369,7 +369,7 @@ test("open-gui launches a fixed vault and waits for native readiness", () => {
   const fakeNative = makeSwitchingObsidian(dir, state);
   const fakeApp = makeFakeObsidianApp(dir, state, log);
 
-  const result = run(["open-gui", `vault-path=${vault}`, "wait", "timeout=2", "format=json"], {
+  const result = run(["open-gui", `vault-path=${vault}`, "format=json"], {
     env: {
       OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
       OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp
@@ -396,7 +396,7 @@ test("open-gui supports default launch readiness and rejects vault name selectio
   const fakeNative = makeSwitchingObsidian(dir, state);
   const fakeApp = makeFakeObsidianApp(dir, state, log);
 
-  let result = run(["open-gui", "wait", "timeout=2"], {
+  let result = run(["open-gui"], {
     env: {
       OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
       OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp,
@@ -431,7 +431,7 @@ test("open-gui without wait returns even if the app process stays open", () => {
 
   try {
     const started = Date.now();
-    const result = run(["open-gui", `vault-path=${vault}`, "format=json"], {
+    const result = run(["open-gui", `vault-path=${vault}`, "no-wait", "format=json"], {
       env: {
         OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp,
         FAKE_APP_HANG: "1",
@@ -446,6 +446,16 @@ test("open-gui without wait returns even if the app process stays open", () => {
   } finally {
     cleanupPidFile(pidFile);
   }
+});
+
+test("open-gui rejects legacy wait and timeout arguments", () => {
+  let result = run(["open-gui", "wait"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /waits by default/);
+
+  result = run(["open-gui", "timeout=2"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /fixed 10 second readiness timeout/);
 });
 
 test("explicit child GUI env is not overridden by recovered values", async () => {

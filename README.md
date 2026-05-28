@@ -29,10 +29,10 @@ To launch Obsidian explicitly before native/plugin commands:
 
 ```bash
 optsidian open-gui
-optsidian open-gui vault-path=/path/to/vault wait
+optsidian open-gui vault-path=/path/to/vault
 ```
 
-Use `wait` before chaining native/plugin commands; opening a vault path can change the active vault seen by later native commands.
+`open-gui` waits up to 10 seconds for native vault resolution before returning. Opening a vault path can change the active vault seen by later native commands.
 
 ## Install
 

@@ -22,7 +22,7 @@ export type OpenObsidianGuiOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
-const DEFAULT_WAIT_TIMEOUT_MS = 15_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
 const WAIT_INTERVAL_MS = 250;
 
 export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Promise<OpenObsidianGuiResult> {

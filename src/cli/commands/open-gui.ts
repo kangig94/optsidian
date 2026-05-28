@@ -1,4 +1,4 @@
-import { getValue, hasFlag, ParsedArgs, parsePositiveInt } from "../args.js";
+import { getValue, hasFlag, ParsedArgs } from "../args.js";
 import { parseFormat } from "../render.js";
 import { UsageError } from "../../errors.js";
 import { openObsidianGui, type OpenObsidianGuiResult } from "../../native/gui.js";
@@ -8,12 +8,16 @@ export async function runOpenGui(args: ParsedArgs): Promise<void> {
   if (getValue(args, "vault") !== undefined) {
     throw new UsageError("open-gui supports vault-path=<path>, not vault=<name>");
   }
-  const timeout = parsePositiveInt(getValue(args, "timeout"), "timeout");
+  if (getValue(args, "timeout") !== undefined) {
+    throw new UsageError("open-gui uses a fixed 10 second readiness timeout");
+  }
+  if (hasFlag(args, "wait")) {
+    throw new UsageError("open-gui waits by default; use no-wait to return immediately");
+  }
   const envVaultPath = process.env.OPTSIDIAN_VAULT_PATH || undefined;
   const result = await openObsidianGui({
     vaultPath: vaultPathArg(args) ?? envVaultPath,
-    wait: hasFlag(args, "wait"),
-    timeoutMs: timeout ? timeout * 1000 : undefined
+    wait: !hasFlag(args, "no-wait")
   });
   process.stdout.write(renderOpenGui(result, parseFormat(getValue(args, "format"))));
 }
