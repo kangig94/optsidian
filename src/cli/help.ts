@@ -190,9 +190,9 @@ export function helpText(): string {
     "",
     "Detailed help:",
     "  optsidian <command> --help    Show implemented help or delegate native help",
-    "",
-    "Optimized:"
   ];
+  appendVaultSelection(lines);
+  lines.push("", "Optimized:");
 
   for (const command of OPTIMIZED_COMMANDS) {
     lines.push(`  ${command.padEnd(20)} ${COMMAND_HELP[command].summary}`);
@@ -239,6 +239,8 @@ export function commandHelpText(command: string): string | undefined {
       lines.push(`  ${option.name.padEnd(18)} ${option.description}`);
     }
   }
+
+  appendVaultSelection(lines);
 
   if (entry.notes && entry.notes.length > 0) {
     lines.push("", "Notes:");
@@ -290,6 +292,16 @@ export function usagePayload(): {
       nativeCommand: "optsidian <native-command> [args]"
     }
   };
+}
+
+function appendVaultSelection(lines: string[]): void {
+  lines.push(
+    "",
+    "Vault selection:",
+    "  vault-path=<path>   Fixed vault root for Optsidian-implemented commands",
+    "  vault=<name>        Obsidian vault name resolved through native CLI",
+    "  OPTSIDIAN_VAULT_PATH=<path> Fixed vault root for Optsidian-implemented commands"
+  );
 }
 
 function isImplementedCommand(command: string): command is ImplementedCommand {

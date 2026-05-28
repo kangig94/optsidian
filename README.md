@@ -9,13 +9,20 @@ It follows a native-first policy: commands that Obsidian already handles well ar
 - Node.js 20 or newer
 - `curl` for the release installer
 - Codex CLI and Claude Code are optional; detected clients are registered automatically
-- A working `obsidian` CLI on `PATH` for native vault resolution
+- A working `obsidian` CLI on `PATH` for active vault resolution and native/plugin commands
 - Linux or macOS for managed install/update
 
 The real Obsidian binary can be overridden with:
 
 ```bash
 OPTSIDIAN_OBSIDIAN_BIN=/path/to/obsidian optsidian read path=README.md head=20
+```
+
+For file-only Optsidian commands, a fixed vault path avoids native vault resolution:
+
+```bash
+optsidian read vault-path=/path/to/vault path=README.md head=20
+OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian write path=note.md content="hello"
 ```
 
 ## Install
@@ -75,7 +82,7 @@ Example MCP client config:
 }
 ```
 
-If Obsidian GUI may be closed when tools are called, add a fixed vault path. Without one, vault-dependent tools resolve the current active vault on every call. If no active vault is available, the MCP server still connects and vault-dependent tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
+On Linux, `optsidian` and `optsidian-mcp` try to recover the Obsidian GUI launch context at runtime when the current process is missing `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS`/`XDG_RUNTIME_DIR`. If Obsidian GUI may be closed when tools are called, add a fixed vault path. Without one, vault-dependent tools resolve the current active vault on every call. If no active vault is available, the MCP server still connects and vault-dependent tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
 
 ```json
 {

@@ -46,7 +46,7 @@ Command routing in V1:
 
 ## Vault Selection
 
-`vault=<name>` is forwarded during vault resolution.
+`vault=<name>` is forwarded during native vault resolution.
 
 ```bash
 optsidian read vault=Work path=README.md head=20
@@ -54,11 +54,20 @@ optsidian search vault=Work query=TODO
 optsidian grep vault=Work query=TODO
 ```
 
+For file-only Optsidian commands, `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH=<path>` pins operations to a fixed vault root and does not require native vault resolution:
+
+```bash
+optsidian read vault-path=/path/to/vault path=README.md head=20
+OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian search query=TODO
+```
+
+Do not combine `vault=<name>` and `vault-path=<path>` in the same command. Native passthrough commands reject explicit `vault-path=<path>` and still require the Obsidian GUI/native CLI context.
+
 Optimized commands resolve paths relative to the selected vault root.
 
 For MCP, vault selection happens when a vault-dependent tool is called. Without a fixed path, each call runs native `obsidian vault info=path` and uses the current active vault.
 
-If Obsidian GUI may be closed, provide a fixed vault path. When set, MCP stays pinned to that path and does not follow active vault changes in the GUI. Without a resolved vault, the MCP server still connects and mutation tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
+On Linux, `optsidian` and `optsidian-mcp` try to recover the Obsidian GUI launch context at runtime when the current process is missing the usual GUI session variables. If Obsidian GUI may be closed, provide a fixed vault path. When set, MCP stays pinned to that path and does not follow active vault changes in the GUI. Without a resolved vault, the MCP server still connects and mutation tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
 
 ```bash
 optsidian-mcp --vault-path /path/to/vault
@@ -73,7 +82,7 @@ Install the latest stable release:
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-The installer does not invoke the native `obsidian` CLI. Native vault resolution still happens later when `optsidian` or `optsidian-mcp` actually run.
+The installer does not invoke the native `obsidian` CLI. Native vault resolution and any Linux GUI env recovery still happen later when `optsidian` or `optsidian-mcp` actually run.
 It requires Node.js 20 or newer plus `curl`.
 
 Check or apply managed updates:

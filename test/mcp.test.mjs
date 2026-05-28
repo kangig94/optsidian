@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const mcpBin = path.resolve("dist/optsidian-mcp");
@@ -22,12 +22,61 @@ function payload(result) {
   return result.structuredContent;
 }
 
+async function withProcessEnv(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function strippedGuiEnv(overrides = {}) {
+  return {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    LANG: process.env.LANG || "en_US.UTF-8",
+    LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+    ...overrides
+  };
+}
+
+function startFakeObsidianHost(dir, guiEnv) {
+  const host = path.join(dir, "obsidian-host.cjs");
+  fs.writeFileSync(host, "setInterval(() => {}, 1000);\\n");
+  return spawn(process.execPath, [host], {
+    stdio: "ignore",
+    env: strippedGuiEnv(guiEnv)
+  });
+}
+
 function makeFakeObsidian(dir, vaultRoot) {
   const fake = path.join(dir, "obsidian-fake.cjs");
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (process.env.FAKE_OBSIDIAN_LOG) fs.appendFileSync(process.env.FAKE_OBSIDIAN_LOG, JSON.stringify(args) + "\\n");
+if (process.env.FAKE_REQUIRE_OBSIDIAN_GUI === "1") {
+  const required = {
+    DISPLAY: process.env.FAKE_EXPECT_DISPLAY,
+    DBUS_SESSION_BUS_ADDRESS: process.env.FAKE_EXPECT_DBUS,
+    XDG_RUNTIME_DIR: process.env.FAKE_EXPECT_XDG
+  };
+  for (const [key, value] of Object.entries(required)) {
+    if ((value && process.env[key] !== value) || (!value && !process.env[key])) {
+      console.error("The CLI is unable to find Obsidian. Please make sure Obsidian is running and try again.");
+      process.exit(7);
+    }
+  }
+}
 if (args[0] === "help") {
   console.log(\`Obsidian CLI
 
@@ -282,6 +331,56 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     assert.equal(fs.readFileSync(path.join(vault, "patch.md"), "utf8"), "patched\n");
   } finally {
     await client.close();
+  }
+});
+
+test("optsidian-mcp recovers GUI env from a running Obsidian process when the child env is stripped", async () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const fake = makeFakeObsidian(dir, vault);
+  const guiEnv = {
+    DISPLAY: ":optsidian-mcp-test",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/optsidian-mcp-bus",
+    XDG_RUNTIME_DIR: "/tmp/optsidian-mcp-runtime"
+  };
+  const host = startFakeObsidianHost(dir, guiEnv);
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+
+  try {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [mcpBin],
+      cwd: path.resolve("."),
+      env: strippedGuiEnv({
+        OPTSIDIAN_OBSIDIAN_BIN: fake,
+        FAKE_VAULT: vault,
+        FAKE_REQUIRE_OBSIDIAN_GUI: "1"
+      }),
+      stderr: "pipe"
+    });
+    const client = new Client({ name: "optsidian-mcp-stripped-env-test", version: "1.0.0" });
+
+    await client.connect(transport);
+    try {
+      const commandMap = await client.callTool({
+        name: "command_map",
+        arguments: {}
+      });
+      assert.deepEqual(commandMap.structuredContent?.routing?.nativeCommands, ["files", "links", "version", "dev:console"]);
+
+      const write = await client.callTool({
+        name: "write",
+        arguments: { path: "recovered.md", content: "ok\n" }
+      });
+      assert.equal(write.structuredContent?.command, "write");
+      assert.equal(fs.readFileSync(path.join(vault, "recovered.md"), "utf8"), "ok\n");
+    } finally {
+      await client.close();
+    }
+  } finally {
+    host.kill("SIGTERM");
   }
 });
 

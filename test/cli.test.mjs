@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const cli = path.resolve("dist/optsidian");
@@ -17,6 +17,19 @@ const fake = path.join(dir, "obsidian-fake.cjs");
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (process.env.FAKE_OBSIDIAN_LOG) fs.appendFileSync(process.env.FAKE_OBSIDIAN_LOG, JSON.stringify(args) + "\\n");
+if (process.env.FAKE_REQUIRE_OBSIDIAN_GUI === "1") {
+  const required = {
+    DISPLAY: process.env.FAKE_EXPECT_DISPLAY,
+    DBUS_SESSION_BUS_ADDRESS: process.env.FAKE_EXPECT_DBUS,
+    XDG_RUNTIME_DIR: process.env.FAKE_EXPECT_XDG
+  };
+  for (const [key, value] of Object.entries(required)) {
+    if ((value && process.env[key] !== value) || (!value && !process.env[key])) {
+      console.error("The CLI is unable to find Obsidian. Please make sure Obsidian is running and try again.");
+      process.exit(7);
+    }
+  }
+}
 if (args[0] === "help") {
   if (process.env.FAKE_OBSIDIAN_HELP_FAIL) {
     console.error(process.env.FAKE_OBSIDIAN_HELP_FAIL);
@@ -50,13 +63,60 @@ console.log("native " + args.join(" "));
   return fake;
 }
 
+function makeFailingObsidian(dir) {
+  const fake = path.join(dir, "obsidian-failing.cjs");
+  const script = `#!/usr/bin/env node
+console.error("Obsidian is not running");
+process.exit(7);
+`;
+  fs.writeFileSync(fake, script);
+  fs.chmodSync(fake, 0o755);
+  return fake;
+}
+
 function run(args, options = {}) {
   const result = spawnSync(process.execPath, [cli, ...args], {
     encoding: "utf8",
     input: options.input,
-    env: { ...process.env, ...options.env }
+    env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
   });
   return result;
+}
+
+async function withProcessEnv(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function strippedGuiEnv(overrides = {}) {
+  return {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    LANG: process.env.LANG || "en_US.UTF-8",
+    LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+    ...overrides
+  };
+}
+
+function startFakeObsidianHost(dir, guiEnv) {
+  const host = path.join(dir, "obsidian-host.cjs");
+  fs.writeFileSync(host, "setInterval(() => {}, 1000);\\n");
+  return spawn(process.execPath, [host], {
+    stdio: "ignore",
+    env: strippedGuiEnv(guiEnv)
+  });
 }
 
 function setup() {
@@ -121,6 +181,30 @@ test("top-level help includes native passthrough error verbatim when command lis
   assert.match(result.stdout, /Start the Obsidian GUI to use native help\./);
 });
 
+test("top-level help recovers GUI env from a running Obsidian process when the child env is stripped", async () => {
+  const { dir, env } = setup();
+  const guiEnv = {
+    DISPLAY: ":optsidian-test",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/optsidian-test-bus",
+    XDG_RUNTIME_DIR: "/tmp/optsidian-test-runtime"
+  };
+  const host = startFakeObsidianHost(dir, guiEnv);
+
+  try {
+    const result = run(["--help"], {
+      mergeEnv: false,
+      env: strippedGuiEnv({
+        ...env,
+        FAKE_REQUIRE_OBSIDIAN_GUI: "1"
+      })
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /files, links, version, dev:console/);
+  } finally {
+    host.kill("SIGTERM");
+  }
+});
+
 test("policy table does not implement native-sufficient commands", async () => {
   const policy = await import(path.resolve("src/cli/policy.ts"));
   for (const command of policy.implementedCommands()) {
@@ -160,6 +244,81 @@ test("raw preserves native exit code", () => {
   const result = run(["raw", "fail"], { env });
   assert.equal(result.status, 7);
   assert.match(result.stderr, /native failure/);
+});
+
+test("implemented commands use vault-path without native vault resolution", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, "note.md"), "fixed vault\n");
+  const fake = makeFailingObsidian(dir);
+
+  const result = run(["read", `vault-path=${vault}`, "path=note.md"], {
+    env: { OPTSIDIAN_OBSIDIAN_BIN: fake }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /fixed vault/);
+});
+
+test("implemented commands use OPTSIDIAN_VAULT_PATH without native vault resolution", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, "note.md"), "env vault\n");
+  const fake = makeFailingObsidian(dir);
+
+  const result = run(["read", "path=note.md"], {
+    env: { OPTSIDIAN_OBSIDIAN_BIN: fake, OPTSIDIAN_VAULT_PATH: vault }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /env vault/);
+});
+
+test("vault-path cannot be combined with native vault selection or native passthrough", () => {
+  const { vault, env, log } = setup();
+
+  let result = run(["read", `vault-path=${vault}`, "vault=Work", "path=note.md"], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Use either vault-path=<path> or vault=<name>/);
+
+  result = run(["read", "--vault-path", "path=note.md"], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Use vault-path=<path> with optsidian CLI, not --vault-path/);
+
+  result = run(["files", `vault-path=${vault}`], { env });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /vault-path=<path> only applies to Optsidian-implemented commands/);
+  assert.equal(fs.existsSync(log), false);
+});
+
+test("explicit child GUI env is not overridden by recovered values", async () => {
+  const { dir, env } = setup();
+  const guiEnv = {
+    DISPLAY: ":optsidian-test",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/optsidian-test-bus",
+    XDG_RUNTIME_DIR: "/tmp/optsidian-test-runtime"
+  };
+  const host = startFakeObsidianHost(dir, guiEnv);
+
+  try {
+    const result = run(["files", "folder=Dashboard"], {
+      mergeEnv: false,
+      env: strippedGuiEnv({
+        ...env,
+        DISPLAY: ":wrong-display",
+        FAKE_REQUIRE_OBSIDIAN_GUI: "1",
+        FAKE_EXPECT_DISPLAY: guiEnv.DISPLAY,
+        FAKE_EXPECT_DBUS: guiEnv.DBUS_SESSION_BUS_ADDRESS,
+        FAKE_EXPECT_XDG: guiEnv.XDG_RUNTIME_DIR
+      })
+    });
+    assert.equal(result.status, 7);
+    assert.match(result.stderr, /unable to find Obsidian/i);
+  } finally {
+    host.kill("SIGTERM");
+  }
 });
 
 test("read returns line-numbered ranges with metadata", () => {

@@ -1,7 +1,9 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { RuntimeError } from "../errors.js";
+import { runObsidianSync } from "./launcher.js";
+
+export { clearObsidianLaunchEnvCache, mergeObsidianLaunchEnv, obsidianBin, recoverLinuxGuiEnv, runObsidianSync, shouldRefreshObsidianLaunch } from "./launcher.js";
 
 export type ObsidianCapture = {
   stdout: string;
@@ -9,17 +11,8 @@ export type ObsidianCapture = {
   status: number;
 };
 
-export function obsidianBin(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OPTSIDIAN_OBSIDIAN_BIN || "obsidian";
-}
-
 export function captureObsidian(args: string[], env: NodeJS.ProcessEnv = process.env): ObsidianCapture {
-  const result = spawnSync(obsidianBin(env), args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: process.platform === "win32",
-    env
-  });
+  const result = runObsidianSync(args, { env });
   if (result.error) {
     throw new RuntimeError(`Failed to run obsidian: ${result.error.message}`);
   }

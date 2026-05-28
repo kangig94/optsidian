@@ -90,6 +90,10 @@ OPTSIDIAN_OBSIDIAN_BIN=/path/to/obsidian dist/optsidian files
 
 Tests use this variable to point at a fake Obsidian executable.
 
+## CLI Vault Resolution
+
+Implemented file commands resolve `vault-path=<path>` first, then `OPTSIDIAN_VAULT_PATH`, then native `obsidian vault info=path` with optional `vault=<name>`. Fixed vault paths are only for Optsidian-implemented commands; delegated native commands still require the Obsidian GUI/native CLI context.
+
 ## MCP Vault Resolution
 
 `optsidian-mcp` does not fail startup when vault resolution is unavailable. Vault-dependent tool calls resolve the current active vault with native `obsidian vault info=path` each time they run, unless `--vault-path <path>` or `OPTSIDIAN_VAULT_PATH=<path>` pins MCP to a fixed vault path. Without either, mutation tools return a runtime error that tells the client to launch Obsidian GUI or configure a fixed vault path.

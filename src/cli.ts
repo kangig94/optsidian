@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { hasFlag, parseArgs } from "./cli/args.js";
 import { delegateToObsidian } from "./cli/delegate.js";
-import { isCliError } from "./errors.js";
+import { UsageError, isCliError } from "./errors.js";
 import { commandHelpText, helpText } from "./cli/help.js";
 import { commandPolicy } from "./cli/policy.js";
-import { resolveVaultRoot } from "./cli/vault.js";
+import { hasVaultPathArg, resolveVaultRoot } from "./cli/vault.js";
 import { runApplyPatch } from "./cli/commands/apply-patch.js";
 import { runCopy } from "./cli/commands/copy.js";
 import { runEdit } from "./cli/commands/edit.js";
@@ -37,6 +37,7 @@ async function main(): Promise<void> {
   const command = args.command;
   if (command && hasFlag(args, "help")) {
     if (commandPolicy(command) === "delegate") {
+      rejectVaultPathForNative(args);
       delegateToObsidian(argv);
     }
     const text = commandHelpText(command);
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
     return;
   }
   if (commandPolicy(command) === "delegate") {
+    rejectVaultPathForNative(args);
     delegateToObsidian(argv);
   }
 
@@ -89,6 +91,12 @@ async function main(): Promise<void> {
       return;
     default:
       delegateToObsidian(argv);
+  }
+}
+
+function rejectVaultPathForNative(args: ReturnType<typeof parseArgs>): void {
+  if (hasVaultPathArg(args)) {
+    throw new UsageError("vault-path=<path> only applies to Optsidian-implemented commands. Native Obsidian commands require the Obsidian GUI/native CLI context.");
   }
 }
 
