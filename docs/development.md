@@ -104,7 +104,7 @@ Implemented file commands resolve `vault-path=<path>` first, then `OPTSIDIAN_VAU
 
 `plugin:install` is extended only for custom plugin sources. Native marketplace installs such as `plugin:install id=<plugin-id>` are delegated unchanged.
 
-Custom `url=<git-url>` and `path=<plugin-dir>` installs are implemented in `src/cli/commands/plugin.ts`. They read `manifest.json`, copy the plugin directory into `.obsidian/plugins/<manifest.id>`, optionally update `community-plugins.json` with `enable`, and optionally call native `plugin:reload` when the target vault is also the active native Obsidian vault.
+Custom `url=<git-url>` and `path=<plugin-dir>` installs are implemented in `src/cli/commands/plugin.ts`. They read `manifest.json`, copy the plugin directory into `.obsidian/plugins/<manifest.id>`, optionally update `community-plugins.json` with `enable`, and try a best-effort native refresh when the target vault is also the active native Obsidian vault. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, the file install path works without native vault resolution or a running Obsidian GUI. `plugin:reload` remains a native passthrough command.
 
 There is no custom registry or update command. Re-run `plugin:install url=...` or `plugin:install path=...` to replace the installed plugin with the current source.
 

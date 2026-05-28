@@ -39,10 +39,10 @@ type PluginInstallResult = {
     status: "enabled" | "skipped";
     changed?: boolean;
   };
-  reload: {
-    requested: boolean;
+  refresh: {
     attempted: boolean;
-    status: "reloaded" | "skipped";
+    status: "plugin-reloaded" | "app-reloaded" | "skipped";
+    command?: "plugin:reload" | "reload";
     reason?: string;
   };
 };
@@ -68,7 +68,7 @@ export function runPluginInstall(args: ParsedArgs): void {
   if (args.values.has("url") && args.values.has("path")) {
     throw new UsageError("Use either url=<git-url> or path=<plugin-dir>, not both");
   }
-  const unexpected = args.positionals.find((value) => value !== "enable" && value !== "reload");
+  const unexpected = args.positionals.find((value) => value !== "enable");
   if (unexpected) {
     throw new UsageError(`Unexpected plugin:install argument: ${unexpected}`);
   }
@@ -96,7 +96,7 @@ export function runPluginInstall(args: ParsedArgs): void {
 
     replaceDirectoryWithCopy(plugin.root, targetRoot);
     commitEnable(enablePlan);
-    const reload = reloadResult(vaultPath, plugin.manifest.id, hasFlag(args, "reload"));
+    const refresh = refreshResult(vaultPath, plugin.manifest.id);
     const result: PluginInstallResult = {
       ok: true,
       command: "plugin:install",
@@ -109,7 +109,7 @@ export function runPluginInstall(args: ParsedArgs): void {
       source,
       vaultPath,
       enable: enablePlan.result,
-      reload
+      refresh
     };
     process.stdout.write(renderPluginInstall(result, format));
   } finally {
@@ -318,17 +318,12 @@ function readCommunityPlugins(file: string): string[] {
   return parsed;
 }
 
-function reloadResult(vaultPath: string, pluginId: string, requested: boolean): PluginInstallResult["reload"] {
-  if (!requested) {
-    return { requested: false, attempted: false, status: "skipped", reason: "reload flag not set" };
-  }
-
+function refreshResult(vaultPath: string, pluginId: string): PluginInstallResult["refresh"] {
   let activeVault: string;
   try {
     activeVault = resolveObsidianVaultRoot();
   } catch (error) {
     return {
-      requested: true,
       attempted: false,
       status: "skipped",
       reason: `Native active vault is unavailable: ${error instanceof Error ? error.message : String(error)}`
@@ -336,23 +331,64 @@ function reloadResult(vaultPath: string, pluginId: string, requested: boolean): 
   }
   if (!sameExistingPath(activeVault, vaultPath)) {
     return {
-      requested: true,
       attempted: false,
       status: "skipped",
       reason: `Native active vault is ${activeVault}, not ${vaultPath}`
     };
   }
 
-  const result = captureObsidian(["plugin:reload", `id=${pluginId}`]);
-  assertNativeSuccess(result, "plugin:reload");
-  return { requested: true, attempted: true, status: "reloaded" };
+  let result: ReturnType<typeof captureObsidian>;
+  try {
+    result = captureObsidian(["plugin:reload", `id=${pluginId}`]);
+  } catch (error) {
+    return {
+      attempted: true,
+      status: "skipped",
+      command: "plugin:reload",
+      reason: `Native plugin refresh is unavailable: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  const details = (result.stderr || result.stdout).trim();
+  if (nativeSucceeded(result)) {
+    return { attempted: true, status: "plugin-reloaded", command: "plugin:reload" };
+  }
+  if (!shouldFallbackToAppReload(details, pluginId)) {
+    return { attempted: true, status: "skipped", command: "plugin:reload", reason: details || "Native plugin:reload failed" };
+  }
+
+  let fallback: ReturnType<typeof captureObsidian>;
+  try {
+    fallback = captureObsidian(["reload"]);
+  } catch (error) {
+    return {
+      attempted: true,
+      status: "skipped",
+      command: "reload",
+      reason: `Native app reload is unavailable: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  if (nativeSucceeded(fallback)) {
+    return { attempted: true, status: "app-reloaded", command: "reload" };
+  }
+  return {
+    attempted: true,
+    status: "skipped",
+    command: "reload",
+    reason: nativeDetails(fallback) || `Native plugin:reload could not find ${pluginId} and app reload failed`
+  };
 }
 
-function assertNativeSuccess(result: { stdout: string; stderr: string; status: number }, command: string): void {
-  const details = (result.stderr || result.stdout).trim();
-  if (result.status !== 0 || /^Error:/m.test(details)) {
-    throw new RuntimeError(details || `Native ${command} failed`);
-  }
+function shouldFallbackToAppReload(details: string, pluginId: string): boolean {
+  return details.includes(`Plugin "${pluginId}" not found`) || details.includes(`Plugin "${pluginId}" is not enabled`);
+}
+
+function nativeSucceeded(result: { stdout: string; stderr: string; status: number }): boolean {
+  const details = nativeDetails(result);
+  return result.status === 0 && !/^Error:/m.test(details);
+}
+
+function nativeDetails(result: { stdout: string; stderr: string; status: number }): string {
+  return (result.stderr || result.stdout).trim();
 }
 
 function renderPluginInstall(result: PluginInstallResult, format: OutputFormat): string {
@@ -367,7 +403,7 @@ function renderPluginInstall(result: PluginInstallResult, format: OutputFormat):
     `vault: ${result.vaultPath}`,
     `path: ${result.plugin.path}`,
     `enable: ${result.enable.status}${result.enable.changed === undefined ? "" : result.enable.changed ? " changed" : " unchanged"}`,
-    `reload: ${result.reload.status}${result.reload.reason ? ` (${result.reload.reason})` : ""}`
+    `refresh: ${result.refresh.status}${result.refresh.command ? ` via ${result.refresh.command}` : ""}${result.refresh.reason ? ` (${result.refresh.reason})` : ""}`
   ].join("\n").concat("\n");
 }
 

@@ -53,6 +53,16 @@ if (args[0] === "vault" && args[1] === "info=path") {
   console.log(process.env.FAKE_VAULT);
   process.exit(0);
 }
+if (args[0] === "plugin:reload" && process.env.FAKE_PLUGIN_RELOAD_NOT_FOUND === "1") {
+  const idArg = args.find((arg) => arg.startsWith("id=")) || "id=unknown";
+  console.log(\`Error: Plugin "\${idArg.slice(3)}" not found. Use "plugins" to list available plugins.\`);
+  process.exit(0);
+}
+if (args[0] === "plugin:reload" && process.env.FAKE_PLUGIN_RELOAD_NOT_ENABLED === "1") {
+  const idArg = args.find((arg) => arg.startsWith("id=")) || "id=unknown";
+  console.log(\`Error: Plugin "\${idArg.slice(3)}" is not enabled.\`);
+  process.exit(0);
+}
 if (args.includes("fail")) {
   console.error("native failure");
   process.exit(7);
@@ -301,6 +311,14 @@ test("plugin:install id delegates unchanged to native Obsidian", () => {
   assert.deepEqual(calls.at(-1), ["plugin:install", "id=community-plugin", "enable"]);
 });
 
+test("plugin:install id preserves native failure when Obsidian is unavailable", () => {
+  const dir = tempRoot();
+  const fake = makeFailingObsidian(dir);
+  const result = run(["plugin:install", "id=community-plugin"], { env: { OPTSIDIAN_OBSIDIAN_BIN: fake } });
+  assert.equal(result.status, 7);
+  assert.match(result.stderr, /Obsidian is not running/);
+});
+
 test("plugin:install id rejects fixed vault paths before native passthrough", () => {
   const { env, vault } = setup();
   const result = run(["plugin:install", "id=community-plugin", `vault-path=${vault}`], { env });
@@ -309,9 +327,9 @@ test("plugin:install id rejects fixed vault paths before native passthrough", ()
 });
 
 test("plugin:install path installs and enables a local custom plugin", () => {
-  const { dir, vault } = setup();
+  const { dir, vault, env } = setup();
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"]);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
 
   const payload = JSON.parse(result.stdout);
@@ -324,9 +342,58 @@ test("plugin:install path installs and enables a local custom plugin", () => {
   assert.deepEqual(payload.source, { type: "local", path: fs.realpathSync(pluginRoot) });
   assert.equal(payload.enable.status, "enabled");
   assert.equal(payload.enable.changed, true);
-  assert.equal(payload.reload.status, "skipped");
+  assert.equal(payload.refresh.status, "plugin-reloaded");
   assert.equal(fs.existsSync(path.join(target, "manifest.json")), true);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
+});
+
+test("plugin:install path installs with a fixed vault path when native Obsidian is unavailable", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const fake = makeFailingObsidian(dir);
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], {
+    env: { OPTSIDIAN_OBSIDIAN_BIN: fake }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
+  assert.equal(payload.refresh.attempted, false);
+  assert.equal(payload.refresh.status, "skipped");
+  assert.match(payload.refresh.reason, /Native active vault is unavailable: Obsidian is not running/);
+  assert.equal(fs.existsSync(path.join(target, "main.js")), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
+});
+
+test("plugin:install path uses OPTSIDIAN_VAULT_PATH when native Obsidian is unavailable", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const fake = makeFailingObsidian(dir);
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, "format=json"], {
+    env: { OPTSIDIAN_OBSIDIAN_BIN: fake, OPTSIDIAN_VAULT_PATH: vault }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.vaultPath, fs.realpathSync(vault));
+  assert.equal(payload.refresh.attempted, false);
+  assert.equal(payload.refresh.status, "skipped");
+  assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "sample-plugin", "main.js")), true);
+});
+
+test("plugin:install path without a fixed vault path fails before install when native Obsidian is unavailable", () => {
+  const dir = tempRoot();
+  const fake = makeFailingObsidian(dir);
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, "enable"], {
+    env: { OPTSIDIAN_OBSIDIAN_BIN: fake }
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Obsidian is not running/);
 });
 
 test("plugin:install validates enable config before copying plugin files", () => {
@@ -355,7 +422,6 @@ test("plugin:install url installs from a git subdirectory and reloads the active
     "dir=dist/obsidian-plugin",
     `vault-path=${vault}`,
     "enable",
-    "reload",
     "format=json"
   ], { env });
   assert.equal(result.status, 0, result.stderr);
@@ -366,30 +432,67 @@ test("plugin:install url installs from a git subdirectory and reloads the active
   assert.equal(payload.source.ref, "main");
   assert.equal(payload.source.dir, "dist/obsidian-plugin");
   assert.equal(payload.source.resolvedCommit, expectedCommit);
-  assert.equal(payload.reload.status, "reloaded");
+  assert.equal(payload.refresh.status, "plugin-reloaded");
+  assert.equal(payload.refresh.command, "plugin:reload");
   assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "sample-plugin", "main.js")), true);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls.at(-2), ["vault", "info=path"]);
   assert.deepEqual(calls.at(-1), ["plugin:reload", "id=sample-plugin"]);
 });
 
-test("plugin:install reload is skipped when the active native vault differs", () => {
+test("plugin:install refresh is skipped when the active native vault differs", () => {
   const { dir, vault, env, log } = setup();
   const otherVault = path.join(dir, "other-vault");
   fs.mkdirSync(otherVault, { recursive: true });
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "reload", "format=json"], {
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
     env: { ...env, FAKE_VAULT: otherVault }
   });
   assert.equal(result.status, 0, result.stderr);
 
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.reload.requested, true);
-  assert.equal(payload.reload.attempted, false);
-  assert.equal(payload.reload.status, "skipped");
-  assert.match(payload.reload.reason, /Native active vault is/);
+  assert.equal(payload.refresh.attempted, false);
+  assert.equal(payload.refresh.status, "skipped");
+  assert.match(payload.refresh.reason, /Native active vault is/);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls.at(-1), ["vault", "info=path"]);
+});
+
+test("plugin:install reloads the app when native Obsidian has not discovered the new plugin yet", () => {
+  const { dir, vault, env } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
+    env: { ...env, FAKE_PLUGIN_RELOAD_NOT_FOUND: "1" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.refresh.attempted, true);
+  assert.equal(payload.refresh.status, "app-reloaded");
+  assert.equal(payload.refresh.command, "reload");
+  assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "sample-plugin", "main.js")), true);
+});
+
+test("plugin:install reloads the app when native Obsidian has not enabled the new plugin yet", () => {
+  const { dir, vault, env } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
+    env: { ...env, FAKE_PLUGIN_RELOAD_NOT_ENABLED: "1" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.refresh.attempted, true);
+  assert.equal(payload.refresh.status, "app-reloaded");
+  assert.equal(payload.refresh.command, "reload");
+});
+
+test("plugin:install rejects reload because refresh is best-effort", () => {
+  const { dir, vault } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "reload"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Unexpected plugin:install argument: reload/);
 });
 
 test("plugin:install rejects overlapping source and target directories", () => {

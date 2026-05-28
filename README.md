@@ -134,11 +134,11 @@ optsidian plugin:install id=obsidian-git enable
 Optsidian extends `plugin:install` for custom plugin sources that are not available through the native marketplace command:
 
 ```bash
-optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable reload
+optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable
 optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
 ```
 
-Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. `reload` only runs when the target vault is the active native Obsidian vault; otherwise the install succeeds and reports that reload was skipped.
+Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
 
 ## Native-First Policy
 

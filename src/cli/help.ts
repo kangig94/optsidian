@@ -197,8 +197,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     summary: "Install marketplace or custom Obsidian plugins",
     usage: [
       "optsidian plugin:install id=<plugin-id> [enable]",
-      "optsidian plugin:install url=<git-url> [ref=<git-ref>] [dir=<subdir>] [vault-path=<path>] [enable] [reload] [format=text|json]",
-      "optsidian plugin:install path=<plugin-dir> [vault-path=<path>] [enable] [reload] [format=text|json]"
+      "optsidian plugin:install url=<git-url> [ref=<git-ref>] [dir=<subdir>] [vault-path=<path>] [enable] [format=text|json]",
+      "optsidian plugin:install path=<plugin-dir> [vault-path=<path>] [enable] [format=text|json]"
     ],
     options: [
       { name: "id=<plugin-id>", description: "Native marketplace plugin id; passed through unchanged" },
@@ -207,12 +207,12 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "ref=<git-ref>", description: "Branch, tag, or commit for url= installs" },
       { name: "dir=<subdir>", description: "Plugin artifact subdirectory inside the git source" },
       { name: "enable", description: "Add the plugin id to community-plugins.json for custom installs" },
-      { name: "reload", description: "Reload the plugin when the target vault is the active native vault" },
       { name: "format=text|json", description: "Output format for custom installs (default: text)" }
     ],
     notes: [
       "id=<plugin-id> is native passthrough.",
       "url= and path= are Optsidian custom-source extensions.",
+      "Custom installs try a best-effort native refresh when the target vault is active.",
       "plugin:enable, plugin:disable, plugin:reload, and plugin:uninstall remain native commands."
     ]
   }
