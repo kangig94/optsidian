@@ -16,7 +16,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "update", "frontmatter"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter"] as const;
 export const MCP_TOOL_NAMES = ["command_map", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
@@ -165,6 +165,24 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "dry-run", description: "Report directory creation without writing" }
     ]
   },
+  "open-gui": {
+    summary: "Launch Obsidian GUI for native and plugin commands",
+    usage: [
+      "optsidian open-gui [vault-path=<path>] [wait] [timeout=<seconds>] [format=text|json]"
+    ],
+    options: [
+      { name: "vault-path=<path>", description: "Vault root to open through the Obsidian URI handler" },
+      { name: "wait", description: "Wait until native vault resolution succeeds" },
+      { name: "timeout=<seconds>", description: "Maximum wait time when wait is set (default: 15)" },
+      { name: "format=text|json", description: "Output format (default: text)" }
+    ],
+    notes: [
+      "open-gui is CLI-only.",
+      "Without wait, launch is fire-and-forget and native CLI readiness is not guaranteed.",
+      "Opening a vault path can change the active vault seen by later native commands.",
+      "Set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian if your system has no obsidian:// URI opener."
+    ]
+  },
   update: {
     summary: "Update or repair the managed Optsidian install",
     usage: ["optsidian update"],
@@ -191,7 +209,7 @@ export function helpText(): string {
     "Detailed help:",
     "  optsidian <command> --help    Show implemented help or delegate native help",
   ];
-  appendVaultSelection(lines);
+  appendTopLevelVaultSelection(lines);
   lines.push("", "Optimized:");
 
   for (const command of OPTIMIZED_COMMANDS) {
@@ -240,7 +258,11 @@ export function commandHelpText(command: string): string | undefined {
     }
   }
 
-  appendVaultSelection(lines);
+  if (command === "open-gui") {
+    appendOpenGuiVaultSelection(lines);
+  } else if (command !== "update") {
+    appendTopLevelVaultSelection(lines);
+  }
 
   if (entry.notes && entry.notes.length > 0) {
     lines.push("", "Notes:");
@@ -294,13 +316,22 @@ export function usagePayload(): {
   };
 }
 
-function appendVaultSelection(lines: string[]): void {
+function appendTopLevelVaultSelection(lines: string[]): void {
   lines.push(
     "",
     "Vault selection:",
     "  vault-path=<path>   Fixed vault root for Optsidian-implemented commands",
     "  vault=<name>        Obsidian vault name resolved through native CLI",
     "  OPTSIDIAN_VAULT_PATH=<path> Fixed vault root for Optsidian-implemented commands"
+  );
+}
+
+function appendOpenGuiVaultSelection(lines: string[]): void {
+  lines.push(
+    "",
+    "Vault selection:",
+    "  vault-path=<path>   Vault root to open through the Obsidian URI handler",
+    "  OPTSIDIAN_VAULT_PATH=<path> Vault root to open when vault-path is omitted"
   );
 }
 

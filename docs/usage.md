@@ -41,7 +41,7 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `update`, `frontmatter`
+- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`
 - MCP tools: `command_map`, `write`, `edit`, `apply_patch`
 
 ## Vault Selection
@@ -73,6 +73,18 @@ On Linux, `optsidian` and `optsidian-mcp` try to recover the Obsidian GUI launch
 optsidian-mcp --vault-path /path/to/vault
 OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian-mcp
 ```
+
+## Launching Obsidian GUI
+
+Use `open-gui` when you want native/plugin/app commands and Obsidian is not already running:
+
+```bash
+optsidian open-gui
+optsidian open-gui wait
+optsidian open-gui vault-path=/path/to/vault wait
+```
+
+Without `wait`, `open-gui` is fire-and-forget and may return before the native CLI is ready. Use `wait` before chaining native/plugin commands; when `vault-path=<path>` is provided, readiness requires that path to become the active native vault. Opening a vault this way can change the active vault seen by later native commands. If your system has no `obsidian://` URI opener, set `OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian`.
 
 ## Install and Update
 

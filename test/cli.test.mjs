@@ -74,6 +74,72 @@ process.exit(7);
   return fake;
 }
 
+function makeSwitchingObsidian(dir, stateFile) {
+  const fake = path.join(dir, "obsidian-switching.cjs");
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "help") {
+  console.log(\`Obsidian CLI
+
+Commands:
+  files                 List files
+  links                 List outgoing links
+  version               Show version\`);
+  process.exit(0);
+}
+if (args[0] === "vault" && args[1] === "info=path") {
+  if (!fs.existsSync(${JSON.stringify(stateFile)})) {
+    console.error("Obsidian is not running");
+    process.exit(7);
+  }
+  console.log(fs.readFileSync(${JSON.stringify(stateFile)}, "utf8").trim());
+  process.exit(0);
+}
+console.error("unexpected args: " + args.join(" "));
+process.exit(9);
+`;
+  fs.writeFileSync(fake, script);
+  fs.chmodSync(fake, 0o755);
+  return fake;
+}
+
+function makeFakeObsidianApp(dir, stateFile, logFile) {
+  const fake = path.join(dir, "obsidian-app-fake.cjs");
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAKE_APP_PID_FILE) fs.writeFileSync(process.env.FAKE_APP_PID_FILE, String(process.pid));
+fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(args) + "\\n");
+const target = args[0] || "";
+let vaultPath = process.env.FAKE_DEFAULT_VAULT || "";
+try {
+  const url = new URL(target);
+  vaultPath = url.searchParams.get("path") || vaultPath;
+} catch {}
+if (vaultPath) fs.writeFileSync(${JSON.stringify(stateFile)}, vaultPath + "\\n");
+if (process.env.FAKE_APP_HANG === "1") setInterval(() => {}, 1000);
+`;
+  fs.writeFileSync(fake, script);
+  fs.chmodSync(fake, 0o755);
+  return fake;
+}
+
+function cleanupPidFile(pidFile) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (fs.existsSync(pidFile)) {
+      const pid = Number(fs.readFileSync(pidFile, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {}
+      }
+      return;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+}
+
 function run(args, options = {}) {
   const result = spawnSync(process.execPath, [cli, ...args], {
     encoding: "utf8",
@@ -291,6 +357,95 @@ test("vault-path cannot be combined with native vault selection or native passth
   assert.equal(result.status, 2);
   assert.match(result.stderr, /vault-path=<path> only applies to Optsidian-implemented commands/);
   assert.equal(fs.existsSync(log), false);
+});
+
+test("open-gui launches a fixed vault and waits for native readiness", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  const state = path.join(dir, "active-vault.txt");
+  const log = path.join(dir, "obsidian-app.log");
+  fs.mkdirSync(vault, { recursive: true });
+  fs.mkdirSync(path.join(vault, ".obsidian"), { recursive: true });
+  const fakeNative = makeSwitchingObsidian(dir, state);
+  const fakeApp = makeFakeObsidianApp(dir, state, log);
+
+  const result = run(["open-gui", `vault-path=${vault}`, "wait", "timeout=2", "format=json"], {
+    env: {
+      OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
+      OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.command, "open-gui");
+  assert.equal(payload.wait, true);
+  assert.equal(payload.vaultPath, fs.realpathSync(vault));
+  assert.equal(payload.readyVaultPath, fs.realpathSync(vault));
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.match(calls[0][0], /^obsidian:\/\/open\?path=/);
+  assert.equal(new URL(calls[0][0]).searchParams.get("path"), fs.realpathSync(vault));
+});
+
+test("open-gui supports default launch readiness and rejects vault name selection", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  const state = path.join(dir, "active-vault.txt");
+  const log = path.join(dir, "obsidian-app.log");
+  fs.mkdirSync(vault, { recursive: true });
+  const fakeNative = makeSwitchingObsidian(dir, state);
+  const fakeApp = makeFakeObsidianApp(dir, state, log);
+
+  let result = run(["open-gui", "wait", "timeout=2"], {
+    env: {
+      OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
+      OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp,
+      FAKE_DEFAULT_VAULT: vault
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Requested Obsidian GUI launch/);
+  assert.match(result.stdout, new RegExp(`native ready: ${vault.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(calls[0][0], "obsidian://open");
+
+  result = run(["open-gui", "vault=Work"], {
+    env: {
+      OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
+      OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp
+    }
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /open-gui supports vault-path=<path>, not vault=<name>/);
+});
+
+test("open-gui without wait returns even if the app process stays open", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  const state = path.join(dir, "active-vault.txt");
+  const log = path.join(dir, "obsidian-app.log");
+  const pidFile = path.join(dir, "obsidian-app.pid");
+  fs.mkdirSync(vault, { recursive: true });
+  const fakeApp = makeFakeObsidianApp(dir, state, log);
+
+  try {
+    const started = Date.now();
+    const result = run(["open-gui", `vault-path=${vault}`, "format=json"], {
+      env: {
+        OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp,
+        FAKE_APP_HANG: "1",
+        FAKE_APP_PID_FILE: pidFile
+      }
+    });
+    const duration = Date.now() - started;
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).wait, false);
+    assert.equal(duration < 1000, true, `open-gui no-wait took ${duration}ms`);
+  } finally {
+    cleanupPidFile(pidFile);
+  }
 });
 
 test("explicit child GUI env is not overridden by recovered values", async () => {

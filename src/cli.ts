@@ -12,6 +12,7 @@ import { runFrontmatter } from "./cli/commands/frontmatter.js";
 import { runGrep } from "./cli/commands/grep.js";
 import { runIndex } from "./cli/commands/index.js";
 import { runMkdir } from "./cli/commands/mkdir.js";
+import { runOpenGui } from "./cli/commands/open-gui.js";
 import { runRead } from "./cli/commands/read.js";
 import { runSearch } from "./cli/commands/search.js";
 import { runUpdate } from "./cli/commands/update.js";
@@ -54,6 +55,10 @@ async function main(): Promise<void> {
 
   if (command === "update") {
     await runUpdate(args);
+    return;
+  }
+  if (command === "open-gui") {
+    await runOpenGui(args);
     return;
   }
 

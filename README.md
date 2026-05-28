@@ -25,6 +25,15 @@ optsidian read vault-path=/path/to/vault path=README.md head=20
 OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian write path=note.md content="hello"
 ```
 
+To launch Obsidian explicitly before native/plugin commands:
+
+```bash
+optsidian open-gui
+optsidian open-gui vault-path=/path/to/vault wait
+```
+
+Use `wait` before chaining native/plugin commands; opening a vault path can change the active vault seen by later native commands.
+
 ## Install
 
 Install the latest published release from the canonical script:
