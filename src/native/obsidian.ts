@@ -53,7 +53,7 @@ export function resolveObsidianVaultRoot(options: { vault?: string; env?: NodeJS
   if (!root) {
     throw new RuntimeError("Obsidian returned an empty vault path");
   }
-  return root;
+  return resolveVaultPathInput(root);
 }
 
 export function resolveObsidianVaultRootWithFallback(options: { vault?: string; fallbackPath?: string; env?: NodeJS.ProcessEnv } = {}): string {

@@ -115,6 +115,38 @@ process.exit(9);
   return fake;
 }
 
+function makeFlakyVaultObsidian(dir, vaultRoot) {
+  const fake = path.join(dir, "obsidian-flaky-vault.cjs");
+  const countFile = path.join(dir, "vault-count.txt");
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAKE_OBSIDIAN_LOG) fs.appendFileSync(process.env.FAKE_OBSIDIAN_LOG, JSON.stringify(args) + "\\n");
+if (args[0] === "help") {
+  console.log(\`Obsidian CLI
+
+Commands:
+  vault                 Show vault info
+  files                 List files\`);
+  process.exit(0);
+}
+if (args[0] === "vault" && args[1] === "info=path") {
+  const previous = fs.existsSync(${JSON.stringify(countFile)}) ? Number(fs.readFileSync(${JSON.stringify(countFile)}, "utf8")) : 0;
+  fs.writeFileSync(${JSON.stringify(countFile)}, String(previous + 1));
+  if (previous === 0) {
+    console.log('Error: Command "vault" not found. It may require a plugin to be enabled.');
+    process.exit(0);
+  }
+  console.log(${JSON.stringify(vaultRoot)});
+  process.exit(0);
+}
+console.log("native " + args.join(" "));
+`;
+  fs.writeFileSync(fake, script);
+  fs.chmodSync(fake, 0o755);
+  return fake;
+}
+
 function makeFakeObsidianApp(dir, stateFile, logFile) {
   const fake = path.join(dir, "obsidian-app-fake.cjs");
   const script = `#!/usr/bin/env node
@@ -703,6 +735,32 @@ test("open-gui launches a fixed vault and waits for native readiness", () => {
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.match(calls[0][0], /^obsidian:\/\/open\?path=/);
   assert.equal(new URL(calls[0][0]).searchParams.get("path"), fs.realpathSync(vault));
+});
+
+test("open-gui keeps waiting when native readiness returns an error-shaped stdout", () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, "vault");
+  const state = path.join(dir, "active-vault.txt");
+  const appLog = path.join(dir, "obsidian-app.log");
+  const nativeLog = path.join(dir, "obsidian-native.log");
+  fs.mkdirSync(vault, { recursive: true });
+  const fakeNative = makeFlakyVaultObsidian(dir, vault);
+  const fakeApp = makeFakeObsidianApp(dir, state, appLog);
+
+  const result = run(["open-gui", "format=json"], {
+    env: {
+      OPTSIDIAN_OBSIDIAN_BIN: fakeNative,
+      OPTSIDIAN_OBSIDIAN_APP_BIN: fakeApp,
+      FAKE_DEFAULT_VAULT: vault,
+      FAKE_OBSIDIAN_LOG: nativeLog
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.readyVaultPath, fs.realpathSync(vault));
+  const nativeCalls = fs.readFileSync(nativeLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(nativeCalls.filter((args) => args[0] === "vault" && args[1] === "info=path").length, 2);
 });
 
 test("open-gui supports default launch readiness and rejects vault name selection", () => {
