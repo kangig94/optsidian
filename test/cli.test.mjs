@@ -232,6 +232,20 @@ function startFakeObsidianHost(dir, guiEnv) {
   });
 }
 
+function waitForProcessEnv(pid, expectedEnv) {
+  if (!pid || process.platform !== "linux") return false;
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      const environ = fs.readFileSync(path.join("/proc", String(pid), "environ"), "utf8");
+      const hasExpectedEnv = Object.entries(expectedEnv).every(([key, value]) => environ.split("\0").includes(`${key}=${value}`));
+      if (hasExpectedEnv) return true;
+    } catch {}
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return false;
+}
+
 function setup() {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
@@ -531,7 +545,7 @@ test("plugin:install normalizes scheme-less GitHub URLs", async () => {
   assert.equal(normalizeGitSource("github:user/sample-plugin"), "https://github.com/user/sample-plugin");
 });
 
-test("top-level help recovers GUI env from a running Obsidian process when the child env is stripped", async () => {
+test("top-level help recovers GUI env from a running Obsidian process when the child env is stripped", async (t) => {
   const { dir, env } = setup();
   const guiEnv = {
     DISPLAY: ":optsidian-test",
@@ -541,6 +555,10 @@ test("top-level help recovers GUI env from a running Obsidian process when the c
   const host = startFakeObsidianHost(dir, guiEnv);
 
   try {
+    if (!waitForProcessEnv(host.pid, guiEnv)) {
+      t.skip("process environment is not observable through /proc on this runner");
+      return;
+    }
     const result = run(["--help"], {
       mergeEnv: false,
       env: strippedGuiEnv({

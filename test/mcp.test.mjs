@@ -58,6 +58,20 @@ function startFakeObsidianHost(dir, guiEnv) {
   });
 }
 
+function waitForProcessEnv(pid, expectedEnv) {
+  if (!pid || process.platform !== "linux") return false;
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      const environ = fs.readFileSync(path.join("/proc", String(pid), "environ"), "utf8");
+      const hasExpectedEnv = Object.entries(expectedEnv).every(([key, value]) => environ.split("\0").includes(`${key}=${value}`));
+      if (hasExpectedEnv) return true;
+    } catch {}
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return false;
+}
+
 function makeFakeObsidian(dir, vaultRoot) {
   const fake = path.join(dir, "obsidian-fake.cjs");
   const script = `#!/usr/bin/env node
@@ -334,7 +348,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
   }
 });
 
-test("optsidian-mcp recovers GUI env from a running Obsidian process when the child env is stripped", async () => {
+test("optsidian-mcp recovers GUI env from a running Obsidian process when the child env is stripped", async (t) => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   fs.mkdirSync(vault, { recursive: true });
@@ -349,6 +363,10 @@ test("optsidian-mcp recovers GUI env from a running Obsidian process when the ch
   const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
 
   try {
+    if (!waitForProcessEnv(host.pid, guiEnv)) {
+      t.skip("process environment is not observable through /proc on this runner");
+      return;
+    }
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [mcpBin],
