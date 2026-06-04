@@ -180,16 +180,16 @@ optsidian read path=README.md around="Native-First" context=5
 optsidian read path=README.md lines=1:20 format=json
 ```
 
-Text output is line-numbered:
+Text output is line-numbered (tab-separated, like `cat -n`):
 
 ```text
 path: README.md
 lines: 1-3/120
 truncated: false
 
-1 | # optsidian
-2 |
-3 | `optsidian` is an LLM-optimized wrapper...
+1	# optsidian
+2	
+3	`optsidian` is an LLM-optimized wrapper...
 ```
 
 ## Extended Commands

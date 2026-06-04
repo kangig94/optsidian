@@ -23,7 +23,6 @@ export type ReadResult = {
     total: number;
   };
   truncated: boolean;
-  content: string;
   numberedText: string;
 };
 

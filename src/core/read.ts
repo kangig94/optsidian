@@ -51,7 +51,6 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
   const maxChars = params.maxChars ?? DEFAULT_READ_MAX_CHARS;
   const truncated = numbered.length > maxChars;
   const numberedText = truncated ? `${numbered.slice(0, maxChars)}\n... truncated ...` : numbered;
-  const content = selected.join("\n");
 
   return {
     ok: true,
@@ -59,7 +58,6 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
     path: target.rel,
     range: { start, end, total: lines.length },
     truncated,
-    content: content.length > maxChars ? `${content.slice(0, maxChars)}\n... truncated ...` : content,
     numberedText
   };
 }

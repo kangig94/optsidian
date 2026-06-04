@@ -32,7 +32,7 @@ export function lineNumbered(lines: string[], startLine: number): string {
   const end = startLine + lines.length - 1;
   const width = String(Math.max(end, 1)).length;
   return lines
-    .map((line, index) => `${String(startLine + index).padStart(width, " ")} | ${line}`)
+    .map((line, index) => `${String(startLine + index).padStart(width, " ")}\t${line}`)
     .join("\n");
 }
 

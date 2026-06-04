@@ -57,9 +57,9 @@ test("core write/read preserves shell-sensitive raw payloads", async () => {
 
   const read = readVaultFile(vault, { path: "raw.md" });
   assert.equal(read.path, "raw.md");
-  assert.match(read.content, /\$HOME/);
-  assert.match(read.content, /\$\(echo hacked\)/);
-  assert.match(read.content, /`uname -a`/);
+  assert.match(read.numberedText, /\$HOME/);
+  assert.match(read.numberedText, /\$\(echo hacked\)/);
+  assert.match(read.numberedText, /`uname -a`/);
 
   const grep = grepVault(vault, { query: "$(whoami)" });
   assert.equal(grep.count, 1);

@@ -869,8 +869,8 @@ test("read returns line-numbered ranges with metadata", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /path: note\.md/);
   assert.match(result.stdout, /lines: 2-3\/4/);
-  assert.match(result.stdout, /2 \| two/);
-  assert.match(result.stdout, /3 \| three/);
+  assert.match(result.stdout, /2\ttwo/);
+  assert.match(result.stdout, /3\tthree/);
 });
 
 test("read caps JSON output and reports empty files as zero lines", () => {
@@ -885,7 +885,7 @@ test("read caps JSON output and reports empty files as zero lines", () => {
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.truncated, true);
-  assert.match(payload.content, /truncated/);
+  assert.match(payload.numberedText, /truncated/);
 });
 
 test("grep is markdown-first and supports context", () => {

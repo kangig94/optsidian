@@ -27,7 +27,7 @@ export function renderRead(result: ReadResult, format: OutputFormat): string {
       path: result.path,
       range: result.range,
       truncated: result.truncated,
-      content: result.content
+      numberedText: result.numberedText
     })}\n`;
   }
   return `path: ${result.path}\nlines: ${result.range.start}-${result.range.end}/${result.range.total}\ntruncated: ${result.truncated}\n\n${result.numberedText}\n`;
