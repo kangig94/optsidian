@@ -166,18 +166,20 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     ]
   },
   "open-gui": {
-    summary: "Launch Obsidian GUI for native and plugin commands",
+    summary: "Launch the Obsidian GUI (opens your last-opened vault by default) for native and plugin commands",
     usage: [
-      "optsidian open-gui [vault-path=<path>] [no-wait] [format=text|json]"
+      "optsidian open-gui [no-wait] [format=text|json]",
+      "optsidian open-gui vault-path=<path> [no-wait] [format=text|json]"
     ],
     options: [
-      { name: "vault-path=<path>", description: "Vault root to open through the Obsidian URI handler" },
+      { name: "vault-path=<path>", description: "Open a SPECIFIC vault instead of the last-opened one. Normally omit this: bare `optsidian open-gui` is the default usage and opens the last-opened vault. Use vault-path only when you must target a particular vault." },
       { name: "no-wait", description: "Return immediately after requesting launch" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
       "open-gui is CLI-only.",
-      "By default, open-gui waits up to 10 seconds for native vault resolution.",
+      "Default usage is bare `optsidian open-gui` (no vault-path): Obsidian launches and opens its last-opened vault. Pass vault-path only to force a specific vault.",
+      "By default, open-gui waits up to 10 seconds for native vault resolution; with no vault-path it resolves as soon as any vault is ready.",
       "With no-wait, launch is fire-and-forget and native CLI readiness is not guaranteed.",
       "Opening a vault path can change the active vault seen by later native commands.",
       "Set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian if your system has no obsidian:// URI opener."
