@@ -121,3 +121,88 @@ test("shouldRefreshObsidianLaunch matches the known recoverable runtime errors",
   assert.equal(shouldRefreshObsidianLaunch("Obsidian is not running"), true);
   assert.equal(shouldRefreshObsidianLaunch("native failure"), false);
 });
+
+test("findObsidianAppLaunch honors OPTSIDIAN_OBSIDIAN_APP_BIN unconditionally", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch(
+    { OPTSIDIAN_OBSIDIAN_APP_BIN: "/custom/obsidian" },
+    { platform: "linux", existsSync: () => false }
+  );
+
+  assert.deepEqual(result, { kind: "binary", binary: "/custom/obsidian" });
+});
+
+test("findObsidianAppLaunch returns the bundled binary on Linux", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch(
+    {},
+    {
+      platform: "linux",
+      existsSync: (candidate) => candidate === "/opt/Obsidian/obsidian"
+    }
+  );
+
+  assert.deepEqual(result, { kind: "binary", binary: "/opt/Obsidian/obsidian" });
+});
+
+test("findObsidianAppLaunch returns undefined on Linux when the bundled binary is absent", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch({}, { platform: "linux", existsSync: () => false });
+  assert.equal(result, undefined);
+});
+
+test("findObsidianAppLaunch prefers ~/Applications over /Applications on darwin", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch(
+    { HOME: "/Users/test" },
+    {
+      platform: "darwin",
+      existsSync: (candidate) =>
+        candidate === "/Users/test/Applications/Obsidian.app" ||
+        candidate === "/Applications/Obsidian.app"
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "darwin-bundle",
+    appBundle: "/Users/test/Applications/Obsidian.app"
+  });
+});
+
+test("findObsidianAppLaunch falls back to /Applications on darwin", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch(
+    { HOME: "/Users/test" },
+    {
+      platform: "darwin",
+      existsSync: (candidate) => candidate === "/Applications/Obsidian.app"
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "darwin-bundle",
+    appBundle: "/Applications/Obsidian.app"
+  });
+});
+
+test("findObsidianAppLaunch returns undefined on darwin when no install is found", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch(
+    { HOME: "/Users/test" },
+    { platform: "darwin", existsSync: () => false }
+  );
+  assert.equal(result, undefined);
+});
+
+test("findObsidianAppLaunch returns undefined on unsupported platforms", async () => {
+  const { findObsidianAppLaunch } = await import(path.resolve("src/native/launcher.ts"));
+
+  const result = findObsidianAppLaunch({}, { platform: "win32", existsSync: () => true });
+  assert.equal(result, undefined);
+});

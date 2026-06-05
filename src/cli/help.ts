@@ -179,10 +179,11 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     notes: [
       "open-gui is CLI-only.",
       "Default usage is bare `optsidian open-gui` (no vault-path): Obsidian launches and opens its last-opened vault. Pass vault-path only to force a specific vault.",
-      "By default, open-gui waits up to 10 seconds for native vault resolution; with no vault-path it resolves as soon as any vault is ready.",
+      "By default, open-gui waits up to 30 seconds for native vault resolution; with no vault-path it resolves as soon as any vault is ready.",
       "With no-wait, launch is fire-and-forget and native CLI readiness is not guaranteed.",
       "Opening a vault path can change the active vault seen by later native commands.",
-      "Set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian if your system has no obsidian:// URI opener."
+      "When Obsidian is installed at the standard location (/opt/Obsidian on Linux, /Applications/Obsidian.app on macOS), open-gui launches the GUI binary directly so a cold start works even without a working obsidian:// URI handler.",
+      "Set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian to override the discovered binary or point at a non-standard install."
     ]
   },
   update: {

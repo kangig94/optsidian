@@ -831,7 +831,7 @@ test("open-gui rejects legacy wait and timeout arguments", () => {
 
   result = run(["open-gui", "timeout=2"]);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /fixed 10 second readiness timeout/);
+  assert.match(result.stderr, /fixed 30 second readiness timeout/);
 });
 
 test("explicit child GUI env is not overridden by recovered values", async () => {

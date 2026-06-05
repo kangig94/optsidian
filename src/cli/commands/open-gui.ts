@@ -9,7 +9,7 @@ export async function runOpenGui(args: ParsedArgs): Promise<void> {
     throw new UsageError("open-gui supports vault-path=<path>, not vault=<name>");
   }
   if (getValue(args, "timeout") !== undefined) {
-    throw new UsageError("open-gui uses a fixed 10 second readiness timeout");
+    throw new UsageError("open-gui uses a fixed 30 second readiness timeout");
   }
   if (hasFlag(args, "wait")) {
     throw new UsageError("open-gui waits by default; use no-wait to return immediately");

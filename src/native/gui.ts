@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { RuntimeError } from "../errors.js";
-import { mergeObsidianLaunchEnv, recoverLinuxGuiEnv } from "./launcher.js";
+import { findObsidianAppLaunch, mergeObsidianLaunchEnv, recoverLinuxGuiEnv } from "./launcher.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./obsidian.js";
 
 export type OpenObsidianGuiResult = {
@@ -22,7 +22,7 @@ export type OpenObsidianGuiOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
-const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const WAIT_INTERVAL_MS = 250;
 
 export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Promise<OpenObsidianGuiResult> {
@@ -65,10 +65,14 @@ function buildGuiLaunchEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 function launchObsidianGui(target: string, env: NodeJS.ProcessEnv): string {
-  const appBin = env.OPTSIDIAN_OBSIDIAN_APP_BIN;
-  if (appBin) {
-    launchDetached(appBin, [target], env);
-    return appBin;
+  const installed = findObsidianAppLaunch(env);
+  if (installed) {
+    if (installed.kind === "darwin-bundle") {
+      launchDetached("open", ["-a", installed.appBundle, target], env);
+      return `open -a ${installed.appBundle}`;
+    }
+    launchDetached(installed.binary, [target], env);
+    return installed.binary;
   }
 
   if (process.platform === "darwin") {
@@ -93,13 +97,7 @@ function launchObsidianGui(target: string, env: NodeJS.ProcessEnv): string {
     return gio;
   }
 
-  const bundledLinuxApp = "/opt/Obsidian/obsidian";
-  if (fs.existsSync(bundledLinuxApp)) {
-    launchDetached(bundledLinuxApp, [target], env);
-    return bundledLinuxApp;
-  }
-
-  throw new RuntimeError("Could not find a GUI opener. Install xdg-open/gio, or set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian.");
+  throw new RuntimeError("Could not find a GUI opener. Install Obsidian to a standard location, install xdg-open/gio, or set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian.");
 }
 
 function launchDetached(command: string, args: string[], env: NodeJS.ProcessEnv): void {

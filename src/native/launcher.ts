@@ -69,6 +69,52 @@ export function recoverLinuxGuiEnv(
   return finalizeGuiEnvSnapshot(recovered, baseEnv);
 }
 
+export type ObsidianAppLaunch =
+  | { kind: "darwin-bundle"; appBundle: string }
+  | { kind: "binary"; binary: string };
+
+export type FindObsidianAppLaunchOptions = {
+  platform?: NodeJS.Platform;
+  existsSync?: (candidate: string) => boolean;
+};
+
+export function findObsidianAppLaunch(
+  env: NodeJS.ProcessEnv = process.env,
+  options: FindObsidianAppLaunchOptions = {}
+): ObsidianAppLaunch | undefined {
+  const override = env.OPTSIDIAN_OBSIDIAN_APP_BIN;
+  if (override) {
+    return { kind: "binary", binary: override };
+  }
+
+  const platform = options.platform ?? process.platform;
+  const exists = options.existsSync ?? ((candidate: string) => fs.existsSync(candidate));
+
+  if (platform === "darwin") {
+    const home = env.HOME;
+    const candidates = [
+      ...(home ? [path.join(home, "Applications/Obsidian.app")] : []),
+      "/Applications/Obsidian.app"
+    ];
+    for (const bundle of candidates) {
+      if (exists(bundle)) {
+        return { kind: "darwin-bundle", appBundle: bundle };
+      }
+    }
+    return undefined;
+  }
+
+  if (platform === "linux") {
+    const bundled = "/opt/Obsidian/obsidian";
+    if (exists(bundled)) {
+      return { kind: "binary", binary: bundled };
+    }
+    return undefined;
+  }
+
+  return undefined;
+}
+
 export function runObsidianSync(args: string[], options: RunObsidianOptions = {}): SpawnSyncReturns<string> {
   const baseEnv = options.env ?? process.env;
   let result = spawnObsidian(args, { ...options, env: buildLaunchEnv(baseEnv, options) });
