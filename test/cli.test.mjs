@@ -405,6 +405,38 @@ test("plugin:install path installs and enables a local custom plugin", () => {
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
 });
 
+test("plugin:install deploys only runtime files, never the source tree", () => {
+  const { dir, vault, env } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  fs.writeFileSync(path.join(pluginRoot, "styles.css"), "/* x */\n");
+  fs.writeFileSync(path.join(pluginRoot, "package.json"), "{}\n");
+  fs.mkdirSync(path.join(pluginRoot, "src"), { recursive: true });
+  fs.writeFileSync(path.join(pluginRoot, "src", "main.ts"), "export {};\n");
+  fs.mkdirSync(path.join(pluginRoot, "node_modules"), { recursive: true });
+
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
+  assert.deepEqual(fs.readdirSync(target).sort(), ["main.js", "manifest.json", "styles.css"]);
+  assert.equal(fs.existsSync(path.join(target, "package.json")), false);
+  assert.equal(fs.existsSync(path.join(target, "src")), false);
+  assert.equal(fs.existsSync(path.join(target, "node_modules")), false);
+});
+
+test("plugin:install preserves the vault's existing data.json (settings) across reinstall", () => {
+  const { dir, vault, env } = setup();
+  const pluginRoot = makeFakePlugin(dir);
+  const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "data.json"), JSON.stringify({ locale: "ko" }));
+
+  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, "data.json"), "utf8")), { locale: "ko" });
+  assert.equal(fs.existsSync(path.join(target, "main.js")), true);
+});
+
 test("plugin:install path installs with a fixed vault path when native Obsidian is unavailable", () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");

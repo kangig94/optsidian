@@ -94,7 +94,7 @@ export function runPluginInstall(args: ParsedArgs): void {
     }
     const enablePlan = prepareEnable(obsidianDir, plugin.manifest.id, hasFlag(args, "enable"));
 
-    replaceDirectoryWithCopy(plugin.root, targetRoot);
+    installPluginRuntime(plugin.root, targetRoot);
     commitEnable(enablePlan);
     const refresh = refreshResult(vaultPath, plugin.manifest.id);
     const result: PluginInstallResult = {
@@ -259,7 +259,13 @@ function ensureObsidianDir(vaultPath: string): string {
   return obsidianDir;
 }
 
-function replaceDirectoryWithCopy(sourceRoot: string, targetRoot: string): void {
+// An Obsidian plugin only needs its prebuilt runtime files. Deploying the repo's
+// source (src/, package.json, node_modules, docs, .git) is what makes tools and
+// agents think the installed plugin must be `npm install`-ed/built to work, so we
+// install ONLY these files. The swap stays atomic via a temp dir + rename.
+const PLUGIN_RUNTIME_FILES = ["manifest.json", "main.js", "styles.css", "data.json"];
+
+function installPluginRuntime(sourceRoot: string, targetRoot: string): void {
   fs.mkdirSync(path.dirname(targetRoot), { recursive: true });
   const tempTarget = `${targetRoot}.tmp-${process.pid}-${Date.now()}`;
   const backupTarget = `${targetRoot}.backup-${process.pid}-${Date.now()}`;
@@ -267,7 +273,21 @@ function replaceDirectoryWithCopy(sourceRoot: string, targetRoot: string): void 
   let movedExisting = false;
   try {
     fs.rmSync(tempTarget, { recursive: true, force: true });
-    fs.cpSync(sourceRoot, tempTarget, { recursive: true });
+    fs.mkdirSync(tempTarget, { recursive: true });
+    for (const name of PLUGIN_RUNTIME_FILES) {
+      const file = path.join(sourceRoot, name);
+      if (fs.existsSync(file) && fs.statSync(file).isFile()) {
+        fs.copyFileSync(file, path.join(tempTarget, name));
+      }
+    }
+    // data.json is the plugin's saved settings in the vault, not shipped by the
+    // source — preserve the existing one across reinstall.
+    if (hadTarget) {
+      const existingData = path.join(targetRoot, "data.json");
+      if (fs.existsSync(existingData) && fs.statSync(existingData).isFile()) {
+        fs.copyFileSync(existingData, path.join(tempTarget, "data.json"));
+      }
+    }
     if (hadTarget) {
       fs.renameSync(targetRoot, backupTarget);
       movedExisting = true;
