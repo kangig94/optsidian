@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   if (command && hasFlag(args, "help")) {
     if (commandPolicy(command) === "delegate") {
       rejectVaultPathForNative(args);
-      delegateToObsidian(argv);
+      delegateToObsidian(["help", command]);
     }
     const text = commandHelpText(command);
     if (!text) {

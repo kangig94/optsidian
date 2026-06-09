@@ -660,13 +660,27 @@ test("policy table does not implement native-sufficient commands", async () => {
   }
 });
 
-test("native command help is delegated unchanged", () => {
+test("native command help delegates as `help <command>`, never running the command", () => {
   const { env, log } = setup();
   const result = run(["files", "--help"], { env });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "native files --help");
+  // Native obsidian ignores `<command> --help` and runs the command; the safe per-command
+  // help form is `obsidian help <command>`. optsidian must delegate that form, not the bare command.
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(calls.at(-1), ["files", "--help"]);
+  assert.deepEqual(calls.at(-1), ["help", "files"]);
+  assert.ok(!calls.some((call) => call[0] === "files"), "the bare native command must never be delegated for --help");
+  assert.match(result.stdout, /Obsidian CLI/);
+});
+
+test("destructive native command help never executes the command", () => {
+  for (const helpForm of [["delete", "--help"], ["delete", "help=true"]]) {
+    const { env, log } = setup();
+    const result = run(helpForm, { env });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(calls.at(-1), ["help", "delete"], `${helpForm.join(" ")} must delegate as \`help delete\``);
+    assert.ok(!calls.some((call) => call[0] === "delete"), `delete must never be executed for ${helpForm.join(" ")}`);
+  }
 });
 
 test("delete remains delegated to native Obsidian", () => {
