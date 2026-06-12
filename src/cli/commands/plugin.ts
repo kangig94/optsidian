@@ -8,6 +8,7 @@ import { parseFormat, type OutputFormat } from "../render.js";
 import { hasVaultPathArg, resolveVaultRoot } from "../vault.js";
 import { captureObsidian, resolveObsidianVaultRoot } from "../../native/obsidian.js";
 import { RuntimeError, UsageError } from "../../errors.js";
+import { fetchReleasePlugin, parseGithubRepo } from "./plugin-release.js";
 
 type PluginManifest = {
   id: string;
@@ -17,7 +18,8 @@ type PluginManifest = {
 
 type PluginInstallSource =
   | { type: "local"; path: string }
-  | { type: "git"; url: string; ref?: string; dir?: string; resolvedCommit: string };
+  | { type: "git"; url: string; ref?: string; dir?: string; resolvedCommit: string }
+  | { type: "release"; url: string; tag: string };
 
 type RequestedPluginInstallSource =
   | { type: "local"; path: string }
@@ -53,7 +55,7 @@ type EnablePlan = {
   next?: string[];
 };
 
-export function runPluginInstall(args: ParsedArgs): void {
+export async function runPluginInstall(args: ParsedArgs): Promise<void> {
   const hasCustomSource = args.values.has("url") || args.values.has("path");
   if (!hasCustomSource) {
     if (hasVaultPathArg(args)) {
@@ -78,15 +80,10 @@ export function runPluginInstall(args: ParsedArgs): void {
   const requestedSource = resolveInstallSource(args);
   let tempRoot: string | undefined;
   try {
-    let source: PluginInstallSource;
-    const sourceRoot = requestedSource.type === "git" ? (tempRoot = clonePluginSource(requestedSource.url, requestedSource.ref)) : requestedSource.path;
-    if (requestedSource.type === "git") {
-      source = { ...requestedSource, resolvedCommit: resolveGitHead(sourceRoot) };
-    } else {
-      source = requestedSource;
-    }
-    const pluginRoot = requestedSource.type === "git" && requestedSource.dir ? resolveSourceSubdir(sourceRoot, requestedSource.dir) : sourceRoot;
-    const plugin = loadPluginManifest(pluginRoot);
+    const materialized = await materializeSource(requestedSource);
+    tempRoot = materialized.tempRoot;
+    const source = materialized.source;
+    const plugin = loadPluginManifest(materialized.pluginRoot);
     const obsidianDir = ensureObsidianDir(vaultPath);
     const targetRoot = path.join(obsidianDir, "plugins", plugin.manifest.id);
     if (pathsOverlap(plugin.root, targetRoot)) {
@@ -155,6 +152,47 @@ export function normalizeGitSource(input: string): string {
   if (/^github\.com\/[^\s]+$/.test(input)) return `https://${input}`;
   if (/^github:[^\s]+\/[^\s]+$/.test(input)) return `https://github.com/${input.slice("github:".length)}`;
   return input;
+}
+
+async function materializeSource(requested: RequestedPluginInstallSource): Promise<{
+  source: PluginInstallSource;
+  pluginRoot: string;
+  tempRoot?: string;
+}> {
+  if (requested.type === "local") {
+    return { source: requested, pluginRoot: requested.path };
+  }
+  // Prefer a published GitHub release (the official distribution); fall back to a clone of
+  // the repo (root, or dir= for a monorepo subdir) when no usable release is available.
+  const repo = requested.dir ? undefined : parseGithubRepo(requested.url);
+  if (repo) {
+    const release = await fetchReleasePlugin({
+      owner: repo.owner,
+      repo: repo.repo,
+      env: process.env,
+      ...(requested.ref ? { tag: requested.ref } : {})
+    });
+    if (release) {
+      return {
+        source: { type: "release", url: requested.url, tag: release.tag },
+        pluginRoot: release.dir,
+        tempRoot: release.dir
+      };
+    }
+  }
+  const cloneRoot = clonePluginSource(requested.url, requested.ref);
+  const pluginRoot = requested.dir ? resolveSourceSubdir(cloneRoot, requested.dir) : cloneRoot;
+  return {
+    source: {
+      type: "git",
+      url: requested.url,
+      ...(requested.ref ? { ref: requested.ref } : {}),
+      ...(requested.dir ? { dir: requested.dir } : {}),
+      resolvedCommit: resolveGitHead(cloneRoot)
+    },
+    pluginRoot,
+    tempRoot: cloneRoot
+  };
 }
 
 function clonePluginSource(url: string, ref: string | undefined): string {
@@ -429,6 +467,7 @@ function renderPluginInstall(result: PluginInstallResult, format: OutputFormat):
 
 function formatSource(source: PluginInstallSource): string {
   if (source.type === "local") return `local ${source.path}`;
+  if (source.type === "release") return `release ${source.url}@${source.tag}`;
   const ref = source.ref ? `#${source.ref}` : "";
   const dir = source.dir ? ` dir=${source.dir}` : "";
   return `git ${source.url}${ref}${dir} commit=${shortCommit(source.resolvedCommit)}`;

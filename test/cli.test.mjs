@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -204,6 +205,56 @@ function gitHead(cwd) {
   return runGit(["rev-parse", "HEAD"], cwd);
 }
 
+async function startGithubReleaseServer(options = {}) {
+  const assets = options.assets ?? {};
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.pathname.includes("/releases/")) {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          tag_name: options.tag ?? "1.2.3",
+          assets: Object.keys(assets).map((name) => ({
+            name,
+            browser_download_url: `${base}/download/${encodeURIComponent(name)}`
+          }))
+        })
+      );
+      return;
+    }
+    if (url.pathname.startsWith("/download/")) {
+      const name = decodeURIComponent(url.pathname.slice("/download/".length));
+      if (assets[name] === undefined) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200);
+      res.end(assets[name]);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    apiBase: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise((resolve) => server.close(resolve))
+  };
+}
+
+// Force the direct (non-curl) HTTP path so the local release server is reachable even if
+// the ambient environment advertises a proxy.
+const NO_PROXY_ENV = {
+  HTTPS_PROXY: "",
+  https_proxy: "",
+  HTTP_PROXY: "",
+  http_proxy: "",
+  ALL_PROXY: "",
+  all_proxy: ""
+};
+
 function cleanupPidFile(pidFile) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (fs.existsSync(pidFile)) {
@@ -226,6 +277,31 @@ function run(args, options = {}) {
     env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
   });
   return result;
+}
+
+// Async variant for tests whose CLI invocation talks to an in-process HTTP mock: spawnSync
+// would block this process's event loop, so the mock server could never answer the child.
+function runAsync(args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cli, ...args], {
+      env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => child.kill("SIGTERM"), options.timeoutMs ?? 15000);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr: stderr + String(error) });
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    });
+  });
 }
 
 async function withProcessEnv(overrides, fn) {
@@ -528,6 +604,36 @@ test("plugin:install url installs from a git subdirectory and reloads the active
   const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls.at(-2), ["vault", "info=path"]);
   assert.deepEqual(calls.at(-1), ["plugin:reload", "id=sample-plugin"]);
+});
+
+test("plugin:install url installs from a published GitHub release instead of cloning", async () => {
+  const { vault, env } = setup();
+  const server = await startGithubReleaseServer({
+    tag: "1.4.0",
+    assets: {
+      "manifest.json": JSON.stringify({ id: "released-plugin", name: "Released", version: "1.4.0" }),
+      "main.js": "module.exports = { released: true };\n",
+      "styles.css": ".released {}\n"
+    }
+  });
+  try {
+    const result = await runAsync(
+      ["plugin:install", "url=https://github.com/acme/released", `vault-path=${vault}`, "enable", "format=json"],
+      { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: server.apiBase } }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.source.type, "release");
+    assert.equal(payload.source.url, "https://github.com/acme/released");
+    assert.equal(payload.source.tag, "1.4.0");
+    assert.equal(payload.plugin.id, "released-plugin");
+    const pluginDir = path.join(vault, ".obsidian", "plugins", "released-plugin");
+    assert.equal(fs.existsSync(path.join(pluginDir, "manifest.json")), true);
+    assert.equal(fs.existsSync(path.join(pluginDir, "main.js")), true);
+    assert.equal(fs.existsSync(path.join(pluginDir, "styles.css")), true);
+  } finally {
+    await server.close();
+  }
 });
 
 test("plugin:install refresh is skipped when the active native vault differs", () => {

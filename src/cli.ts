@@ -63,7 +63,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "plugin:install") {
-    runPluginInstall(args);
+    await runPluginInstall(args);
     return;
   }
 
