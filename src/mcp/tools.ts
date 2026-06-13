@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
@@ -5,7 +7,7 @@ import { applyVaultPatch, editVaultFile, writeVaultFile } from "../core/index.js
 import type { EditParams, EditSelector, LineRange } from "../core/index.js";
 import { usagePayload } from "../cli/help.js";
 import { UsageError } from "../errors.js";
-import { runTool } from "./result.js";
+import { runTool, type ToolPayload } from "./result.js";
 
 const usageArgsSchema = z.object({});
 
@@ -37,13 +39,24 @@ const patchArgsSchema = z.object({
   dryRun: z.boolean().optional().describe("Return diff without writing")
 });
 
+const commandRunArgsSchema = z.object({
+  command: z.string().min(1).describe(
+    'Optsidian or native/plugin command verb to run, e.g. "para-zk:create-llm-wiki", "read", or "search". Same as the CLI command word.'
+  ),
+  args: z.array(z.string()).optional().describe(
+    'Argument tokens passed through verbatim as argv (no shell parsing), e.g. ["title=Diffusion Policy", "key=body", "format=json"]. Add format=json yourself when you want JSON.'
+  )
+});
+
 export type UsageToolArgs = z.infer<typeof usageArgsSchema>;
 export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
 export type EditToolArgs = z.infer<typeof editArgsSchema>;
 export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
+export type CommandRunToolArgs = z.infer<typeof commandRunArgsSchema>;
 
 export type OptsidianToolHandlers = {
   command_map(args: UsageToolArgs): CallToolResult;
+  command_run(args: CommandRunToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
   edit(args: EditToolArgs): CallToolResult;
   apply_patch(args: PatchToolArgs): CallToolResult;
@@ -52,10 +65,40 @@ export type OptsidianToolHandlers = {
 export function createToolHandlers(resolveVaultRoot: () => string): OptsidianToolHandlers {
   return {
     command_map: () => runTool(() => usagePayload()),
+    command_run: (args) => runTool(() => runOptsidianCommand(args)),
     write: (args) => runTool(() => writeVaultFile(resolveVaultRoot(), args)),
     edit: (args) => runTool(() => editVaultFile(resolveVaultRoot(), editArgsToParams(args))),
     apply_patch: (args) => runTool(() => applyVaultPatch(resolveVaultRoot(), args))
   };
+}
+
+// Run any optsidian command (CLI-only or native-delegated) by invoking the sibling
+// optsidian CLI as a child process. The MCP server runs outside the host Bash sandbox,
+// so the child inherits that: native-delegated commands (para-zk:*, other plugin
+// commands) reach the running Obsidian over its unix socket, and CLI-only commands
+// (read/search/grep/frontmatter) read the vault — identically to the real CLI. This is
+// the only tool that drives native/plugin commands; the file-mutation tools above do not.
+function runOptsidianCommand(args: CommandRunToolArgs): ToolPayload {
+  const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
+  const argv = [cliBin, args.command, ...(args.args ?? [])];
+  try {
+    const stdout = execFileSync(process.execPath, argv, {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024
+    });
+    return { ok: true, command: args.command, exit_code: 0, stdout };
+  } catch (error) {
+    // execFileSync throws on non-zero exit; surface the captured output as a structured
+    // result (not an MCP error) so the caller can read the command's own stdout/stderr.
+    const failure = error as { status?: number | null; stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
+    return {
+      ok: false,
+      command: args.command,
+      exit_code: typeof failure.status === "number" ? failure.status : 1,
+      stdout: failure.stdout ? String(failure.stdout) : "",
+      stderr: failure.stderr ? String(failure.stderr) : (failure.message ?? "")
+    };
+  }
 }
 
 export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () => string): void {
@@ -69,6 +112,16 @@ export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () =
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async (args) => handlers.command_map(args)
+  );
+  server.registerTool(
+    "command_run",
+    {
+      description:
+        "Run any Optsidian command (CLI-only like read/search/grep/frontmatter, or native-delegated like para-zk:* and other plugin commands) and capture its output. Use this when you need a command beyond the file-mutation tools — it reaches the running Obsidian. Pass the command verb in `command` and key=value tokens in `args` (argv, no shell). Returns {ok, command, exit_code, stdout, stderr}.",
+      inputSchema: commandRunArgsSchema.shape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => handlers.command_run(args)
   );
   server.registerTool(
     "write",

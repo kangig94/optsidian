@@ -17,7 +17,7 @@ type CommandHelp = {
 };
 
 export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"] as const;
-export const MCP_TOOL_NAMES = ["command_map", "write", "edit", "apply_patch"] as const;
+export const MCP_TOOL_NAMES = ["command_map", "command_run", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   read: {
