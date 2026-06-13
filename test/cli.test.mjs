@@ -401,7 +401,7 @@ test("top-level and implemented command help stay local", () => {
   assert.match(result.stdout, /plugin:install\s+Install marketplace or custom Obsidian plugins/);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /files, links, version, dev:console/);
-  assert.match(result.stdout, /MCP tools: command_map, write, edit, apply_patch/);
+  assert.match(result.stdout, /MCP tools: command_map, command_run, write, edit, apply_patch/);
   assert.doesNotMatch(result.stdout, /Addons:/);
 
   const searchHelp = run(["search", "--help"]);

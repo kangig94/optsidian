@@ -196,7 +196,7 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
     ].join("\n");
 
     assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
-    assert.deepEqual(payload(commandMap).routing.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
+    assert.deepEqual(payload(commandMap).routing.mcpTools, ["command_map", "command_run", "write", "edit", "apply_patch"]);
     assert.deepEqual(payload(commandMap).routing.nativeCommands, ["files", "links", "version", "dev:console"]);
     assert.equal(payload(commandMap).routing.nativeCommandsError, undefined);
     assert.match(payload(commandMap).preference.rule, /Prefer Optsidian for Obsidian vault work/);
@@ -317,7 +317,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ["apply_patch", "command_map", "edit", "write"]
+      ["apply_patch", "command_map", "command_run", "edit", "write"]
     );
 
     const commandMap = await client.callTool({
@@ -325,7 +325,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       arguments: {}
     });
     assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
-    assert.deepEqual(commandMap.structuredContent?.routing?.mcpTools, ["command_map", "write", "edit", "apply_patch"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.mcpTools, ["command_map", "command_run", "write", "edit", "apply_patch"]);
     assert.deepEqual(commandMap.structuredContent?.routing?.nativeCommands, ["files", "links", "version", "dev:console"]);
     assert.equal(commandMap.structuredContent?.routing?.nativeCommandsError, undefined);
     assert.match(String(commandMap.structuredContent?.preference?.rule), /Prefer Optsidian for Obsidian vault work/);
@@ -612,7 +612,7 @@ test("optsidian-mcp connects without a resolved vault and returns a runtime erro
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ["apply_patch", "command_map", "edit", "write"]
+      ["apply_patch", "command_map", "command_run", "edit", "write"]
     );
 
     const commandMap = await client.callTool({
