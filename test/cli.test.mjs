@@ -1009,6 +1009,8 @@ test("explicit child GUI env is not overridden by recovered values", async () =>
     });
     assert.equal(result.status, 7);
     assert.match(result.stderr, /unable to find Obsidian/i);
+    // optsidian appends a sandbox-cause hint when the native CLI cannot reach Obsidian.
+    assert.match(result.stderr, /sandbox/i);
   } finally {
     host.kill("SIGTERM");
   }
