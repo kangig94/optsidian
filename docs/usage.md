@@ -128,7 +128,7 @@ optsidian read path=note.md head=50
 optsidian read path=note.md tail=30
 optsidian read path=note.md lines=10:40
 optsidian read path=note.md around="needle" context=4
-optsidian read path=note.md max-chars=5000
+optsidian read path=note.md max-lines=200
 optsidian read path=note.md format=json
 ```
 

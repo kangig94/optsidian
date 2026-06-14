@@ -10,7 +10,7 @@ export type ReadParams = {
   tail?: number;
   around?: string;
   context?: number;
-  maxChars?: number;
+  maxLines?: number;
 };
 
 export type ReadResult = {

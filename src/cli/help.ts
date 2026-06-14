@@ -23,7 +23,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   read: {
     summary: "Read a vault file with line ranges and output caps",
     usage: [
-      "optsidian read path=<path> [lines=a:b|head=n|tail=n|around=<text>] [context=n] [max-chars=n] [format=text|json]"
+      "optsidian read path=<path> [lines=a:b|head=n|tail=n|around=<text>] [context=n] [max-lines=n] [format=text|json]"
     ],
     options: [
       { name: "path=<path>", description: "Vault-relative file path" },
@@ -32,7 +32,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "tail=<n>", description: "Last n lines" },
       { name: "around=<text>", description: "First line containing this text plus context" },
       { name: "context=<n>", description: "Context lines for around (default: 3)" },
-      { name: "max-chars=<n>", description: "Output cap for content and numbered text (default: 20000)" },
+      { name: "max-lines=<n>", description: "Max lines returned; range.end is the actual last line so paging never skips (default: 2000)" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: ["Use only one of lines=, head=, tail=, or around=."]

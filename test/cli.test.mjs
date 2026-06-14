@@ -1025,19 +1025,20 @@ test("read returns line-numbered ranges with metadata", () => {
   assert.match(result.stdout, /3\tthree/);
 });
 
-test("read caps JSON output and reports empty files as zero lines", () => {
+test("read caps JSON output by lines and reports empty files as zero lines", () => {
   const { vault, env } = setup();
   fs.writeFileSync(path.join(vault, "empty.md"), "");
   let result = run(["read", "path=empty.md", "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).range.total, 0);
 
-  fs.writeFileSync(path.join(vault, "long.md"), "abcdef\n");
-  result = run(["read", "path=long.md", "format=json", "max-chars=3"], { env });
+  fs.writeFileSync(path.join(vault, "long.md"), "one\ntwo\nthree\nfour\nfive\n");
+  result = run(["read", "path=long.md", "format=json", "max-lines=2"], { env });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.truncated, true);
-  assert.match(payload.numberedText, /truncated/);
+  assert.deepEqual(payload.range, { start: 1, end: 2, total: 5 });
+  assert.equal(payload.numberedText, "1\tone\n2\ttwo");
 });
 
 test("grep is markdown-first and supports context", () => {

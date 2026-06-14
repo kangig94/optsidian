@@ -35,6 +35,27 @@ Body with #rollout tag.
   assert.match(doc.body, /Body with #rollout tag/);
 });
 
+test("read caps by lines and pages without gaps", async () => {
+  const vault = tempVault();
+  const { readVaultFile, writeVaultFile } = await core();
+  writeVaultFile(vault, { path: "doc.md", content: `${Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n")}\n` });
+
+  const first = readVaultFile(vault, { path: "doc.md", maxLines: 4 });
+  assert.deepEqual(first.range, { start: 1, end: 4, total: 10 });
+  assert.equal(first.truncated, true);
+  assert.equal(first.numberedText.split("\n").length, 4);
+
+  // a requested range wider than maxLines is capped to the actual returned end
+  const windowed = readVaultFile(vault, { path: "doc.md", lines: { start: 5, end: 10 }, maxLines: 3 });
+  assert.deepEqual(windowed.range, { start: 5, end: 7, total: 10 });
+  assert.equal(windowed.truncated, true);
+
+  // continuing from the reported end reads the remainder with no gap and no truncation
+  const rest = readVaultFile(vault, { path: "doc.md", lines: { start: 8, end: 10 }, maxLines: 3 });
+  assert.deepEqual(rest.range, { start: 8, end: 10, total: 10 });
+  assert.equal(rest.truncated, false);
+});
+
 test("core write/read preserves shell-sensitive raw payloads", async () => {
   const vault = tempVault();
   const { grepVault, readVaultFile, writeVaultFile } = await core();

@@ -5,7 +5,7 @@ import { decodeUtf8, lineNumbered, splitText } from "./text.js";
 import type { ReadParams, ReadResult } from "./types.js";
 import { assertLineRange, assertOptionalNonNegativeInteger, assertOptionalPositiveInteger } from "./validation.js";
 
-export const DEFAULT_READ_MAX_CHARS = 20_000;
+export const DEFAULT_READ_MAX_LINES = 2_000;
 
 export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult {
   validateReadParams(params);
@@ -46,17 +46,17 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
     throw new UsageError(`Start line ${start} is beyond end of file (${lines.length})`);
   }
 
-  const selected = lines.slice(start - 1, end);
-  const numbered = lineNumbered(selected, start);
-  const maxChars = params.maxChars ?? DEFAULT_READ_MAX_CHARS;
-  const truncated = numbered.length > maxChars;
-  const numberedText = truncated ? `${numbered.slice(0, maxChars)}\n... truncated ...` : numbered;
+  const maxLines = params.maxLines ?? DEFAULT_READ_MAX_LINES;
+  const cappedEnd = Math.min(end, start - 1 + maxLines);
+  const selected = lines.slice(start - 1, cappedEnd);
+  const numberedText = lineNumbered(selected, start);
+  const truncated = cappedEnd < end;
 
   return {
     ok: true,
     command: "read",
     path: target.rel,
-    range: { start, end, total: lines.length },
+    range: { start, end: cappedEnd, total: lines.length },
     truncated,
     numberedText
   };
@@ -67,5 +67,5 @@ function validateReadParams(params: ReadParams): void {
   assertOptionalPositiveInteger(params.head, "head");
   assertOptionalPositiveInteger(params.tail, "tail");
   assertOptionalNonNegativeInteger(params.context, "context");
-  assertOptionalPositiveInteger(params.maxChars, "maxChars");
+  assertOptionalPositiveInteger(params.maxLines, "maxLines");
 }
