@@ -6,9 +6,17 @@ import path from "node:path";
 import { RuntimeError } from "../errors.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
-// Shared GitHub HTTP layer: a small GET that tolerates redirects and proxy
-// environments (curl fallback) and carries the GitHub Accept header + optional
-// GITHUB_TOKEN. Used by both the self-updater and custom plugin release installs.
+// Shared GitHub HTTP layer: a small GET that tolerates redirects and proxy environments
+// (curl fallback) and carries a GitHub Accept header + a token resolved from GITHUB_TOKEN or
+// the user's local `gh`/`git` login. Used by the self-updater and custom plugin release
+// installs, including PRIVATE repos.
+
+const JSON_ACCEPT = "application/vnd.github+json";
+// Release-asset bytes must be fetched from the API asset endpoint with an octet-stream Accept;
+// that is the only form that works for a PRIVATE repo (browser_download_url 404s there).
+const ASSET_ACCEPT = "application/octet-stream";
+
+type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean };
 
 export async function fetchJson(url: string, env: NodeJS.ProcessEnv): Promise<unknown> {
   const response = await requestBuffer(url, env);
@@ -20,7 +28,7 @@ export async function fetchJson(url: string, env: NodeJS.ProcessEnv): Promise<un
 }
 
 export async function downloadFile(url: string, targetPath: string, env: NodeJS.ProcessEnv): Promise<void> {
-  const response = await requestBuffer(url, env);
+  const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT });
   const tmpPath = `${targetPath}.download-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmpPath, response.body);
   fs.renameSync(tmpPath, targetPath);
@@ -29,22 +37,28 @@ export async function downloadFile(url: string, targetPath: string, env: NodeJS.
 export async function requestBuffer(
   url: string,
   env: NodeJS.ProcessEnv,
-  redirects = 0
+  options: FetchOptions = {}
 ): Promise<{ statusCode: number; body: Buffer }> {
+  const accept = options.accept ?? JSON_ACCEPT;
+  const redirects = options.redirects ?? 0;
+  const sendAuth = options.sendAuth ?? true;
   if (hasProxyEnv(env)) {
     if (!hasCommand("curl", env)) {
       throw new RuntimeError("Proxy environment detected, but curl is not available for optsidian network access.");
     }
-    return requestBufferWithCurl(url, env);
+    // curl -fsSL drops Authorization on a cross-host redirect by default, so an asset's
+    // signed CDN URL is reached without our token.
+    return requestBufferWithCurl(url, env, accept, sendAuth);
   }
-  return requestBufferDirect(url, env, redirects);
+  return requestBufferDirect(url, env, { accept, redirects, sendAuth });
 }
 
 async function requestBufferDirect(
   url: string,
   env: NodeJS.ProcessEnv,
-  redirects = 0
+  options: Required<FetchOptions>
 ): Promise<{ statusCode: number; body: Buffer }> {
+  const { accept, redirects, sendAuth } = options;
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
@@ -57,7 +71,7 @@ async function requestBufferDirect(
         target,
         {
           method: "GET",
-          headers: githubHeaders(env),
+          headers: githubHeaders(env, accept, sendAuth),
           agent: false
         },
         (res) => {
@@ -84,7 +98,14 @@ async function requestBufferDirect(
     if (typeof location !== "string" || location.length === 0) {
       throw new RuntimeError(`Redirect response from ${url} did not include a location header`);
     }
-    return requestBuffer(new URL(location, target).toString(), env, redirects + 1);
+    const nextUrl = new URL(location, target);
+    // Never carry Authorization across a host change: a release asset's API URL redirects
+    // to a signed CDN URL that rejects a second auth mechanism.
+    return requestBuffer(nextUrl.toString(), env, {
+      accept,
+      redirects: redirects + 1,
+      sendAuth: sendAuth && nextUrl.host === target.host
+    });
   }
 
   if (statusCode < 200 || statusCode >= 300) {
@@ -97,10 +118,16 @@ async function requestBufferDirect(
   };
 }
 
-async function requestBufferWithCurl(url: string, env: NodeJS.ProcessEnv): Promise<{ statusCode: number; body: Buffer }> {
-  const args = ["-fsSL", "-H", "Accept: application/vnd.github+json", "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
-  if (env.GITHUB_TOKEN) {
-    args.push("-H", `Authorization: Bearer ${env.GITHUB_TOKEN}`);
+async function requestBufferWithCurl(
+  url: string,
+  env: NodeJS.ProcessEnv,
+  accept: string,
+  sendAuth: boolean
+): Promise<{ statusCode: number; body: Buffer }> {
+  const args = ["-fsSL", "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
+  const token = sendAuth ? resolveGithubToken(env) : undefined;
+  if (token) {
+    args.push("-H", `Authorization: Bearer ${token}`);
   }
   args.push(url);
   const result = spawnSync("curl", args, {
@@ -119,16 +146,50 @@ async function requestBufferWithCurl(url: string, env: NodeJS.ProcessEnv): Promi
   };
 }
 
-function githubHeaders(env: NodeJS.ProcessEnv): Record<string, string> {
+function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean): Record<string, string> {
   const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
+    Accept: accept,
     "User-Agent": `optsidian/${OPTSIDIAN_VERSION}`,
     Connection: "close"
   };
-  if (env.GITHUB_TOKEN) {
-    headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  const token = sendAuth ? resolveGithubToken(env) : undefined;
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
   }
   return headers;
+}
+
+// Explicit GITHUB_TOKEN wins; otherwise fall back to the user's local login via `gh auth
+// token` or `git credential fill`, so a private-repo release install works without manually
+// exporting a token. The local lookup runs at most once per process.
+let cachedLocalToken: string | null | undefined;
+
+function resolveGithubToken(env: NodeJS.ProcessEnv): string | undefined {
+  const explicit = env.GITHUB_TOKEN?.trim();
+  if (explicit) return explicit;
+  if (cachedLocalToken === undefined) {
+    cachedLocalToken = readLocalGithubToken(env);
+  }
+  return cachedLocalToken ?? undefined;
+}
+
+function readLocalGithubToken(env: NodeJS.ProcessEnv): string | null {
+  const gh = spawnSync("gh", ["auth", "token"], { env, encoding: "utf8" });
+  if (!gh.error && (gh.status ?? 1) === 0) {
+    const token = (gh.stdout ?? "").trim();
+    if (token) return token;
+  }
+  const cred = spawnSync("git", ["credential", "fill"], {
+    env,
+    encoding: "utf8",
+    input: "protocol=https\nhost=github.com\n\n"
+  });
+  if (!cred.error && (cred.status ?? 1) === 0) {
+    const match = /^password=(.+)$/m.exec(cred.stdout ?? "");
+    const token = match?.[1]?.trim();
+    if (token) return token;
+  }
+  return null;
 }
 
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {

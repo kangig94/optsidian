@@ -84,8 +84,15 @@ function readReleaseAssets(release: Record<string, unknown>): Map<string, string
   for (const item of list) {
     if (!item || typeof item !== "object") continue;
     const asset = item as Record<string, unknown>;
-    if (typeof asset.name === "string" && typeof asset.browser_download_url === "string") {
-      assets.set(asset.name, asset.browser_download_url);
+    // Prefer the API asset URL (works for private repos with octet-stream Accept); fall back
+    // to browser_download_url for hosts that only expose it.
+    const downloadUrl = typeof asset.url === "string"
+      ? asset.url
+      : typeof asset.browser_download_url === "string"
+        ? asset.browser_download_url
+        : undefined;
+    if (typeof asset.name === "string" && downloadUrl) {
+      assets.set(asset.name, downloadUrl);
     }
   }
   return assets;

@@ -205,33 +205,53 @@ function gitHead(cwd) {
   return runGit(["rev-parse", "HEAD"], cwd);
 }
 
+function serveReleaseAsset(res, assets, name) {
+  if (assets[name] === undefined) {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+  res.writeHead(200);
+  res.end(assets[name]);
+}
+
 async function startGithubReleaseServer(options = {}) {
   const assets = options.assets ?? {};
+  const requests = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
+    const base = `http://127.0.0.1:${server.address().port}`;
     if (url.pathname.includes("/releases/")) {
-      const base = `http://127.0.0.1:${server.address().port}`;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
           tag_name: options.tag ?? "1.2.3",
           assets: Object.keys(assets).map((name) => ({
             name,
+            // API asset URL (preferred; works for private repos) + the public download URL.
+            url: `${base}/assets/${encodeURIComponent(name)}`,
             browser_download_url: `${base}/download/${encodeURIComponent(name)}`
           }))
         })
       );
       return;
     }
-    if (url.pathname.startsWith("/download/")) {
-      const name = decodeURIComponent(url.pathname.slice("/download/".length));
-      if (assets[name] === undefined) {
-        res.writeHead(404);
+    if (url.pathname.startsWith("/assets/")) {
+      const name = decodeURIComponent(url.pathname.slice("/assets/".length));
+      requests.push({ path: url.pathname, accept: req.headers.accept, authorization: req.headers.authorization });
+      if (options.assetRedirectBase) {
+        res.writeHead(302, { location: `${options.assetRedirectBase}/cdn/${encodeURIComponent(name)}` });
         res.end();
         return;
       }
-      res.writeHead(200);
-      res.end(assets[name]);
+      serveReleaseAsset(res, assets, name);
+      return;
+    }
+    if (url.pathname.startsWith("/download/") || url.pathname.startsWith("/cdn/")) {
+      const prefix = url.pathname.startsWith("/cdn/") ? "/cdn/" : "/download/";
+      const name = decodeURIComponent(url.pathname.slice(prefix.length));
+      requests.push({ path: url.pathname, accept: req.headers.accept, authorization: req.headers.authorization });
+      serveReleaseAsset(res, assets, name);
       return;
     }
     res.writeHead(404);
@@ -240,6 +260,7 @@ async function startGithubReleaseServer(options = {}) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     apiBase: `http://127.0.0.1:${server.address().port}`,
+    requests,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
@@ -619,7 +640,7 @@ test("plugin:install url installs from a published GitHub release instead of clo
   try {
     const result = await runAsync(
       ["plugin:install", "url=https://github.com/acme/released", `vault-path=${vault}`, "enable", "format=json"],
-      { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: server.apiBase } }
+      { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: server.apiBase, GITHUB_TOKEN: "test-token" } }
     );
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
@@ -633,6 +654,38 @@ test("plugin:install url installs from a published GitHub release instead of clo
     assert.equal(fs.existsSync(path.join(pluginDir, "styles.css")), true);
   } finally {
     await server.close();
+  }
+});
+
+test("plugin:install authenticates the asset API URL but drops auth on a cross-host CDN redirect", async () => {
+  const { vault, env } = setup();
+  const assets = {
+    "manifest.json": JSON.stringify({ id: "private-plugin", name: "Private", version: "2.0.0" }),
+    "main.js": "module.exports = { ok: true };\n"
+  };
+  const cdn = await startGithubReleaseServer({ assets });
+  const api = await startGithubReleaseServer({ tag: "2.0.0", assets, assetRedirectBase: cdn.apiBase });
+  try {
+    const result = await runAsync(
+      ["plugin:install", "url=https://github.com/acme/private", `vault-path=${vault}`, "enable", "format=json"],
+      { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: api.apiBase, GITHUB_TOKEN: "secret-token" } }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    // The API asset URL (same host as the API base) carries the token...
+    assert.ok(
+      api.requests.some((entry) => entry.authorization === "Bearer secret-token"),
+      "API asset request should carry the bearer token"
+    );
+    // ...but the redirected cross-host CDN request must NOT (a signed URL rejects a second auth mechanism).
+    assert.ok(cdn.requests.length > 0, "CDN should receive the redirected download");
+    assert.ok(
+      cdn.requests.every((entry) => !entry.authorization),
+      "cross-host CDN request must not carry the bearer token"
+    );
+    assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "private-plugin", "main.js")), true);
+  } finally {
+    await api.close();
+    await cdn.close();
   }
 });
 
