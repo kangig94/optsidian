@@ -65,6 +65,16 @@ Update an existing managed install:
 optsidian update
 ```
 
+### Separate Claude config dirs (`CLAUDE_CONFIG_DIR`)
+
+`install.sh` registers the MCP only with the Claude config dir active during install (`~/.claude` by default). Claude Code stores MCP servers per config dir (in `<CLAUDE_CONFIG_DIR>/.claude.json`), so register once for each additional config dir:
+
+```bash
+CLAUDE_CONFIG_DIR=$HOME/.claude-work claude mcp add optsidian -s user -- ~/.local/bin/optsidian-mcp
+```
+
+Append `-e OPTSIDIAN_VAULT_PATH=/path/to/vault` to match a fixed-vault install. Codex keeps a single global config, so it needs no per-config-dir step. The entry points at the stable `~/.local/bin/optsidian-mcp` path, so `optsidian update` (which replaces that binary in place) reaches every registered config dir automatically — no re-registration needed.
+
 Uninstall:
 
 ```bash
