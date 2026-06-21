@@ -28,13 +28,29 @@ import type {
 } from "./types.js";
 import { assertOptionalPositiveInteger } from "./validation.js";
 
-const SEARCH_SCHEMA_VERSION = 2;
-const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 1;
+const SEARCH_SCHEMA_VERSION = 3;
+const SEARCH_IDENTITY_SCHEMA_VERSION = 1;
+const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 2;
 const SEARCH_ENGINE = "orama";
 const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
 const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
+const SEARCH_DB_SCHEMA = {
+  path: "string",
+  title: "string",
+  aliases: "string[]",
+  tags: "string[]",
+  headings: "string[]",
+  body: "string",
+  pathTokens: "string",
+  titleTokens: "string",
+  aliasesTokens: "string",
+  tagsTokens: "string",
+  headingsTokens: "string",
+  bodyTokens: "string"
+} as const;
+const SEARCH_SCHEMA_DIGEST = sha256(JSON.stringify(SEARCH_DB_SCHEMA));
 const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchDocument> = {
   title: "titleTokens",
   aliases: "aliasesTokens",
@@ -57,12 +73,23 @@ type FileManifest = {
   size: number;
 };
 
+type SearchTokenizerTier = "intl" | "kiwi";
+type SearchManifestMismatch = "match" | "tier-only-upgrade" | "incompatible";
+
 type SearchManifest = {
+  identitySchemaVersion: number;
   schemaVersion: number;
+  schemaDigest: string;
   engine: string;
   optsidianVersion: string;
   builtAt: string;
   documents: number;
+  tokenizerTier: SearchTokenizerTier;
+  tokenizerIdentity: string;
+  declaredAnalyzers: string[];
+  activeAnalyzers: string[];
+  nodeVersion: string;
+  icuVersion: string | null;
   analyzer: SearchAnalyzerIdentity;
   files: Record<string, FileManifest>;
 };
@@ -336,15 +363,7 @@ async function buildAndPersistIndex(
   const docs = await buildDocuments(vaultRoot, files, Object.keys(files), analyzer, analysisCache);
   await insertMultiple(db, docs, 500);
   persistDb(db, paths.indexPath);
-  const manifest: SearchManifest = {
-    schemaVersion: SEARCH_SCHEMA_VERSION,
-    engine: SEARCH_ENGINE,
-    optsidianVersion: OPTSIDIAN_VERSION,
-    builtAt: new Date().toISOString(),
-    documents: docs.length,
-    analyzer: analyzer.identity,
-    files
-  };
+  const manifest = createSearchManifest(docs.length, analyzer.identity, files);
   fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeAnalysisCache(paths, analyzer.identity, files, docs);
   return manifest;
@@ -376,15 +395,7 @@ async function applyIncrementalIndex(
   }
 
   persistDb(db, paths.indexPath);
-  const manifest: SearchManifest = {
-    schemaVersion: SEARCH_SCHEMA_VERSION,
-    engine: SEARCH_ENGINE,
-    optsidianVersion: OPTSIDIAN_VERSION,
-    builtAt: new Date().toISOString(),
-    documents: await count(db),
-    analyzer: analyzer.identity,
-    files
-  };
+  const manifest = createSearchManifest(await count(db), analyzer.identity, files);
   fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeAnalysisCache(paths, analyzer.identity, files, docs, analysisCache, new Set([...diff.deleted, ...diff.changed]));
   return manifest;
@@ -392,20 +403,7 @@ async function applyIncrementalIndex(
 
 function createSearchDb(): AnyOrama {
   return create({
-    schema: {
-      path: "string",
-      title: "string",
-      aliases: "string[]",
-      tags: "string[]",
-      headings: "string[]",
-      body: "string",
-      pathTokens: "string",
-      titleTokens: "string",
-      aliasesTokens: "string",
-      tagsTokens: "string",
-      headingsTokens: "string",
-      bodyTokens: "string"
-    },
+    schema: SEARCH_DB_SCHEMA,
     components: {
       tokenizer: {
         language: "optsidian-analyzed",
@@ -424,6 +422,53 @@ function restoreDb(indexPath: string): AnyOrama {
   const db = createSearchDb();
   load(db, JSON.parse(fs.readFileSync(indexPath, "utf8")) as RawData);
   return db;
+}
+
+function createSearchManifest(
+  documents: number,
+  analyzer: SearchAnalyzerIdentity,
+  files: Record<string, FileManifest>
+): SearchManifest {
+  return {
+    ...searchManifestIdentity(analyzer),
+    builtAt: new Date().toISOString(),
+    documents,
+    analyzer,
+    files
+  };
+}
+
+function searchManifestIdentity(analyzer: SearchAnalyzerIdentity): Omit<SearchManifest, "builtAt" | "documents" | "analyzer" | "files"> {
+  const activeAnalyzers = normalizeAnalyzerList(analyzer.activeAnalyzers ?? []);
+  return {
+    identitySchemaVersion: SEARCH_IDENTITY_SCHEMA_VERSION,
+    schemaVersion: SEARCH_SCHEMA_VERSION,
+    schemaDigest: SEARCH_SCHEMA_DIGEST,
+    engine: SEARCH_ENGINE,
+    optsidianVersion: OPTSIDIAN_VERSION,
+    tokenizerTier: searchTokenizerTier(analyzer),
+    tokenizerIdentity: searchTokenizerIdentity(analyzer),
+    declaredAnalyzers: normalizeAnalyzerList(analyzer.declaredAnalyzers ?? []),
+    activeAnalyzers,
+    nodeVersion: process.versions.node,
+    icuVersion: process.versions.icu ?? null
+  };
+}
+
+function searchTokenizerTier(analyzer: SearchAnalyzerIdentity): SearchTokenizerTier {
+  return normalizeAnalyzerList(analyzer.activeAnalyzers ?? []).includes("ko") ? "kiwi" : "intl";
+}
+
+function searchTokenizerIdentity(analyzer: SearchAnalyzerIdentity): string {
+  return JSON.stringify({
+    name: analyzer.name,
+    version: analyzer.version,
+    baseline: analyzer.baseline,
+    tier: searchTokenizerTier(analyzer),
+    activeAnalyzers: normalizeAnalyzerList(analyzer.activeAnalyzers ?? []),
+    model: analyzer.model,
+    optionsHash: analyzer.optionsHash
+  });
 }
 
 async function buildDocuments(
@@ -494,10 +539,95 @@ function currentFileManifest(vaultRoot: string): Record<string, FileManifest> {
 function readManifest(paths: CachePaths): SearchManifest | undefined {
   if (!fs.existsSync(paths.manifestPath)) return undefined;
   try {
-    return JSON.parse(fs.readFileSync(paths.manifestPath, "utf8")) as SearchManifest;
+    const parsed = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8")) as unknown;
+    return isSearchManifest(parsed) ? parsed : undefined;
   } catch {
     return undefined;
   }
+}
+
+function isSearchManifest(value: unknown): value is SearchManifest {
+  return (
+    hasCompleteSearchManifestIdentity(value) &&
+    typeof value.builtAt === "string" &&
+    typeof value.documents === "number" &&
+    Number.isSafeInteger(value.documents) &&
+    value.documents >= 0 &&
+    isFileManifestRecord(value.files)
+  );
+}
+
+function hasCompleteSearchManifestIdentity(value: unknown): value is SearchManifest {
+  return (
+    isRecord(value) &&
+    value.identitySchemaVersion === SEARCH_IDENTITY_SCHEMA_VERSION &&
+    typeof value.schemaVersion === "number" &&
+    typeof value.schemaDigest === "string" &&
+    typeof value.engine === "string" &&
+    typeof value.optsidianVersion === "string" &&
+    isSearchTokenizerTier(value.tokenizerTier) &&
+    typeof value.tokenizerIdentity === "string" &&
+    isStringArray(value.declaredAnalyzers) &&
+    isStringArray(value.activeAnalyzers) &&
+    typeof value.nodeVersion === "string" &&
+    (typeof value.icuVersion === "string" || value.icuVersion === null) &&
+    isSearchAnalyzerIdentity(value.analyzer)
+  );
+}
+
+function isSearchTokenizerTier(value: unknown): value is SearchTokenizerTier {
+  return value === "intl" || value === "kiwi";
+}
+
+function isSearchAnalyzerIdentity(value: unknown): value is SearchAnalyzerIdentity {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.version === "string" &&
+    typeof value.node === "string" &&
+    (value.baseline === undefined || typeof value.baseline === "string") &&
+    (value.runtime === undefined || typeof value.runtime === "string") &&
+    (value.icu === undefined || typeof value.icu === "string") &&
+    (value.model === undefined || typeof value.model === "string") &&
+    (value.optionsHash === undefined || typeof value.optionsHash === "string") &&
+    (value.declaredAnalyzers === undefined || isStringArray(value.declaredAnalyzers)) &&
+    (value.activeAnalyzers === undefined || isStringArray(value.activeAnalyzers))
+  );
+}
+
+function isFileManifestRecord(value: unknown): value is Record<string, FileManifest> {
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry.mtimeMs === "number" &&
+      Number.isFinite(entry.mtimeMs) &&
+      typeof entry.size === "number" &&
+      Number.isSafeInteger(entry.size) &&
+      entry.size >= 0
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeAnalyzerList(analyzers: readonly string[]): string[] {
+  return [...new Set(analyzers.map((analyzer) => analyzer.trim().toLowerCase()).filter(Boolean))].sort((left, right) =>
+    left.localeCompare(right)
+  );
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+function sha256(input: string): string {
+  return crypto.createHash("sha256").update(input).digest("hex");
 }
 
 function readAnalysisCache(paths: CachePaths, analyzer: SearchAnalyzerIdentity): AnalysisCache | undefined {
@@ -564,12 +694,49 @@ function tokenFields(doc: SearchDocument): SearchTokenFields {
   };
 }
 
+export function classifySearchManifestMismatch(
+  manifest: Partial<SearchManifest> | undefined,
+  analyzer: SearchAnalyzerIdentity
+): SearchManifestMismatch {
+  if (!hasCompleteSearchManifestIdentity(manifest)) return "incompatible";
+  const expected = searchManifestIdentity(analyzer);
+  const structurallyCompatible =
+    manifest.identitySchemaVersion === expected.identitySchemaVersion &&
+    manifest.schemaVersion === expected.schemaVersion &&
+    manifest.schemaDigest === expected.schemaDigest &&
+    manifest.engine === expected.engine &&
+    manifest.optsidianVersion === expected.optsidianVersion &&
+    manifest.nodeVersion === expected.nodeVersion &&
+    manifest.icuVersion === expected.icuVersion;
+
+  if (!structurallyCompatible) return "incompatible";
+
+  const tokenizerMatches = manifest.tokenizerIdentity === expected.tokenizerIdentity;
+  const tierMatches = manifest.tokenizerTier === expected.tokenizerTier;
+  const declaredAnalyzersMatch = stringArraysEqual(manifest.declaredAnalyzers, expected.declaredAnalyzers);
+  const activeAnalyzersMatch = stringArraysEqual(manifest.activeAnalyzers, expected.activeAnalyzers);
+  if (
+    tokenizerMatches &&
+    tierMatches &&
+    declaredAnalyzersMatch &&
+    activeAnalyzersMatch &&
+    analyzerIdentityKey(manifest.analyzer) === analyzerIdentityKey(analyzer)
+  ) {
+    return "match";
+  }
+
+  if (manifest.tokenizerTier === "intl" && expected.tokenizerTier === "kiwi") {
+    return "tier-only-upgrade";
+  }
+
+  return "incompatible";
+}
+
 function hardRebuildReason(manifest: SearchManifest, analyzer: SearchAnalyzerIdentity): string | undefined {
-  if (manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) return "schema changed";
-  if (manifest.engine !== SEARCH_ENGINE) return "engine changed";
-  if (manifest.optsidianVersion !== OPTSIDIAN_VERSION) return "optsidian version changed";
-  if (analyzerIdentityKey(manifest.analyzer) !== analyzerIdentityKey(analyzer)) return "analyzer changed";
-  return undefined;
+  const mismatch = classifySearchManifestMismatch(manifest, analyzer);
+  if (mismatch === "match") return undefined;
+  if (mismatch === "tier-only-upgrade") return "analyzer tier upgrade pending";
+  return "index identity changed";
 }
 
 function diffManifestFiles(previous: Record<string, FileManifest>, current: Record<string, FileManifest>): ManifestDiff {

@@ -15,7 +15,7 @@ import { runMkdir } from "./cli/commands/mkdir.js";
 import { runOpenGui } from "./cli/commands/open-gui.js";
 import { runRead } from "./cli/commands/read.js";
 import { runSearch } from "./cli/commands/search.js";
-import { runSettings } from "./cli/commands/settings.js";
+import { runConfig } from "./cli/commands/config.js";
 import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
@@ -72,8 +72,8 @@ async function main(): Promise<void> {
     await runPluginInstall(args);
     return;
   }
-  if (command === "settings") {
-    runSettings(args);
+  if (command === "config") {
+    runConfig(args);
     return;
   }
 

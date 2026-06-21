@@ -52,8 +52,8 @@ export type SearchDeclaredAnalyzer = "ko";
 
 export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
-const ROUTER_VERSION = "script-router-v1";
-const INTL_ANALYZER_VERSION = "intl-segmenter-v1";
+const ROUTER_VERSION = "script-router-v2";
+const INTL_ANALYZER_VERSION = "intl-segmenter-latin-v2";
 const DAEMON_PROTOCOL_VERSION = "v2";
 const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
 const ANALYZER_IDLE_ENV = "OPTSIDIAN_ANALYZER_IDLE_MS";
@@ -68,6 +68,10 @@ const WORD_SCRIPT_RUN_PATTERN =
   /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
 const SCRIPT_RUN_PATTERN =
   /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
+const LATIN_SCRIPT_PATTERN = /\p{Script=Latin}/u;
+const COMBINING_MARK_PATTERN = /\p{Mark}/u;
+const COMBINING_MARKS_PATTERN = /\p{Mark}/gu;
+const ASCII_ALPHA_PATTERN = /^[a-z]+$/;
 
 let requestId = 0;
 
@@ -140,7 +144,7 @@ export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly Sea
   for (const run of scriptRuns(normalized)) {
     tokens.push(...tokenizeScriptRun(run, declaredAnalyzers));
   }
-  return unique(tokens.map((token) => token.trim()).filter(Boolean));
+  return unique(tokens.map((token) => normalizeToken(token.trim())).filter(Boolean));
 }
 
 function tokenizeScriptRun(run: ScriptRun, declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): string[] {
@@ -187,6 +191,249 @@ function tokenizeIntlRun(text: string): string[] {
     }
   }
   return tokens;
+}
+
+function normalizeToken(token: string): string {
+  let normalized = foldLatinDiacritics(token);
+  if (ASCII_ALPHA_PATTERN.test(normalized)) {
+    normalized = porterStemAscii(normalized);
+  }
+  return normalized;
+}
+
+function foldLatinRun(raw: string): string {
+  return raw.normalize("NFD").replace(COMBINING_MARKS_PATTERN, "");
+}
+
+function foldLatinDiacritics(raw: string): string {
+  let folded = "";
+  let latinRun = "";
+
+  for (const char of raw) {
+    if (LATIN_SCRIPT_PATTERN.test(char)) {
+      latinRun += char;
+      continue;
+    }
+
+    if (latinRun && COMBINING_MARK_PATTERN.test(char)) {
+      latinRun += char;
+      continue;
+    }
+
+    if (latinRun) {
+      folded += foldLatinRun(latinRun);
+      latinRun = "";
+    }
+    folded += char;
+  }
+
+  if (latinRun) {
+    folded += foldLatinRun(latinRun);
+  }
+
+  return folded;
+}
+
+function isAsciiConsonant(word: string, index: number): boolean {
+  const char = word[index];
+  if (char === "a" || char === "e" || char === "i" || char === "o" || char === "u") return false;
+  if (char === "y") return index === 0 ? true : !isAsciiConsonant(word, index - 1);
+  return true;
+}
+
+function asciiMeasure(word: string): number {
+  let measure = 0;
+  let sawVowel = false;
+  for (let index = 0; index < word.length; index += 1) {
+    if (isAsciiConsonant(word, index)) {
+      if (sawVowel) {
+        measure += 1;
+        sawVowel = false;
+      }
+      continue;
+    }
+    sawVowel = true;
+  }
+  return measure;
+}
+
+function containsAsciiVowel(word: string): boolean {
+  for (let index = 0; index < word.length; index += 1) {
+    if (!isAsciiConsonant(word, index)) return true;
+  }
+  return false;
+}
+
+function endsWithDoubleAsciiConsonant(word: string): boolean {
+  const last = word.length - 1;
+  if (last < 1 || word[last] !== word[last - 1]) return false;
+  return isAsciiConsonant(word, last);
+}
+
+function isAsciiCvc(word: string): boolean {
+  const last = word.length - 1;
+  if (last < 2) return false;
+  const finalChar = word[last];
+  return (
+    isAsciiConsonant(word, last) &&
+    !isAsciiConsonant(word, last - 1) &&
+    isAsciiConsonant(word, last - 2) &&
+    finalChar !== "w" &&
+    finalChar !== "x" &&
+    finalChar !== "y"
+  );
+}
+
+function replaceSuffixByMeasure(word: string, suffix: string, replacement: string, minMeasureExclusive: number): string | null {
+  if (!word.endsWith(suffix)) return null;
+  const stem = word.slice(0, -suffix.length);
+  if (asciiMeasure(stem) <= minMeasureExclusive) return null;
+  return `${stem}${replacement}`;
+}
+
+function porterStep1a(word: string): string {
+  if (word.endsWith("sses")) return word.slice(0, -2);
+  if (word.endsWith("ies")) return word.slice(0, -2);
+  if (word.endsWith("ss")) return word;
+  if (word.endsWith("s")) return word.slice(0, -1);
+  return word;
+}
+
+function porterStep1b(word: string): string {
+  const eedReplacement = replaceSuffixByMeasure(word, "eed", "ee", 0);
+  if (eedReplacement !== null) return eedReplacement;
+  if (word.endsWith("eed")) return word;
+
+  for (const suffix of ["ed", "ing"] as const) {
+    if (!word.endsWith(suffix)) continue;
+    let stem = word.slice(0, -suffix.length);
+    if (!containsAsciiVowel(stem)) return word;
+    if (stem.endsWith("at") || stem.endsWith("bl") || stem.endsWith("iz")) {
+      stem += "e";
+    } else if (endsWithDoubleAsciiConsonant(stem)) {
+      const finalChar = stem[stem.length - 1];
+      if (finalChar !== "l" && finalChar !== "s" && finalChar !== "z") {
+        stem = stem.slice(0, -1);
+      }
+    } else if (asciiMeasure(stem) === 1 && isAsciiCvc(stem)) {
+      stem += "e";
+    }
+    return stem;
+  }
+
+  return word;
+}
+
+function porterStep1c(word: string): string {
+  if (!word.endsWith("y")) return word;
+  const stem = word.slice(0, -1);
+  return containsAsciiVowel(stem) ? `${stem}i` : word;
+}
+
+const PORTER_STEP2_SUFFIXES: ReadonlyArray<readonly [suffix: string, replacement: string]> = [
+  ["ization", "ize"],
+  ["ational", "ate"],
+  ["fulness", "ful"],
+  ["ousness", "ous"],
+  ["iveness", "ive"],
+  ["tional", "tion"],
+  ["biliti", "ble"],
+  ["alism", "al"],
+  ["ation", "ate"],
+  ["ator", "ate"],
+  ["aliti", "al"],
+  ["iviti", "ive"],
+  ["enci", "ence"],
+  ["anci", "ance"],
+  ["izer", "ize"],
+  ["alli", "al"],
+  ["entli", "ent"],
+  ["ousli", "ous"],
+  ["bli", "ble"],
+  ["eli", "e"],
+  ["logi", "log"]
+];
+
+const PORTER_STEP3_SUFFIXES: ReadonlyArray<readonly [suffix: string, replacement: string]> = [
+  ["icate", "ic"],
+  ["ative", ""],
+  ["alize", "al"],
+  ["iciti", "ic"],
+  ["ical", "ic"],
+  ["ful", ""],
+  ["ness", ""]
+];
+
+const PORTER_STEP4_SUFFIXES = [
+  "ement",
+  "ance",
+  "ence",
+  "able",
+  "ible",
+  "ment",
+  "ant",
+  "ent",
+  "ism",
+  "ate",
+  "iti",
+  "ous",
+  "ive",
+  "ize",
+  "al",
+  "er",
+  "ic",
+  "ou"
+] as const;
+
+function applyPorterSuffixes(word: string, suffixes: ReadonlyArray<readonly [suffix: string, replacement: string]>): string {
+  for (const [suffix, replacement] of suffixes) {
+    const replaced = replaceSuffixByMeasure(word, suffix, replacement, 0);
+    if (replaced !== null) return replaced;
+  }
+  return word;
+}
+
+function porterStep4(word: string): string {
+  if (word.endsWith("ion")) {
+    const stem = word.slice(0, -3);
+    if (asciiMeasure(stem) > 1 && (stem.endsWith("s") || stem.endsWith("t"))) return stem;
+    return word;
+  }
+
+  for (const suffix of PORTER_STEP4_SUFFIXES) {
+    const replaced = replaceSuffixByMeasure(word, suffix, "", 1);
+    if (replaced !== null) return replaced;
+  }
+
+  return word;
+}
+
+function porterStep5a(word: string): string {
+  if (!word.endsWith("e")) return word;
+  const stem = word.slice(0, -1);
+  const measure = asciiMeasure(stem);
+  if (measure > 1 || (measure === 1 && !isAsciiCvc(stem))) return stem;
+  return word;
+}
+
+function porterStep5b(word: string): string {
+  if (asciiMeasure(word) > 1 && endsWithDoubleAsciiConsonant(word) && word.endsWith("l")) {
+    return word.slice(0, -1);
+  }
+  return word;
+}
+
+function porterStemAscii(word: string): string {
+  if (word.length < 3) return word;
+  let stem = porterStep1a(word);
+  stem = porterStep1b(stem);
+  stem = porterStep1c(stem);
+  stem = applyPorterSuffixes(stem, PORTER_STEP2_SUFFIXES);
+  stem = applyPorterSuffixes(stem, PORTER_STEP3_SUFFIXES);
+  stem = porterStep4(stem);
+  stem = porterStep5a(stem);
+  stem = porterStep5b(stem);
+  return stem;
 }
 
 export async function runSearchAnalyzerDaemon(

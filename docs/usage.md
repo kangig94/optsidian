@@ -41,7 +41,7 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `settings`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
+- CLI-only: `read`, `search`, `grep`, `index`, `config`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
 - MCP tools: `command_map`, `write`, `edit`, `apply_patch`
 
 Marketplace plugin installs stay native:
@@ -150,9 +150,9 @@ optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter`, so CJK text has a useful zero-config baseline without a language-specific model.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
 
-The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. The manifest records the analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists:
+The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. The manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists:
 
 ```bash
 optsidian index status
@@ -162,13 +162,13 @@ optsidian index clear
 
 Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` is parsed as a future Korean analyzer opt-in, but no dedicated Korean backend ships yet, so Hangul still falls back to the Intl baseline. This is mainly infrastructure for heavier analyzer backends.
 
-Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `settings` command does not create or edit it. Environment variables still override file settings:
+Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
 
 ```bash
-optsidian settings set search.analyzer=intl-daemon
-optsidian settings set search.extraLangs=ko
-optsidian settings get search.extraLangs
-optsidian settings unset search.extraLangs
+optsidian config set search.analyzer=intl-daemon
+optsidian config set search.extraLangs=ko
+optsidian config get search.extraLangs
+optsidian config unset search.extraLangs
 ```
 
 ```bash
@@ -310,14 +310,14 @@ Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`
 
 ## JSON Output
 
-The `read`, `search`, `grep`, `frontmatter`, `settings`, and custom-source `plugin:install` commands support `format=json`.
+The `read`, `search`, `grep`, `frontmatter`, `config`, and custom-source `plugin:install` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
 optsidian search query=TODO format=json
 optsidian grep query=TODO format=json
 optsidian frontmatter read path=note.md format=json
-optsidian settings list format=json
+optsidian config list format=json
 optsidian plugin:install path=../my-plugin vault-path=/path/to/vault format=json
 ```
 

@@ -14,23 +14,23 @@ export type OptsidianSettings = {
   search?: SearchSettings;
 };
 
-export type SettingsReadResult = {
+export type ConfigReadResult = {
   ok: true;
-  command: "settings";
+  command: "config";
   action: "get" | "list" | "path";
   path: string;
   key?: string;
   value: unknown;
 };
 
-export type SettingsMutationResult = {
+export type ConfigMutationResult = {
   ok: true;
-  command: "settings";
+  command: "config";
   action: "set" | "unset";
   path: string;
   key: string;
   value?: unknown;
-  settings: OptsidianSettings;
+  config: OptsidianSettings;
 };
 
 const SETTINGS_DIR = ".optsidian";
@@ -41,12 +41,12 @@ export function readOptsidianSettings(cwd = process.cwd(), env: NodeJS.ProcessEn
   return mergeSettings(readGlobalSettings(cwd, env), readLocalOverrideSettings(cwd));
 }
 
-export function getSettingsValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): SettingsReadResult {
+export function getConfigValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): ConfigReadResult {
   const path = resolveSettingsPath(cwd, env);
   const settings = readOptsidianSettings(cwd, env);
   return {
     ok: true,
-    command: "settings",
+    command: "config",
     action: "get",
     path,
     key,
@@ -54,48 +54,48 @@ export function getSettingsValue(cwd: string, key: string, env: NodeJS.ProcessEn
   };
 }
 
-export function listSettings(cwd: string, env: NodeJS.ProcessEnv = process.env): SettingsReadResult {
+export function listConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): ConfigReadResult {
   const path = resolveSettingsPath(cwd, env);
   return {
     ok: true,
-    command: "settings",
+    command: "config",
     action: "list",
     path,
     value: readOptsidianSettings(cwd, env)
   };
 }
 
-export function settingsPathResult(cwd: string, env: NodeJS.ProcessEnv = process.env): SettingsReadResult {
+export function configPathResult(cwd: string, env: NodeJS.ProcessEnv = process.env): ConfigReadResult {
   const path = resolveSettingsPath(cwd, env);
   return {
     ok: true,
-    command: "settings",
+    command: "config",
     action: "path",
     path,
     value: path
   };
 }
 
-export function setSettingsValue(
+export function setConfigValue(
   cwd: string,
   key: string,
   value: unknown,
   env: NodeJS.ProcessEnv = process.env
-): SettingsMutationResult {
+): ConfigMutationResult {
   const path = resolveSettingsPath(cwd, env);
   const settings = readGlobalSettings(cwd, env);
   setKnownSetting(settings, key, value);
   writeSettingsFile(path, settings);
-  return { ok: true, command: "settings", action: "set", path, key, value: getKnownSetting(settings, key), settings };
+  return { ok: true, command: "config", action: "set", path, key, value: getKnownSetting(settings, key), config: settings };
 }
 
-export function unsetSettingsValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): SettingsMutationResult {
+export function unsetConfigValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): ConfigMutationResult {
   const path = resolveSettingsPath(cwd, env);
   const settings = readGlobalSettings(cwd, env);
   unsetKnownSetting(settings, key);
   pruneEmptyObjects(settings);
   writeSettingsFile(path, settings);
-  return { ok: true, command: "settings", action: "unset", path, key, settings };
+  return { ok: true, command: "config", action: "unset", path, key, config: settings };
 }
 
 export function resolveSettingsPath(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {

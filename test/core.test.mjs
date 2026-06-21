@@ -76,6 +76,8 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
 
   assert.ok(tokenizeIntlText("検索方式を改善する").includes("検索"));
   assert.ok(tokenizeIntlText("中文搜索方式需要改善").includes("搜索"));
+  assert.deepEqual(tokenizeIntlText("résumés running studies"), ["resum", "run", "studi"]);
+  assert.deepEqual(tokenizeIntlText("한글"), ["한글"]);
   assert.deepEqual(tokenizeRoutedText("검색API", ["ko"]), ["검색", "api"]);
   assert.deepEqual(parseDeclaredSearchAnalyzers(" ko,KO , "), ["ko"]);
   const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
@@ -152,7 +154,7 @@ test("core ranked search uses metadata fields and external cache", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
-    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths, classifySearchManifestMismatch } = await import(path.join(repoRoot, "src/core/search.ts"));
     writeVaultFile(vault, {
       path: "Projects/Alpha.md",
       content: `---
@@ -184,9 +186,24 @@ The rollout is blocked by review.
     assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
     const analysisCache = JSON.parse(fs.readFileSync(cachePaths(vault).analysisPath, "utf8"));
     assert.equal(analysisCache.analyzer.name, "router");
-    assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-v1");
+    assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-latin-v2");
     assert.deepEqual(analysisCache.analyzer.activeAnalyzers, []);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
+    const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
+    assert.equal(manifest.identitySchemaVersion, 1);
+    assert.equal(manifest.schemaVersion, 3);
+    assert.match(manifest.schemaDigest, /^[a-f0-9]{64}$/);
+    assert.equal(manifest.tokenizerTier, "intl");
+    assert.deepEqual(manifest.declaredAnalyzers, []);
+    assert.deepEqual(manifest.activeAnalyzers, []);
+    assert.equal(manifest.nodeVersion, process.versions.node);
+    assert.equal(manifest.icuVersion, process.versions.icu ?? null);
+    assert.equal(classifySearchManifestMismatch(manifest, analysisCache.analyzer), "match");
+    assert.equal(classifySearchManifestMismatch({}, analysisCache.analyzer), "incompatible");
+    assert.equal(
+      classifySearchManifestMismatch(manifest, { ...analysisCache.analyzer, activeAnalyzers: ["ko"] }),
+      "tier-only-upgrade"
+    );
 
     const scoped = await searchVault(vault, { query: "project alpha", path: "Projects", limit: 2 });
     assert.deepEqual(scoped.matches.map((match) => match.path), ["Projects/Alpha.md"]);
