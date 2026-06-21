@@ -1595,9 +1595,10 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "search.indexWarmConcurrency: 2");
 
+  const searchEnv = { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_INDEX_DAEMON: "0" };
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
-    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
+    env: searchEnv
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
@@ -1605,19 +1606,7 @@ test("config command writes global settings and reads project-local overrides", 
   fs.writeFileSync(path.join(vault, "Notes", "search-new.md"), "# 신규\n\n신규 검색 설정.\n");
   result = run(["search", "query=신규", "format=json"], {
     cwd: project,
-    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    ok: true,
-    command: "search",
-    matches: [],
-    warnings: ["fts_index_stale_manifest"]
-  });
-
-  result = run(["search", "query=신규", "format=json"], {
-    cwd: project,
-    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES: "20" }
+    env: { ...searchEnv, OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES: "20" }
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-new.md"]);

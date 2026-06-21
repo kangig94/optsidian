@@ -101,6 +101,7 @@ export function renderIndexResult(
         lines.push(`- ${projection.key}${projection.roles.length > 0 ? ` [${projection.roles.join(", ")}]` : ""}: ${renderProjectionState(projection)}`);
       }
     }
+    lines.push(renderAnalyzerStatus(result.analyzer));
     lines.push(renderWarmAccess(result.warmAccess));
     lines.push(renderWarmSchedule(result.warmSchedule));
     if (result.reconcile) {
@@ -136,6 +137,20 @@ export function renderIndexResult(
     return `${lines.join("\n")}\n`;
   }
   return "Index cleared.\n";
+}
+
+function renderAnalyzerStatus(analyzer: SearchIndexStatusResult["analyzer"]): string {
+  const details = [
+    `target: ${analyzer.targetTier}`,
+    analyzer.declaredAnalyzers.length > 0 ? `declared: ${analyzer.declaredAnalyzers.join(",")}` : "declared: none",
+    analyzer.activeAnalyzers.length > 0 ? `active: ${analyzer.activeAnalyzers.join(",")}` : "active: none"
+  ];
+  if (analyzer.kiwi) {
+    details.push(`kiwi model: ${analyzer.kiwi.modelState}`);
+    details.push(`kiwi analyzer: ${analyzer.kiwi.analyzerState}`);
+    if (analyzer.kiwi.reason) details.push(`reason: ${analyzer.kiwi.reason}`);
+  }
+  return `Analyzer: ${details.join(", ")}.`;
 }
 
 function renderWarmAccess(access: SearchIndexStatusResult["warmAccess"]): string {

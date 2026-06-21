@@ -5,7 +5,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { RuntimeError, UsageError } from "../errors.js";
+import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "./kiwi-artifact.js";
+import { getKiwiAnalyzerManager } from "./kiwi-manager.js";
 import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
+import type { SearchAnalyzerRuntimeStatus } from "./types.js";
 
 export type SearchAnalyzerIdentity = {
   name: string;
@@ -23,10 +26,16 @@ export type SearchAnalyzerIdentity = {
 export type SearchAnalyzer = {
   identity: SearchAnalyzerIdentity;
   degradedAnalyzer?: SearchAnalyzer;
+  reconcileTargetAnalyzer?: SearchAnalyzer;
   isTerminalLoadError?(error: unknown): boolean;
-  withLease?<T>(run: (analyzer: SearchAnalyzer) => T | Promise<T>): Promise<T>;
+  withLease?<T>(run: (analyzer: SearchAnalyzer) => T | Promise<T>, options?: SearchAnalyzerLeaseOptions): Promise<T>;
   tokenize(text: string): Promise<string[]>;
   tokenizeBatch(texts: readonly string[]): Promise<string[][]>;
+};
+
+export type SearchAnalyzerLeaseOptions = {
+  wait?: boolean;
+  installIfMissing?: boolean;
 };
 
 export type SearchAnalyzerDegradedEvent = {
@@ -123,13 +132,22 @@ export function resolveSearchAnalyzer(
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
 ): SearchAnalyzer {
   const mode = searchAnalyzerMode(env, settings);
-  const declaredAnalyzers = parseDeclaredSearchAnalyzers(searchExtraLangsValue(env, settings));
-  if (mode === "intl") return createRouterAnalyzer(declaredAnalyzers);
-  if (mode === "intl-daemon") return createDaemonAnalyzer(env, settings, declaredAnalyzers);
-  if (mode === "kiwi") {
-    throw new UsageError(`${ANALYZER_MODE_ENV}=kiwi is not available. Use ${SEARCH_EXTRA_LANGS_ENV}=ko after a Korean analyzer backend is added.`);
+  const parsedDeclaredAnalyzers = parseDeclaredSearchAnalyzers(searchExtraLangsValue(env, settings));
+  const declaredAnalyzers = mode === "kiwi" && !parsedDeclaredAnalyzers.includes("ko")
+    ? [...parsedDeclaredAnalyzers, "ko" as const]
+    : parsedDeclaredAnalyzers;
+  const baseline = mode === "intl-daemon"
+    ? createDaemonAnalyzer(env, settings, declaredAnalyzers)
+    : createRouterAnalyzer(declaredAnalyzers);
+  if (mode === "intl" || mode === "intl-daemon") {
+    return declaredAnalyzers.includes("ko")
+      ? createKiwiAnalyzer(env, declaredAnalyzers, baseline)
+      : baseline;
   }
-  throw new UsageError(`${ANALYZER_MODE_ENV} must be one of: intl, intl-daemon`);
+  if (mode === "kiwi") {
+    return createKiwiAnalyzer(env, declaredAnalyzers, baseline);
+  }
+  throw new UsageError(`${ANALYZER_MODE_ENV} must be one of: intl, intl-daemon, kiwi`);
 }
 
 function searchAnalyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string {
@@ -178,6 +196,10 @@ export function parseDeclaredSearchAnalyzers(raw: string | undefined): SearchDec
   return [...declared].sort((left, right) => left.localeCompare(right));
 }
 
+function normalizeDeclaredSearchAnalyzers(values: readonly SearchDeclaredAnalyzer[]): SearchDeclaredAnalyzer[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
 export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): SearchAnalyzer | undefined {
   const name = identity.name.trim().toLowerCase();
   if (name !== "router" && name !== "intl") return undefined;
@@ -188,10 +210,11 @@ export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): Se
 export async function withSearchAnalyzerLease<T>(
   analyzer: SearchAnalyzer,
   run: (analyzer: SearchAnalyzer) => T | Promise<T>,
-  onDegraded?: (event: SearchAnalyzerDegradedEvent) => void | Promise<void>
+  onDegraded?: (event: SearchAnalyzerDegradedEvent) => void | Promise<void>,
+  options: SearchAnalyzerLeaseOptions = {}
 ): Promise<T> {
   try {
-    return analyzer.withLease ? await analyzer.withLease(run) : await run(analyzer);
+    return analyzer.withLease ? await analyzer.withLease(run, options) : await run(analyzer);
   } catch (error) {
     const degradedAnalyzer = analyzer.degradedAnalyzer;
     if (!isTerminalAnalyzerError(analyzer, error) || !degradedAnalyzer || degradedAnalyzer === analyzer) {
@@ -204,7 +227,7 @@ export async function withSearchAnalyzerLease<T>(
       reason: "terminal-load-error"
     };
     notifySearchAnalyzerDegraded(onDegraded, event);
-    return withSearchAnalyzerLease(degradedAnalyzer, run, onDegraded);
+    return withSearchAnalyzerLease(degradedAnalyzer, run, onDegraded, options);
   }
 }
 
@@ -230,19 +253,19 @@ export function tokenizeIntlText(text: string): string[] {
   return tokenizeRoutedText(text, []);
 }
 
-export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): string[] {
+export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi?: { tokens(text: string): string[] } | null): string[] {
   const normalized = normalizeAnalyzerInput(text);
   if (!normalized) return [];
   const tokens: string[] = [];
   for (const run of scriptRuns(normalized)) {
-    tokens.push(...tokenizeScriptRun(run, declaredAnalyzers));
+    tokens.push(...tokenizeScriptRun(run, declaredAnalyzers, kiwi));
   }
   return unique(tokens.map((token) => normalizeToken(token.trim())).filter(Boolean));
 }
 
-function tokenizeScriptRun(run: ScriptRun, declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): string[] {
-  if (run.script === "hangul" && declaredAnalyzers.includes("ko")) {
-    return tokenizeIntlRun(run.text);
+function tokenizeScriptRun(run: ScriptRun, declaredAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi?: { tokens(text: string): string[] } | null): string[] {
+  if (run.script === "hangul" && declaredAnalyzers.includes("ko") && kiwi) {
+    return kiwi.tokens(run.text);
   }
   return tokenizeIntlRun(run.text);
 }
@@ -617,6 +640,88 @@ function createDaemonAnalyzer(
     identity,
     tokenize: async (text) => (await requestDaemonTokenization([text], declaredAnalyzers, env, settings))[0] ?? [],
     tokenizeBatch: async (texts) => requestDaemonTokenization([...texts], declaredAnalyzers, env, settings)
+  };
+}
+
+function createKiwiAnalyzer(
+  env: NodeJS.ProcessEnv,
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  degradedAnalyzer: SearchAnalyzer
+): SearchAnalyzer {
+  const normalizedDeclared = normalizeDeclaredSearchAnalyzers(declaredAnalyzers);
+  const manager = getKiwiAnalyzerManager();
+  const identity = kiwiRouterIdentity(normalizedDeclared, normalizedDeclared.includes("ko") ? ["ko"] : []);
+  let targetAnalyzer: SearchAnalyzer;
+  const createLeasedAnalyzer = (activeAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi: { tokens(text: string): string[] } | null): SearchAnalyzer => {
+    const active = normalizeDeclaredSearchAnalyzers(activeAnalyzers);
+    if (!active.includes("ko")) {
+      return {
+        ...degradedAnalyzer,
+        reconcileTargetAnalyzer: targetAnalyzer
+      };
+    }
+    return {
+      identity: kiwiRouterIdentity(normalizedDeclared, active),
+      degradedAnalyzer,
+      isTerminalLoadError: (error) => manager.isTerminalLoadError(error),
+      tokenize: async (text) => tokenizeRoutedText(text, normalizedDeclared, kiwi),
+      tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, normalizedDeclared, kiwi))
+    };
+  };
+
+  targetAnalyzer = {
+    identity,
+    degradedAnalyzer,
+    isTerminalLoadError: (error) => manager.isTerminalLoadError(error),
+    withLease: async (run, options = {}) => manager.withAnalyzerLease(
+      env,
+      normalizedDeclared,
+      {
+        wait: options.wait === true,
+        installIfMissing: options.installIfMissing === true
+      },
+      (lease) => run(createLeasedAnalyzer(lease.activeAnalyzers, lease.analyzer))
+    ),
+    tokenize: async (text) => degradedAnalyzer.tokenize(text),
+    tokenizeBatch: async (texts) => degradedAnalyzer.tokenizeBatch(texts)
+  };
+  return targetAnalyzer;
+}
+
+function kiwiRouterIdentity(
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  activeAnalyzers: readonly SearchDeclaredAnalyzer[]
+): SearchAnalyzerIdentity {
+  return {
+    ...routerIdentity(declaredAnalyzers, activeAnalyzers),
+    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`
+  };
+}
+
+export function searchAnalyzerRuntimeStatus(
+  analyzer: SearchAnalyzer,
+  env: NodeJS.ProcessEnv = process.env
+): SearchAnalyzerRuntimeStatus {
+  const declaredAnalyzers = normalizeAnalyzerNames(analyzer.identity.declaredAnalyzers ?? []);
+  const activeAnalyzers = normalizeAnalyzerNames(analyzer.identity.activeAnalyzers ?? []);
+  const targetTier = activeAnalyzers.includes("ko") ? "kiwi" : "intl";
+  if (targetTier !== "kiwi") {
+    return { targetTier, declaredAnalyzers, activeAnalyzers };
+  }
+
+  const managerStatus = getKiwiAnalyzerManager().status(env);
+  return {
+    targetTier,
+    declaredAnalyzers,
+    activeAnalyzers,
+    kiwi: {
+      modelState: managerStatus.model.installed ? "installed" : "missing",
+      modelPath: managerStatus.model.targetDir,
+      missingFiles: managerStatus.model.missingFiles,
+      analyzerState: managerStatus.state,
+      leaseCount: managerStatus.leaseCount,
+      ...(managerStatus.state === "degraded" ? { reason: managerStatus.reason } : {})
+    }
   };
 }
 

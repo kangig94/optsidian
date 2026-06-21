@@ -124,6 +124,20 @@ export type SearchIndexProjectionStatus = {
   builtAt?: string;
 };
 
+export type SearchAnalyzerRuntimeStatus = {
+  targetTier: "intl" | "kiwi";
+  declaredAnalyzers: string[];
+  activeAnalyzers: string[];
+  kiwi?: {
+    modelState: "missing" | "installed";
+    modelPath: string;
+    missingFiles: string[];
+    analyzerState: "unloaded" | "loading" | "loaded" | "degraded";
+    leaseCount: number;
+    reason?: string;
+  };
+};
+
 export type SearchIndexWarmAccessStatus = {
   path: string;
   recent: boolean;
@@ -146,6 +160,7 @@ export type SearchIndexStatusResult = {
   action: "status";
   ready: boolean;
   staleTier?: boolean;
+  analyzer: SearchAnalyzerRuntimeStatus;
   projections: SearchIndexProjectionStatus[];
   warmAccess: SearchIndexWarmAccessStatus;
   warmSchedule: SearchIndexWarmScheduleStatus;

@@ -13,6 +13,7 @@ import {
   analyzerIdentityKey,
   createServedSearchAnalyzer,
   resolveSearchAnalyzer,
+  searchAnalyzerRuntimeStatus,
   tokensToSearchText,
   withSearchAnalyzerLease,
   type SearchAnalyzer,
@@ -32,6 +33,7 @@ import type {
   SearchIndexReconcileSnapshot,
   SearchIndexReconcileStatus,
   SearchIndexStatusResult,
+  SearchAnalyzerRuntimeStatus,
   SearchIndexWarmAccessStatus,
   SearchIndexWarmResult,
   SearchIndexWarmScheduleStatus,
@@ -50,6 +52,7 @@ const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 2;
 const SEARCH_ENGINE = "orama";
 const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
+const SEARCH_COMMIT_FILE = "commit.json";
 const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
 const SEARCH_RECONCILE_COMMAND = "__search-reconcile";
 const SEARCH_RECONCILE_LOCK_DIR = "reconcile.lock";
@@ -57,6 +60,7 @@ const SEARCH_RECONCILE_STATUS_FILE = "reconcile-status.json";
 const SEARCH_INDEX_WRITER_LOCK_DIR = "index-writer.lock";
 const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
 const SEARCH_INDEX_STALE_MANIFEST_WARNING = "fts_index_stale_manifest";
+const SEARCH_INDEX_BUILDING_WARNING = "fts_index_building";
 const SEARCH_RECONCILE_LOCK_STALE_MS = 30 * 60 * 1000;
 const SEARCH_RECONCILE_STATUS_SCHEMA_VERSION = 1;
 const SEARCH_RECONCILE_ERROR_MAX_LENGTH = 2048;
@@ -131,6 +135,7 @@ type CachePaths = {
   indexDir: string;
   indexPath: string;
   manifestPath: string;
+  commitPath: string;
   analysisPath: string;
 };
 
@@ -250,6 +255,13 @@ type PersistedIndex = {
   manifest: SearchManifest;
 };
 
+type SearchIndexCommit = {
+  schemaVersion: 1;
+  indexSha256: string;
+  manifestSha256: string;
+  writtenAt: string;
+};
+
 type RankedCandidate = {
   path: string;
   title: string;
@@ -325,7 +337,8 @@ export async function searchVaultWithAnalyzer(
   return withSearchAnalyzerLease(
     analyzer,
     (leasedAnalyzer) => searchVaultWithLeasedAnalyzer(vaultRoot, params, leasedAnalyzer, requestReconcile),
-    (event) => requestReconcile(vaultRoot, event.degradedAnalyzer, "terminal-analyzer-failure")
+    (event) => requestReconcile(vaultRoot, event.degradedAnalyzer, "terminal-analyzer-failure"),
+    { wait: false }
   );
 }
 
@@ -338,6 +351,14 @@ async function searchVaultWithLeasedAnalyzer(
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
   const plan = await loadSearchPlan(vaultRoot, analyzer, requestReconcile);
+  if (analyzer.reconcileTargetAnalyzer) {
+    addWarning(plan.warnings, SEARCH_INDEX_STALE_TIER_WARNING);
+    try {
+      requestReconcile(vaultRoot, analyzer.reconcileTargetAnalyzer, "stale-tier");
+    } catch {
+      // Background reconcile is best-effort from the read path.
+    }
+  }
   const stalePaths = staleResultPaths(plan.diff);
   const overlayAnalyzer = baselineAnalyzerForSearch(analyzer) ?? plan.projection.analyzer;
   const overlay = await buildSearchOverlay(vaultRoot, plan.currentFiles, plan.diff, overlayAnalyzer, plan.warnings);
@@ -399,6 +420,7 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
   return searchIndexStatus(
     Boolean(served),
     served?.staleTier === true,
+    searchAnalyzerRuntimeStatus(analyzer),
     projections,
     vaultAccessStatus(vaultRoot, { settings }),
     indexWarmScheduleStatus({ settings }),
@@ -410,6 +432,7 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
 function searchIndexStatus(
   ready: boolean,
   staleTier: boolean,
+  analyzer: SearchAnalyzerRuntimeStatus,
   projections: SearchIndexProjectionStatus[],
   warmAccess: SearchIndexWarmAccessStatus,
   warmSchedule: SearchIndexWarmScheduleStatus,
@@ -422,6 +445,7 @@ function searchIndexStatus(
     action: "status",
     ready,
     ...(staleTier ? { staleTier: true } : {}),
+    analyzer,
     projections,
     warmAccess,
     warmSchedule,
@@ -504,9 +528,8 @@ function readProjectionStatus(
     };
   }
 
-  try {
-    restoreDb(paths.indexPath);
-  } catch {
+  const persisted = readPersistedIndex(paths);
+  if (!persisted) {
     return {
       key,
       tier: manifest.tokenizerTier,
@@ -639,7 +662,12 @@ async function ensureSearchIndexWithAnalyzer(
   if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
     await ensureSearchIndexWithLeasedAnalyzer(vaultRoot, baselineAnalyzer, options);
   }
-  await withSearchAnalyzerLease(analyzer, (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer, options));
+  await withSearchAnalyzerLease(
+    analyzer,
+    (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer, options),
+    undefined,
+    { wait: true, installIfMissing: true }
+  );
 }
 
 async function ensureSearchIndexWithLeasedAnalyzer(
@@ -664,7 +692,7 @@ async function rebuildSearchIndexWithAnalyzer(vaultRoot: string, analyzer: Searc
       command: "index",
       action: "rebuild"
     };
-  });
+  }, undefined, { wait: true, installIfMissing: true });
 }
 
 async function rebuildSearchIndexWithLeasedAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
@@ -740,6 +768,7 @@ export function cachePaths(vaultRoot: string, analyzerKey = "intl"): CachePaths 
     indexDir,
     indexPath: path.join(indexDir, SEARCH_INDEX_FILE),
     manifestPath: path.join(indexDir, SEARCH_MANIFEST_FILE),
+    commitPath: path.join(indexDir, SEARCH_COMMIT_FILE),
     analysisPath: path.join(indexDir, SEARCH_ANALYSIS_CACHE_FILE)
   };
 }
@@ -1115,7 +1144,7 @@ async function loadSearchPlan(
   const currentFiles = currentFileManifest(vaultRoot);
 
   const targetPaths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
-  const target = await readStablePersistedIndex(targetPaths);
+  const target = await readStablePersistedIndex(targetPaths, { waitForWriter: false });
   const targetPlan = target ? searchPlanFromPersisted(target, analyzer, currentFiles, []) : undefined;
   if (targetPlan) {
     if (targetPlan.warnings.includes(SEARCH_INDEX_STALE_TIER_WARNING)) requestReconcile(vaultRoot, analyzer, "stale-tier");
@@ -1126,7 +1155,7 @@ async function loadSearchPlan(
   const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
   if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
     const baselinePaths = cachePaths(vaultRoot, analyzerCacheKey(baselineAnalyzer.identity));
-    const baseline = await readStablePersistedIndex(baselinePaths);
+    const baseline = await readStablePersistedIndex(baselinePaths, { waitForWriter: false });
     const baselinePlan = baseline ? searchPlanFromPersisted(baseline, analyzer, currentFiles, [SEARCH_INDEX_STALE_TIER_WARNING]) : undefined;
     if (baselinePlan) {
       requestReconcile(vaultRoot, analyzer, "stale-tier");
@@ -1136,6 +1165,10 @@ async function loadSearchPlan(
 
   const buildAnalyzer = baselineAnalyzer ?? analyzer;
   const buildPaths = cachePaths(vaultRoot, analyzerCacheKey(buildAnalyzer.identity));
+  if (isSearchIndexWriterLockActive(buildPaths.cacheDir)) {
+    requestReconcile(vaultRoot, analyzer, "stale-manifest");
+    return emptySearchPlan(currentFiles, buildAnalyzer, [SEARCH_INDEX_BUILDING_WARNING]);
+  }
   const loaded = await withSearchIndexWriterLock(buildPaths.cacheDir, vaultRoot, buildAnalyzer, "full-build", () =>
     loadOrBuildIndexForWrite(vaultRoot, buildAnalyzer, requestReconcile, buildPaths, { serveStaleTier: false })
   );
@@ -1146,6 +1179,24 @@ async function loadSearchPlan(
     diff: diffManifestFiles(loaded.manifest.files, currentFiles),
     currentFiles,
     warnings
+  };
+}
+
+function emptySearchPlan(
+  currentFiles: Record<string, FileManifest>,
+  analyzer: SearchAnalyzer,
+  warnings: string[]
+): SearchPlan {
+  return {
+    projection: {
+      db: createSearchDb(),
+      manifest: createSearchManifest(0, analyzer.identity, {}),
+      analyzer,
+      source: "persisted"
+    },
+    diff: { added: Object.keys(currentFiles), changed: [], deleted: [] },
+    currentFiles,
+    warnings: uniqueWarnings(warnings)
   };
 }
 
@@ -1316,17 +1367,16 @@ async function loadOrBuildIndexForWrite(
   options: SearchIndexWriteOptions
 ): Promise<LoadedIndex> {
   const currentFiles = currentFileManifest(vaultRoot);
+  const persisted = readPersistedIndex(paths);
   if (options.fastNoop) {
-    const manifest = readManifest(paths);
-    if (manifest && fs.existsSync(paths.indexPath)) {
-      const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
-      const diff = diffManifestFiles(manifest.files, currentFiles);
+    if (persisted) {
+      const mismatch = classifySearchManifestMismatch(persisted.manifest, analyzer.identity);
+      const diff = diffManifestFiles(persisted.manifest.files, currentFiles);
       if (mismatch === "match" && !hasManifestDiff(diff)) {
-        return { db: createSearchDb(), manifest, analyzer, warnings: [] };
+        return { db: createSearchDb(), manifest: persisted.manifest, analyzer, warnings: [] };
       }
     }
   }
-  const persisted = readPersistedIndex(paths);
   if (persisted) {
     const mismatch = classifySearchManifestMismatch(persisted.manifest, analyzer.identity);
     const diff = diffManifestFiles(persisted.manifest.files, currentFiles);
@@ -1370,9 +1420,8 @@ async function buildAndPersistIndexUnlocked(
   const analysisCache = readAnalysisCache(paths, analyzer.identity);
   const docs = await buildDocuments(vaultRoot, files, Object.keys(files), analyzer, analysisCache);
   await insertMultiple(db, docs, 500);
-  persistDb(db, paths.indexPath);
   const manifest = createSearchManifest(docs.length, analyzer.identity, files);
-  writeJsonFile(paths.manifestPath, manifest, 2);
+  persistIndexPair(db, manifest, paths);
   writeAnalysisCache(paths, analyzer.identity, files, docs);
   return manifest;
 }
@@ -1402,9 +1451,8 @@ async function applyIncrementalIndexUnlocked(
     await insertMultiple(db, docs, 500);
   }
 
-  persistDb(db, paths.indexPath);
   const manifest = createSearchManifest(await count(db), analyzer.identity, files);
-  writeJsonFile(paths.manifestPath, manifest, 2);
+  persistIndexPair(db, manifest, paths);
   writeAnalysisCache(paths, analyzer.identity, files, docs, analysisCache, new Set([...diff.deleted, ...diff.changed]));
   return manifest;
 }
@@ -1422,18 +1470,35 @@ function createSearchDb(): AnyOrama {
   });
 }
 
-function persistDb(db: AnyOrama, indexPath: string): void {
-  writeJsonFile(indexPath, save(db));
+function persistIndexPair(db: AnyOrama, manifest: SearchManifest, paths: CachePaths): void {
+  const indexRaw = writeJsonFile(paths.indexPath, save(db));
+  const manifestRaw = writeJsonFile(paths.manifestPath, manifest, 2);
+  writeJsonFile(paths.commitPath, createSearchIndexCommit(indexRaw, manifestRaw), 2);
 }
 
 function restoreDb(indexPath: string): AnyOrama {
+  return restoreDbFromRaw(fs.readFileSync(indexPath, "utf8"));
+}
+
+function restoreDbFromRaw(raw: string): AnyOrama {
   const db = createSearchDb();
-  load(db, JSON.parse(fs.readFileSync(indexPath, "utf8")) as RawData);
+  load(db, JSON.parse(raw) as RawData);
   return db;
 }
 
-function writeJsonFile(filePath: string, value: unknown, spaces?: number): void {
-  atomicWriteFile(filePath, `${JSON.stringify(value, null, spaces)}\n`);
+function writeJsonFile(filePath: string, value: unknown, spaces?: number): string {
+  const raw = `${JSON.stringify(value, null, spaces)}\n`;
+  atomicWriteFile(filePath, raw);
+  return raw;
+}
+
+function createSearchIndexCommit(indexRaw: string, manifestRaw: string): SearchIndexCommit {
+  return {
+    schemaVersion: 1,
+    indexSha256: sha256(indexRaw),
+    manifestSha256: sha256(manifestRaw),
+    writtenAt: new Date().toISOString()
+  };
 }
 
 function createSearchManifest(
@@ -1570,35 +1635,81 @@ function readManifestRaw(paths: CachePaths): ManifestRead | undefined {
   }
 }
 
-async function readStablePersistedIndex(paths: CachePaths): Promise<PersistedIndex | undefined> {
+async function readStablePersistedIndex(paths: CachePaths, options: { waitForWriter?: boolean } = {}): Promise<PersistedIndex | undefined> {
+  const waitForWriter = options.waitForWriter !== false;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await waitForSearchIndexWriterIdle(paths.cacheDir);
+    if (waitForWriter) {
+      await waitForSearchIndexWriterIdle(paths.cacheDir);
+    }
     if (!fs.existsSync(paths.indexPath)) return undefined;
+    const writerActiveBefore = isSearchIndexWriterLockActive(paths.cacheDir);
     const first = readManifestRaw(paths);
     if (!first) return undefined;
-    let db: AnyOrama;
+    let indexRaw: string;
     try {
-      db = restoreDb(paths.indexPath);
+      indexRaw = fs.readFileSync(paths.indexPath, "utf8");
     } catch {
       return undefined;
     }
     const second = readManifestRaw(paths);
-    if (second?.raw === first.raw && !isSearchIndexWriterLockActive(paths.cacheDir)) {
+    const writerActiveAfter = isSearchIndexWriterLockActive(paths.cacheDir);
+    if (second?.raw === first.raw && (!waitForWriter || !writerActiveAfter)) {
+      if (!indexCommitMatches(paths, indexRaw, first.raw)) {
+        return undefined;
+      }
+      let db: AnyOrama;
+      try {
+        db = restoreDbFromRaw(indexRaw);
+      } catch {
+        return undefined;
+      }
       return { db, manifest: first.manifest };
     }
+    if (!waitForWriter) return undefined;
   }
   return undefined;
 }
 
 function readPersistedIndex(paths: CachePaths): PersistedIndex | undefined {
   if (!fs.existsSync(paths.indexPath)) return undefined;
-  const manifest = readManifest(paths);
-  if (!manifest) return undefined;
+  const manifestRead = readManifestRaw(paths);
+  if (!manifestRead) return undefined;
+  let indexRaw: string;
   try {
-    return { db: restoreDb(paths.indexPath), manifest };
+    indexRaw = fs.readFileSync(paths.indexPath, "utf8");
   } catch {
     return undefined;
   }
+  if (!indexCommitMatches(paths, indexRaw, manifestRead.raw)) return undefined;
+  try {
+    return { db: restoreDbFromRaw(indexRaw), manifest: manifestRead.manifest };
+  } catch {
+    return undefined;
+  }
+}
+
+function readSearchIndexCommit(paths: CachePaths): SearchIndexCommit | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(paths.commitPath, "utf8")) as unknown;
+    return isSearchIndexCommit(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isSearchIndexCommit(value: unknown): value is SearchIndexCommit {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    typeof value.indexSha256 === "string" &&
+    typeof value.manifestSha256 === "string" &&
+    typeof value.writtenAt === "string"
+  );
+}
+
+function indexCommitMatches(paths: CachePaths, indexRaw: string, manifestRaw: string): boolean {
+  const commit = readSearchIndexCommit(paths);
+  return Boolean(commit && commit.indexSha256 === sha256(indexRaw) && commit.manifestSha256 === sha256(manifestRaw));
 }
 
 function isSearchManifest(value: unknown): value is SearchManifest {

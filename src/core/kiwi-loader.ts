@@ -1,0 +1,195 @@
+import fs from "node:fs";
+import initKiwiModule from "kiwi-nlp/dist/build/kiwi-wasm.js";
+import kiwiWasmBinary from "kiwi-nlp/dist/kiwi-wasm.wasm";
+import {
+  KIWI_MODEL_FILES,
+  KIWI_MODEL_TYPE,
+  KIWI_MODEL_VERSION,
+  KIWI_NLP_VERSION,
+  ensureKiwiModelArtifact,
+  inspectKiwiModelArtifact,
+  kiwiModelFilePath,
+  type KiwiModelFileName
+} from "./kiwi-artifact.js";
+
+export type KiwiAnalyzerIdentity = {
+  engine: "kiwi";
+  kiwiNlpVersion: string;
+  modelVersion: string;
+  modelType: typeof KIWI_MODEL_TYPE;
+};
+
+export type KiwiAnalyzer = {
+  identity: KiwiAnalyzerIdentity;
+  tokens(text: string): string[];
+  dispose(): Promise<void>;
+};
+
+export type LoadKiwiAnalyzerOptions = {
+  installIfMissing?: boolean;
+  env?: NodeJS.ProcessEnv;
+};
+
+type KiwiTokenInfo = {
+  str?: string;
+};
+
+type KiwiWasmModule = {
+  FS: {
+    mkdir(path: string): void;
+    writeFile(path: string, data: Uint8Array): void;
+    unlink(path: string): void;
+    rmdir(path: string): void;
+  };
+  api(command: string): string;
+};
+
+type KiwiWasmInitializer = (moduleArg?: Record<string, unknown>) => Promise<KiwiWasmModule>;
+
+type KiwiApi = {
+  cmd<T = unknown>(command: Record<string, unknown>): T;
+  loadModelFiles(files: Record<KiwiModelFileName, Uint8Array>): Promise<{
+    modelPath: string;
+    unload(): Promise<void>;
+  }>;
+};
+
+const initKiwi = initKiwiModule as unknown as KiwiWasmInitializer;
+const KIWI_MATCH_ALL_WITH_NORMALIZING = 8_454_207;
+
+export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): Promise<KiwiAnalyzer> {
+  const env = options.env ?? process.env;
+  if (options.installIfMissing === true) {
+    const installed = await ensureKiwiModelArtifact(env);
+    if (installed.status === "error") throw new Error(installed.message);
+  }
+
+  const state = inspectKiwiModelArtifact(env);
+  if (!state.installed) {
+    throw new Error("Kiwi model artifact is not installed");
+  }
+
+  const loaded = await buildDisposableKiwi(readModelFiles(env));
+  if (!loaded.ready()) {
+    await loaded.dispose();
+    throw new Error("Kiwi analyzer was constructed but is not ready");
+  }
+
+  let disposed = false;
+  return {
+    identity: kiwiAnalyzerIdentity(),
+    tokens(text: string): string[] {
+      if (disposed) throw new Error("Kiwi analyzer has been disposed");
+      return loaded.tokenize(text).map((token) => token.str).filter((token): token is string => Boolean(token));
+    },
+    async dispose(): Promise<void> {
+      if (disposed) return;
+      disposed = true;
+      await loaded.dispose();
+    }
+  };
+}
+
+export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
+  return {
+    engine: "kiwi",
+    kiwiNlpVersion: KIWI_NLP_VERSION,
+    modelVersion: KIWI_MODEL_VERSION,
+    modelType: KIWI_MODEL_TYPE
+  };
+}
+
+function readModelFiles(env: NodeJS.ProcessEnv): Record<KiwiModelFileName, Uint8Array> {
+  const files = {} as Record<KiwiModelFileName, Uint8Array>;
+  for (const fileName of KIWI_MODEL_FILES) {
+    files[fileName] = new Uint8Array(Buffer.from(fs.readFileSync(kiwiModelFilePath(fileName, env))));
+  }
+  return files;
+}
+
+async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Array>): Promise<{
+  ready(): boolean;
+  tokenize(text: string): KiwiTokenInfo[];
+  dispose(): Promise<void>;
+}> {
+  const api = await createKiwiApi();
+  const loadedModel = await api.loadModelFiles(modelFiles);
+  let disposed = false;
+  try {
+    const id = api.cmd<number>({
+      method: "build",
+      args: [{
+        modelType: KIWI_MODEL_TYPE,
+        modelPath: loadedModel.modelPath
+      }]
+    });
+    return {
+      ready(): boolean {
+        return api.cmd<boolean>({ method: "ready", id, args: [] });
+      },
+      tokenize(text: string): KiwiTokenInfo[] {
+        return api.cmd<KiwiTokenInfo[]>({
+          method: "tokenize",
+          id,
+          args: [text, KIWI_MATCH_ALL_WITH_NORMALIZING]
+        });
+      },
+      async dispose(): Promise<void> {
+        if (disposed) return;
+        disposed = true;
+        await loadedModel.unload();
+      }
+    };
+  } catch (error) {
+    await loadedModel.unload();
+    throw error;
+  }
+}
+
+async function createKiwiApi(): Promise<KiwiApi> {
+  const kiwi = await initKiwi({
+    wasmBinary: kiwiWasmBinary
+  });
+  return {
+    cmd<T = unknown>(command: Record<string, unknown>): T {
+      return JSON.parse(kiwi.api(JSON.stringify(command))) as T;
+    },
+    async loadModelFiles(files: Record<KiwiModelFileName, Uint8Array>) {
+      const modelPath = `kiwi-model-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      kiwi.FS.mkdir(modelPath);
+      const loadedFiles: string[] = [];
+      try {
+        for (const [name, data] of Object.entries(files)) {
+          const filePath = `${modelPath}/${name}`;
+          kiwi.FS.writeFile(filePath, data);
+          loadedFiles.push(filePath);
+        }
+      } catch (error) {
+        cleanupLoadedFiles(kiwi, modelPath, loadedFiles);
+        throw error;
+      }
+
+      return {
+        modelPath,
+        async unload(): Promise<void> {
+          cleanupLoadedFiles(kiwi, modelPath, loadedFiles);
+        }
+      };
+    }
+  };
+}
+
+function cleanupLoadedFiles(kiwi: KiwiWasmModule, modelPath: string, loadedFiles: string[]): void {
+  for (const filePath of [...loadedFiles].reverse()) {
+    try {
+      kiwi.FS.unlink(filePath);
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+  try {
+    kiwi.FS.rmdir(modelPath);
+  } catch {
+    // Best-effort cleanup only.
+  }
+}

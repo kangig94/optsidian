@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,21 @@ const repoRoot = process.cwd();
 
 function tempVault() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-core-"));
+}
+
+function sha256(raw) {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function recommitSearchIndexPair(paths) {
+  const indexRaw = fs.readFileSync(paths.indexPath, "utf8");
+  const manifestRaw = fs.readFileSync(paths.manifestPath, "utf8");
+  fs.writeFileSync(paths.commitPath, `${JSON.stringify({
+    schemaVersion: 1,
+    indexSha256: sha256(indexRaw),
+    manifestSha256: sha256(manifestRaw),
+    writtenAt: new Date().toISOString()
+  }, null, 2)}\n`);
 }
 
 async function core() {
@@ -82,19 +98,91 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
   assert.deepEqual(parseDeclaredSearchAnalyzers(" ko,KO , "), ["ko"]);
   const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
   assert.deepEqual(analyzer.identity.declaredAnalyzers, ["ko"]);
-  assert.deepEqual(analyzer.identity.activeAnalyzers, []);
+  assert.deepEqual(analyzer.identity.activeAnalyzers, ["ko"]);
   assert.ok((await analyzer.tokenize("한국어 검색")).includes("한국어"));
   const envOverSettings = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }, { search: { extraLangs: ["ko"] } });
   assert.deepEqual(envOverSettings.identity.declaredAnalyzers, []);
-  assert.throws(
-    () => resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_ANALYZER: "kiwi" }, { search: { analyzer: "intl" } }),
-    /kiwi is not available/
-  );
+  assert.deepEqual(resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_ANALYZER: "kiwi" }, { search: { analyzer: "intl" } }).identity.activeAnalyzers, ["ko"]);
   assert.equal(
     analyzerIdentityKey({ name: "custom", version: "1", node: "20", model: "m", runtime: "daemon" }),
     analyzerIdentityKey({ runtime: "daemon", model: "m", node: "20", version: "1", name: "custom" })
   );
   assert.throws(() => parseDeclaredSearchAnalyzers("ja"), /registered analyzers: ko/);
+});
+
+test("kiwi analyzer lease is non-blocking for search and blocking for warm", async () => {
+  const {
+    resolveSearchAnalyzer,
+    withSearchAnalyzerLease
+  } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+  const {
+    KiwiAnalyzerManager,
+    __setKiwiAnalyzerManagerForTests
+  } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+
+  const loadCalls = [];
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: () => ({
+      targetDir: "/tmp/kiwi-model",
+      manifestPath: "/tmp/kiwi-model/manifest.json",
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    loadAnalyzer: async (options) => {
+      loadCalls.push(options);
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: "0.23.0",
+          modelType: "cong-global"
+        },
+        tokens: (text) => [`kiwi:${text}`],
+        dispose: async () => {}
+      };
+    }
+  });
+
+  __setKiwiAnalyzerManagerForTests(manager);
+  try {
+    const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+    const nonBlocking = await withSearchAnalyzerLease(
+      analyzer,
+      async (leased) => ({
+        tokens: await leased.tokenize("한국어"),
+        hasTarget: Boolean(leased.reconcileTargetAnalyzer)
+      }),
+      undefined,
+      { wait: false }
+    );
+    assert.deepEqual(loadCalls, []);
+    assert.equal(nonBlocking.hasTarget, true);
+    assert.ok(nonBlocking.tokens.includes("한국어"));
+
+    const blocking = await withSearchAnalyzerLease(
+      analyzer,
+      async (leased) => leased.tokenize("한국어"),
+      undefined,
+      { wait: true, installIfMissing: true }
+    );
+    assert.deepEqual(blocking, ["kiwi:한국어"]);
+    assert.equal(loadCalls.length, 1);
+    assert.equal(loadCalls[0].installIfMissing, true);
+  } finally {
+    await manager.close();
+    __setKiwiAnalyzerManagerForTests(null);
+  }
 });
 
 test("read caps by lines and pages without gaps", async () => {
@@ -334,14 +422,14 @@ test("core search serves a valid Intl index during analyzer tier upgrades", asyn
     assert.deepEqual(manifest.declaredAnalyzers, ["ko"]);
     assert.deepEqual(manifest.activeAnalyzers, []);
 
-    const futureAnalyzer = {
+    const targetAnalyzer = {
       identity: { ...manifest.analyzer, activeAnalyzers: ["ko"] },
       tokenize: async (text) => [`kiwi_${text}`],
       tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
     };
     const reconcileRequests = [];
 
-    const stale = await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer, (root, analyzer, reason) => {
+    const stale = await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, targetAnalyzer, (root, analyzer, reason) => {
       reconcileRequests.push({ root, identity: analyzer.identity, reason });
     });
 
@@ -374,7 +462,7 @@ test("core search coalesces background reconcile requests until the child exits"
     });
 
     const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
-    const futureAnalyzer = {
+    const targetAnalyzer = {
       identity: { ...manifest.analyzer, activeAnalyzers: ["ko"] },
       tokenize: async (text) => [`kiwi_${text}`],
       tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
@@ -399,13 +487,13 @@ test("core search coalesces background reconcile requests until the child exits"
       return child;
     });
     try {
-      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
-      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, targetAnalyzer);
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, targetAnalyzer);
       assert.equal(spawns.length, 1);
       assert.deepEqual(spawns[0].args, ["__search-reconcile", vault, "reason=stale-tier"]);
 
       children[0].emit("close");
-      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, targetAnalyzer);
       assert.equal(spawns.length, 2);
     } finally {
       __setSearchReconcileChildSpawnerForTests(undefined);
@@ -530,6 +618,7 @@ test("core reconcile refreshes search index incrementally", async () => {
     const betaStat = fs.statSync(betaPath);
     manifest.files["Notes/Beta.md"] = { mtimeMs: betaStat.mtimeMs, size: betaStat.size };
     fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    recommitSearchIndexPair(paths);
 
     await reconcileSearchIndex(vault, "manual");
     result = await searchVault(vault, { query: "beta", limit: 5 });
@@ -557,6 +646,7 @@ test("core warm refreshes search index incrementally", async () => {
     const betaStat = fs.statSync(betaPath);
     manifest.files["Notes/Beta.md"] = { mtimeMs: betaStat.mtimeMs, size: betaStat.size };
     fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    recommitSearchIndexPair(paths);
 
     const warm = await warmSearchIndexes([vault]);
     assert.deepEqual(warm.vaults.map((entry) => entry.status), ["ready"]);
@@ -607,7 +697,8 @@ test("core search index writer lock protects reads and recovers stale locks", as
     fs.mkdirSync(lockDir, { recursive: true });
     __setSearchIndexWriterLockWaitMsForTests(1);
     try {
-      await assert.rejects(() => searchVault(vault, { query: "alpha", limit: 5 }), /Timed out waiting for search index writer lock/);
+      const served = await searchVault(vault, { query: "alpha", limit: 5 });
+      assert.deepEqual(served.matches.map((match) => match.path), ["Notes/Writer.md"]);
     } finally {
       __setSearchIndexWriterLockWaitMsForTests(undefined);
       fs.rmSync(lockDir, { recursive: true, force: true });
@@ -635,6 +726,71 @@ test("core search index writer lock protects reads and recovers stale locks", as
   });
 });
 
+test("core search requires a committed index pair while a writer is active", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { rebuildSearchIndex, searchVault, writeVaultFile } = await core();
+    const { cachePaths, searchIndexWriterLockPath } = await import(path.join(repoRoot, "src/core/search.ts"));
+
+    writeVaultFile(vault, {
+      path: "Notes/Commit.md",
+      content: "# Commit\n\nalpha\n"
+    });
+    await searchVault(vault, { query: "alpha", limit: 5 });
+
+    const paths = cachePaths(vault);
+    const oldManifestRaw = fs.readFileSync(paths.manifestPath, "utf8");
+    writeVaultFile(vault, {
+      path: "Notes/Commit.md",
+      content: "# Commit\n\nalpha beta expanded\n",
+      overwrite: true
+    });
+    await rebuildSearchIndex(vault);
+    fs.writeFileSync(paths.manifestPath, oldManifestRaw);
+
+    const lockDir = searchIndexWriterLockPath(vault);
+    fs.mkdirSync(lockDir, { recursive: true });
+    try {
+      const result = await searchVault(vault, { query: "beta", limit: 5 });
+      assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Commit.md"]);
+      assert.ok(result.warnings?.includes("fts_index_building"));
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("core search rebuilds an uncommitted persisted index pair after a torn write", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { rebuildSearchIndex, searchVault, writeVaultFile } = await core();
+    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
+
+    writeVaultFile(vault, {
+      path: "Notes/Torn.md",
+      content: "# Torn\n\nalpha\n"
+    });
+    await searchVault(vault, { query: "alpha", limit: 5 });
+
+    const paths = cachePaths(vault);
+    const oldManifestRaw = fs.readFileSync(paths.manifestPath, "utf8");
+    writeVaultFile(vault, {
+      path: "Notes/Torn.md",
+      content: "# Torn\n\nalpha beta repaired\n",
+      overwrite: true
+    });
+    await rebuildSearchIndex(vault);
+    fs.writeFileSync(paths.manifestPath, oldManifestRaw);
+
+    const result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Torn.md"]);
+    const repairedManifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    assert.equal(repairedManifest.files["Notes/Torn.md"].size, fs.statSync(path.join(vault, "Notes", "Torn.md")).size);
+  });
+});
+
 test("core search degrades terminal analyzer load failures to Intl", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
@@ -647,10 +803,11 @@ test("core search degrades terminal analyzer load failures to Intl", async () =>
       content: "# Degraded Analyzer\n\n한국어 검색 fallback marker\n"
     });
 
-    const intlAnalyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+    const intlAnalyzer = resolveSearchAnalyzer({}, {});
+    const degradedIdentity = { ...intlAnalyzer.identity, declaredAnalyzers: ["ko"], activeAnalyzers: [] };
     let fallbackLeases = 0;
     const degradedAnalyzer = {
-      identity: intlAnalyzer.identity,
+      identity: degradedIdentity,
       withLease: async (run) => {
         fallbackLeases += 1;
         return run(intlAnalyzer);
@@ -659,7 +816,7 @@ test("core search degrades terminal analyzer load failures to Intl", async () =>
       tokenizeBatch: (texts) => intlAnalyzer.tokenizeBatch(texts)
     };
     const terminalAnalyzer = {
-      identity: { ...degradedAnalyzer.identity, activeAnalyzers: ["ko"] },
+      identity: { ...degradedIdentity, activeAnalyzers: ["ko"] },
       degradedAnalyzer,
       isTerminalLoadError: (error) => error instanceof SearchAnalyzerTerminalLoadError,
       withLease: async () => {
@@ -696,7 +853,12 @@ test("core search isolates terminal analyzer degrade observer failures", async (
       content: "# Observer Failure\n\n한국어 검색 observer fallback\n"
     });
 
-    const degradedAnalyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+    const intlAnalyzer = resolveSearchAnalyzer({}, {});
+    const degradedAnalyzer = {
+      identity: { ...intlAnalyzer.identity, declaredAnalyzers: ["ko"], activeAnalyzers: [] },
+      tokenize: (text) => intlAnalyzer.tokenize(text),
+      tokenizeBatch: (texts) => intlAnalyzer.tokenizeBatch(texts)
+    };
     const terminalAnalyzer = {
       identity: { ...degradedAnalyzer.identity, activeAnalyzers: ["ko"] },
       degradedAnalyzer,
