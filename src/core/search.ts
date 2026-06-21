@@ -19,11 +19,13 @@ import {
   type SearchAnalyzerIdentity
 } from "./search-analyzer.js";
 import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
+import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 import { decodeUtf8, splitText } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
 import type {
   SearchField,
   SearchIndexMutationResult,
+  SearchIndexProjectionStatus,
   SearchIndexReconcileRunStatus,
   SearchIndexReconcileSnapshot,
   SearchIndexReconcileStatus,
@@ -381,34 +383,15 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const reconcile = readSearchReconcileStatus(paths.cacheDir);
   const reconcileStatus = readSearchReconcileSnapshot(paths.cacheDir);
-  const status = readProjectionStatus(paths, analyzer);
-  if (status) return searchIndexStatus(true, status.staleTier, reconcile, reconcileStatus);
-
-  const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
-  if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
-    const baselineStatus = readProjectionStatus(cachePaths(vaultRoot, analyzerCacheKey(baselineAnalyzer.identity)), analyzer);
-    if (baselineStatus) return searchIndexStatus(true, true, reconcile, reconcileStatus);
-  }
-
-  return searchIndexStatus(false, false, reconcile, reconcileStatus);
-}
-
-function readProjectionStatus(paths: CachePaths, analyzer: SearchAnalyzer): { staleTier: boolean } | undefined {
-  const manifest = readManifest(paths);
-  if (!fs.existsSync(paths.indexPath) || !manifest) return undefined;
-  const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
-  if (mismatch !== "match" && mismatch !== "tier-only-upgrade") return undefined;
-  try {
-    restoreDb(paths.indexPath);
-  } catch {
-    return undefined;
-  }
-  return { staleTier: mismatch === "tier-only-upgrade" };
+  const projections = searchIndexProjectionStatuses(vaultRoot, analyzer);
+  const served = projections.find((projection) => projection.compatible);
+  return searchIndexStatus(Boolean(served), served?.staleTier === true, projections, reconcile, reconcileStatus);
 }
 
 function searchIndexStatus(
   ready: boolean,
   staleTier: boolean,
+  projections: SearchIndexProjectionStatus[],
   reconcile: SearchIndexReconcileStatus | undefined,
   reconcileStatus: SearchIndexReconcileSnapshot | undefined
 ): SearchIndexStatusResult {
@@ -418,9 +401,133 @@ function searchIndexStatus(
     action: "status",
     ready,
     ...(staleTier ? { staleTier: true } : {}),
+    projections,
     ...(reconcile ? { reconcile } : {}),
     ...(reconcileStatus ? { reconcileStatus } : {})
   };
+}
+
+function searchIndexProjectionStatuses(vaultRoot: string, analyzer: SearchAnalyzer): SearchIndexProjectionStatus[] {
+  const activeKey = analyzerCacheKey(analyzer.identity);
+  const keys = new Set<string>([activeKey]);
+  const roles = new Map<string, Set<SearchIndexProjectionStatus["roles"][number]>>();
+  addProjectionRole(roles, activeKey, "active");
+
+  const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
+  if (baselineAnalyzer) {
+    const baselineKey = analyzerCacheKey(baselineAnalyzer.identity);
+    keys.add(baselineKey);
+    addProjectionRole(roles, baselineKey, "baseline");
+  }
+
+  const rootPaths = cachePaths(vaultRoot);
+  for (const key of cachedProjectionKeys(rootPaths.cacheDir)) {
+    keys.add(key);
+    addProjectionRole(roles, key, "cached");
+  }
+
+  return [...keys]
+    .sort(compareProjectionKeys(activeKey, analyzerCacheKey((baselineAnalyzer ?? analyzer).identity)))
+    .map((key) => readProjectionStatus(vaultRoot, key, analyzer, [...(roles.get(key) ?? new Set())]));
+}
+
+function addProjectionRole(
+  roles: Map<string, Set<SearchIndexProjectionStatus["roles"][number]>>,
+  key: string,
+  role: SearchIndexProjectionStatus["roles"][number]
+): void {
+  const set = roles.get(key) ?? new Set<SearchIndexProjectionStatus["roles"][number]>();
+  set.add(role);
+  roles.set(key, set);
+}
+
+function cachedProjectionKeys(cacheDir: string): string[] {
+  const indexesDir = path.join(cacheDir, "indexes");
+  try {
+    return fs.readdirSync(indexesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch (error) {
+    if (isNoEntryError(error)) return [];
+    throw error;
+  }
+}
+
+function readProjectionStatus(
+  vaultRoot: string,
+  key: string,
+  analyzer: SearchAnalyzer,
+  roles: SearchIndexProjectionStatus["roles"]
+): SearchIndexProjectionStatus {
+  const paths = cachePaths(vaultRoot, key);
+  if (!fs.existsSync(paths.indexPath) || !fs.existsSync(paths.manifestPath)) {
+    return {
+      key,
+      tier: projectionTierForKey(key),
+      roles,
+      state: "missing",
+      compatible: false
+    };
+  }
+
+  const manifest = readManifest(paths);
+  if (!manifest) {
+    return {
+      key,
+      tier: projectionTierForKey(key),
+      roles,
+      state: "unreadable",
+      compatible: false
+    };
+  }
+
+  try {
+    restoreDb(paths.indexPath);
+  } catch {
+    return {
+      key,
+      tier: manifest.tokenizerTier,
+      roles,
+      state: "unreadable",
+      compatible: false,
+      documents: manifest.documents,
+      files: Object.keys(manifest.files).length,
+      builtAt: manifest.builtAt
+    };
+  }
+
+  const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
+  const compatible = mismatch === "match" || mismatch === "tier-only-upgrade";
+  return {
+    key,
+    tier: manifest.tokenizerTier,
+    roles,
+    state: "ready",
+    compatible,
+    ...(mismatch === "tier-only-upgrade" ? { staleTier: true } : {}),
+    documents: manifest.documents,
+    files: Object.keys(manifest.files).length,
+    builtAt: manifest.builtAt
+  };
+}
+
+function projectionTierForKey(key: string): SearchTokenizerTier {
+  return key.startsWith("kiwi") ? "kiwi" : "intl";
+}
+
+function compareProjectionKeys(activeKey: string, baselineKey: string): (left: string, right: string) => number {
+  return (left, right) => {
+    const leftRank = projectionKeyRank(left, activeKey, baselineKey);
+    const rightRank = projectionKeyRank(right, activeKey, baselineKey);
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return left.localeCompare(right);
+  };
+}
+
+function projectionKeyRank(key: string, activeKey: string, baselineKey: string): number {
+  if (key === activeKey) return 0;
+  if (key === baselineKey) return 1;
+  return 2;
 }
 
 export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndexMutationResult> {
@@ -1654,10 +1761,21 @@ function overlayWithinLimits(files: Record<string, FileManifest>, relPaths: read
   return true;
 }
 
-function searchOverlayLimits(env: NodeJS.ProcessEnv = process.env): SearchOverlayLimits {
+function searchOverlayLimits(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+): SearchOverlayLimits {
   return {
-    maxFiles: parseNonNegativeIntegerEnv(env[SEARCH_OVERLAY_MAX_FILES_ENV], SEARCH_OVERLAY_MAX_FILES_DEFAULT, SEARCH_OVERLAY_MAX_FILES_ENV),
-    maxBytes: parseNonNegativeIntegerEnv(env[SEARCH_OVERLAY_MAX_BYTES_ENV], SEARCH_OVERLAY_MAX_BYTES_DEFAULT, SEARCH_OVERLAY_MAX_BYTES_ENV)
+    maxFiles: parseNonNegativeIntegerEnv(
+      env[SEARCH_OVERLAY_MAX_FILES_ENV],
+      settings.search?.overlayMaxFiles ?? SEARCH_OVERLAY_MAX_FILES_DEFAULT,
+      SEARCH_OVERLAY_MAX_FILES_ENV
+    ),
+    maxBytes: parseNonNegativeIntegerEnv(
+      env[SEARCH_OVERLAY_MAX_BYTES_ENV],
+      settings.search?.overlayMaxBytes ?? SEARCH_OVERLAY_MAX_BYTES_DEFAULT,
+      SEARCH_OVERLAY_MAX_BYTES_ENV
+    )
   };
 }
 

@@ -8,6 +8,8 @@ export type SearchSettings = {
   extraLangs?: string[];
   analyzerIdleMs?: number;
   analyzerRequestTimeoutMs?: number;
+  overlayMaxFiles?: number;
+  overlayMaxBytes?: number;
 };
 
 export type OptsidianSettings = {
@@ -165,6 +167,12 @@ function normalizeSettings(value: unknown): OptsidianSettings {
         "search.analyzerRequestTimeoutMs"
       );
     }
+    if (value.search.overlayMaxFiles !== undefined) {
+      settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value.search.overlayMaxFiles, "search.overlayMaxFiles");
+    }
+    if (value.search.overlayMaxBytes !== undefined) {
+      settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value.search.overlayMaxBytes, "search.overlayMaxBytes");
+    }
   }
   return settings;
 }
@@ -179,6 +187,10 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.analyzerIdleMs;
     case "search.analyzerRequestTimeoutMs":
       return settings.search?.analyzerRequestTimeoutMs;
+    case "search.overlayMaxFiles":
+      return settings.search?.overlayMaxFiles;
+    case "search.overlayMaxBytes":
+      return settings.search?.overlayMaxBytes;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -199,6 +211,12 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
     case "search.analyzerRequestTimeoutMs":
       settings.search.analyzerRequestTimeoutMs = normalizePositiveInteger(value, key);
       return;
+    case "search.overlayMaxFiles":
+      settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value, key);
+      return;
+    case "search.overlayMaxBytes":
+      settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value, key);
+      return;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -217,6 +235,12 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.analyzerRequestTimeoutMs":
       if (settings.search) delete settings.search.analyzerRequestTimeoutMs;
+      return;
+    case "search.overlayMaxFiles":
+      if (settings.search) delete settings.search.overlayMaxFiles;
+      return;
+    case "search.overlayMaxBytes":
+      if (settings.search) delete settings.search.overlayMaxBytes;
       return;
     default:
       throw new UsageError(knownSettingMessage());
@@ -250,6 +274,12 @@ function normalizePositiveInteger(value: unknown, key: string): number {
   return parsed;
 }
 
+function normalizeNonNegativeInteger(value: unknown, key: string): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new UsageError(`${key} must be a non-negative integer`);
+  return parsed;
+}
+
 function writeSettingsFile(file: string, settings: OptsidianSettings): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
@@ -260,7 +290,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

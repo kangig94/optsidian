@@ -1194,11 +1194,32 @@ test("search ranks notes and index commands manage cache", async () => {
 
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Index ready.\n");
+  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n$/);
 
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "status", ready: true });
+  const statusPayload = JSON.parse(result.stdout);
+  assert.equal(statusPayload.ready, true);
+  assert.equal(statusPayload.staleTier, undefined);
+  assert.deepEqual(statusPayload.projections.map((projection) => ({
+    key: projection.key,
+    tier: projection.tier,
+    roles: projection.roles,
+    state: projection.state,
+    compatible: projection.compatible,
+    documents: projection.documents,
+    files: projection.files
+  })), [
+    {
+      key: "intl",
+      tier: "intl",
+      roles: ["active", "baseline", "cached"],
+      state: "ready",
+      compatible: true,
+      documents: 2,
+      files: 2
+    }
+  ]);
 
   const { cachePaths } = await import(path.resolve("src/core/search.ts"));
   const statusPaths = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => cachePaths(vault));
@@ -1208,10 +1229,7 @@ test("search ranks notes and index commands manage cache", async () => {
   try {
     result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(
-      result.stdout,
-      "Index ready.\nReconcile running (reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00.000Z).\n"
-    );
+    assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\nReconcile running \(reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00\.000Z\)\.\n$/);
 
     result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
     assert.equal(result.status, 0, result.stderr);
@@ -1257,9 +1275,9 @@ test("search ranks notes and index commands manage cache", async () => {
   );
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(
+  assert.match(
     result.stdout,
-    "Index ready.\nLast reconcile: failure (reason: manual, finished: 2026-06-21T00:00:01.000Z, duration: 1000ms, error: simulated failure).\n"
+    /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\nLast reconcile: failure \(reason: manual, finished: 2026-06-21T00:00:01\.000Z, duration: 1000ms, error: simulated failure\)\.\n$/
   );
 
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
@@ -1317,7 +1335,7 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
 
   result = run(["index", "status", "vault-path=" + secondVault], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Index ready.\n");
+  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 1, files: 1\n$/);
 
   const overrideRegistry = path.join(dir, "override-obsidian.json");
   fs.writeFileSync(
@@ -1379,7 +1397,7 @@ test("search wakes the index daemon to warm discovered vaults", async () => {
   while (Date.now() < deadline && !ready) {
     const status = run(["index", "status", "vault-path=" + secondVault], { env: searchEnv });
     assert.equal(status.status, 0, status.stderr);
-    ready = status.stdout === "Index ready.\n";
+    ready = status.stdout.startsWith("Index ready.\n");
     if (!ready) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   assert.equal(ready, true);
@@ -1521,12 +1539,40 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'search.extraLangs: ["ko"]');
 
+  result = run(["config", "set", "search.overlayMaxFiles=0", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.overlayMaxFiles, 0);
+
+  result = run(["config", "get", "search.overlayMaxFiles"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.overlayMaxFiles: 0");
+
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
     env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
+
+  fs.writeFileSync(path.join(vault, "Notes", "search-new.md"), "# 신규\n\n신규 검색 설정.\n");
+  result = run(["search", "query=신규", "format=json"], {
+    cwd: project,
+    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    ok: true,
+    command: "search",
+    matches: [],
+    warnings: ["fts_index_stale_manifest"]
+  });
+
+  result = run(["search", "query=신규", "format=json"], {
+    cwd: project,
+    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES: "20" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-new.md"]);
 
   const { cachePaths } = await import(path.resolve("src/core/search.ts"));
   const manifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
@@ -1550,6 +1596,10 @@ test("config command writes global settings and reads project-local overrides", 
   assert.deepEqual(envOverrideManifest.analyzer.declaredAnalyzers, []);
 
   result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0 } });
+
+  result = run(["config", "unset", "search.overlayMaxFiles", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, {});
 

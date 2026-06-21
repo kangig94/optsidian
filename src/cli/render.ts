@@ -95,6 +95,12 @@ export function renderIndexResult(
   }
   if (result.action === "status") {
     const lines = [result.ready ? (result.staleTier ? "Index ready (stale analyzer tier)." : "Index ready.") : "Index missing."];
+    if (result.projections.length > 0) {
+      lines.push("Projections:");
+      for (const projection of result.projections) {
+        lines.push(`- ${projection.key}${projection.roles.length > 0 ? ` [${projection.roles.join(", ")}]` : ""}: ${renderProjectionState(projection)}`);
+      }
+    }
     if (result.reconcile) {
       const details = [
         result.reconcile.reason ? `reason: ${result.reconcile.reason}` : "",
@@ -128,6 +134,16 @@ export function renderIndexResult(
     return `${lines.join("\n")}\n`;
   }
   return "Index cleared.\n";
+}
+
+function renderProjectionState(projection: SearchIndexStatusResult["projections"][number]): string {
+  const details = [
+    projection.state,
+    projection.compatible ? (projection.staleTier ? "stale-tier" : "compatible") : "",
+    projection.documents !== undefined ? `documents: ${projection.documents}` : "",
+    projection.files !== undefined ? `files: ${projection.files}` : ""
+  ].filter(Boolean);
+  return details.join(", ");
 }
 
 function renderReconcileRun(run: SearchIndexReconcileRunStatus): string {

@@ -12,7 +12,14 @@ import {
 import { parseDeclaredSearchAnalyzers } from "../../core/search-analyzer.js";
 import { UsageError } from "../../errors.js";
 
-const SETTING_KEYS = new Set(["search.analyzer", "search.extraLangs", "search.analyzerIdleMs", "search.analyzerRequestTimeoutMs"]);
+const SETTING_KEYS = new Set([
+  "search.analyzer",
+  "search.extraLangs",
+  "search.analyzerIdleMs",
+  "search.analyzerRequestTimeoutMs",
+  "search.overlayMaxFiles",
+  "search.overlayMaxBytes"
+]);
 
 export function runConfig(args: ParsedArgs): void {
   const action = args.positionals[0] ?? "list";
@@ -74,7 +81,9 @@ function parseSettingValue(key: string, value: string): unknown {
 
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
-    throw new UsageError("config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs");
+    throw new UsageError(
+      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes"
+    );
   }
 }
 

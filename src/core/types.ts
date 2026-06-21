@@ -112,12 +112,25 @@ export type SearchIndexReconcileSnapshot = {
   lastFailure?: SearchIndexReconcileRunStatus;
 };
 
+export type SearchIndexProjectionStatus = {
+  key: string;
+  tier: "intl" | "kiwi";
+  roles: Array<"active" | "baseline" | "cached">;
+  state: "missing" | "ready" | "unreadable";
+  compatible: boolean;
+  staleTier?: boolean;
+  documents?: number;
+  files?: number;
+  builtAt?: string;
+};
+
 export type SearchIndexStatusResult = {
   ok: true;
   command: "index";
   action: "status";
   ready: boolean;
   staleTier?: boolean;
+  projections: SearchIndexProjectionStatus[];
   reconcile?: SearchIndexReconcileStatus;
   reconcileStatus?: SearchIndexReconcileSnapshot;
 };
