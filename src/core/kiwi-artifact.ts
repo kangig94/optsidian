@@ -14,6 +14,11 @@ export const KIWI_MODEL_URL = `https://github.com/bab2min/Kiwi/releases/download
 export const KIWI_MODEL_SHA256 = "355a006ab0bd4dec171cdca8e0b0d951e82bd5bc5993265421d8961876f20430";
 export const KIWI_MODEL_ARCHIVE_SIZE_BYTES = 88_069_544;
 export const KIWI_MODEL_TAR_PREFIX = "models/cong/base/";
+export const KIWI_WASM_FILE_NAME = "kiwi-wasm.wasm";
+export const KIWI_WASM_NPM_TARBALL_URL = `https://registry.npmjs.org/kiwi-nlp/-/kiwi-nlp-${KIWI_NLP_VERSION}.tgz`;
+export const KIWI_WASM_TAR_PATH = `package/dist/${KIWI_WASM_FILE_NAME}`;
+export const KIWI_WASM_SHA256 = "1b78e48701468610cbb49b34105fd297dc1252774ef5c861ebf80fd6cc7d664e";
+export const KIWI_WASM_SIZE_BYTES = 3_779_034;
 export const KIWI_MODEL_FILES = [
   "sj.morph",
   "default.dict",
@@ -48,6 +53,25 @@ export type KiwiModelArtifactState = {
   missingFiles: string[];
 };
 
+export type KiwiWasmArtifactManifest = {
+  packageId: "kiwi-wasm";
+  kiwiNlpVersion: string;
+  sourceUrl: string;
+  wasmSha256: string;
+  wasmSizeBytes: number;
+  file: typeof KIWI_WASM_FILE_NAME;
+  installedAt: string;
+};
+
+export type KiwiWasmArtifactState = {
+  targetDir: string;
+  manifestPath: string;
+  wasmPath: string;
+  installed: boolean;
+  manifest: KiwiWasmArtifactManifest | null;
+  missingFiles: string[];
+};
+
 export type KiwiModelArtifactInstallResult =
   | {
       status: "installed" | "already_installed";
@@ -61,8 +85,22 @@ export type KiwiModelArtifactInstallResult =
       message: string;
     };
 
+export type KiwiWasmArtifactInstallResult =
+  | {
+      status: "installed" | "already_installed";
+      method: "npm-tarball";
+      version: string;
+      targetDir: string;
+    }
+  | {
+      status: "error";
+      code: string;
+      message: string;
+    };
+
 const KIWI_MODEL_DIR_NAME = "cong-base";
 const KIWI_MODEL_MANIFEST_FILE = "manifest.json";
+const KIWI_WASM_MANIFEST_FILE = "manifest.json";
 const KIWI_INSTALL_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
 const TAR_BLOCK_SIZE = 512;
 const TAR_FILE_TYPES = new Set(["0", ""]);
@@ -83,12 +121,37 @@ export function kiwiModelFilePath(fileName: string, env: NodeJS.ProcessEnv = pro
   return path.join(kiwiModelDir(env), fileName);
 }
 
+export function kiwiWasmDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(kiwiDataDir(env), "wasm", `v${KIWI_NLP_VERSION}`);
+}
+
+export function kiwiWasmManifestPath(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(kiwiWasmDir(env), KIWI_WASM_MANIFEST_FILE);
+}
+
+export function kiwiWasmFilePath(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(kiwiWasmDir(env), KIWI_WASM_FILE_NAME);
+}
+
 export function inspectKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): KiwiModelArtifactState {
   const manifest = readInstalledManifest(env);
   const missingFiles = KIWI_MODEL_FILES.filter((fileName) => !isFile(kiwiModelFilePath(fileName, env)));
   return {
     targetDir: kiwiModelDir(env),
     manifestPath: kiwiModelManifestPath(env),
+    installed: manifest !== null && missingFiles.length === 0,
+    manifest,
+    missingFiles
+  };
+}
+
+export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): KiwiWasmArtifactState {
+  const manifest = readInstalledWasmManifest(env);
+  const missingFiles = isFile(kiwiWasmFilePath(env)) ? [] : [KIWI_WASM_FILE_NAME];
+  return {
+    targetDir: kiwiWasmDir(env),
+    manifestPath: kiwiWasmManifestPath(env),
+    wasmPath: kiwiWasmFilePath(env),
     installed: manifest !== null && missingFiles.length === 0,
     manifest,
     missingFiles
@@ -122,10 +185,46 @@ export async function ensureKiwiModelArtifact(env: NodeJS.ProcessEnv = process.e
   }
 }
 
+export async function ensureKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): Promise<KiwiWasmArtifactInstallResult> {
+  const dataDir = kiwiDataDir(env);
+  fs.mkdirSync(dataDir, { recursive: true });
+  let release: (() => void) | undefined;
+  try {
+    release = await acquireInstallLock(path.join(dataDir, "wasm-install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
+    const current = inspectKiwiWasmArtifact(env);
+    if (current.installed) {
+      return {
+        status: "already_installed",
+        method: "npm-tarball",
+        version: KIWI_NLP_VERSION,
+        targetDir: current.targetDir
+      };
+    }
+    return await installDownloadedWasm(env);
+  } catch (error) {
+    return {
+      status: "error",
+      code: errorCode(error),
+      message: errorMessage(error)
+    };
+  } finally {
+    release?.();
+  }
+}
+
 function readInstalledManifest(env: NodeJS.ProcessEnv): KiwiModelArtifactManifest | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(kiwiModelManifestPath(env), "utf8")) as unknown;
     return isKiwiModelArtifactManifest(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readInstalledWasmManifest(env: NodeJS.ProcessEnv): KiwiWasmArtifactManifest | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(kiwiWasmManifestPath(env), "utf8")) as unknown;
+    return isKiwiWasmArtifactManifest(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -145,6 +244,19 @@ function isKiwiModelArtifactManifest(value: unknown): value is KiwiModelArtifact
     files !== null &&
     files.length === KIWI_MODEL_FILES.length &&
     KIWI_MODEL_FILES.every((fileName) => files.includes(fileName)) &&
+    typeof value.installedAt === "string"
+  );
+}
+
+function isKiwiWasmArtifactManifest(value: unknown): value is KiwiWasmArtifactManifest {
+  return (
+    isRecord(value) &&
+    value.packageId === "kiwi-wasm" &&
+    value.kiwiNlpVersion === KIWI_NLP_VERSION &&
+    value.sourceUrl === KIWI_WASM_NPM_TARBALL_URL &&
+    value.wasmSha256 === KIWI_WASM_SHA256 &&
+    value.wasmSizeBytes === KIWI_WASM_SIZE_BYTES &&
+    value.file === KIWI_WASM_FILE_NAME &&
     typeof value.installedAt === "string"
   );
 }
@@ -169,6 +281,26 @@ async function installDownloadedModel(env: NodeJS.ProcessEnv): Promise<KiwiModel
   };
 }
 
+async function installDownloadedWasm(env: NodeJS.ProcessEnv): Promise<KiwiWasmArtifactInstallResult> {
+  const archive = await downloadBuffer(KIWI_WASM_NPM_TARBALL_URL);
+  const wasm = extractKiwiWasmFile(archive);
+  if (wasm.length !== KIWI_WASM_SIZE_BYTES) {
+    throw new RuntimeError(`Kiwi wasm size mismatch: expected ${KIWI_WASM_SIZE_BYTES}, got ${wasm.length}`);
+  }
+  const digest = crypto.createHash("sha256").update(wasm).digest("hex");
+  if (digest !== KIWI_WASM_SHA256) {
+    throw new RuntimeError(`Kiwi wasm digest mismatch: expected ${KIWI_WASM_SHA256}, got ${digest}`);
+  }
+
+  writeWasmFileAtomic(env, wasm);
+  return {
+    status: "installed",
+    method: "npm-tarball",
+    version: KIWI_NLP_VERSION,
+    targetDir: kiwiWasmDir(env)
+  };
+}
+
 async function downloadBuffer(url: string): Promise<Buffer> {
   const response = await fetch(url, {
     headers: {
@@ -176,9 +308,35 @@ async function downloadBuffer(url: string): Promise<Buffer> {
     }
   });
   if (!response.ok) {
-    throw new RuntimeError(`Failed to download Kiwi model: HTTP ${response.status}`);
+    throw new RuntimeError(`Failed to download Kiwi artifact from ${url}: HTTP ${response.status}`);
   }
   return Buffer.from(await response.arrayBuffer());
+}
+
+function extractKiwiWasmFile(archiveBuffer: Buffer): Buffer {
+  const tarBuffer = zlib.gunzipSync(archiveBuffer);
+  let offset = 0;
+
+  while (offset + TAR_BLOCK_SIZE <= tarBuffer.length) {
+    const header = tarBuffer.subarray(offset, offset + TAR_BLOCK_SIZE);
+    if (header.every((byte) => byte === 0)) break;
+
+    const name = tarFieldToString(header.subarray(0, 100));
+    const prefix = tarFieldToString(header.subarray(345, 500));
+    const fullName = prefix ? `${prefix}/${name}` : name;
+    const size = tarFieldToNumber(header.subarray(124, 136));
+    const typeFlag = header[156] === 0 ? "" : String.fromCharCode(header[156]);
+    offset += TAR_BLOCK_SIZE;
+
+    const data = tarBuffer.subarray(offset, offset + size);
+    if (TAR_FILE_TYPES.has(typeFlag) && fullName === KIWI_WASM_TAR_PATH) {
+      return Buffer.from(data);
+    }
+
+    offset += Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+  }
+
+  throw new RuntimeError(`Kiwi npm tarball is missing required file: ${KIWI_WASM_TAR_PATH}`);
 }
 
 function extractKiwiModelFiles(archiveBuffer: Buffer): Map<KiwiModelFileName, Buffer> {
@@ -214,6 +372,25 @@ function extractKiwiModelFiles(archiveBuffer: Buffer): Map<KiwiModelFileName, Bu
   return files;
 }
 
+function writeWasmFileAtomic(env: NodeJS.ProcessEnv, wasm: Buffer): void {
+  const targetDir = kiwiWasmDir(env);
+  const parentDir = path.dirname(targetDir);
+  const stagingDir = path.join(parentDir, `.wasm-${process.pid}-${Date.now()}.part`);
+  fs.mkdirSync(parentDir, { recursive: true });
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  fs.mkdirSync(stagingDir, { recursive: true });
+
+  try {
+    fs.writeFileSync(path.join(stagingDir, KIWI_WASM_FILE_NAME), wasm);
+    fs.writeFileSync(path.join(stagingDir, KIWI_WASM_MANIFEST_FILE), `${JSON.stringify(createWasmManifest(), null, 2)}\n`);
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    fs.renameSync(stagingDir, targetDir);
+  } catch (error) {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 function writeModelFilesAtomic(env: NodeJS.ProcessEnv, modelFiles: ReadonlyMap<KiwiModelFileName, Buffer>): void {
   const targetDir = kiwiModelDir(env);
   const parentDir = path.dirname(targetDir);
@@ -247,6 +424,18 @@ function createManifest(): KiwiModelArtifactManifest {
     archiveSha256: KIWI_MODEL_SHA256,
     archiveSizeBytes: KIWI_MODEL_ARCHIVE_SIZE_BYTES,
     files: [...KIWI_MODEL_FILES],
+    installedAt: new Date().toISOString()
+  };
+}
+
+function createWasmManifest(): KiwiWasmArtifactManifest {
+  return {
+    packageId: "kiwi-wasm",
+    kiwiNlpVersion: KIWI_NLP_VERSION,
+    sourceUrl: KIWI_WASM_NPM_TARBALL_URL,
+    wasmSha256: KIWI_WASM_SHA256,
+    wasmSizeBytes: KIWI_WASM_SIZE_BYTES,
+    file: KIWI_WASM_FILE_NAME,
     installedAt: new Date().toISOString()
   };
 }

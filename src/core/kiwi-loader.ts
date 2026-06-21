@@ -1,14 +1,15 @@
 import fs from "node:fs";
 import initKiwiModule from "kiwi-nlp/dist/build/kiwi-wasm.js";
-import kiwiWasmBinary from "kiwi-nlp/dist/kiwi-wasm.wasm";
 import {
   KIWI_MODEL_FILES,
   KIWI_MODEL_TYPE,
   KIWI_MODEL_VERSION,
   KIWI_NLP_VERSION,
   ensureKiwiModelArtifact,
+  ensureKiwiWasmArtifact,
   inspectKiwiModelArtifact,
   kiwiModelFilePath,
+  kiwiWasmFilePath,
   type KiwiModelFileName
 } from "./kiwi-artifact.js";
 
@@ -69,7 +70,7 @@ export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): P
     throw new Error("Kiwi model artifact is not installed");
   }
 
-  const loaded = await buildDisposableKiwi(readModelFiles(env));
+  const loaded = await buildDisposableKiwi(readModelFiles(env), env);
   if (!loaded.ready()) {
     await loaded.dispose();
     throw new Error("Kiwi analyzer was constructed but is not ready");
@@ -99,6 +100,12 @@ export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
   };
 }
 
+export async function loadKiwiWasmBinary(env: NodeJS.ProcessEnv = process.env): Promise<Uint8Array> {
+  const installed = await ensureKiwiWasmArtifact(env);
+  if (installed.status === "error") throw new Error(installed.message);
+  return new Uint8Array(Buffer.from(fs.readFileSync(kiwiWasmFilePath(env))));
+}
+
 function readModelFiles(env: NodeJS.ProcessEnv): Record<KiwiModelFileName, Uint8Array> {
   const files = {} as Record<KiwiModelFileName, Uint8Array>;
   for (const fileName of KIWI_MODEL_FILES) {
@@ -107,12 +114,12 @@ function readModelFiles(env: NodeJS.ProcessEnv): Record<KiwiModelFileName, Uint8
   return files;
 }
 
-async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Array>): Promise<{
+async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Array>, env: NodeJS.ProcessEnv): Promise<{
   ready(): boolean;
   tokenize(text: string): KiwiTokenInfo[];
   dispose(): Promise<void>;
 }> {
-  const api = await createKiwiApi();
+  const api = await createKiwiApi(env);
   const loadedModel = await api.loadModelFiles(modelFiles);
   let disposed = false;
   try {
@@ -146,9 +153,9 @@ async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Ar
   }
 }
 
-async function createKiwiApi(): Promise<KiwiApi> {
+async function createKiwiApi(env: NodeJS.ProcessEnv): Promise<KiwiApi> {
   const kiwi = await initKiwi({
-    wasmBinary: kiwiWasmBinary
+    wasmBinary: await loadKiwiWasmBinary(env)
   });
   return {
     cmd<T = unknown>(command: Record<string, unknown>): T {

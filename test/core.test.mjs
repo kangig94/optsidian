@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import zlib from "node:zlib";
 
 const repoRoot = process.cwd();
 
@@ -13,6 +14,28 @@ function tempVault() {
 
 function sha256(raw) {
   return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function tarSingleFile(filePath, content) {
+  const contentBuffer = Buffer.from(content);
+  const header = Buffer.alloc(512, 0);
+  const name = Buffer.from(filePath);
+  if (name.length > 100) throw new Error("tar test helper only supports short paths");
+  name.copy(header, 0);
+  header.write("0000644\0", 100, "ascii");
+  header.write("0000000\0", 108, "ascii");
+  header.write("0000000\0", 116, "ascii");
+  header.write(contentBuffer.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+  header.write("00000000000\0", 136, "ascii");
+  header[156] = "0".charCodeAt(0);
+  header.write("ustar\0", 257, "ascii");
+  header.write("00", 263, "ascii");
+  header.fill(0x20, 148, 156);
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+  const padding = Buffer.alloc((512 - (contentBuffer.length % 512)) % 512, 0);
+  return Buffer.concat([header, contentBuffer, padding, Buffer.alloc(1024, 0)]);
 }
 
 function recommitSearchIndexPair(paths) {
@@ -182,6 +205,37 @@ test("kiwi analyzer lease is non-blocking for search and blocking for warm", asy
   } finally {
     await manager.close();
     __setKiwiAnalyzerManagerForTests(null);
+  }
+});
+
+test("kiwi wasm binary installs at runtime instead of using a bundled wasm import", async () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
+  const archive = zlib.gzipSync(tarSingleFile("package/dist/kiwi-wasm.wasm", wasm));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
+    };
+  };
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const { inspectKiwiWasmArtifact } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  try {
+    const env = { XDG_CACHE_HOME: cache };
+    const binary = await loadKiwiWasmBinary(env);
+    const state = inspectKiwiWasmArtifact(env);
+    assert.ok(binary instanceof Uint8Array);
+    assert.equal(binary.length, wasm.length);
+    assert.equal(sha256(binary), sha256(wasm));
+    assert.equal(state.installed, true);
+    assert.equal(state.manifest.wasmSha256, sha256(wasm));
+    assert.deepEqual(calls, ["https://registry.npmjs.org/kiwi-nlp/-/kiwi-nlp-0.23.0.tgz"]);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
