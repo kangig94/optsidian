@@ -24,7 +24,7 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
     }
     case "clear":
       if (!vaultRoot) throw new UsageError("index clear requires a vault");
-      process.stdout.write(renderIndexResult(clearSearchIndex(vaultRoot), format));
+      process.stdout.write(renderIndexResult(await clearSearchIndex(vaultRoot), format));
       return;
     default:
       throw new UsageError("index action must be status, rebuild, warm, or clear");

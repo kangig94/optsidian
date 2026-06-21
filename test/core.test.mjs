@@ -466,6 +466,56 @@ test("core reconcile uses a cross-process lock and recovers stale locks", async 
   });
 });
 
+test("core search index writer lock protects reads and recovers stale locks", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+    const {
+      __setSearchIndexWriterLockStaleMsForTests,
+      __setSearchIndexWriterLockWaitMsForTests,
+      cachePaths,
+      searchIndexWriterLockPath
+    } = await import(path.join(repoRoot, "src/core/search.ts"));
+
+    writeVaultFile(vault, {
+      path: "Notes/Writer.md",
+      content: "# Writer\n\nalpha\n"
+    });
+    await searchVault(vault, { query: "alpha", limit: 5 });
+
+    const lockDir = searchIndexWriterLockPath(vault);
+    fs.mkdirSync(lockDir, { recursive: true });
+    __setSearchIndexWriterLockWaitMsForTests(1);
+    try {
+      await assert.rejects(() => searchVault(vault, { query: "alpha", limit: 5 }), /Timed out waiting for search index writer lock/);
+    } finally {
+      __setSearchIndexWriterLockWaitMsForTests(undefined);
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+
+    writeVaultFile(vault, {
+      path: "Notes/Writer.md",
+      content: "# Writer\n\nalpha beta\n",
+      overwrite: true
+    });
+    fs.mkdirSync(lockDir, { recursive: true });
+    const staleAt = new Date(Date.now() - 10_000);
+    fs.utimesSync(lockDir, staleAt, staleAt);
+    __setSearchIndexWriterLockStaleMsForTests(1);
+    try {
+      const result = await searchVault(vault, { query: "beta", limit: 5 });
+      assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Writer.md"]);
+    } finally {
+      __setSearchIndexWriterLockStaleMsForTests(undefined);
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+
+    const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
+    assert.equal(manifest.files["Notes/Writer.md"].size, fs.statSync(path.join(vault, "Notes/Writer.md")).size);
+  });
+});
+
 test("core search degrades terminal analyzer load failures to Intl", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
