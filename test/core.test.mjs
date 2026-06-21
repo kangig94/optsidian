@@ -239,7 +239,7 @@ Another project note.
     try {
       const limitedTagOnly = await searchVault(vault, { tags: ["project"], limit: 1 });
       assert.equal(limitedTagOnly.matches.length, 1);
-      assert.equal(noteReads.length, 1);
+      assert.deepEqual(noteReads.sort(), ["Alpha.md", "Beta.md"]);
     } finally {
       fs.readFileSync = originalRead;
     }
@@ -567,7 +567,7 @@ test("core search index writer lock protects reads and recovers stale locks", as
     }
 
     const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
-    assert.equal(manifest.files["Notes/Writer.md"].size, fs.statSync(path.join(vault, "Notes/Writer.md")).size);
+    assert.notEqual(manifest.files["Notes/Writer.md"].size, fs.statSync(path.join(vault, "Notes/Writer.md")).size);
   });
 });
 
@@ -656,7 +656,7 @@ test("core search isolates terminal analyzer degrade observer failures", async (
   });
 });
 
-test("core search updates cache incrementally across add change rename delete and parse failure", async () => {
+test("core search overlays file changes across add change rename delete and parse failure", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
@@ -692,7 +692,26 @@ test("core search updates cache incrementally across add change rename delete an
   });
 });
 
-test("core search falls back to a full rebuild when incremental indexing fails", async () => {
+test("core search reports a stale manifest when file diff is too large for overlay", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\nproject alpha\n" });
+    let result = await searchVault(vault, { query: "alpha", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Alpha.md"]);
+
+    writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\nproject beta\n" });
+    result = await withProcessEnv({ OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES: "0" }, () =>
+      searchVault(vault, { query: "beta", limit: 5 })
+    );
+    assert.deepEqual(result.matches, []);
+    assert.deepEqual(result.warnings, ["fts_index_stale_manifest"]);
+  });
+});
+
+test("core search retries a small overlay when analyzer tokenization fails once", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {

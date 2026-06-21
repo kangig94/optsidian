@@ -50,12 +50,17 @@ const SEARCH_RECONCILE_LOCK_DIR = "reconcile.lock";
 const SEARCH_RECONCILE_STATUS_FILE = "reconcile-status.json";
 const SEARCH_INDEX_WRITER_LOCK_DIR = "index-writer.lock";
 const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
+const SEARCH_INDEX_STALE_MANIFEST_WARNING = "fts_index_stale_manifest";
 const SEARCH_RECONCILE_LOCK_STALE_MS = 30 * 60 * 1000;
 const SEARCH_RECONCILE_STATUS_SCHEMA_VERSION = 1;
 const SEARCH_RECONCILE_ERROR_MAX_LENGTH = 2048;
 const SEARCH_INDEX_WRITER_LOCK_STALE_MS = 30 * 60 * 1000;
 const SEARCH_INDEX_WRITER_LOCK_WAIT_MS = 60 * 1000;
 const SEARCH_INDEX_WRITER_LOCK_POLL_MS = 50;
+const SEARCH_OVERLAY_MAX_FILES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES";
+const SEARCH_OVERLAY_MAX_BYTES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES";
+const SEARCH_OVERLAY_MAX_FILES_DEFAULT = 20;
+const SEARCH_OVERLAY_MAX_BYTES_DEFAULT = 2 * 1024 * 1024;
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_DB_SCHEMA = {
   path: "string",
@@ -117,6 +122,7 @@ type SearchManifest = {
 
 type CachePaths = {
   cacheDir: string;
+  indexDir: string;
   indexPath: string;
   manifestPath: string;
   analysisPath: string;
@@ -127,6 +133,38 @@ type LoadedIndex = {
   manifest: SearchManifest;
   analyzer: SearchAnalyzer;
   warnings: string[];
+};
+
+type SearchProjection = {
+  db: AnyOrama;
+  manifest: SearchManifest;
+  analyzer: SearchAnalyzer;
+  source: "persisted" | "overlay";
+  queryTerms?: string[];
+};
+
+type SearchProjectionHit = {
+  document: SearchDocument;
+  score: number;
+  analyzer: SearchAnalyzer;
+  queryTerms: string[];
+  source: SearchProjection["source"];
+};
+
+type SearchPlan = {
+  projection: SearchProjection;
+  diff: ManifestDiff;
+  currentFiles: Record<string, FileManifest>;
+  warnings: string[];
+};
+
+type SearchOverlayLimits = {
+  maxFiles: number;
+  maxBytes: number;
+};
+
+type BuildDocumentsOptions = {
+  strictAnalyzerErrors?: boolean;
 };
 
 export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnalyzer, reason: SearchReconcileReason) => void;
@@ -287,37 +325,27 @@ async function searchVaultWithLeasedAnalyzer(
 ): Promise<SearchResult> {
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
-  const loaded = await loadOrBuildIndex(vaultRoot, analyzer, requestReconcile);
-  const servedAnalyzer = loaded.analyzer;
-  const analyzedQuery = search.query ? tokensToSearchText(await servedAnalyzer.tokenize(search.query)) : undefined;
-  const queryTerms = analyzedQuery ? analyzedQuery.split(" ").filter(Boolean) : [];
-  if (search.query && queryTerms.length === 0) {
-    return searchResult([], loaded.warnings);
-  }
-  const rawLimit = search.query
-    ? Math.min(loaded.manifest.documents, Math.max(search.limit * CANDIDATE_LIMIT_MULTIPLIER, CANDIDATE_LIMIT_MIN))
-    : pathFilter || search.tags
-      ? loaded.manifest.documents
-      : search.limit;
-  const properties = searchFields(search.fields).map((field) => SEARCH_FIELD_INDEX_PROPERTY[field]);
-  const results = (await oramaSearch(loaded.db, {
-    limit: rawLimit,
-    ...(analyzedQuery
-      ? {
-          term: analyzedQuery,
-          properties,
-          boost: boostForFields(search.fields),
-          tolerance: 0
-        }
-      : {})
-  })) as Results<SearchDocument>;
+  const plan = await loadSearchPlan(vaultRoot, analyzer, requestReconcile);
+  const stalePaths = staleResultPaths(plan.diff);
+  const overlayAnalyzer = baselineAnalyzerForSearch(analyzer) ?? plan.projection.analyzer;
+  const overlay = await buildSearchOverlay(vaultRoot, plan.currentFiles, plan.diff, overlayAnalyzer, plan.warnings);
+  if (hasManifestDiff(plan.diff)) requestReconcile(vaultRoot, analyzer, "stale-manifest");
 
-  const filteredHits = results.hits.filter(
-    (hit) => (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) && matchesTagFilter(hit.document.tags, search.tags)
-  );
+  const projectionSearches = [
+    searchProjection(plan.projection, search, pathFilter, stalePaths),
+    ...(overlay ? [searchProjection(overlay, search, pathFilter, new Set<string>())] : [])
+  ];
+  const projectionResults = await Promise.all(projectionSearches);
+  const mergedHits = mergeProjectionHits(projectionResults.flat());
+  if (search.query && mergedHits.length === 0 && projectionResults.every((hits) => hits.length === 0)) {
+    return searchResult([], plan.warnings);
+  }
+
+  const sourceByPath = new Map(mergedHits.map((hit) => [hit.document.path, hit]));
+  const rankingQueryTerms = firstQueryTerms(mergedHits);
   const matches = search.query
-    ? rerankCandidates(search.query, queryTerms, filteredHits, search.fields).slice(0, search.limit)
-    : filteredHits
+    ? rerankCandidates(search.query, rankingQueryTerms, mergedHits, search.fields).slice(0, search.limit)
+    : mergedHits
         .map((hit) => ({
           path: hit.document.path,
           title: hit.document.title,
@@ -326,14 +354,17 @@ async function searchVaultWithLeasedAnalyzer(
         .sort(compareTagOnlyMatches)
         .slice(0, search.limit);
 
-  const withSnippets = await Promise.all(matches.map(async (match) => ({
-    path: match.path,
-    title: match.title,
-    tags: match.tags,
-    snippets: await snippetsForDocument(vaultRoot, match.path, search.query, queryTerms, servedAnalyzer)
-  })));
+  const withSnippets = await Promise.all(matches.map(async (match) => {
+    const source = sourceByPath.get(match.path);
+    return {
+      path: match.path,
+      title: match.title,
+      tags: match.tags,
+      snippets: await snippetsForDocument(vaultRoot, match.path, search.query, source?.queryTerms ?? rankingQueryTerms, source?.analyzer ?? plan.projection.analyzer)
+    };
+  }));
 
-  return searchResult(withSnippets, loaded.warnings);
+  return searchResult(withSnippets, plan.warnings);
 }
 
 function searchResult(matches: SearchMatch[], warnings: string[] = []): SearchResult {
@@ -350,20 +381,29 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const reconcile = readSearchReconcileStatus(paths.cacheDir);
   const reconcileStatus = readSearchReconcileSnapshot(paths.cacheDir);
+  const status = readProjectionStatus(paths, analyzer);
+  if (status) return searchIndexStatus(true, status.staleTier, reconcile, reconcileStatus);
+
+  const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
+  if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
+    const baselineStatus = readProjectionStatus(cachePaths(vaultRoot, analyzerCacheKey(baselineAnalyzer.identity)), analyzer);
+    if (baselineStatus) return searchIndexStatus(true, true, reconcile, reconcileStatus);
+  }
+
+  return searchIndexStatus(false, false, reconcile, reconcileStatus);
+}
+
+function readProjectionStatus(paths: CachePaths, analyzer: SearchAnalyzer): { staleTier: boolean } | undefined {
   const manifest = readManifest(paths);
-  if (!fs.existsSync(paths.indexPath) || !manifest) {
-    return searchIndexStatus(false, false, reconcile, reconcileStatus);
-  }
+  if (!fs.existsSync(paths.indexPath) || !manifest) return undefined;
   const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
-  if (mismatch !== "match" && mismatch !== "tier-only-upgrade") {
-    return searchIndexStatus(false, false, reconcile, reconcileStatus);
-  }
+  if (mismatch !== "match" && mismatch !== "tier-only-upgrade") return undefined;
   try {
     restoreDb(paths.indexPath);
   } catch {
-    return searchIndexStatus(false, false, reconcile, reconcileStatus);
+    return undefined;
   }
-  return searchIndexStatus(true, mismatch === "tier-only-upgrade", reconcile, reconcileStatus);
+  return { staleTier: mismatch === "tier-only-upgrade" };
 }
 
 function searchIndexStatus(
@@ -435,6 +475,10 @@ async function ensureSearchIndex(vaultRoot: string): Promise<void> {
 }
 
 async function ensureSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
+  const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
+  if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
+    await ensureSearchIndexWithLeasedAnalyzer(vaultRoot, baselineAnalyzer);
+  }
   await withSearchAnalyzerLease(analyzer, (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer));
 }
 
@@ -508,9 +552,7 @@ export async function clearSearchIndex(vaultRoot: string): Promise<SearchIndexMu
   const analyzer = resolveSearchAnalyzer();
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "clear", async () => {
-    fs.rmSync(paths.indexPath, { force: true });
-    fs.rmSync(paths.manifestPath, { force: true });
-    fs.rmSync(paths.analysisPath, { force: true });
+    fs.rmSync(path.join(paths.cacheDir, "indexes"), { recursive: true, force: true });
   });
   return {
     ok: true,
@@ -524,14 +566,14 @@ export function cachePaths(vaultRoot: string, analyzerKey = "intl"): CachePaths 
   const hash = crypto.createHash("sha256").update(root).digest("hex").slice(0, 16);
   const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
   const cacheDir = path.join(base, "optsidian", hash);
-  const indexFile = analyzerKey === "intl" ? SEARCH_INDEX_FILE : `search-${analyzerKey}.orama`;
-  const manifestFile = analyzerKey === "intl" ? SEARCH_MANIFEST_FILE : `manifest-${analyzerKey}.json`;
-  const analysisFile = analyzerKey === "intl" ? SEARCH_ANALYSIS_CACHE_FILE : `analysis-${analyzerKey}.json`;
+  const safeAnalyzerKey = analyzerKey.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "intl";
+  const indexDir = path.join(cacheDir, "indexes", safeAnalyzerKey);
   return {
     cacheDir,
-    indexPath: path.join(cacheDir, indexFile),
-    manifestPath: path.join(cacheDir, manifestFile),
-    analysisPath: path.join(cacheDir, analysisFile)
+    indexDir,
+    indexPath: path.join(indexDir, SEARCH_INDEX_FILE),
+    manifestPath: path.join(indexDir, SEARCH_MANIFEST_FILE),
+    analysisPath: path.join(indexDir, SEARCH_ANALYSIS_CACHE_FILE)
   };
 }
 
@@ -604,7 +646,13 @@ function requestSearchReconcile(vaultRoot: string, analyzer: SearchAnalyzer, rea
   }
 }
 
-const SEARCH_RECONCILE_REASONS = ["stale-tier", "incompatible", "terminal-analyzer-failure", "manual"] as const satisfies readonly SearchReconcileReason[];
+const SEARCH_RECONCILE_REASONS = [
+  "stale-tier",
+  "stale-manifest",
+  "incompatible",
+  "terminal-analyzer-failure",
+  "manual"
+] as const satisfies readonly SearchReconcileReason[];
 
 function isSearchReconcileReason(value: string): value is SearchReconcileReason {
   return (SEARCH_RECONCILE_REASONS as readonly string[]).includes(value);
@@ -892,42 +940,205 @@ async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-async function loadOrBuildIndex(
+async function loadSearchPlan(
   vaultRoot: string,
   analyzer: SearchAnalyzer,
   requestReconcile: SearchReconcileRequester
-): Promise<LoadedIndex> {
-  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+): Promise<SearchPlan> {
   const currentFiles = currentFileManifest(vaultRoot);
-  const persisted = await readStablePersistedIndex(paths);
-  if (persisted) {
-    const mismatch = classifySearchManifestMismatch(persisted.manifest, analyzer.identity);
-    try {
-      const diff = diffManifestFiles(persisted.manifest.files, currentFiles);
-      if (mismatch === "match") {
-        if (!hasManifestDiff(diff)) {
-          return { db: persisted.db, manifest: persisted.manifest, analyzer, warnings: [] };
-        }
-        return await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "incremental", () =>
-          loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths, { serveStaleTier: true })
-        );
-      }
 
-      if (mismatch === "tier-only-upgrade" && !hasManifestDiff(diff)) {
-        const servedAnalyzer = createServedSearchAnalyzer(persisted.manifest.analyzer);
-        if (servedAnalyzer) {
-          requestReconcile(vaultRoot, analyzer, "stale-tier");
-          return { db: persisted.db, manifest: persisted.manifest, analyzer: servedAnalyzer, warnings: [SEARCH_INDEX_STALE_TIER_WARNING] };
-        }
-      }
-    } catch {
-      // Fall through to a full rebuild on any restore or incremental failure.
+  const targetPaths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  const target = await readStablePersistedIndex(targetPaths);
+  const targetPlan = target ? searchPlanFromPersisted(target, analyzer, currentFiles, []) : undefined;
+  if (targetPlan) {
+    if (targetPlan.warnings.includes(SEARCH_INDEX_STALE_TIER_WARNING)) requestReconcile(vaultRoot, analyzer, "stale-tier");
+    return targetPlan;
+  }
+  if (target) requestReconcile(vaultRoot, analyzer, "incompatible");
+
+  const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
+  if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
+    const baselinePaths = cachePaths(vaultRoot, analyzerCacheKey(baselineAnalyzer.identity));
+    const baseline = await readStablePersistedIndex(baselinePaths);
+    const baselinePlan = baseline ? searchPlanFromPersisted(baseline, analyzer, currentFiles, [SEARCH_INDEX_STALE_TIER_WARNING]) : undefined;
+    if (baselinePlan) {
+      requestReconcile(vaultRoot, analyzer, "stale-tier");
+      return baselinePlan;
     }
   }
 
-  return withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "full-build", () =>
-    loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths, { serveStaleTier: true })
+  const buildAnalyzer = baselineAnalyzer ?? analyzer;
+  const buildPaths = cachePaths(vaultRoot, analyzerCacheKey(buildAnalyzer.identity));
+  const loaded = await withSearchIndexWriterLock(buildPaths.cacheDir, vaultRoot, buildAnalyzer, "full-build", () =>
+    loadOrBuildIndexForWrite(vaultRoot, buildAnalyzer, requestReconcile, buildPaths, { serveStaleTier: false })
   );
+  const warnings = analyzerIdentityKey(buildAnalyzer.identity) === analyzerIdentityKey(analyzer.identity) ? [] : [SEARCH_INDEX_STALE_TIER_WARNING];
+  if (warnings.length > 0) requestReconcile(vaultRoot, analyzer, "stale-tier");
+  return {
+    projection: { db: loaded.db, manifest: loaded.manifest, analyzer: loaded.analyzer, source: "persisted" },
+    diff: diffManifestFiles(loaded.manifest.files, currentFiles),
+    currentFiles,
+    warnings
+  };
+}
+
+function searchPlanFromPersisted(
+  persisted: PersistedIndex,
+  analyzer: SearchAnalyzer,
+  currentFiles: Record<string, FileManifest>,
+  warnings: string[]
+): SearchPlan | undefined {
+  const mismatch = classifySearchManifestMismatch(persisted.manifest, analyzer.identity);
+  const diff = diffManifestFiles(persisted.manifest.files, currentFiles);
+  if (mismatch === "match") {
+    return {
+      projection: { db: persisted.db, manifest: persisted.manifest, analyzer, source: "persisted" },
+      diff,
+      currentFiles,
+      warnings: uniqueWarnings(warnings)
+    };
+  }
+
+  if (mismatch === "tier-only-upgrade") {
+    const servedAnalyzer = createServedSearchAnalyzer(persisted.manifest.analyzer);
+    if (servedAnalyzer) {
+      return {
+        projection: { db: persisted.db, manifest: persisted.manifest, analyzer: servedAnalyzer, source: "persisted" },
+        diff,
+        currentFiles,
+        warnings: uniqueWarnings([...warnings, SEARCH_INDEX_STALE_TIER_WARNING])
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function baselineAnalyzerForSearch(analyzer: SearchAnalyzer): SearchAnalyzer | undefined {
+  if (searchTokenizerTier(analyzer.identity) === "intl") return analyzer;
+  return createServedSearchAnalyzer({ ...analyzer.identity, activeAnalyzers: [] });
+}
+
+async function buildSearchOverlay(
+  vaultRoot: string,
+  currentFiles: Record<string, FileManifest>,
+  diff: ManifestDiff,
+  analyzer: SearchAnalyzer,
+  warnings: string[]
+): Promise<SearchProjection | undefined> {
+  const relPaths = [...diff.added, ...diff.changed];
+  if (relPaths.length === 0) return undefined;
+
+  const limits = searchOverlayLimits();
+  if (!overlayWithinLimits(currentFiles, relPaths, limits)) {
+    addWarning(warnings, SEARCH_INDEX_STALE_MANIFEST_WARNING);
+    return undefined;
+  }
+
+  try {
+    return await buildSearchOverlayUnlocked(vaultRoot, currentFiles, relPaths, analyzer, warnings);
+  } catch {
+    try {
+      return await buildSearchOverlayUnlocked(vaultRoot, currentFiles, relPaths, analyzer, warnings);
+    } catch {
+      addWarning(warnings, SEARCH_INDEX_STALE_MANIFEST_WARNING);
+      return undefined;
+    }
+  }
+}
+
+async function buildSearchOverlayUnlocked(
+  vaultRoot: string,
+  currentFiles: Record<string, FileManifest>,
+  relPaths: string[],
+  analyzer: SearchAnalyzer,
+  warnings: string[]
+): Promise<SearchProjection | undefined> {
+  const db = createSearchDb();
+  const docs = await buildDocuments(vaultRoot, currentFiles, relPaths, analyzer, undefined, { strictAnalyzerErrors: true });
+  if (docs.length === 0) {
+    addWarning(warnings, SEARCH_INDEX_STALE_MANIFEST_WARNING);
+    return undefined;
+  }
+  if (docs.length < relPaths.length) addWarning(warnings, SEARCH_INDEX_STALE_MANIFEST_WARNING);
+  await insertMultiple(db, docs, 100);
+  const files = Object.fromEntries(
+    relPaths
+      .map((rel) => [rel, currentFiles[rel]])
+      .filter((entry): entry is [string, FileManifest] => Boolean(entry[1]))
+  );
+  return {
+    db,
+    manifest: createSearchManifest(docs.length, analyzer.identity, files),
+    analyzer,
+    source: "overlay"
+  };
+}
+
+async function searchProjection(
+  projection: SearchProjection,
+  search: NormalizedSearchParams,
+  pathFilter: PathFilter | undefined,
+  excludedPaths: Set<string>
+): Promise<SearchProjectionHit[]> {
+  if (projection.manifest.documents < 1) return [];
+  const analyzedQuery = search.query ? tokensToSearchText(await projection.analyzer.tokenize(search.query)) : undefined;
+  const queryTerms = analyzedQuery ? analyzedQuery.split(" ").filter(Boolean) : [];
+  if (search.query && queryTerms.length === 0) return [];
+  const rawLimit = search.query
+    ? Math.min(projection.manifest.documents, Math.max(search.limit * CANDIDATE_LIMIT_MULTIPLIER, CANDIDATE_LIMIT_MIN))
+    : pathFilter || search.tags
+      ? projection.manifest.documents
+      : search.limit;
+  const properties = searchFields(search.fields).map((field) => SEARCH_FIELD_INDEX_PROPERTY[field]);
+  const results = (await oramaSearch(projection.db, {
+    limit: rawLimit,
+    ...(analyzedQuery
+      ? {
+          term: analyzedQuery,
+          properties,
+          boost: boostForFields(search.fields),
+          tolerance: 0
+        }
+      : {})
+  })) as Results<SearchDocument>;
+
+  return results.hits
+    .filter(
+      (hit) =>
+        !excludedPaths.has(hit.document.path) &&
+        (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) &&
+        matchesTagFilter(hit.document.tags, search.tags)
+    )
+    .map((hit) => ({
+      document: hit.document,
+      score: hit.score,
+      analyzer: projection.analyzer,
+      queryTerms,
+      source: projection.source
+    }));
+}
+
+function mergeProjectionHits(hits: SearchProjectionHit[]): SearchProjectionHit[] {
+  const byPath = new Map<string, SearchProjectionHit>();
+  for (const hit of hits) {
+    const existing = byPath.get(hit.document.path);
+    if (!existing || hit.source === "overlay" || (existing.source !== "overlay" && hit.score > existing.score)) {
+      byPath.set(hit.document.path, hit);
+    }
+  }
+  return [...byPath.values()];
+}
+
+function firstQueryTerms(hits: SearchProjectionHit[]): string[] {
+  for (const hit of hits) {
+    if (hit.queryTerms.length > 0) return hit.queryTerms;
+  }
+  return [];
+}
+
+function staleResultPaths(diff: ManifestDiff): Set<string> {
+  return new Set([...diff.deleted, ...diff.changed]);
 }
 
 async function loadOrBuildIndexForWrite(
@@ -977,7 +1188,7 @@ async function buildAndPersistIndexUnlocked(
   paths: CachePaths,
   analyzer: SearchAnalyzer
 ): Promise<SearchManifest> {
-  fs.mkdirSync(paths.cacheDir, { recursive: true });
+  fs.mkdirSync(paths.indexDir, { recursive: true });
   const db = createSearchDb();
   const analysisCache = readAnalysisCache(paths, analyzer.identity);
   const docs = await buildDocuments(vaultRoot, files, Object.keys(files), analyzer, analysisCache);
@@ -997,7 +1208,7 @@ async function applyIncrementalIndexUnlocked(
   paths: CachePaths,
   analyzer: SearchAnalyzer
 ): Promise<SearchManifest> {
-  fs.mkdirSync(paths.cacheDir, { recursive: true });
+  fs.mkdirSync(paths.indexDir, { recursive: true });
 
   for (const rel of [...diff.deleted, ...diff.changed]) {
     await remove(db, rel);
@@ -1100,11 +1311,12 @@ async function buildDocuments(
   files: Record<string, FileManifest>,
   relPaths: string[],
   analyzer: SearchAnalyzer,
-  analysisCache: AnalysisCache | undefined
+  analysisCache: AnalysisCache | undefined,
+  options: BuildDocumentsOptions = {}
 ): Promise<SearchDocument[]> {
   const docs: SearchDocument[] = [];
   for (const rel of relPaths.sort((a, b) => a.localeCompare(b))) {
-    const doc = await parseDocument(vaultRoot, rel, files[rel], analyzer, analysisCache);
+    const doc = await parseDocument(vaultRoot, rel, files[rel], analyzer, analysisCache, options);
     if (doc) docs.push(doc);
   }
   return docs;
@@ -1115,16 +1327,23 @@ async function parseDocument(
   relPath: string,
   manifest: FileManifest | undefined,
   analyzer: SearchAnalyzer,
-  analysisCache: AnalysisCache | undefined
+  analysisCache: AnalysisCache | undefined,
+  options: BuildDocumentsOptions = {}
 ): Promise<SearchDocument | undefined> {
   const abs = path.join(vaultRoot, relPath);
+  let note: ParsedMarkdownNote;
   try {
     const text = decodeUtf8(fs.readFileSync(abs), relPath);
-    const note = parseMarkdownNote(relPath, text);
+    note = parseMarkdownNote(relPath, text);
     const cached = manifest ? cachedTokenFields(analysisCache, relPath, manifest) : undefined;
     if (cached) return { ...note, ...cached };
-    return analyzeDocument(note, analyzer);
   } catch {
+    return undefined;
+  }
+  try {
+    return await analyzeDocument(note, analyzer);
+  } catch (error) {
+    if (options.strictAnalyzerErrors) throw error;
     return undefined;
   }
 }
@@ -1423,6 +1642,37 @@ function diffManifestFiles(previous: Record<string, FileManifest>, current: Reco
 
 function hasManifestDiff(diff: ManifestDiff): boolean {
   return diff.added.length > 0 || diff.changed.length > 0 || diff.deleted.length > 0;
+}
+
+function overlayWithinLimits(files: Record<string, FileManifest>, relPaths: readonly string[], limits: SearchOverlayLimits): boolean {
+  if (relPaths.length > limits.maxFiles) return false;
+  let bytes = 0;
+  for (const rel of relPaths) {
+    bytes += files[rel]?.size ?? 0;
+    if (bytes > limits.maxBytes) return false;
+  }
+  return true;
+}
+
+function searchOverlayLimits(env: NodeJS.ProcessEnv = process.env): SearchOverlayLimits {
+  return {
+    maxFiles: parseNonNegativeIntegerEnv(env[SEARCH_OVERLAY_MAX_FILES_ENV], SEARCH_OVERLAY_MAX_FILES_DEFAULT, SEARCH_OVERLAY_MAX_FILES_ENV),
+    maxBytes: parseNonNegativeIntegerEnv(env[SEARCH_OVERLAY_MAX_BYTES_ENV], SEARCH_OVERLAY_MAX_BYTES_DEFAULT, SEARCH_OVERLAY_MAX_BYTES_ENV)
+  };
+}
+
+function parseNonNegativeIntegerEnv(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  if (!/^\d+$/.test(raw)) throw new UsageError(`${name} must be a non-negative integer`);
+  return Number(raw);
+}
+
+function addWarning(warnings: string[], warning: string): void {
+  if (!warnings.includes(warning)) warnings.push(warning);
+}
+
+function uniqueWarnings(warnings: readonly string[]): string[] {
+  return [...new Set(warnings)];
 }
 
 function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {

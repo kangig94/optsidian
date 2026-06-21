@@ -70,11 +70,12 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     ],
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
-      "The search cache lives outside the vault and is rebuilt automatically as needed.",
+      "The search cache lives outside the vault; tokenizer projections live under indexes/<tier-key>/.",
       "warm discovers Obsidian's vault registry and ensures indexes ahead of first search, using incremental updates when possible.",
       "The background index daemon exits after 5 minutes idle; tune OPTSIDIAN_INDEX_DAEMON_IDLE_MS and OPTSIDIAN_INDEX_DAEMON_POLL_MS.",
       "The cache records schema, Node/ICU, tokenizer tier, and analyzer identity, then rebuilds when they change.",
       "During analyzer tier upgrades, a valid Intl-tier index can be served while a background reconcile rebuilds the target tier.",
+      "Small stale file diffs are searched through an in-memory Intl overlay; tune with OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES and OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES.",
       "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko is parsed, but currently falls back to Intl because no Korean backend ships yet.",
       "status reports cache readiness plus stale-tier, reconcile-lock, and last reconcile result diagnostics when present."
     ]

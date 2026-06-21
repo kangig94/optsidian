@@ -150,8 +150,10 @@ function settingNumberValue(envValue: string | undefined, settingValue: number |
 
 export function analyzerCacheKey(identity: SearchAnalyzerIdentity): string {
   const name = identity.name.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "analyzer";
-  if (name === "intl" || name === "router") return "intl";
-  return `${name}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
+  const activeAnalyzers = normalizeAnalyzerNames(identity.activeAnalyzers ?? []);
+  if ((name === "intl" || name === "router") && activeAnalyzers.length === 0) return "intl";
+  const tier = activeAnalyzers.includes("ko") ? "kiwi" : name;
+  return `${tier}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
 }
 
 export function analyzerIdentityKey(identity: SearchAnalyzerIdentity): string {
@@ -218,6 +220,10 @@ function notifySearchAnalyzerDegraded(
   void Promise.resolve()
     .then(() => onDegraded(event))
     .catch(() => {});
+}
+
+function normalizeAnalyzerNames(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
 }
 
 export function tokenizeIntlText(text: string): string[] {

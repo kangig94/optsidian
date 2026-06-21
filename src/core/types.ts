@@ -87,7 +87,7 @@ export type SearchResult = {
   warnings?: string[];
 };
 
-export type SearchReconcileReason = "stale-tier" | "incompatible" | "terminal-analyzer-failure" | "manual";
+export type SearchReconcileReason = "stale-tier" | "stale-manifest" | "incompatible" | "terminal-analyzer-failure" | "manual";
 
 export type SearchIndexReconcileStatus = {
   active: true;
