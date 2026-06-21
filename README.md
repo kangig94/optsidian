@@ -239,7 +239,7 @@ optsidian index warm
 optsidian index clear
 ```
 
-`index warm` prebuilds search indexes for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
+`index warm` prepares search indexes for discovered vaults, using incremental updates when a compatible cache already exists. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
 ### `grep`
 

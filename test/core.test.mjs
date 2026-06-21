@@ -466,6 +466,61 @@ test("core reconcile uses a cross-process lock and recovers stale locks", async 
   });
 });
 
+test("core reconcile refreshes search index incrementally", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+    const { cachePaths, reconcileSearchIndex } = await import(path.join(repoRoot, "src/core/search.ts"));
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha original\n" });
+    writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\n\nbeta stable\n" });
+    let result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha changed\n", overwrite: true });
+    const paths = cachePaths(vault);
+    const betaPath = path.join(vault, "Notes", "Beta.md");
+    fs.writeFileSync(betaPath, Buffer.from([0xc3, 0x28, 0x20, 0x62, 0x65, 0x74, 0x61]));
+    const manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    const betaStat = fs.statSync(betaPath);
+    manifest.files["Notes/Beta.md"] = { mtimeMs: betaStat.mtimeMs, size: betaStat.size };
+    fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    await reconcileSearchIndex(vault, "manual");
+    result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+  });
+});
+
+test("core warm refreshes search index incrementally", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, warmSearchIndexes, writeVaultFile } = await core();
+    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha original\n" });
+    writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\n\nbeta stable\n" });
+    let result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha changed\n", overwrite: true });
+    const paths = cachePaths(vault);
+    const betaPath = path.join(vault, "Notes", "Beta.md");
+    fs.writeFileSync(betaPath, Buffer.from([0xc3, 0x28, 0x20, 0x62, 0x65, 0x74, 0x61]));
+    const manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8"));
+    const betaStat = fs.statSync(betaPath);
+    manifest.files["Notes/Beta.md"] = { mtimeMs: betaStat.mtimeMs, size: betaStat.size };
+    fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const warm = await warmSearchIndexes([vault]);
+    assert.deepEqual(warm.vaults.map((entry) => entry.status), ["ready"]);
+    result = await searchVault(vault, { query: "beta", limit: 5 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+  });
+});
+
 test("core search index writer lock protects reads and recovers stale locks", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));

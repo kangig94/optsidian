@@ -131,6 +131,10 @@ type LoadedIndex = {
 
 export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnalyzer, reason: SearchReconcileReason) => void;
 
+type SearchIndexWriteOptions = {
+  serveStaleTier: boolean;
+};
+
 type SearchReconcileChildSpawner = (bin: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess;
 
 type ActiveSearchReconcile = {
@@ -405,8 +409,8 @@ export async function warmSearchIndexes(vaultRoots: readonly string[], warnings:
     seen.add(root);
 
     try {
-      await rebuildSearchIndex(root);
-      results.push({ vaultRoot: root, status: "rebuilt" });
+      await ensureSearchIndex(root);
+      results.push({ vaultRoot: root, status: "ready" });
     } catch (error) {
       results.push({
         vaultRoot: root,
@@ -423,6 +427,22 @@ export async function warmSearchIndexes(vaultRoots: readonly string[], warnings:
     vaults: results,
     ...(warnings.length > 0 ? { warnings: [...warnings] } : {})
   };
+}
+
+async function ensureSearchIndex(vaultRoot: string): Promise<void> {
+  const analyzer = resolveSearchAnalyzer();
+  await ensureSearchIndexWithAnalyzer(vaultRoot, analyzer);
+}
+
+async function ensureSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
+  await withSearchAnalyzerLease(analyzer, (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer));
+}
+
+async function ensureSearchIndexWithLeasedAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "ensure", async () => {
+    await loadOrBuildIndexForWrite(vaultRoot, analyzer, noSearchReconcile, paths, { serveStaleTier: false });
+  });
 }
 
 async function rebuildSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<SearchIndexMutationResult> {
@@ -459,7 +479,7 @@ export async function reconcileSearchIndex(vaultRoot: string, reason: SearchReco
   });
 
   try {
-    await rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
+    await ensureSearchIndexWithAnalyzer(vaultRoot, analyzer);
     writeSearchReconcileSnapshot(paths.cacheDir, {
       state: "success",
       reason,
@@ -481,6 +501,8 @@ export async function reconcileSearchIndex(vaultRoot: string, reason: SearchReco
     reconcileLock.release();
   }
 }
+
+function noSearchReconcile(): void {}
 
 export async function clearSearchIndex(vaultRoot: string): Promise<SearchIndexMutationResult> {
   const analyzer = resolveSearchAnalyzer();
@@ -887,7 +909,7 @@ async function loadOrBuildIndex(
           return { db: persisted.db, manifest: persisted.manifest, analyzer, warnings: [] };
         }
         return await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "incremental", () =>
-          loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths)
+          loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths, { serveStaleTier: true })
         );
       }
 
@@ -904,7 +926,7 @@ async function loadOrBuildIndex(
   }
 
   return withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "full-build", () =>
-    loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths)
+    loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths, { serveStaleTier: true })
   );
 }
 
@@ -912,7 +934,8 @@ async function loadOrBuildIndexForWrite(
   vaultRoot: string,
   analyzer: SearchAnalyzer,
   requestReconcile: SearchReconcileRequester,
-  paths: CachePaths
+  paths: CachePaths,
+  options: SearchIndexWriteOptions
 ): Promise<LoadedIndex> {
   const currentFiles = currentFileManifest(vaultRoot);
   const persisted = readPersistedIndex(paths);
@@ -923,11 +946,18 @@ async function loadOrBuildIndexForWrite(
       if (!hasManifestDiff(diff)) {
         return { db: persisted.db, manifest: persisted.manifest, analyzer, warnings: [] };
       }
-      const updated = await applyIncrementalIndexUnlocked(vaultRoot, persisted.db, currentFiles, diff, paths, analyzer);
+      let updated: SearchManifest;
+      try {
+        updated = await applyIncrementalIndexUnlocked(vaultRoot, persisted.db, currentFiles, diff, paths, analyzer);
+      } catch {
+        const rebuilt = await buildAndPersistIndexUnlocked(vaultRoot, currentFiles, paths, analyzer);
+        const db = restoreDb(paths.indexPath);
+        return { db, manifest: rebuilt, analyzer, warnings: [] };
+      }
       return { db: persisted.db, manifest: updated, analyzer, warnings: [] };
     }
 
-    if (mismatch === "tier-only-upgrade" && !hasManifestDiff(diff)) {
+    if (options.serveStaleTier && mismatch === "tier-only-upgrade" && !hasManifestDiff(diff)) {
       const servedAnalyzer = createServedSearchAnalyzer(persisted.manifest.analyzer);
       if (servedAnalyzer) {
         requestReconcile(vaultRoot, analyzer, "stale-tier");

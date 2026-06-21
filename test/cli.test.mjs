@@ -1281,7 +1281,7 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "clear" });
 });
 
-test("index warm prebuilds discovered Obsidian registry vaults", async () => {
+test("index warm prepares discovered Obsidian registry vaults", async () => {
   const { dir, vault, env } = setup();
   const secondVault = path.join(dir, "second-vault");
   fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
@@ -1309,8 +1309,8 @@ test("index warm prebuilds discovered Obsidian registry vaults", async () => {
   assert.deepEqual(
     payload.vaults.map((entry) => ({ vaultRoot: entry.vaultRoot, status: entry.status })),
     [
-      { vaultRoot: fs.realpathSync(vault), status: "rebuilt" },
-      { vaultRoot: fs.realpathSync(secondVault), status: "rebuilt" }
+      { vaultRoot: fs.realpathSync(vault), status: "ready" },
+      { vaultRoot: fs.realpathSync(secondVault), status: "ready" }
     ]
   );
 

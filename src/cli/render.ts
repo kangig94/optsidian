@@ -119,11 +119,11 @@ export function renderIndexResult(
       lines.push("No vaults found to warm.");
       return `${lines.join("\n")}\n`;
     }
-    const rebuilt = result.vaults.filter((vault) => vault.status === "rebuilt").length;
-    const failed = result.vaults.length - rebuilt;
-    lines.push(`Warmed ${rebuilt} vault${rebuilt === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}.`);
+    const ready = result.vaults.filter((vault) => vault.status === "ready").length;
+    const failed = result.vaults.length - ready;
+    lines.push(`Warmed ${ready} vault${ready === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}.`);
     for (const vault of result.vaults) {
-      lines.push(`${vault.status === "rebuilt" ? "rebuilt" : "failed"}: ${vault.vaultRoot}${vault.error ? ` (${vault.error})` : ""}`);
+      lines.push(`${vault.status === "ready" ? "ready" : "failed"}: ${vault.vaultRoot}${vault.error ? ` (${vault.error})` : ""}`);
     }
     return `${lines.join("\n")}\n`;
   }

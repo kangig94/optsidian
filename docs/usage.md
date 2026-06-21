@@ -161,7 +161,7 @@ optsidian index warm
 optsidian index clear
 ```
 
-`index warm` prebuilds search indexes for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
+`index warm` prepares search indexes for discovered vaults, using incremental updates when a compatible cache already exists. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
 Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` is parsed as a future Korean analyzer opt-in, but no dedicated Korean backend ships yet, so Hangul still falls back to the Intl baseline. This is mainly infrastructure for heavier analyzer backends.
 

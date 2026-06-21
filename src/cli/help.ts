@@ -70,7 +70,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
       "The search cache lives outside the vault and is rebuilt automatically as needed.",
-      "warm discovers Obsidian's vault registry and rebuilds indexes ahead of first search.",
+      "warm discovers Obsidian's vault registry and ensures indexes ahead of first search, using incremental updates when possible.",
       "The cache records schema, Node/ICU, tokenizer tier, and analyzer identity, then rebuilds when they change.",
       "During analyzer tier upgrades, a valid Intl-tier index can be served while a background reconcile rebuilds the target tier.",
       "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko is parsed, but currently falls back to Intl because no Korean backend ships yet.",

@@ -124,7 +124,7 @@ export type SearchIndexStatusResult = {
 
 export type SearchIndexWarmVaultResult = {
   vaultRoot: string;
-  status: "rebuilt" | "failed";
+  status: "ready" | "failed";
   error?: string;
 };
 
