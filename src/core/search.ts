@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +11,7 @@ import { resolveVaultPath, vaultRealpath, vaultRelative, walkFiles } from "./pat
 import {
   analyzerCacheKey,
   analyzerIdentityKey,
+  createServedSearchAnalyzer,
   resolveSearchAnalyzer,
   tokensToSearchText,
   type SearchAnalyzer,
@@ -35,6 +37,8 @@ const SEARCH_ENGINE = "orama";
 const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
 const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
+const SEARCH_RECONCILE_COMMAND = "__search-reconcile";
+const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_DB_SCHEMA = {
   path: "string",
@@ -104,7 +108,11 @@ type CachePaths = {
 type LoadedIndex = {
   db: AnyOrama;
   manifest: SearchManifest;
+  analyzer: SearchAnalyzer;
+  warnings: string[];
 };
+
+export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnalyzer) => void;
 
 type PathFilter = {
   rel: string;
@@ -193,15 +201,26 @@ const COVERAGE_FIELD_WEIGHT: Record<CoverageField, number> = {
   path: 1
 };
 
+const requestedSearchReconciles = new Set<string>();
+
 export async function searchVault(vaultRoot: string, params: SearchParams): Promise<SearchResult> {
+  return searchVaultWithAnalyzer(vaultRoot, params, resolveSearchAnalyzer());
+}
+
+export async function searchVaultWithAnalyzer(
+  vaultRoot: string,
+  params: SearchParams,
+  analyzer: SearchAnalyzer,
+  requestReconcile: SearchReconcileRequester = requestSearchReconcile
+): Promise<SearchResult> {
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
-  const analyzer = resolveSearchAnalyzer();
-  const loaded = await loadOrBuildIndex(vaultRoot, analyzer);
-  const analyzedQuery = search.query ? tokensToSearchText(await analyzer.tokenize(search.query)) : undefined;
+  const loaded = await loadOrBuildIndex(vaultRoot, analyzer, requestReconcile);
+  const servedAnalyzer = loaded.analyzer;
+  const analyzedQuery = search.query ? tokensToSearchText(await servedAnalyzer.tokenize(search.query)) : undefined;
   const queryTerms = analyzedQuery ? analyzedQuery.split(" ").filter(Boolean) : [];
   if (search.query && queryTerms.length === 0) {
-    return { ok: true, command: "search", matches: [] };
+    return searchResult([], loaded.warnings);
   }
   const rawLimit = search.query
     ? Math.min(loaded.manifest.documents, Math.max(search.limit * CANDIDATE_LIMIT_MULTIPLIER, CANDIDATE_LIMIT_MIN))
@@ -239,13 +258,18 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
     path: match.path,
     title: match.title,
     tags: match.tags,
-    snippets: await snippetsForDocument(vaultRoot, match.path, search.query, queryTerms, analyzer)
+    snippets: await snippetsForDocument(vaultRoot, match.path, search.query, queryTerms, servedAnalyzer)
   })));
 
+  return searchResult(withSnippets, loaded.warnings);
+}
+
+function searchResult(matches: SearchMatch[], warnings: string[] = []): SearchResult {
   return {
     ok: true,
     command: "search",
-    matches: withSnippets
+    matches,
+    ...(warnings.length > 0 ? { warnings } : {})
   };
 }
 
@@ -261,7 +285,7 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
       ready: false
     };
   }
-  if (hardRebuildReason(manifest, analyzer.identity) !== undefined) {
+  if (!isManifestUsableForRead(manifest, analyzer.identity)) {
     return {
       ok: true,
       command: "index",
@@ -299,6 +323,10 @@ export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndex
   };
 }
 
+export async function reconcileSearchIndex(vaultRoot: string): Promise<void> {
+  await rebuildSearchIndex(vaultRoot);
+}
+
 export function clearSearchIndex(vaultRoot: string): SearchIndexMutationResult {
   const analyzer = resolveSearchAnalyzer();
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
@@ -328,19 +356,59 @@ export function cachePaths(vaultRoot: string, analyzerKey = "intl"): CachePaths 
   };
 }
 
-async function loadOrBuildIndex(vaultRoot: string, analyzer: SearchAnalyzer): Promise<LoadedIndex> {
+export function searchReconcileCommand(): string {
+  return SEARCH_RECONCILE_COMMAND;
+}
+
+function requestSearchReconcile(vaultRoot: string, analyzer: SearchAnalyzer): void {
+  const bin = process.argv[1];
+  if (!bin) return;
+
+  const root = vaultRealpath(vaultRoot);
+  const key = `${root}\0${analyzerIdentityKey(analyzer.identity)}`;
+  if (requestedSearchReconciles.has(key)) return;
+  requestedSearchReconciles.add(key);
+
+  try {
+    const child = spawn(process.execPath, [bin, SEARCH_RECONCILE_COMMAND, root], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env
+    });
+    child.unref();
+  } catch {
+    requestedSearchReconciles.delete(key);
+  }
+}
+
+async function loadOrBuildIndex(
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  requestReconcile: SearchReconcileRequester
+): Promise<LoadedIndex> {
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const currentFiles = currentFileManifest(vaultRoot);
   const manifest = readManifest(paths);
-  if (manifest && fs.existsSync(paths.indexPath) && hardRebuildReason(manifest, analyzer.identity) === undefined) {
+  if (manifest && fs.existsSync(paths.indexPath)) {
+    const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
     try {
       const db = restoreDb(paths.indexPath);
       const diff = diffManifestFiles(manifest.files, currentFiles);
-      if (!hasManifestDiff(diff)) {
-        return { db, manifest };
+      if (mismatch === "match") {
+        if (!hasManifestDiff(diff)) {
+          return { db, manifest, analyzer, warnings: [] };
+        }
+        const updated = await applyIncrementalIndex(vaultRoot, db, currentFiles, diff, paths, analyzer);
+        return { db, manifest: updated, analyzer, warnings: [] };
       }
-      const updated = await applyIncrementalIndex(vaultRoot, db, currentFiles, diff, paths, analyzer);
-      return { db, manifest: updated };
+
+      if (mismatch === "tier-only-upgrade" && !hasManifestDiff(diff)) {
+        const servedAnalyzer = createServedSearchAnalyzer(manifest.analyzer);
+        if (servedAnalyzer) {
+          requestReconcile(vaultRoot, analyzer);
+          return { db, manifest, analyzer: servedAnalyzer, warnings: [SEARCH_INDEX_STALE_TIER_WARNING] };
+        }
+      }
     } catch {
       // Fall through to a full rebuild on any restore or incremental failure.
     }
@@ -348,7 +416,7 @@ async function loadOrBuildIndex(vaultRoot: string, analyzer: SearchAnalyzer): Pr
 
   const rebuilt = await buildAndPersistIndex(vaultRoot, currentFiles, paths, analyzer);
   const db = restoreDb(paths.indexPath);
-  return { db, manifest: rebuilt };
+  return { db, manifest: rebuilt, analyzer, warnings: [] };
 }
 
 async function buildAndPersistIndex(
@@ -732,11 +800,9 @@ export function classifySearchManifestMismatch(
   return "incompatible";
 }
 
-function hardRebuildReason(manifest: SearchManifest, analyzer: SearchAnalyzerIdentity): string | undefined {
+function isManifestUsableForRead(manifest: SearchManifest, analyzer: SearchAnalyzerIdentity): boolean {
   const mismatch = classifySearchManifestMismatch(manifest, analyzer);
-  if (mismatch === "match") return undefined;
-  if (mismatch === "tier-only-upgrade") return "analyzer tier upgrade pending";
-  return "index identity changed";
+  return mismatch === "match" || mismatch === "tier-only-upgrade";
 }
 
 function diffManifestFiles(previous: Record<string, FileManifest>, current: Record<string, FileManifest>): ManifestDiff {

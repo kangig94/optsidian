@@ -84,6 +84,7 @@ export type SearchResult = {
   ok: true;
   command: "search";
   matches: SearchMatch[];
+  warnings?: string[];
 };
 
 export type SearchIndexStatusResult = {

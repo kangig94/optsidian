@@ -268,6 +268,48 @@ test("core search uses analyzer tokens for CJK queries", async () => {
   });
 });
 
+test("core search serves a valid Intl index during analyzer tier upgrades", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+    const { cachePaths, searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    writeVaultFile(vault, {
+      path: "Notes/Stale.md",
+      content: "# Stale Tier\n\nrésumés running studies\n"
+    });
+
+    await withProcessEnv({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, async () => {
+      const result = await searchVault(vault, { query: "running", limit: 5 });
+      assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Stale.md"]);
+    });
+
+    const manifestPath = cachePaths(vault).manifestPath;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.equal(manifest.tokenizerTier, "intl");
+    assert.deepEqual(manifest.declaredAnalyzers, ["ko"]);
+    assert.deepEqual(manifest.activeAnalyzers, []);
+
+    const futureAnalyzer = {
+      identity: { ...manifest.analyzer, activeAnalyzers: ["ko"] },
+      tokenize: async (text) => [`kiwi_${text}`],
+      tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
+    };
+    const reconcileRequests = [];
+
+    const stale = await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer, (root, analyzer) => {
+      reconcileRequests.push({ root, identity: analyzer.identity });
+    });
+
+    assert.deepEqual(stale.matches.map((match) => match.path), ["Notes/Stale.md"]);
+    assert.deepEqual(stale.warnings, ["fts_index_stale_tier"]);
+    assert.equal(reconcileRequests.length, 1);
+    assert.equal(reconcileRequests[0].root, vault);
+    assert.deepEqual(reconcileRequests[0].identity.activeAnalyzers, ["ko"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, "utf8")), manifest);
+  });
+});
+
 test("core search updates cache incrementally across add change rename delete and parse failure", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));

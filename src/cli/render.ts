@@ -53,10 +53,12 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
+  const warnings = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
   if (result.matches.length === 0) {
-    return "No matches found.\n";
+    return `${warnings.length > 0 ? `${warnings.join("\n")}\n` : ""}No matches found.\n`;
   }
-  const out: string[] = [];
+  const out: string[] = [...warnings];
+  if (out.length > 0) out.push("");
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`title: ${match.title}`);

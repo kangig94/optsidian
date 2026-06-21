@@ -20,6 +20,7 @@ import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
 import { runSearchAnalyzerDaemon } from "./core/search-analyzer.js";
+import { reconcileSearchIndex, searchReconcileCommand } from "./core/search.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
 async function main(): Promise<void> {
@@ -34,6 +35,12 @@ async function main(): Promise<void> {
   }
   if (argv[0] === "__analyzer-daemon") {
     await runSearchAnalyzerDaemon();
+    return;
+  }
+  if (argv[0] === searchReconcileCommand()) {
+    const vaultRoot = argv[1];
+    if (!vaultRoot) throw new UsageError(`${searchReconcileCommand()} requires a vault path`);
+    await reconcileSearchIndex(vaultRoot);
     return;
   }
 
