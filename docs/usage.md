@@ -41,7 +41,7 @@ optsidian raw read path=README.md
 
 Command routing in V1:
 
-- CLI-only: `read`, `search`, `grep`, `index`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
+- CLI-only: `read`, `search`, `grep`, `index`, `settings`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
 - MCP tools: `command_map`, `write`, `edit`, `apply_patch`
 
 Marketplace plugin installs stay native:
@@ -160,7 +160,16 @@ optsidian index rebuild
 optsidian index clear
 ```
 
-Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. This is mainly infrastructure for heavier analyzer backends.
+Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` is parsed as a future Korean analyzer opt-in, but no dedicated Korean backend ships yet, so Hangul still falls back to the Intl baseline. This is mainly infrastructure for heavier analyzer backends.
+
+Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `settings` command does not create or edit it. Environment variables still override file settings:
+
+```bash
+optsidian settings set search.analyzer=intl-daemon
+optsidian settings set search.extraLangs=ko
+optsidian settings get search.extraLangs
+optsidian settings unset search.extraLangs
+```
 
 ```bash
 optsidian grep query=TODO
@@ -301,13 +310,14 @@ Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`
 
 ## JSON Output
 
-The `read`, `search`, `grep`, `frontmatter`, and custom-source `plugin:install` commands support `format=json`.
+The `read`, `search`, `grep`, `frontmatter`, `settings`, and custom-source `plugin:install` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
 optsidian search query=TODO format=json
 optsidian grep query=TODO format=json
 optsidian frontmatter read path=note.md format=json
+optsidian settings list format=json
 optsidian plugin:install path=../my-plugin vault-path=/path/to/vault format=json
 ```
 

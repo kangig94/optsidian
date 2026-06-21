@@ -222,7 +222,15 @@ optsidian search query="#project alpha" format=json
 
 Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` for a zero-config multilingual baseline.
 
-The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. Its manifest records the analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists. `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` routes the default Intl analyzer through the analyzer daemon, which exits after 5 minutes idle by default. Analyzer request timeout defaults to 60 seconds and can be changed with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`.
+The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. Its manifest records the analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists. `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` routes the default Intl analyzer through the analyzer daemon, which exits after 5 minutes idle by default. Analyzer request timeout defaults to 60 seconds and can be changed with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` is parsed as a future Korean analyzer opt-in, but no dedicated Korean backend ships yet, so Hangul still falls back to the Intl baseline.
+
+Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `settings` command does not create or edit it. Environment variables still override file settings:
+
+```bash
+optsidian settings set search.analyzer=intl-daemon
+optsidian settings set search.extraLangs=ko
+optsidian settings get search.extraLangs
+```
 
 ```bash
 optsidian index status

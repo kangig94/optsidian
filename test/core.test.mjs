@@ -4,16 +4,46 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+const repoRoot = process.cwd();
+
 function tempVault() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-core-"));
 }
 
 async function core() {
-  return import(path.resolve("src/core/index.ts"));
+  return import(path.join(repoRoot, "src/core/index.ts"));
+}
+
+async function withProcessEnv(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function withSearchProcess(cache, fn) {
+  const previousCwd = process.cwd();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-project-"));
+  process.chdir(project);
+  try {
+    return await withProcessEnv({ XDG_CACHE_HOME: cache, XDG_CONFIG_HOME: path.join(project, "config") }, fn);
+  } finally {
+    process.chdir(previousCwd);
+  }
 }
 
 test("markdown search parser extracts title aliases tags headings and body", async () => {
-  const { parseMarkdownNote } = await import(path.resolve("src/core/search-parse.ts"));
+  const { parseMarkdownNote } = await import(path.join(repoRoot, "src/core/search-parse.ts"));
   const doc = parseMarkdownNote(
     "Projects/alpha.md",
     `---
@@ -36,14 +66,33 @@ Body with #rollout tag.
 });
 
 test("intl search analyzer segments CJK text for lexical search", async () => {
-  const { analyzerIdentityKey, tokenizeIntlText } = await import(path.resolve("src/core/search-analyzer.ts"));
+  const {
+    analyzerIdentityKey,
+    parseDeclaredSearchAnalyzers,
+    resolveSearchAnalyzer,
+    tokenizeIntlText,
+    tokenizeRoutedText
+  } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
 
   assert.ok(tokenizeIntlText("検索方式を改善する").includes("検索"));
   assert.ok(tokenizeIntlText("中文搜索方式需要改善").includes("搜索"));
+  assert.deepEqual(tokenizeRoutedText("검색API", ["ko"]), ["검색", "api"]);
+  assert.deepEqual(parseDeclaredSearchAnalyzers(" ko,KO , "), ["ko"]);
+  const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+  assert.deepEqual(analyzer.identity.declaredAnalyzers, ["ko"]);
+  assert.deepEqual(analyzer.identity.activeAnalyzers, []);
+  assert.ok((await analyzer.tokenize("한국어 검색")).includes("한국어"));
+  const envOverSettings = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }, { search: { extraLangs: ["ko"] } });
+  assert.deepEqual(envOverSettings.identity.declaredAnalyzers, []);
+  assert.throws(
+    () => resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_ANALYZER: "kiwi" }, { search: { analyzer: "intl" } }),
+    /kiwi is not available/
+  );
   assert.equal(
     analyzerIdentityKey({ name: "custom", version: "1", node: "20", model: "m", runtime: "daemon" }),
     analyzerIdentityKey({ runtime: "daemon", model: "m", node: "20", version: "1", name: "custom" })
   );
+  assert.throws(() => parseDeclaredSearchAnalyzers("ja"), /registered analyzers: ko/);
 });
 
 test("read caps by lines and pages without gaps", async () => {
@@ -101,11 +150,9 @@ test("core write/read preserves shell-sensitive raw payloads", async () => {
 test("core ranked search uses metadata fields and external cache", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
-  const previousCache = process.env.XDG_CACHE_HOME;
-  process.env.XDG_CACHE_HOME = cache;
-  try {
+  await withSearchProcess(cache, async () => {
     const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
-    const { cachePaths } = await import(path.resolve("src/core/search.ts"));
+    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
     writeVaultFile(vault, {
       path: "Projects/Alpha.md",
       content: `---
@@ -136,7 +183,9 @@ The rollout is blocked by review.
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
     assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
     const analysisCache = JSON.parse(fs.readFileSync(cachePaths(vault).analysisPath, "utf8"));
-    assert.equal(analysisCache.analyzer.name, "intl");
+    assert.equal(analysisCache.analyzer.name, "router");
+    assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-v1");
+    assert.deepEqual(analysisCache.analyzer.activeAnalyzers, []);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
 
     const scoped = await searchVault(vault, { query: "project alpha", path: "Projects", limit: 2 });
@@ -184,18 +233,13 @@ Another project note.
     await assert.rejects(() => searchVault(vault, { path: "Projects", limit: 2 }), /query=<text> or tag=<tag>/);
     await assert.rejects(() => searchVault(vault, { query: "review", fields: ["unknown"], limit: 2 }), /field must be one of/);
     await assert.rejects(() => searchVault(vault, { tags: ["project"], fields: ["title"], limit: 2 }), /field=<field> requires query=<text>/);
-  } finally {
-    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = previousCache;
-  }
+  });
 });
 
 test("core search uses analyzer tokens for CJK queries", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
-  const previousCache = process.env.XDG_CACHE_HOME;
-  process.env.XDG_CACHE_HOME = cache;
-  try {
+  await withSearchProcess(cache, async () => {
     const { searchVault, writeVaultFile } = await core();
     writeVaultFile(vault, {
       path: "Notes/search-ja.md",
@@ -204,18 +248,13 @@ test("core search uses analyzer tokens for CJK queries", async () => {
     const result = await searchVault(vault, { query: "検索", limit: 2 });
     assert.deepEqual(result.matches.map((match) => match.path), ["Notes/search-ja.md"]);
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /検索方式/);
-  } finally {
-    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = previousCache;
-  }
+  });
 });
 
 test("core search updates cache incrementally across add change rename delete and parse failure", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
-  const previousCache = process.env.XDG_CACHE_HOME;
-  process.env.XDG_CACHE_HOME = cache;
-  try {
+  await withSearchProcess(cache, async () => {
     const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
 
     writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\nproject alpha\n" });
@@ -245,18 +284,13 @@ test("core search updates cache incrementally across add change rename delete an
     assert.equal(result.matches.length, 0);
 
     assert.equal(getSearchIndexStatus(vault).ready, true);
-  } finally {
-    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = previousCache;
-  }
+  });
 });
 
 test("core reranking favors note identity over body-only mentions and respects field scope", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
-  const previousCache = process.env.XDG_CACHE_HOME;
-  process.env.XDG_CACHE_HOME = cache;
-  try {
+  await withSearchProcess(cache, async () => {
     const { searchVault, writeVaultFile } = await core();
 
     writeVaultFile(vault, {
@@ -304,10 +338,7 @@ Minimal body.
 
     result = await searchVault(vault, { query: "roadmap", fields: ["body"], limit: 3 });
     assert.equal(result.matches[0].path, "Notes/Roadmap Body.md");
-  } finally {
-    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = previousCache;
-  }
+  });
 });
 
 test("core frontmatter reads and mutates structured YAML while preserving body", async () => {

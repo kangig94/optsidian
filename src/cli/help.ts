@@ -16,7 +16,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "settings", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"] as const;
 export const MCP_TOOL_NAMES = ["command_map", "command_run", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
@@ -55,7 +55,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "Search is CLI-only. Use MCP command_map for routing and CLI help discovery.",
       "query is required unless tag= is provided.",
       "field= is only valid when query= is present.",
-      "Search indexes analyzer tokens; default analyzer is Intl.Segmenter.",
+      "Search indexes script-routed analyzer tokens; default baseline is Intl.Segmenter.",
       "Search output returns note path, title, tags, and body snippets only."
     ]
   },
@@ -65,8 +65,31 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
       "The search cache lives outside the vault and is rebuilt automatically as needed.",
-      "The cache records the active analyzer identity and is rebuilt when it changes.",
+      "The cache records the analyzer identity and is rebuilt when it changes.",
+      "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko is parsed, but currently falls back to Intl because no Korean backend ships yet.",
       "status only reports whether a usable cache exists."
+    ]
+  },
+  settings: {
+    summary: "Read or update global Optsidian settings",
+    usage: [
+      "optsidian settings [list] [format=text|json]",
+      "optsidian settings path [format=text|json]",
+      "optsidian settings get <key> [format=text|json]",
+      "optsidian settings set <key>=<value> [format=text|json]",
+      "optsidian settings unset <key> [format=text|json]"
+    ],
+    options: [
+      { name: "search.analyzer=intl|intl-daemon", description: "Use the in-process analyzer or daemon-backed analyzer" },
+      { name: "search.extraLangs=ko", description: "Declare future language analyzers; currently ko falls back to Intl" },
+      { name: "search.analyzerIdleMs=<ms>", description: "Daemon idle timeout" },
+      { name: "search.analyzerRequestTimeoutMs=<ms>", description: "Daemon request timeout" },
+      { name: "format=text|json", description: "Output format (default: text)" }
+    ],
+    notes: [
+      "Settings are written to $XDG_CONFIG_HOME/optsidian/settings.json, or ~/.config/optsidian/settings.json.",
+      "A project-local .optsidian/settings.json is read as an override when present, but this command does not create or edit it.",
+      "Environment variables still override file settings."
     ]
   },
   grep: {

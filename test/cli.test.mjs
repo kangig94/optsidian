@@ -295,6 +295,7 @@ function run(args, options = {}) {
   const result = spawnSync(process.execPath, [cli, ...args], {
     encoding: "utf8",
     input: options.input,
+    cwd: options.cwd,
     env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
   });
   return result;
@@ -305,6 +306,7 @@ function run(args, options = {}) {
 function runAsync(args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cli, ...args], {
+      cwd: options.cwd,
       env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
     });
     let stdout = "";
@@ -393,7 +395,12 @@ function setup() {
   fs.mkdirSync(vault, { recursive: true });
   const log = path.join(dir, "obsidian.log");
   const fake = makeFakeObsidian(dir, vault);
-  const env = { OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log };
+  const env = {
+    OPTSIDIAN_OBSIDIAN_BIN: fake,
+    FAKE_VAULT: vault,
+    FAKE_OBSIDIAN_LOG: log,
+    XDG_CONFIG_HOME: path.join(dir, "config")
+  };
   return { dir, vault, env, log };
 }
 
@@ -1216,6 +1223,7 @@ test("search can use the analyzer daemon and the daemon exits after idle", () =>
       XDG_CACHE_HOME: cache,
       XDG_RUNTIME_DIR: runtime,
       OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
+      OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
       OPTSIDIAN_ANALYZER_IDLE_MS: "50",
       OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
     }
@@ -1224,12 +1232,81 @@ test("search can use the analyzer daemon and the daemon exits after idle", () =>
   const payload = JSON.parse(result.stdout);
   assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
 
-  const socketPath = path.join(runtime, "optsidian", "analyzer.sock");
+  const socketPath = path.join(runtime, "optsidian", "analyzer-v2.sock");
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline && fs.existsSync(socketPath)) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   assert.equal(fs.existsSync(socketPath), false);
+});
+
+test("settings command writes global settings and reads project-local overrides", async () => {
+  const project = tempRoot();
+  const { vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 설정.\n");
+
+  let result = run(["settings", "path"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  const globalSettings = path.join(env.XDG_CONFIG_HOME, "optsidian", "settings.json");
+  assert.equal(result.stdout.trim(), globalSettings);
+
+  result = run(["settings", "set", "search.extraLangs=ko", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  const setPayload = JSON.parse(result.stdout);
+  assert.equal(setPayload.path, globalSettings);
+  assert.deepEqual(setPayload.settings.search.extraLangs, ["ko"]);
+  assert.equal(fs.existsSync(path.join(project, ".optsidian", "settings.json")), false);
+
+  result = run(["settings", "get", "search.extraLangs"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'search.extraLangs: ["ko"]');
+
+  result = run(["search", "query=검색", "format=json"], {
+    cwd: project,
+    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
+
+  const { cachePaths } = await import(path.resolve("src/core/search.ts"));
+  const manifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
+    JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"))
+  );
+  assert.deepEqual(manifest.analyzer.declaredAnalyzers, ["ko"]);
+  assert.deepEqual(manifest.analyzer.activeAnalyzers, []);
+
+  result = run(["search", "query=검색", "format=json"], {
+    cwd: project,
+    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const envOverrideManifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
+    JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"))
+  );
+  assert.deepEqual(envOverrideManifest.analyzer.declaredAnalyzers, []);
+
+  result = run(["settings", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).settings, {});
+
+  const localSettings = path.join(project, ".optsidian", "settings.json");
+  fs.mkdirSync(path.dirname(localSettings), { recursive: true });
+  fs.writeFileSync(localSettings, '{\n  "search": {\n    "analyzer": "intl-daemon",\n    "extraLangs": ["ko"]\n  }\n}\n');
+
+  result = run(["settings", "get", "search.analyzer"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.analyzer: intl-daemon");
+
+  result = run(["settings", "set", "search.analyzer=intl", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).settings.search.analyzer, "intl");
+  assert.match(fs.readFileSync(localSettings, "utf8"), /"intl-daemon"/);
+
+  result = run(["settings", "get", "search.analyzer"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.analyzer: intl-daemon");
 });
 
 test("search requires query or tag and validates fields", () => {

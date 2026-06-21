@@ -5,15 +5,19 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { RuntimeError, UsageError } from "../errors.js";
+import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 
 export type SearchAnalyzerIdentity = {
   name: string;
   version: string;
+  baseline?: string;
   runtime?: string;
   node: string;
   icu?: string;
   model?: string;
   optionsHash?: string;
+  declaredAnalyzers?: string[];
+  activeAnalyzers?: string[];
 };
 
 export type SearchAnalyzer = {
@@ -36,38 +40,71 @@ type SearchAnalyzerSelector = {
   version?: string;
   model?: string;
   optionsHash?: string;
+  declaredAnalyzers?: string[];
+  activeAnalyzers?: string[];
 };
 
 type AnalyzerResponse =
   | { id: number; result: { analyzer: SearchAnalyzerIdentity; tokens: string[][] } }
   | { id: number; error: { message: string } };
 
-const ANALYZER_VERSION = "intl-segmenter-v1";
+export type SearchDeclaredAnalyzer = "ko";
+
+export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
+
+const ROUTER_VERSION = "script-router-v1";
+const INTL_ANALYZER_VERSION = "intl-segmenter-v1";
+const DAEMON_PROTOCOL_VERSION = "v2";
 const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
 const ANALYZER_IDLE_ENV = "OPTSIDIAN_ANALYZER_IDLE_MS";
 const ANALYZER_REQUEST_TIMEOUT_ENV = "OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS";
 const ANALYZER_BIN_ENV = "OPTSIDIAN_ANALYZER_DAEMON_BIN";
+const REGISTERED_ANALYZERS = ["ko"] as const satisfies readonly SearchDeclaredAnalyzer[];
+const REGISTERED_ANALYZER_SET: ReadonlySet<string> = new Set(REGISTERED_ANALYZERS);
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60 * 1000;
 const STARTUP_TIMEOUT_MS = 2000;
 const WORD_SCRIPT_RUN_PATTERN =
   /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
+const SCRIPT_RUN_PATTERN =
+  /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
 
 let requestId = 0;
 
-export function resolveSearchAnalyzer(env: NodeJS.ProcessEnv = process.env): SearchAnalyzer {
-  const mode = (env[ANALYZER_MODE_ENV] ?? "intl").trim().toLowerCase();
-  if (mode === "intl") return createIntlAnalyzer();
-  if (mode === "intl-daemon" || mode === "daemon-intl") return createDaemonAnalyzer(env);
+export function resolveSearchAnalyzer(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+): SearchAnalyzer {
+  const mode = searchAnalyzerMode(env, settings);
+  const declaredAnalyzers = parseDeclaredSearchAnalyzers(searchExtraLangsValue(env, settings));
+  if (mode === "intl") return createRouterAnalyzer(declaredAnalyzers);
+  if (mode === "intl-daemon") return createDaemonAnalyzer(env, settings, declaredAnalyzers);
   if (mode === "kiwi") {
-    throw new UsageError("OPTSIDIAN_SEARCH_ANALYZER=kiwi is not available in this build yet");
+    throw new UsageError(`${ANALYZER_MODE_ENV}=kiwi is not available. Use ${SEARCH_EXTRA_LANGS_ENV}=ko after a Korean analyzer backend is added.`);
   }
   throw new UsageError(`${ANALYZER_MODE_ENV} must be one of: intl, intl-daemon`);
 }
 
+function searchAnalyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string {
+  const raw = env[ANALYZER_MODE_ENV] ?? settings.search?.analyzer ?? "intl";
+  const mode = raw.trim().toLowerCase();
+  return mode === "daemon-intl" ? "intl-daemon" : mode;
+}
+
+function searchExtraLangsValue(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string | undefined {
+  if (env[SEARCH_EXTRA_LANGS_ENV] !== undefined) return env[SEARCH_EXTRA_LANGS_ENV];
+  return settings.search?.extraLangs?.join(",");
+}
+
+function settingNumberValue(envValue: string | undefined, settingValue: number | undefined): string | undefined {
+  if (envValue !== undefined) return envValue;
+  return settingValue === undefined ? undefined : String(settingValue);
+}
+
 export function analyzerCacheKey(identity: SearchAnalyzerIdentity): string {
   const name = identity.name.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "analyzer";
-  return name === "intl" ? "intl" : `${name}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
+  if ((name === "intl" || name === "router") && (identity.activeAnalyzers ?? []).length === 0) return "intl";
+  return `${name}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
 }
 
 export function analyzerIdentityKey(identity: SearchAnalyzerIdentity): string {
@@ -78,31 +115,88 @@ export function tokensToSearchText(tokens: readonly string[]): string {
   return unique(tokens).join(" ");
 }
 
+export function parseDeclaredSearchAnalyzers(raw: string | undefined): SearchDeclaredAnalyzer[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const declared = new Set<SearchDeclaredAnalyzer>();
+  for (const part of raw.split(",")) {
+    const code = part.trim().toLowerCase();
+    if (!code) continue;
+    if (!REGISTERED_ANALYZER_SET.has(code)) {
+      throw new UsageError(`${SEARCH_EXTRA_LANGS_ENV} must include only registered analyzers: ${REGISTERED_ANALYZERS.join(", ")}`);
+    }
+    declared.add(code as SearchDeclaredAnalyzer);
+  }
+  return [...declared].sort((left, right) => left.localeCompare(right));
+}
+
 export function tokenizeIntlText(text: string): string[] {
+  return tokenizeRoutedText(text, []);
+}
+
+export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): string[] {
   const normalized = normalizeAnalyzerInput(text);
   if (!normalized) return [];
+  const tokens: string[] = [];
+  for (const run of scriptRuns(normalized)) {
+    tokens.push(...tokenizeScriptRun(run, declaredAnalyzers));
+  }
+  return unique(tokens.map((token) => token.trim()).filter(Boolean));
+}
+
+function tokenizeScriptRun(run: ScriptRun, declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): string[] {
+  if (run.script === "hangul" && declaredAnalyzers.includes("ko")) {
+    return tokenizeIntlRun(run.text);
+  }
+  return tokenizeIntlRun(run.text);
+}
+
+type ScriptRun = {
+  script: "latin" | "hangul" | "han" | "hiragana" | "katakana" | "other";
+  text: string;
+};
+
+function scriptRuns(text: string): ScriptRun[] {
+  return [...text.matchAll(SCRIPT_RUN_PATTERN)].map((match) => ({
+    script: scriptForRun(match[0]),
+    text: match[0]
+  }));
+}
+
+function scriptForRun(text: string): ScriptRun["script"] {
+  if (/\p{Script=Hangul}/u.test(text)) return "hangul";
+  if (/\p{Script=Han}/u.test(text)) return "han";
+  if (/\p{Script=Hiragana}/u.test(text)) return "hiragana";
+  if (/\p{Script=Katakana}/u.test(text)) return "katakana";
+  if (/\p{Script=Latin}/u.test(text)) return "latin";
+  return "other";
+}
+
+function tokenizeIntlRun(text: string): string[] {
   const segmenter = intlSegmenter();
   const tokens: string[] = [];
   if (segmenter) {
-    for (const segment of segmenter.segment(normalized)) {
+    for (const segment of segmenter.segment(text)) {
       if (segment.isWordLike !== true) continue;
       for (const run of segment.segment.matchAll(WORD_SCRIPT_RUN_PATTERN)) {
         tokens.push(run[0]);
       }
     }
   } else {
-    for (const run of normalized.matchAll(WORD_SCRIPT_RUN_PATTERN)) {
+    for (const run of text.matchAll(WORD_SCRIPT_RUN_PATTERN)) {
       tokens.push(run[0]);
     }
   }
-  return unique(tokens.map((token) => token.trim()).filter(Boolean));
+  return tokens;
 }
 
-export async function runSearchAnalyzerDaemon(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+export async function runSearchAnalyzerDaemon(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+): Promise<void> {
   const paths = analyzerDaemonPaths(env);
   fs.mkdirSync(paths.runtimeDir, { recursive: true });
 
-  const idleMs = parseIdleMs(env[ANALYZER_IDLE_ENV]);
+  const idleMs = parseIdleMs(settingNumberValue(env[ANALYZER_IDLE_ENV], settings.search?.analyzerIdleMs));
   const sockets = new Set<net.Socket>();
   let idleTimer: NodeJS.Timeout | undefined;
   const server = net.createServer((socket) => {
@@ -164,26 +258,37 @@ export async function runSearchAnalyzerDaemon(env: NodeJS.ProcessEnv = process.e
   }
 }
 
-function createIntlAnalyzer(): SearchAnalyzer {
+function createRouterAnalyzer(declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): SearchAnalyzer {
+  const identity = routerIdentity(declaredAnalyzers, []);
   return {
-    identity: intlIdentity(),
-    tokenize: async (text) => tokenizeIntlText(text),
-    tokenizeBatch: async (texts) => texts.map((text) => tokenizeIntlText(text))
+    identity,
+    tokenize: async (text) => tokenizeRoutedText(text, declaredAnalyzers),
+    tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, declaredAnalyzers))
   };
 }
 
-function createDaemonAnalyzer(env: NodeJS.ProcessEnv): SearchAnalyzer {
+function createDaemonAnalyzer(
+  env: NodeJS.ProcessEnv,
+  settings: OptsidianSettings,
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[]
+): SearchAnalyzer {
+  const identity = routerIdentity(declaredAnalyzers, []);
   return {
-    identity: intlIdentity(),
-    tokenize: async (text) => (await requestDaemonTokenization([text], env))[0] ?? [],
-    tokenizeBatch: async (texts) => requestDaemonTokenization([...texts], env)
+    identity,
+    tokenize: async (text) => (await requestDaemonTokenization([text], declaredAnalyzers, env, settings))[0] ?? [],
+    tokenizeBatch: async (texts) => requestDaemonTokenization([...texts], declaredAnalyzers, env, settings)
   };
 }
 
-async function requestDaemonTokenization(texts: string[], env: NodeJS.ProcessEnv): Promise<string[][]> {
+async function requestDaemonTokenization(
+  texts: string[],
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  env: NodeJS.ProcessEnv,
+  settings: OptsidianSettings
+): Promise<string[][]> {
   if (texts.length === 0) return [];
   try {
-    return await requestRunningDaemon(texts, env);
+    return await requestRunningDaemon(texts, declaredAnalyzers, env, settings);
   } catch (error) {
     cleanupStaleSocketForError(error, env);
     spawnAnalyzerDaemon(env);
@@ -194,7 +299,7 @@ async function requestDaemonTokenization(texts: string[], env: NodeJS.ProcessEnv
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
     await sleep(50);
     try {
-      return await requestRunningDaemon(texts, env);
+      return await requestRunningDaemon(texts, declaredAnalyzers, env, settings);
     } catch (error) {
       lastError = error;
     }
@@ -202,15 +307,27 @@ async function requestDaemonTokenization(texts: string[], env: NodeJS.ProcessEnv
   throw new RuntimeError(`Analyzer daemon is unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function requestRunningDaemon(texts: string[], env: NodeJS.ProcessEnv): Promise<string[][]> {
+async function requestRunningDaemon(
+  texts: string[],
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  env: NodeJS.ProcessEnv,
+  settings: OptsidianSettings
+): Promise<string[][]> {
   const paths = analyzerDaemonPaths(env);
   const id = ++requestId;
-  const request: AnalyzerRequest = { id, method: "tokenizeBatch", params: { analyzer: { name: "intl" }, texts } };
-  const response = await sendAnalyzerRequest(paths.socketPath, request, env);
+  const request: AnalyzerRequest = {
+    id,
+    method: "tokenizeBatch",
+    params: {
+      analyzer: { name: "router", declaredAnalyzers: [...declaredAnalyzers], activeAnalyzers: [] },
+      texts
+    }
+  };
+  const response = await sendAnalyzerRequest(paths.socketPath, request, env, settings);
   if ("error" in response) {
     throw new RuntimeError(response.error.message);
   }
-  const expectedIdentity = analyzerIdentityKey(intlIdentity());
+  const expectedIdentity = analyzerIdentityKey(routerIdentity(declaredAnalyzers, []));
   const actualIdentity = analyzerIdentityKey(response.result.analyzer);
   if (actualIdentity !== expectedIdentity) {
     throw new RuntimeError("Analyzer daemon identity does not match the active search analyzer");
@@ -218,14 +335,19 @@ async function requestRunningDaemon(texts: string[], env: NodeJS.ProcessEnv): Pr
   return response.result.tokens;
 }
 
-function sendAnalyzerRequest(socketPath: string, request: AnalyzerRequest, env: NodeJS.ProcessEnv): Promise<AnalyzerResponse> {
+function sendAnalyzerRequest(
+  socketPath: string,
+  request: AnalyzerRequest,
+  env: NodeJS.ProcessEnv,
+  settings: OptsidianSettings
+): Promise<AnalyzerResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = "";
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new RuntimeError("Analyzer daemon request timed out"));
-    }, parseRequestTimeoutMs(env[ANALYZER_REQUEST_TIMEOUT_ENV]));
+    }, parseRequestTimeoutMs(settingNumberValue(env[ANALYZER_REQUEST_TIMEOUT_ENV], settings.search?.analyzerRequestTimeoutMs)));
     timer.unref();
     socket.setEncoding("utf8");
     socket.on("connect", () => {
@@ -254,15 +376,23 @@ function handleAnalyzerLine(socket: net.Socket, line: string): void {
   let request: AnalyzerRequest | undefined;
   try {
     request = JSON.parse(line) as AnalyzerRequest;
-    if (request.method !== "tokenizeBatch" || request.params?.analyzer?.name !== "intl" || !Array.isArray(request.params.texts)) {
+    if (request.method !== "tokenizeBatch" || !Array.isArray(request.params.texts)) {
       throw new Error("unsupported analyzer request");
     }
-    const tokens = request.params.texts.map((text) => tokenizeIntlText(String(text)));
-    socket.write(`${JSON.stringify({ id: request.id, result: { analyzer: intlIdentity(), tokens } })}\n`);
+    const declaredAnalyzers = parseSelectorDeclaredAnalyzers(request.params.analyzer);
+    const tokens = request.params.texts.map((text) => tokenizeRoutedText(String(text), declaredAnalyzers));
+    socket.write(`${JSON.stringify({ id: request.id, result: { analyzer: routerIdentity(declaredAnalyzers, []), tokens } })}\n`);
   } catch (error) {
     const id = typeof request?.id === "number" ? request.id : 0;
     socket.write(`${JSON.stringify({ id, error: { message: error instanceof Error ? error.message : String(error) } })}\n`);
   }
+}
+
+function parseSelectorDeclaredAnalyzers(selector: SearchAnalyzerSelector): SearchDeclaredAnalyzer[] {
+  if (selector.name !== "router" && selector.name !== "intl") {
+    throw new Error("unsupported analyzer request");
+  }
+  return parseDeclaredSearchAnalyzers((selector.declaredAnalyzers ?? []).join(","));
 }
 
 function spawnAnalyzerDaemon(env: NodeJS.ProcessEnv): void {
@@ -280,10 +410,10 @@ function analyzerDaemonPaths(env: NodeJS.ProcessEnv): { runtimeDir: string; sock
   const base = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), `optsidian-${process.getuid?.() ?? "user"}`);
   const runtimeDir = path.join(base, "optsidian");
   if (process.platform === "win32") {
-    const key = stableHash(runtimeDir).slice(0, 16);
+    const key = stableHash(`${runtimeDir}:${DAEMON_PROTOCOL_VERSION}`).slice(0, 16);
     return { runtimeDir, socketPath: `\\\\.\\pipe\\optsidian-analyzer-${key}` };
   }
-  return { runtimeDir, socketPath: path.join(runtimeDir, "analyzer.sock") };
+  return { runtimeDir, socketPath: path.join(runtimeDir, `analyzer-${DAEMON_PROTOCOL_VERSION}.sock`) };
 }
 
 function cleanupStaleSocketForError(error: unknown, env: NodeJS.ProcessEnv): void {
@@ -323,13 +453,19 @@ function intlSegmenter(): Intl.Segmenter | undefined {
   return new Intl.Segmenter(undefined, { granularity: "word" });
 }
 
-function intlIdentity(): SearchAnalyzerIdentity {
+function routerIdentity(
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  activeAnalyzers: readonly SearchDeclaredAnalyzer[]
+): SearchAnalyzerIdentity {
   return {
-    name: "intl",
-    version: ANALYZER_VERSION,
+    name: "router",
+    version: ROUTER_VERSION,
+    baseline: INTL_ANALYZER_VERSION,
     runtime: "node-intl",
     node: process.versions.node,
-    ...(process.versions.icu ? { icu: process.versions.icu } : {})
+    ...(process.versions.icu ? { icu: process.versions.icu } : {}),
+    declaredAnalyzers: [...declaredAnalyzers].sort((left, right) => left.localeCompare(right)),
+    activeAnalyzers: [...activeAnalyzers].sort((left, right) => left.localeCompare(right))
   };
 }
 
