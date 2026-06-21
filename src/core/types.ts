@@ -124,6 +124,22 @@ export type SearchIndexProjectionStatus = {
   builtAt?: string;
 };
 
+export type SearchIndexWarmAccessStatus = {
+  path: string;
+  recent: boolean;
+  maxAgeDays: number;
+  lastAccessAt?: string;
+  expiresAt?: string;
+};
+
+export type SearchIndexWarmScheduleStatus = {
+  path: string;
+  intervalMinutes: number;
+  throttled: boolean;
+  lastAttemptAt?: string;
+  nextAttemptAt?: string;
+};
+
 export type SearchIndexStatusResult = {
   ok: true;
   command: "index";
@@ -131,6 +147,8 @@ export type SearchIndexStatusResult = {
   ready: boolean;
   staleTier?: boolean;
   projections: SearchIndexProjectionStatus[];
+  warmAccess: SearchIndexWarmAccessStatus;
+  warmSchedule: SearchIndexWarmScheduleStatus;
   reconcile?: SearchIndexReconcileStatus;
   reconcileStatus?: SearchIndexReconcileSnapshot;
 };

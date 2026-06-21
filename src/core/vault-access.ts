@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import { UsageError } from "../errors.js";
 import { optsidianCacheRoot } from "./cache-root.js";
+import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
+import type { SearchIndexWarmAccessStatus } from "./types.js";
 import { atomicWriteFile } from "./write-file.js";
 
 export type VaultAccessEntry = {
@@ -17,22 +20,26 @@ type VaultAccessFile = {
 type VaultAccessOptions = {
   env?: NodeJS.ProcessEnv;
   nowMs?: number;
+  settings?: OptsidianSettings;
 };
 
 const VAULT_ACCESS_SCHEMA_VERSION = 1;
 const VAULT_ACCESS_FILE = "vault-access.json";
-const VAULT_ACCESS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const VAULT_ACCESS_MAX_AGE_DAYS_ENV = "OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS";
+const DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS = 7;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const VAULT_ACCESS_MAX_ENTRIES = 200;
 
 export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions = {}): string | undefined {
   try {
     const env = options.env ?? process.env;
     const nowMs = options.nowMs ?? Date.now();
+    const maxAgeMs = vaultAccessMaxAgeMs(env, settingsForAccess(options, env));
     const realpath = fs.realpathSync(vaultRoot);
     const statePath = vaultAccessPath(env);
     const existing = readVaultAccessFile(statePath);
     const entries = new Map<string, VaultAccessEntry>();
-    for (const entry of recentVaultEntries(existing?.vaults ?? [], nowMs)) {
+    for (const entry of recentVaultEntries(existing?.vaults ?? [], nowMs, maxAgeMs)) {
       entries.set(entry.realpath, entry);
     }
     entries.set(realpath, {
@@ -40,7 +47,7 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
       lastAccessAtMs: nowMs,
       lastAccessAt: new Date(nowMs).toISOString()
     });
-    writeVaultAccessFile(statePath, [...entries.values()], nowMs);
+    writeVaultAccessFile(statePath, [...entries.values()], nowMs, maxAgeMs);
     return realpath;
   } catch {
     return undefined;
@@ -50,12 +57,13 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
 export function recentVaultAccessRoots(options: VaultAccessOptions = {}): string[] {
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? Date.now();
+  const maxAgeMs = vaultAccessMaxAgeMs(env, settingsForAccess(options, env));
   const state = readVaultAccessFile(vaultAccessPath(env));
   if (!state) return [];
 
   const seen = new Set<string>();
   const roots: string[] = [];
-  for (const entry of recentVaultEntries(state.vaults, nowMs)) {
+  for (const entry of recentVaultEntries(state.vaults, nowMs, maxAgeMs)) {
     if (seen.has(entry.realpath)) continue;
     seen.add(entry.realpath);
     try {
@@ -67,13 +75,42 @@ export function recentVaultAccessRoots(options: VaultAccessOptions = {}): string
   return roots;
 }
 
+export function vaultAccessStatus(vaultRoot: string, options: VaultAccessOptions = {}): SearchIndexWarmAccessStatus {
+  const env = options.env ?? process.env;
+  const nowMs = options.nowMs ?? Date.now();
+  const settings = settingsForAccess(options, env);
+  const maxAgeDays = vaultAccessMaxAgeDays(env, settings);
+  const maxAgeMs = maxAgeDaysToMs(maxAgeDays);
+  const statePath = vaultAccessPath(env);
+  const realpath = fs.realpathSync(vaultRoot);
+  const state = readVaultAccessFile(statePath);
+  const entry = state?.vaults.find((candidate) => candidate.realpath === realpath);
+  if (!entry) {
+    return {
+      path: statePath,
+      recent: false,
+      maxAgeDays
+    };
+  }
+
+  const ageMs = nowMs - entry.lastAccessAtMs;
+  const expiresAtMs = entry.lastAccessAtMs + maxAgeMs;
+  return {
+    path: statePath,
+    recent: ageMs <= maxAgeMs,
+    maxAgeDays,
+    lastAccessAt: entry.lastAccessAt,
+    expiresAt: new Date(expiresAtMs).toISOString()
+  };
+}
+
 export function vaultAccessPath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), VAULT_ACCESS_FILE);
 }
 
-function recentVaultEntries(entries: readonly VaultAccessEntry[], nowMs: number): VaultAccessEntry[] {
+function recentVaultEntries(entries: readonly VaultAccessEntry[], nowMs: number, maxAgeMs: number): VaultAccessEntry[] {
   return entries
-    .filter((entry) => nowMs - entry.lastAccessAtMs <= VAULT_ACCESS_MAX_AGE_MS)
+    .filter((entry) => nowMs - entry.lastAccessAtMs <= maxAgeMs)
     .sort((left, right) => right.lastAccessAtMs - left.lastAccessAtMs || left.realpath.localeCompare(right.realpath))
     .slice(0, VAULT_ACCESS_MAX_ENTRIES);
 }
@@ -88,13 +125,41 @@ function readVaultAccessFile(filePath: string): VaultAccessFile | undefined {
   }
 }
 
-function writeVaultAccessFile(filePath: string, entries: readonly VaultAccessEntry[], nowMs: number): void {
+function writeVaultAccessFile(filePath: string, entries: readonly VaultAccessEntry[], nowMs: number, maxAgeMs: number): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const vaults = recentVaultEntries(entries, nowMs);
+  const vaults = recentVaultEntries(entries, nowMs, maxAgeMs);
   atomicWriteFile(filePath, `${JSON.stringify({
     schemaVersion: VAULT_ACCESS_SCHEMA_VERSION,
     vaults
   }, null, 2)}\n`);
+}
+
+function settingsForAccess(options: VaultAccessOptions, env: NodeJS.ProcessEnv): OptsidianSettings {
+  return options.settings ?? readOptsidianSettings(process.cwd(), env);
+}
+
+function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
+  return parsePositiveInteger(
+    env[VAULT_ACCESS_MAX_AGE_DAYS_ENV],
+    settings.search?.indexWarmAccessMaxAgeDays ?? DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS,
+    VAULT_ACCESS_MAX_AGE_DAYS_ENV
+  );
+}
+
+function vaultAccessMaxAgeMs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
+  return maxAgeDaysToMs(vaultAccessMaxAgeDays(env, settings));
+}
+
+function maxAgeDaysToMs(days: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, days * MS_PER_DAY);
+}
+
+function parsePositiveInteger(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  if (!/^\d+$/.test(raw)) throw new UsageError(`${name} must be a positive integer`);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new UsageError(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function isVaultAccessFile(value: unknown): value is VaultAccessFile {

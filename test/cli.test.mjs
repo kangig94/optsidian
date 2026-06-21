@@ -1195,13 +1195,20 @@ test("search ranks notes and index commands manage cache", async () => {
 
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n$/);
+  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n/m);
+  assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
+  assert.match(result.stdout, /^MCP warm throttle: inactive \(interval: 30m, last attempt: none\)\.\n$/m);
 
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const statusPayload = JSON.parse(result.stdout);
   assert.equal(statusPayload.ready, true);
   assert.equal(statusPayload.staleTier, undefined);
+  assert.equal(statusPayload.warmAccess.recent, true);
+  assert.equal(statusPayload.warmAccess.maxAgeDays, 7);
+  assert.equal(typeof statusPayload.warmAccess.lastAccessAt, "string");
+  assert.equal(statusPayload.warmSchedule.intervalMinutes, 30);
+  assert.equal(statusPayload.warmSchedule.throttled, false);
   assert.deepEqual(statusPayload.projections.map((projection) => ({
     key: projection.key,
     tier: projection.tier,
@@ -1230,7 +1237,10 @@ test("search ranks notes and index commands manage cache", async () => {
   try {
     result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\nReconcile running \(reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00\.000Z\)\.\n$/);
+    assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n/m);
+    assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
+    assert.match(result.stdout, /^MCP warm throttle: inactive \(interval: 30m, last attempt: none\)\.\n/m);
+    assert.match(result.stdout, /^Reconcile running \(reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00\.000Z\)\.\n$/m);
 
     result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
     assert.equal(result.status, 0, result.stderr);
@@ -1278,7 +1288,7 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\nLast reconcile: failure \(reason: manual, finished: 2026-06-21T00:00:01\.000Z, duration: 1000ms, error: simulated failure\)\.\n$/
+    /^Last reconcile: failure \(reason: manual, finished: 2026-06-21T00:00:01\.000Z, duration: 1000ms, error: simulated failure\)\.\n$/m
   );
 
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
@@ -1336,7 +1346,8 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
 
   result = run(["index", "status", "vault-path=" + secondVault], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 1, files: 1\n$/);
+  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 1, files: 1\n/m);
+  assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
 
   const overrideRegistry = path.join(dir, "override-obsidian.json");
   fs.writeFileSync(
@@ -1419,7 +1430,8 @@ test("search wakes the index daemon to warm recently accessed vaults", async () 
 
   const thirdStatus = run(["index", "status", "vault-path=" + thirdVault], { env: searchEnv });
   assert.equal(thirdStatus.status, 0, thirdStatus.stderr);
-  assert.match(thirdStatus.stdout, /^Index missing\.\nProjections:\n- intl \[active, baseline\]: missing\n$/);
+  assert.match(thirdStatus.stdout, /^Index missing\.\nProjections:\n- intl \[active, baseline\]: missing\n/m);
+  assert.match(thirdStatus.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
 });
 
 test("search can use the analyzer daemon and the daemon exits after idle", async () => {
@@ -1567,6 +1579,22 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "search.indexWarmIntervalMinutes: 30");
 
+  result = run(["config", "set", "search.indexWarmAccessMaxAgeDays=5", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.indexWarmAccessMaxAgeDays, 5);
+
+  result = run(["config", "get", "search.indexWarmAccessMaxAgeDays"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.indexWarmAccessMaxAgeDays: 5");
+
+  result = run(["config", "set", "search.indexWarmConcurrency=2", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.indexWarmConcurrency, 2);
+
+  result = run(["config", "get", "search.indexWarmConcurrency"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.indexWarmConcurrency: 2");
+
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
     env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
@@ -1616,6 +1644,27 @@ test("config command writes global settings and reads project-local overrides", 
   assert.deepEqual(envOverrideManifest.analyzer.declaredAnalyzers, []);
 
   result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config, {
+    search: {
+      overlayMaxFiles: 0,
+      indexWarmIntervalMinutes: 30,
+      indexWarmAccessMaxAgeDays: 5,
+      indexWarmConcurrency: 2
+    }
+  });
+
+  result = run(["config", "unset", "search.indexWarmAccessMaxAgeDays", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config, {
+    search: {
+      overlayMaxFiles: 0,
+      indexWarmIntervalMinutes: 30,
+      indexWarmConcurrency: 2
+    }
+  });
+
+  result = run(["config", "unset", "search.indexWarmConcurrency", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0, indexWarmIntervalMinutes: 30 } });
 

@@ -11,6 +11,8 @@ export type SearchSettings = {
   overlayMaxFiles?: number;
   overlayMaxBytes?: number;
   indexWarmIntervalMinutes?: number;
+  indexWarmAccessMaxAgeDays?: number;
+  indexWarmConcurrency?: number;
 };
 
 export type OptsidianSettings = {
@@ -180,6 +182,18 @@ function normalizeSettings(value: unknown): OptsidianSettings {
         "search.indexWarmIntervalMinutes"
       );
     }
+    if (value.search.indexWarmAccessMaxAgeDays !== undefined) {
+      settings.search.indexWarmAccessMaxAgeDays = normalizePositiveInteger(
+        value.search.indexWarmAccessMaxAgeDays,
+        "search.indexWarmAccessMaxAgeDays"
+      );
+    }
+    if (value.search.indexWarmConcurrency !== undefined) {
+      settings.search.indexWarmConcurrency = normalizePositiveInteger(
+        value.search.indexWarmConcurrency,
+        "search.indexWarmConcurrency"
+      );
+    }
   }
   return settings;
 }
@@ -200,6 +214,10 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.overlayMaxBytes;
     case "search.indexWarmIntervalMinutes":
       return settings.search?.indexWarmIntervalMinutes;
+    case "search.indexWarmAccessMaxAgeDays":
+      return settings.search?.indexWarmAccessMaxAgeDays;
+    case "search.indexWarmConcurrency":
+      return settings.search?.indexWarmConcurrency;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -229,6 +247,12 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
     case "search.indexWarmIntervalMinutes":
       settings.search.indexWarmIntervalMinutes = normalizeNonNegativeInteger(value, key);
       return;
+    case "search.indexWarmAccessMaxAgeDays":
+      settings.search.indexWarmAccessMaxAgeDays = normalizePositiveInteger(value, key);
+      return;
+    case "search.indexWarmConcurrency":
+      settings.search.indexWarmConcurrency = normalizePositiveInteger(value, key);
+      return;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -256,6 +280,12 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.indexWarmIntervalMinutes":
       if (settings.search) delete settings.search.indexWarmIntervalMinutes;
+      return;
+    case "search.indexWarmAccessMaxAgeDays":
+      if (settings.search) delete settings.search.indexWarmAccessMaxAgeDays;
+      return;
+    case "search.indexWarmConcurrency":
+      if (settings.search) delete settings.search.indexWarmConcurrency;
       return;
     default:
       throw new UsageError(knownSettingMessage());
@@ -305,7 +335,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

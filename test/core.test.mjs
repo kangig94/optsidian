@@ -129,7 +129,7 @@ test("vault access registry keeps recent realpaths only", async () => {
   fs.mkdirSync(thirdVault, { recursive: true });
   const env = { XDG_CACHE_HOME: cache };
   const dayMs = 24 * 60 * 60 * 1000;
-  const { recordVaultAccess, recentVaultAccessRoots, vaultAccessPath } = await import(path.join(repoRoot, "src/core/vault-access.ts"));
+  const { recordVaultAccess, recentVaultAccessRoots, vaultAccessPath, vaultAccessStatus } = await import(path.join(repoRoot, "src/core/vault-access.ts"));
   const firstReal = fs.realpathSync(firstVault);
   const secondReal = fs.realpathSync(secondVault);
   const thirdReal = fs.realpathSync(thirdVault);
@@ -137,9 +137,24 @@ test("vault access registry keeps recent realpaths only", async () => {
   assert.equal(recordVaultAccess(firstVault, { env, nowMs: 0 }), firstReal);
   assert.equal(recordVaultAccess(secondVault, { env, nowMs: 6 * dayMs }), secondReal);
   assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 6 * dayMs }), [secondReal, firstReal]);
+  assert.deepEqual(recentVaultAccessRoots({
+    env,
+    nowMs: 6 * dayMs,
+    settings: { search: { indexWarmAccessMaxAgeDays: 5 } }
+  }), [secondReal]);
 
   assert.equal(recordVaultAccess(thirdVault, { env, nowMs: 8 * dayMs }), thirdReal);
   assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 8 * dayMs }), [thirdReal, secondReal]);
+  assert.equal(vaultAccessStatus(firstVault, {
+    env,
+    nowMs: 8 * dayMs,
+    settings: { search: { indexWarmAccessMaxAgeDays: 5 } }
+  }).recent, false);
+  assert.deepEqual(recentVaultAccessRoots({
+    env: { ...env, OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS: "10" },
+    nowMs: 8 * dayMs,
+    settings: { search: { indexWarmAccessMaxAgeDays: 5 } }
+  }), [thirdReal, secondReal]);
 
   fs.rmSync(secondVault, { recursive: true, force: true });
   assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 8 * dayMs }), [thirdReal]);
@@ -547,6 +562,26 @@ test("core warm refreshes search index incrementally", async () => {
     assert.deepEqual(warm.vaults.map((entry) => entry.status), ["ready"]);
     result = await searchVault(vault, { query: "beta", limit: 5 });
     assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Beta.md"]);
+  });
+});
+
+test("core warm preserves input order with concurrency", async () => {
+  const firstVault = tempVault();
+  const secondVault = tempVault();
+  const missingVault = path.join(os.tmpdir(), "optsidian-missing-" + Date.now());
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { warmSearchIndexes, writeVaultFile } = await core();
+    writeVaultFile(firstVault, { path: "one.md", content: "# One\n\nalpha\n" });
+    writeVaultFile(secondVault, { path: "two.md", content: "# Two\n\nbeta\n" });
+
+    const warm = await warmSearchIndexes([missingVault, firstVault, secondVault], [], { concurrency: 2 });
+    assert.deepEqual(warm.vaults.map((entry) => entry.vaultRoot), [
+      path.resolve(missingVault),
+      fs.realpathSync(firstVault),
+      fs.realpathSync(secondVault)
+    ]);
+    assert.deepEqual(warm.vaults.map((entry) => entry.status), ["failed", "ready", "ready"]);
   });
 });
 

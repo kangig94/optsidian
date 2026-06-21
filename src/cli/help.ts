@@ -97,6 +97,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.overlayMaxFiles=<n>", description: "Maximum changed files searched through foreground Intl overlay" },
       { name: "search.overlayMaxBytes=<n>", description: "Maximum changed bytes searched through foreground Intl overlay" },
       { name: "search.indexWarmIntervalMinutes=<minutes>", description: "Minimum interval between MCP-triggered index warm attempts" },
+      { name: "search.indexWarmAccessMaxAgeDays=<days>", description: "Recently accessed vault retention window for background index warm" },
+      { name: "search.indexWarmConcurrency=<n>", description: "Background index warm concurrency" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [

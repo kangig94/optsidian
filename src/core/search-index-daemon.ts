@@ -8,6 +8,7 @@ import { RuntimeError, UsageError } from "../errors.js";
 import { resolveVaultPathInput } from "../native/obsidian.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 import { warmSearchIndexes } from "./search.js";
+import { readOptsidianSettings } from "./settings.js";
 import type { SearchIndexWarmResult } from "./types.js";
 import { recentVaultAccessRoots } from "./vault-access.js";
 
@@ -59,10 +60,12 @@ const INDEX_DAEMON_ENABLE_ENV = "OPTSIDIAN_INDEX_DAEMON";
 const INDEX_DAEMON_IDLE_ENV = "OPTSIDIAN_INDEX_DAEMON_IDLE_MS";
 const INDEX_DAEMON_POLL_ENV = "OPTSIDIAN_INDEX_DAEMON_POLL_MS";
 const INDEX_DAEMON_REQUEST_TIMEOUT_ENV = "OPTSIDIAN_INDEX_DAEMON_REQUEST_TIMEOUT_MS";
+const INDEX_WARM_CONCURRENCY_ENV = "OPTSIDIAN_INDEX_WARM_CONCURRENCY";
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 const DEFAULT_ONESHOT_IDLE_MS = 30 * 1000;
 const DEFAULT_POLL_MS = 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 750;
+const DEFAULT_INDEX_WARM_CONCURRENCY = 2;
 const STARTUP_TIMEOUT_MS = 2000;
 const INDEX_DAEMON_COMMAND = "__index-daemon";
 
@@ -98,6 +101,7 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
 
   const idleMs = parsePositiveIntegerEnv(env[INDEX_DAEMON_IDLE_ENV], DEFAULT_IDLE_MS, INDEX_DAEMON_IDLE_ENV);
   const pollMs = parseNonNegativeIntegerEnv(env[INDEX_DAEMON_POLL_ENV], DEFAULT_POLL_MS, INDEX_DAEMON_POLL_ENV);
+  const warmConcurrency = indexWarmConcurrency(env);
   const sockets = new Set<net.Socket>();
   const queue: IndexDaemonJob[] = [];
   let active = false;
@@ -208,7 +212,7 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
         if (!job) continue;
         try {
           lastRun = job.kind === "recent"
-            ? await warmRecentVaults(env)
+            ? await warmRecentVaults(env, warmConcurrency)
             : await warmSearchIndexes([job.vaultRoot], [], { fastNoop: true });
           lastError = undefined;
         } catch (error) {
@@ -281,8 +285,8 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
   }
 }
 
-async function warmRecentVaults(env: NodeJS.ProcessEnv): Promise<SearchIndexWarmResult> {
-  return warmSearchIndexes(recentVaultAccessRoots({ env }), [], { fastNoop: true });
+async function warmRecentVaults(env: NodeJS.ProcessEnv, concurrency: number): Promise<SearchIndexWarmResult> {
+  return warmSearchIndexes(recentVaultAccessRoots({ env }), [], { fastNoop: true, concurrency });
 }
 
 async function requestSearchIndexDaemon(
@@ -429,6 +433,15 @@ function parseNonNegativeIntegerEnv(raw: string | undefined, fallback: number, n
   if (raw === undefined || raw.trim() === "") return fallback;
   if (!/^\d+$/.test(raw)) throw new UsageError(`${name} must be a non-negative integer`);
   return Number(raw);
+}
+
+function indexWarmConcurrency(env: NodeJS.ProcessEnv): number {
+  const settings = readOptsidianSettings(process.cwd(), env);
+  return parsePositiveIntegerEnv(
+    env[INDEX_WARM_CONCURRENCY_ENV],
+    settings.search?.indexWarmConcurrency ?? DEFAULT_INDEX_WARM_CONCURRENCY,
+    INDEX_WARM_CONCURRENCY_ENV
+  );
 }
 
 function isConnectionRefused(error: unknown): boolean {

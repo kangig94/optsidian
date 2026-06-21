@@ -19,9 +19,11 @@ import {
   type SearchAnalyzerIdentity
 } from "./search-analyzer.js";
 import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
+import { indexWarmScheduleStatus } from "./search-index-schedule-state.js";
 import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 import { decodeUtf8, splitText } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
+import { vaultAccessStatus } from "./vault-access.js";
 import type {
   SearchField,
   SearchIndexMutationResult,
@@ -30,7 +32,9 @@ import type {
   SearchIndexReconcileSnapshot,
   SearchIndexReconcileStatus,
   SearchIndexStatusResult,
+  SearchIndexWarmAccessStatus,
   SearchIndexWarmResult,
+  SearchIndexWarmScheduleStatus,
   SearchIndexWarmVaultResult,
   SearchMatch,
   SearchParams,
@@ -178,6 +182,7 @@ type SearchIndexWriteOptions = {
 
 type SearchIndexWarmOptions = {
   fastNoop?: boolean;
+  concurrency?: number;
 };
 
 type SearchReconcileChildSpawner = (bin: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess;
@@ -385,18 +390,29 @@ function searchResult(matches: SearchMatch[], warnings: string[] = []): SearchRe
 
 export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult {
   const analyzer = resolveSearchAnalyzer();
+  const settings = readOptsidianSettings();
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const reconcile = readSearchReconcileStatus(paths.cacheDir);
   const reconcileStatus = readSearchReconcileSnapshot(paths.cacheDir);
   const projections = searchIndexProjectionStatuses(vaultRoot, analyzer);
   const served = projections.find((projection) => projection.compatible);
-  return searchIndexStatus(Boolean(served), served?.staleTier === true, projections, reconcile, reconcileStatus);
+  return searchIndexStatus(
+    Boolean(served),
+    served?.staleTier === true,
+    projections,
+    vaultAccessStatus(vaultRoot, { settings }),
+    indexWarmScheduleStatus({ settings }),
+    reconcile,
+    reconcileStatus
+  );
 }
 
 function searchIndexStatus(
   ready: boolean,
   staleTier: boolean,
   projections: SearchIndexProjectionStatus[],
+  warmAccess: SearchIndexWarmAccessStatus,
+  warmSchedule: SearchIndexWarmScheduleStatus,
   reconcile: SearchIndexReconcileStatus | undefined,
   reconcileStatus: SearchIndexReconcileSnapshot | undefined
 ): SearchIndexStatusResult {
@@ -407,6 +423,8 @@ function searchIndexStatus(
     ready,
     ...(staleTier ? { staleTier: true } : {}),
     projections,
+    warmAccess,
+    warmSchedule,
     ...(reconcile ? { reconcile } : {}),
     ...(reconcileStatus ? { reconcileStatus } : {})
   };
@@ -546,33 +564,55 @@ export async function warmSearchIndexes(
   options: SearchIndexWarmOptions = {}
 ): Promise<SearchIndexWarmResult> {
   const seen = new Set<string>();
-  const results: SearchIndexWarmVaultResult[] = [];
+  const items: Array<{ root: string } | { result: SearchIndexWarmVaultResult }> = [];
 
   for (const vaultRoot of vaultRoots) {
     let root: string;
     try {
       root = vaultRealpath(vaultRoot);
     } catch (error) {
-      results.push({
+      items.push({ result: {
         vaultRoot: path.resolve(vaultRoot),
         status: "failed",
         error: errorMessage(error)
-      });
+      } });
       continue;
     }
 
     if (seen.has(root)) continue;
     seen.add(root);
+    items.push({ root });
+  }
 
+  const results = new Array<SearchIndexWarmVaultResult>(items.length);
+  const warmItem = async (item: { root: string } | { result: SearchIndexWarmVaultResult }): Promise<SearchIndexWarmVaultResult> => {
+    if ("result" in item) return item.result;
     try {
-      await ensureSearchIndex(root, options);
-      results.push({ vaultRoot: root, status: "ready" });
+      await ensureSearchIndex(item.root, options);
+      return { vaultRoot: item.root, status: "ready" };
     } catch (error) {
-      results.push({
-        vaultRoot: root,
+      return {
+        vaultRoot: item.root,
         status: "failed",
         error: errorMessage(error)
-      });
+      };
+    }
+  };
+
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? 1, items.length || 1));
+  let nextIndex = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await warmItem(items[index]);
+    }
+  });
+  await Promise.all(workers);
+
+  for (const result of results) {
+    if (!result) {
+      throw new RuntimeError("Search index warm worker did not produce a result");
     }
   }
 

@@ -101,6 +101,8 @@ export function renderIndexResult(
         lines.push(`- ${projection.key}${projection.roles.length > 0 ? ` [${projection.roles.join(", ")}]` : ""}: ${renderProjectionState(projection)}`);
       }
     }
+    lines.push(renderWarmAccess(result.warmAccess));
+    lines.push(renderWarmSchedule(result.warmSchedule));
     if (result.reconcile) {
       const details = [
         result.reconcile.reason ? `reason: ${result.reconcile.reason}` : "",
@@ -134,6 +136,24 @@ export function renderIndexResult(
     return `${lines.join("\n")}\n`;
   }
   return "Index cleared.\n";
+}
+
+function renderWarmAccess(access: SearchIndexStatusResult["warmAccess"]): string {
+  const details = [
+    `max age: ${access.maxAgeDays}d`,
+    access.lastAccessAt ? `last access: ${access.lastAccessAt}` : "last access: none",
+    access.expiresAt ? `expires: ${access.expiresAt}` : ""
+  ].filter(Boolean);
+  return `Background warm target: ${access.recent ? "yes" : "no"} (${details.join(", ")}).`;
+}
+
+function renderWarmSchedule(schedule: SearchIndexStatusResult["warmSchedule"]): string {
+  const details = [
+    `interval: ${schedule.intervalMinutes}m`,
+    schedule.lastAttemptAt ? `last attempt: ${schedule.lastAttemptAt}` : "last attempt: none",
+    schedule.nextAttemptAt ? `next eligible: ${schedule.nextAttemptAt}` : ""
+  ].filter(Boolean);
+  return `MCP warm throttle: ${schedule.throttled ? "active" : "inactive"} (${details.join(", ")}).`;
 }
 
 function renderProjectionState(projection: SearchIndexStatusResult["projections"][number]): string {
