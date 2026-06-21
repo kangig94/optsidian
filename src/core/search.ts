@@ -7,7 +7,15 @@ import type { AnyOrama, RawData, Results } from "@orama/orama";
 import { OPTSIDIAN_VERSION } from "../version.js";
 import { UsageError } from "../errors.js";
 import { resolveVaultPath, vaultRealpath, vaultRelative, walkFiles } from "./path.js";
-import { parseMarkdownNote, SearchDocument } from "./search-parse.js";
+import {
+  analyzerCacheKey,
+  analyzerIdentityKey,
+  resolveSearchAnalyzer,
+  tokensToSearchText,
+  type SearchAnalyzer,
+  type SearchAnalyzerIdentity
+} from "./search-analyzer.js";
+import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
 import { decodeUtf8, splitText } from "./text.js";
 import type {
   SearchField,
@@ -20,11 +28,21 @@ import type {
 } from "./types.js";
 import { assertOptionalPositiveInteger } from "./validation.js";
 
-const SEARCH_SCHEMA_VERSION = 1;
+const SEARCH_SCHEMA_VERSION = 2;
+const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 1;
 const SEARCH_ENGINE = "orama";
 const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
+const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
+const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchDocument> = {
+  title: "titleTokens",
+  aliases: "aliasesTokens",
+  tags: "tagsTokens",
+  headings: "headingsTokens",
+  path: "pathTokens",
+  body: "bodyTokens"
+};
 const SEARCH_BOOST = {
   title: 8,
   tags: 7,
@@ -45,6 +63,7 @@ type SearchManifest = {
   optsidianVersion: string;
   builtAt: string;
   documents: number;
+  analyzer: SearchAnalyzerIdentity;
   files: Record<string, FileManifest>;
 };
 
@@ -52,6 +71,7 @@ type CachePaths = {
   cacheDir: string;
   indexPath: string;
   manifestPath: string;
+  analysisPath: string;
 };
 
 type LoadedIndex = {
@@ -76,6 +96,18 @@ type ManifestDiff = {
   added: string[];
   changed: string[];
   deleted: string[];
+};
+
+type SearchTokenFields = Pick<SearchDocument, "pathTokens" | "titleTokens" | "aliasesTokens" | "tagsTokens" | "headingsTokens" | "bodyTokens">;
+
+type AnalysisCacheEntry = FileManifest & {
+  tokens: SearchTokenFields;
+};
+
+type AnalysisCache = {
+  schemaVersion: number;
+  analyzer: SearchAnalyzerIdentity;
+  files: Record<string, AnalysisCacheEntry>;
 };
 
 type RankedCandidate = {
@@ -137,18 +169,24 @@ const COVERAGE_FIELD_WEIGHT: Record<CoverageField, number> = {
 export async function searchVault(vaultRoot: string, params: SearchParams): Promise<SearchResult> {
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
-  const loaded = await loadOrBuildIndex(vaultRoot);
+  const analyzer = resolveSearchAnalyzer();
+  const loaded = await loadOrBuildIndex(vaultRoot, analyzer);
+  const analyzedQuery = search.query ? tokensToSearchText(await analyzer.tokenize(search.query)) : undefined;
+  const queryTerms = analyzedQuery ? analyzedQuery.split(" ").filter(Boolean) : [];
+  if (search.query && queryTerms.length === 0) {
+    return { ok: true, command: "search", matches: [] };
+  }
   const rawLimit = search.query
     ? Math.min(loaded.manifest.documents, Math.max(search.limit * CANDIDATE_LIMIT_MULTIPLIER, CANDIDATE_LIMIT_MIN))
     : pathFilter || search.tags
       ? loaded.manifest.documents
       : search.limit;
-  const properties = search.fields ? [...search.fields] : [...SEARCH_PROPERTIES];
+  const properties = searchFields(search.fields).map((field) => SEARCH_FIELD_INDEX_PROPERTY[field]);
   const results = (await oramaSearch(loaded.db, {
     limit: rawLimit,
-    ...(search.query
+    ...(analyzedQuery
       ? {
-          term: normalizeQueryForOrama(search.query),
+          term: analyzedQuery,
           properties,
           boost: boostForFields(search.fields),
           tolerance: 0
@@ -160,7 +198,7 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
     (hit) => (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) && matchesTagFilter(hit.document.tags, search.tags)
   );
   const matches = search.query
-    ? rerankCandidates(search.query, filteredHits, search.fields).slice(0, search.limit)
+    ? rerankCandidates(search.query, queryTerms, filteredHits, search.fields).slice(0, search.limit)
     : filteredHits
         .map((hit) => ({
           path: hit.document.path,
@@ -170,12 +208,12 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
         .sort(compareTagOnlyMatches)
         .slice(0, search.limit);
 
-  const withSnippets = matches.map((match) => ({
+  const withSnippets = await Promise.all(matches.map(async (match) => ({
     path: match.path,
     title: match.title,
     tags: match.tags,
-    snippets: snippetsForDocument(vaultRoot, match.path, search.query)
-  }));
+    snippets: await snippetsForDocument(vaultRoot, match.path, search.query, queryTerms, analyzer)
+  })));
 
   return {
     ok: true,
@@ -185,9 +223,18 @@ export async function searchVault(vaultRoot: string, params: SearchParams): Prom
 }
 
 export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult {
-  const paths = cachePaths(vaultRoot);
+  const analyzer = resolveSearchAnalyzer();
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const manifest = readManifest(paths);
   if (!fs.existsSync(paths.indexPath) || !manifest) {
+    return {
+      ok: true,
+      command: "index",
+      action: "status",
+      ready: false
+    };
+  }
+  if (hardRebuildReason(manifest, analyzer.identity) !== undefined) {
     return {
       ok: true,
       command: "index",
@@ -214,9 +261,10 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
 }
 
 export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndexMutationResult> {
-  const paths = cachePaths(vaultRoot);
+  const analyzer = resolveSearchAnalyzer();
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const currentFiles = currentFileManifest(vaultRoot);
-  await buildAndPersistIndex(vaultRoot, currentFiles, paths);
+  await buildAndPersistIndex(vaultRoot, currentFiles, paths, analyzer);
   return {
     ok: true,
     command: "index",
@@ -225,8 +273,11 @@ export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndex
 }
 
 export function clearSearchIndex(vaultRoot: string): SearchIndexMutationResult {
-  const paths = cachePaths(vaultRoot);
-  fs.rmSync(paths.cacheDir, { recursive: true, force: true });
+  const analyzer = resolveSearchAnalyzer();
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  fs.rmSync(paths.indexPath, { force: true });
+  fs.rmSync(paths.manifestPath, { force: true });
+  fs.rmSync(paths.analysisPath, { force: true });
   return {
     ok: true,
     command: "index",
@@ -234,45 +285,55 @@ export function clearSearchIndex(vaultRoot: string): SearchIndexMutationResult {
   };
 }
 
-export function cachePaths(vaultRoot: string): CachePaths {
+export function cachePaths(vaultRoot: string, analyzerKey = "intl"): CachePaths {
   const root = vaultRealpath(vaultRoot);
   const hash = crypto.createHash("sha256").update(root).digest("hex").slice(0, 16);
   const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
   const cacheDir = path.join(base, "optsidian", hash);
+  const indexFile = analyzerKey === "intl" ? SEARCH_INDEX_FILE : `search-${analyzerKey}.orama`;
+  const manifestFile = analyzerKey === "intl" ? SEARCH_MANIFEST_FILE : `manifest-${analyzerKey}.json`;
+  const analysisFile = analyzerKey === "intl" ? SEARCH_ANALYSIS_CACHE_FILE : `analysis-${analyzerKey}.json`;
   return {
     cacheDir,
-    indexPath: path.join(cacheDir, SEARCH_INDEX_FILE),
-    manifestPath: path.join(cacheDir, SEARCH_MANIFEST_FILE)
+    indexPath: path.join(cacheDir, indexFile),
+    manifestPath: path.join(cacheDir, manifestFile),
+    analysisPath: path.join(cacheDir, analysisFile)
   };
 }
 
-async function loadOrBuildIndex(vaultRoot: string): Promise<LoadedIndex> {
-  const paths = cachePaths(vaultRoot);
+async function loadOrBuildIndex(vaultRoot: string, analyzer: SearchAnalyzer): Promise<LoadedIndex> {
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const currentFiles = currentFileManifest(vaultRoot);
   const manifest = readManifest(paths);
-  if (manifest && fs.existsSync(paths.indexPath) && hardRebuildReason(manifest) === undefined) {
+  if (manifest && fs.existsSync(paths.indexPath) && hardRebuildReason(manifest, analyzer.identity) === undefined) {
     try {
       const db = restoreDb(paths.indexPath);
       const diff = diffManifestFiles(manifest.files, currentFiles);
       if (!hasManifestDiff(diff)) {
         return { db, manifest };
       }
-      const updated = await applyIncrementalIndex(vaultRoot, db, currentFiles, diff, paths);
+      const updated = await applyIncrementalIndex(vaultRoot, db, currentFiles, diff, paths, analyzer);
       return { db, manifest: updated };
     } catch {
       // Fall through to a full rebuild on any restore or incremental failure.
     }
   }
 
-  const rebuilt = await buildAndPersistIndex(vaultRoot, currentFiles, paths);
+  const rebuilt = await buildAndPersistIndex(vaultRoot, currentFiles, paths, analyzer);
   const db = restoreDb(paths.indexPath);
   return { db, manifest: rebuilt };
 }
 
-async function buildAndPersistIndex(vaultRoot: string, files: Record<string, FileManifest>, paths: CachePaths): Promise<SearchManifest> {
+async function buildAndPersistIndex(
+  vaultRoot: string,
+  files: Record<string, FileManifest>,
+  paths: CachePaths,
+  analyzer: SearchAnalyzer
+): Promise<SearchManifest> {
   fs.mkdirSync(paths.cacheDir, { recursive: true });
   const db = createSearchDb();
-  const docs = buildDocuments(vaultRoot, Object.keys(files));
+  const analysisCache = readAnalysisCache(paths, analyzer.identity);
+  const docs = await buildDocuments(vaultRoot, files, Object.keys(files), analyzer, analysisCache);
   await insertMultiple(db, docs, 500);
   persistDb(db, paths.indexPath);
   const manifest: SearchManifest = {
@@ -281,9 +342,11 @@ async function buildAndPersistIndex(vaultRoot: string, files: Record<string, Fil
     optsidianVersion: OPTSIDIAN_VERSION,
     builtAt: new Date().toISOString(),
     documents: docs.length,
+    analyzer: analyzer.identity,
     files
   };
   fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeAnalysisCache(paths, analyzer.identity, files, docs);
   return manifest;
 }
 
@@ -292,7 +355,8 @@ async function applyIncrementalIndex(
   db: AnyOrama,
   files: Record<string, FileManifest>,
   diff: ManifestDiff,
-  paths: CachePaths
+  paths: CachePaths,
+  analyzer: SearchAnalyzer
 ): Promise<SearchManifest> {
   fs.mkdirSync(paths.cacheDir, { recursive: true });
 
@@ -300,12 +364,15 @@ async function applyIncrementalIndex(
     await remove(db, rel);
   }
 
+  const analysisCache = readAnalysisCache(paths, analyzer.identity);
   const toInsert = [...diff.added, ...diff.changed]
-    .map((rel) => parseDocument(vaultRoot, rel))
+    .map((rel) => parseDocument(vaultRoot, rel, files[rel], analyzer, analysisCache));
+  const resolved = await Promise.all(toInsert);
+  const docs = resolved
     .filter((doc): doc is SearchDocument => Boolean(doc));
 
-  if (toInsert.length > 0) {
-    await insertMultiple(db, toInsert, 500);
+  if (docs.length > 0) {
+    await insertMultiple(db, docs, 500);
   }
 
   persistDb(db, paths.indexPath);
@@ -315,9 +382,11 @@ async function applyIncrementalIndex(
     optsidianVersion: OPTSIDIAN_VERSION,
     builtAt: new Date().toISOString(),
     documents: await count(db),
+    analyzer: analyzer.identity,
     files
   };
   fs.writeFileSync(paths.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeAnalysisCache(paths, analyzer.identity, files, docs, analysisCache, new Set([...diff.deleted, ...diff.changed]));
   return manifest;
 }
 
@@ -329,7 +398,20 @@ function createSearchDb(): AnyOrama {
       aliases: "string[]",
       tags: "string[]",
       headings: "string[]",
-      body: "string"
+      body: "string",
+      pathTokens: "string",
+      titleTokens: "string",
+      aliasesTokens: "string",
+      tagsTokens: "string",
+      headingsTokens: "string",
+      bodyTokens: "string"
+    },
+    components: {
+      tokenizer: {
+        language: "optsidian-analyzed",
+        normalizationCache: new Map<string, string>(),
+        tokenize: (raw: string) => String(raw).split(/\s+/).map((token) => token.trim()).filter(Boolean)
+      }
     }
   });
 }
@@ -344,23 +426,58 @@ function restoreDb(indexPath: string): AnyOrama {
   return db;
 }
 
-function buildDocuments(vaultRoot: string, relPaths: string[]): SearchDocument[] {
+async function buildDocuments(
+  vaultRoot: string,
+  files: Record<string, FileManifest>,
+  relPaths: string[],
+  analyzer: SearchAnalyzer,
+  analysisCache: AnalysisCache | undefined
+): Promise<SearchDocument[]> {
   const docs: SearchDocument[] = [];
   for (const rel of relPaths.sort((a, b) => a.localeCompare(b))) {
-    const doc = parseDocument(vaultRoot, rel);
+    const doc = await parseDocument(vaultRoot, rel, files[rel], analyzer, analysisCache);
     if (doc) docs.push(doc);
   }
   return docs;
 }
 
-function parseDocument(vaultRoot: string, relPath: string): SearchDocument | undefined {
+async function parseDocument(
+  vaultRoot: string,
+  relPath: string,
+  manifest: FileManifest | undefined,
+  analyzer: SearchAnalyzer,
+  analysisCache: AnalysisCache | undefined
+): Promise<SearchDocument | undefined> {
   const abs = path.join(vaultRoot, relPath);
   try {
     const text = decodeUtf8(fs.readFileSync(abs), relPath);
-    return parseMarkdownNote(relPath, text);
+    const note = parseMarkdownNote(relPath, text);
+    const cached = manifest ? cachedTokenFields(analysisCache, relPath, manifest) : undefined;
+    if (cached) return { ...note, ...cached };
+    return analyzeDocument(note, analyzer);
   } catch {
     return undefined;
   }
+}
+
+async function analyzeDocument(note: ParsedMarkdownNote, analyzer: SearchAnalyzer): Promise<SearchDocument> {
+  const [pathTokens, titleTokens, aliasesTokens, tagsTokens, headingsTokens, bodyTokens] = await analyzer.tokenizeBatch([
+    note.path,
+    note.title,
+    note.aliases.join(" "),
+    note.tags.join(" "),
+    note.headings.join(" "),
+    note.body
+  ]);
+  return {
+    ...note,
+    pathTokens: tokensToSearchText(pathTokens ?? []),
+    titleTokens: tokensToSearchText(titleTokens ?? []),
+    aliasesTokens: tokensToSearchText(aliasesTokens ?? []),
+    tagsTokens: tokensToSearchText(tagsTokens ?? []),
+    headingsTokens: tokensToSearchText(headingsTokens ?? []),
+    bodyTokens: tokensToSearchText(bodyTokens ?? [])
+  };
 }
 
 function currentFileManifest(vaultRoot: string): Record<string, FileManifest> {
@@ -383,10 +500,75 @@ function readManifest(paths: CachePaths): SearchManifest | undefined {
   }
 }
 
-function hardRebuildReason(manifest: SearchManifest): string | undefined {
+function readAnalysisCache(paths: CachePaths, analyzer: SearchAnalyzerIdentity): AnalysisCache | undefined {
+  if (!fs.existsSync(paths.analysisPath)) return undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(paths.analysisPath, "utf8")) as AnalysisCache;
+    if (parsed.schemaVersion !== SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION) return undefined;
+    if (analyzerIdentityKey(parsed.analyzer) !== analyzerIdentityKey(analyzer)) return undefined;
+    if (!parsed.files || typeof parsed.files !== "object") return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeAnalysisCache(
+  paths: CachePaths,
+  analyzer: SearchAnalyzerIdentity,
+  files: Record<string, FileManifest>,
+  docs: SearchDocument[],
+  previous?: AnalysisCache,
+  dropPaths: Set<string> = new Set()
+): void {
+  const nextFiles: Record<string, AnalysisCacheEntry> = {};
+  for (const [rel, entry] of Object.entries(previous?.files ?? {})) {
+    const current = files[rel];
+    if (!current || dropPaths.has(rel) || !sameFileManifest(entry, current)) continue;
+    nextFiles[rel] = entry;
+  }
+  for (const doc of docs) {
+    const manifest = files[doc.path];
+    if (!manifest) continue;
+    nextFiles[doc.path] = {
+      ...manifest,
+      tokens: tokenFields(doc)
+    };
+  }
+  const cache: AnalysisCache = {
+    schemaVersion: SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION,
+    analyzer,
+    files: nextFiles
+  };
+  fs.writeFileSync(paths.analysisPath, `${JSON.stringify(cache)}\n`);
+}
+
+function cachedTokenFields(cache: AnalysisCache | undefined, relPath: string, manifest: FileManifest): SearchTokenFields | undefined {
+  const entry = cache?.files[relPath];
+  if (!entry || !sameFileManifest(entry, manifest)) return undefined;
+  return entry.tokens;
+}
+
+function sameFileManifest(left: FileManifest, right: FileManifest): boolean {
+  return left.mtimeMs === right.mtimeMs && left.size === right.size;
+}
+
+function tokenFields(doc: SearchDocument): SearchTokenFields {
+  return {
+    pathTokens: doc.pathTokens,
+    titleTokens: doc.titleTokens,
+    aliasesTokens: doc.aliasesTokens,
+    tagsTokens: doc.tagsTokens,
+    headingsTokens: doc.headingsTokens,
+    bodyTokens: doc.bodyTokens
+  };
+}
+
+function hardRebuildReason(manifest: SearchManifest, analyzer: SearchAnalyzerIdentity): string | undefined {
   if (manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) return "schema changed";
   if (manifest.engine !== SEARCH_ENGINE) return "engine changed";
   if (manifest.optsidianVersion !== OPTSIDIAN_VERSION) return "optsidian version changed";
+  if (analyzerIdentityKey(manifest.analyzer) !== analyzerIdentityKey(analyzer)) return "analyzer changed";
   return undefined;
 }
 
@@ -456,10 +638,11 @@ function matchesPathFilter(relPath: string, filter: PathFilter): boolean {
 
 function rerankCandidates(
   query: string,
+  queryTerms: string[],
   hits: Array<{ document: SearchDocument; score: number }>,
   fields?: SearchField[]
 ): RankedCandidate[] {
-  const context = queryContext(query, fields);
+  const context = queryContext(query, queryTerms, fields);
   const candidates = hits.map((hit, index) => rankedCandidate(hit.document, index + 1, context));
   const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.exact), compareIdentityRank);
   const phraseRanks = rankMap(
@@ -497,14 +680,20 @@ function rankedCandidate(doc: SearchDocument, baseRank: number, context: QueryCo
   };
 }
 
-function snippetsForDocument(vaultRoot: string, relPath: string, query: string | undefined): SearchSnippet[] {
+async function snippetsForDocument(
+  vaultRoot: string,
+  relPath: string,
+  query: string | undefined,
+  queryTerms: string[],
+  analyzer: SearchAnalyzer
+): Promise<SearchSnippet[]> {
   try {
     const abs = resolveVaultPath(vaultRoot, relPath, { mustExist: true }).abs;
     const lines = splitText(decodeUtf8(fs.readFileSync(abs), relPath)).lines;
-    const terms = query ? queryTerms(query) : [];
     const bodyStart = bodyStartLine(lines);
-    const headingSnippets = matchingSnippets(lines, terms, bodyStart, (line) => /^#{1,6}\s+/.test(line));
-    const bodySnippets = matchingSnippets(lines, terms, bodyStart, (line) => !/^#{1,6}\s+/.test(line));
+    const terms = query ? queryTerms : [];
+    const headingSnippets = await matchingSnippets(lines, terms, bodyStart, analyzer, (line) => /^#{1,6}\s+/.test(line));
+    const bodySnippets = await matchingSnippets(lines, terms, bodyStart, analyzer, (line) => !/^#{1,6}\s+/.test(line));
     const snippets = uniqueSnippets(bodySnippets.length > 0 ? [...headingSnippets.slice(0, 1), ...bodySnippets] : headingSnippets).slice(
       0,
       3
@@ -529,15 +718,23 @@ function bodyStartLine(lines: string[]): number {
   return 0;
 }
 
-function matchingSnippets(lines: string[], terms: string[], start: number, predicate: (line: string) => boolean): SearchSnippet[] {
-  const snippets: SearchSnippet[] = [];
+async function matchingSnippets(
+  lines: string[],
+  terms: string[],
+  start: number,
+  analyzer: SearchAnalyzer,
+  predicate: (line: string) => boolean
+): Promise<SearchSnippet[]> {
+  const candidates: SearchSnippet[] = [];
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index];
-    if (predicate(line) && textMatchesTerms(line, terms)) {
-      snippets.push({ line: index + 1, text: line });
+    if (predicate(line)) {
+      candidates.push({ line: index + 1, text: line });
     }
   }
-  return snippets;
+  if (terms.length === 0 || candidates.length === 0) return [];
+  const tokenized = await analyzer.tokenizeBatch(candidates.map((candidate) => candidate.text));
+  return candidates.filter((_, index) => tokensMatchTerms(tokenized[index] ?? [], terms));
 }
 
 function uniqueSnippets(snippets: SearchSnippet[]): SearchSnippet[] {
@@ -551,21 +748,15 @@ function uniqueSnippets(snippets: SearchSnippet[]): SearchSnippet[] {
   return result;
 }
 
-function queryTerms(query: string): string[] {
-  const normalized = normalizeIdentityText(query);
-  if (!normalized) return [];
-  return [...new Set(normalized.split(" ").filter(Boolean))];
-}
-
 function searchFields(fields: SearchField[] | undefined): SearchField[] {
   return fields ?? [...SEARCH_PROPERTIES];
 }
 
-function boostForFields(fields: SearchField[] | undefined): Record<SearchField, number> {
+function boostForFields(fields: SearchField[] | undefined): Record<string, number> {
   const allowed = new Set(searchFields(fields));
   return Object.fromEntries(
-    SEARCH_PROPERTIES.filter((field) => allowed.has(field)).map((field) => [field, SEARCH_BOOST[field]])
-  ) as Record<SearchField, number>;
+    SEARCH_PROPERTIES.filter((field) => allowed.has(field)).map((field) => [SEARCH_FIELD_INDEX_PROPERTY[field], SEARCH_BOOST[field]])
+  ) as Record<string, number>;
 }
 
 function normalizeTagFilters(tags: string[] | undefined): string[] | undefined {
@@ -607,19 +798,15 @@ function compareTagOnlyMatches(left: { path: string }, right: { path: string }):
   return left.path.localeCompare(right.path);
 }
 
-function normalizeQueryForOrama(query: string): string {
-  return query.replace(/#/g, " ").trim();
+function tokensMatchTerms(tokens: readonly string[], terms: readonly string[]): boolean {
+  const available = new Set(tokens);
+  return terms.some((term) => available.has(term));
 }
 
-function textMatchesTerms(value: string, terms: string[]): boolean {
-  const normalized = normalizeText(value);
-  return terms.some((term) => normalized.includes(term));
-}
-
-function queryContext(query: string, fields?: SearchField[]): QueryContext {
+function queryContext(query: string, queryTerms: string[], fields?: SearchField[]): QueryContext {
   return {
     phrase: normalizeIdentityText(query),
-    terms: queryTerms(query),
+    terms: queryTerms,
     allowed: new Set(searchFields(fields))
   };
 }
@@ -658,22 +845,19 @@ function bestPhrasePriority(doc: SearchDocument, context: QueryContext): number 
 function metadataCoverage(doc: SearchDocument, context: QueryContext): { terms: number; fieldScore: number } {
   if (context.terms.length === 0) return { terms: 0, fieldScore: 0 };
   const values: Array<[CoverageField, string[]]> = [
-    ["title", context.allowed.has("title") ? [doc.title] : []],
-    ["aliases", context.allowed.has("aliases") ? doc.aliases : []],
-    ["tags", context.allowed.has("tags") ? doc.tags : []],
-    ["headings", context.allowed.has("headings") ? doc.headings : []],
-    ["path", context.allowed.has("path") ? [filenameStem(doc.path), ...pathSegments(doc.path)] : []]
+    ["title", context.allowed.has("title") ? fieldTokens(doc.titleTokens) : []],
+    ["aliases", context.allowed.has("aliases") ? fieldTokens(doc.aliasesTokens) : []],
+    ["tags", context.allowed.has("tags") ? fieldTokens(doc.tagsTokens) : []],
+    ["headings", context.allowed.has("headings") ? fieldTokens(doc.headingsTokens) : []],
+    ["path", context.allowed.has("path") ? fieldTokens(doc.pathTokens) : []]
   ];
-  const normalized = new Map<CoverageField, string[]>(
-    values.map(([field, entries]) => [field, entries.map(normalizeIdentityText).filter(Boolean)])
-  );
 
   let matchedTerms = 0;
   let fieldScore = 0;
   for (const term of context.terms) {
     let matched = false;
-    for (const [field, entries] of normalized) {
-      if (entries.some((entry) => entry.includes(term))) {
+    for (const [field, entries] of values) {
+      if (entries.includes(term)) {
         matched = true;
         fieldScore += COVERAGE_FIELD_WEIGHT[field];
       }
@@ -682,6 +866,10 @@ function metadataCoverage(doc: SearchDocument, context: QueryContext): { terms: 
   }
 
   return { terms: matchedTerms, fieldScore };
+}
+
+function fieldTokens(value: string): string[] {
+  return value.split(" ").filter(Boolean);
 }
 
 function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {

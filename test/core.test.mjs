@@ -35,6 +35,17 @@ Body with #rollout tag.
   assert.match(doc.body, /Body with #rollout tag/);
 });
 
+test("intl search analyzer segments CJK text for lexical search", async () => {
+  const { analyzerIdentityKey, tokenizeIntlText } = await import(path.resolve("src/core/search-analyzer.ts"));
+
+  assert.ok(tokenizeIntlText("検索方式を改善する").includes("検索"));
+  assert.ok(tokenizeIntlText("中文搜索方式需要改善").includes("搜索"));
+  assert.equal(
+    analyzerIdentityKey({ name: "custom", version: "1", node: "20", model: "m", runtime: "daemon" }),
+    analyzerIdentityKey({ runtime: "daemon", model: "m", node: "20", version: "1", name: "custom" })
+  );
+});
+
 test("read caps by lines and pages without gaps", async () => {
   const vault = tempVault();
   const { readVaultFile, writeVaultFile } = await core();
@@ -94,6 +105,7 @@ test("core ranked search uses metadata fields and external cache", async () => {
   process.env.XDG_CACHE_HOME = cache;
   try {
     const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
+    const { cachePaths } = await import(path.resolve("src/core/search.ts"));
     writeVaultFile(vault, {
       path: "Projects/Alpha.md",
       content: `---
@@ -123,6 +135,9 @@ The rollout is blocked by review.
     assert.deepEqual(Object.keys(result.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
     assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
+    const analysisCache = JSON.parse(fs.readFileSync(cachePaths(vault).analysisPath, "utf8"));
+    assert.equal(analysisCache.analyzer.name, "intl");
+    assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
 
     const scoped = await searchVault(vault, { query: "project alpha", path: "Projects", limit: 2 });
     assert.deepEqual(scoped.matches.map((match) => match.path), ["Projects/Alpha.md"]);
@@ -169,6 +184,26 @@ Another project note.
     await assert.rejects(() => searchVault(vault, { path: "Projects", limit: 2 }), /query=<text> or tag=<tag>/);
     await assert.rejects(() => searchVault(vault, { query: "review", fields: ["unknown"], limit: 2 }), /field must be one of/);
     await assert.rejects(() => searchVault(vault, { tags: ["project"], fields: ["title"], limit: 2 }), /field=<field> requires query=<text>/);
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
+});
+
+test("core search uses analyzer tokens for CJK queries", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = cache;
+  try {
+    const { searchVault, writeVaultFile } = await core();
+    writeVaultFile(vault, {
+      path: "Notes/search-ja.md",
+      content: "# メモ\n\n検索方式を改善する。\n"
+    });
+    const result = await searchVault(vault, { query: "検索", limit: 2 });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/search-ja.md"]);
+    assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /検索方式/);
   } finally {
     if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = previousCache;

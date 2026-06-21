@@ -220,9 +220,9 @@ optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `field=` is only valid when `query=` is present.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` for a zero-config multilingual baseline.
 
-The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. `index status` only reports whether a usable cache exists.
+The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. Its manifest records the analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists. `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` routes the default Intl analyzer through the analyzer daemon, which exits after 5 minutes idle by default. Analyzer request timeout defaults to 60 seconds and can be changed with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`.
 
 ```bash
 optsidian index status

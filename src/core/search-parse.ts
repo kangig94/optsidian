@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export type SearchDocument = {
+export type ParsedMarkdownNote = {
   id: string;
   path: string;
   title: string;
@@ -10,13 +10,22 @@ export type SearchDocument = {
   body: string;
 };
 
+export type SearchDocument = ParsedMarkdownNote & {
+  pathTokens: string;
+  titleTokens: string;
+  aliasesTokens: string;
+  tagsTokens: string;
+  headingsTokens: string;
+  bodyTokens: string;
+};
+
 type Frontmatter = {
   title?: string;
   aliases: string[];
   tags: string[];
 };
 
-export function parseMarkdownNote(relPath: string, content: string): SearchDocument {
+export function parseMarkdownNote(relPath: string, content: string): ParsedMarkdownNote {
   const parsed = splitFrontmatter(content);
   const headings = extractHeadings(parsed.body);
   const firstH1 = headings.find((heading) => heading.level === 1)?.text;

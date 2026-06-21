@@ -55,6 +55,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "Search is CLI-only. Use MCP command_map for routing and CLI help discovery.",
       "query is required unless tag= is provided.",
       "field= is only valid when query= is present.",
+      "Search indexes analyzer tokens; default analyzer is Intl.Segmenter.",
       "Search output returns note path, title, tags, and body snippets only."
     ]
   },
@@ -64,6 +65,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
       "The search cache lives outside the vault and is rebuilt automatically as needed.",
+      "The cache records the active analyzer identity and is rebuilt when it changes.",
       "status only reports whether a usable cache exists."
     ]
   },

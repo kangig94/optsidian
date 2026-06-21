@@ -1200,6 +1200,38 @@ test("search ranks notes and index commands manage cache", () => {
   assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "clear" });
 });
 
+test("search can use the analyzer daemon and the daemon exits after idle", () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const { dir, vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  const runtime = path.join(dir, "runtime");
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "search-ja.md"), "# メモ\n\n検索方式を改善する。\n");
+
+  const result = run(["search", "query=検索", "format=json"], {
+    env: {
+      ...env,
+      XDG_CACHE_HOME: cache,
+      XDG_RUNTIME_DIR: runtime,
+      OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
+      OPTSIDIAN_ANALYZER_IDLE_MS: "50",
+      OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
+    }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
+
+  const socketPath = path.join(runtime, "optsidian", "analyzer.sock");
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && fs.existsSync(socketPath)) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  assert.equal(fs.existsSync(socketPath), false);
+});
+
 test("search requires query or tag and validates fields", () => {
   const { vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));

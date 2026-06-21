@@ -150,15 +150,17 @@ optsidian search tag=project,alpha
 optsidian search query="#project alpha" format=json
 ```
 
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `field=` is only valid when `query=` is present.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter`, so CJK text has a useful zero-config baseline without a language-specific model.
 
-The search index is cached outside the vault and rebuilt automatically as needed. `index status` only reports whether a usable cache exists:
+The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. The manifest records the analyzer identity, so changing analyzer settings rebuilds the index. `index status` only reports whether a usable cache exists:
 
 ```bash
 optsidian index status
 optsidian index rebuild
 optsidian index clear
 ```
+
+Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. This is mainly infrastructure for heavier analyzer backends.
 
 ```bash
 optsidian grep query=TODO
