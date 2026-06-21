@@ -56,7 +56,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "query is required unless tag= is provided.",
       "field= is only valid when query= is present.",
       "Search indexes analyzer tokens; default baseline is Intl.Segmenter plus Latin folding and ASCII stemming.",
-      "CLI search wakes the background index daemon unless OPTSIDIAN_INDEX_DAEMON=0.",
+      "CLI search wakes the background index daemon for vaults Optsidian accessed in the last 7 days unless OPTSIDIAN_INDEX_DAEMON=0.",
       "Search output returns note path, title, tags, and body snippets only."
     ]
   },
@@ -71,8 +71,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
       "The search cache lives outside the vault; tokenizer projections live under indexes/<tier-key>/.",
-      "warm discovers Obsidian's vault registry and ensures indexes ahead of first search, using incremental updates when possible.",
-      "The background index daemon exits after 5 minutes idle; tune OPTSIDIAN_INDEX_DAEMON_IDLE_MS and OPTSIDIAN_INDEX_DAEMON_POLL_MS.",
+      "warm explicitly discovers Obsidian's vault registry and ensures indexes ahead of first search, using incremental updates when possible.",
+      "The background index daemon warms only vaults Optsidian accessed in the last 7 days and exits after 5 minutes idle; tune OPTSIDIAN_INDEX_DAEMON_IDLE_MS and OPTSIDIAN_INDEX_DAEMON_POLL_MS.",
       "The cache records schema, Node/ICU, tokenizer tier, and analyzer identity, then rebuilds when they change.",
       "During analyzer tier upgrades, a valid Intl-tier index can be served while a background reconcile rebuilds the target tier.",
       "Small stale file diffs are searched through an in-memory Intl overlay; tune with OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES and OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES.",

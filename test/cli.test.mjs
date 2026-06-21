@@ -401,7 +401,8 @@ function setup() {
     FAKE_VAULT: vault,
     FAKE_OBSIDIAN_LOG: log,
     OPTSIDIAN_INDEX_DAEMON: "0",
-    XDG_CONFIG_HOME: path.join(dir, "config")
+    XDG_CONFIG_HOME: path.join(dir, "config"),
+    XDG_CACHE_HOME: path.join(dir, "cache")
   };
   return { dir, vault, env, log };
 }
@@ -1353,19 +1354,22 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
   assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
 });
 
-test("search wakes the index daemon to warm discovered vaults", async () => {
+test("search wakes the index daemon to warm recently accessed vaults", async () => {
   if (process.platform === "win32") {
     return;
   }
   const { __searchIndexDaemonSocketPathForTests } = await import(path.resolve("src/core/search-index-daemon.ts"));
   const { dir, vault, env } = setup();
   const secondVault = path.join(dir, "second-vault");
+  const thirdVault = path.join(dir, "third-vault");
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");
   fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
   fs.mkdirSync(path.join(secondVault, "Notes"), { recursive: true });
+  fs.mkdirSync(path.join(thirdVault, "Notes"), { recursive: true });
   fs.writeFileSync(path.join(vault, "Notes", "alpha.md"), "# Alpha\n\nindex daemon alpha\n");
   fs.writeFileSync(path.join(secondVault, "Notes", "beta.md"), "# Beta\n\nindex daemon beta\n");
+  fs.writeFileSync(path.join(thirdVault, "Notes", "gamma.md"), "# Gamma\n\nindex daemon gamma\n");
 
   const registryDir = path.join(env.XDG_CONFIG_HOME, "obsidian");
   fs.mkdirSync(registryDir, { recursive: true });
@@ -1374,7 +1378,8 @@ test("search wakes the index daemon to warm discovered vaults", async () => {
     JSON.stringify({
       vaults: {
         first: { path: vault, open: true },
-        second: { path: secondVault, open: false }
+        second: { path: secondVault, open: false },
+        third: { path: thirdVault, open: false }
       }
     })
   );
@@ -1388,6 +1393,9 @@ test("search wakes the index daemon to warm discovered vaults", async () => {
     XDG_CACHE_HOME: cache,
     XDG_RUNTIME_DIR: runtime
   };
+  const readSecond = run(["read", "vault-path=" + secondVault, "path=Notes/beta.md", "format=json"], { env: searchEnv });
+  assert.equal(readSecond.status, 0, readSecond.stderr);
+
   const result = run(["search", "query=alpha", "format=json"], { env: searchEnv });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/alpha.md"]);
@@ -1408,6 +1416,10 @@ test("search wakes the index daemon to warm discovered vaults", async () => {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   assert.equal(fs.existsSync(socketPath), false);
+
+  const thirdStatus = run(["index", "status", "vault-path=" + thirdVault], { env: searchEnv });
+  assert.equal(thirdStatus.status, 0, thirdStatus.stderr);
+  assert.match(thirdStatus.stdout, /^Index missing\.\nProjections:\n- intl \[active, baseline\]: missing\n$/);
 });
 
 test("search can use the analyzer daemon and the daemon exits after idle", async () => {

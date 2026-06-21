@@ -118,6 +118,35 @@ test("read caps by lines and pages without gaps", async () => {
   assert.equal(rest.truncated, false);
 });
 
+test("vault access registry keeps recent realpaths only", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-access-"));
+  const cache = path.join(dir, "cache");
+  const firstVault = path.join(dir, "vault");
+  const secondVault = path.join(dir, "second-vault");
+  const thirdVault = path.join(dir, "third-vault");
+  fs.mkdirSync(firstVault, { recursive: true });
+  fs.mkdirSync(secondVault, { recursive: true });
+  fs.mkdirSync(thirdVault, { recursive: true });
+  const env = { XDG_CACHE_HOME: cache };
+  const dayMs = 24 * 60 * 60 * 1000;
+  const { recordVaultAccess, recentVaultAccessRoots, vaultAccessPath } = await import(path.join(repoRoot, "src/core/vault-access.ts"));
+  const firstReal = fs.realpathSync(firstVault);
+  const secondReal = fs.realpathSync(secondVault);
+  const thirdReal = fs.realpathSync(thirdVault);
+
+  assert.equal(recordVaultAccess(firstVault, { env, nowMs: 0 }), firstReal);
+  assert.equal(recordVaultAccess(secondVault, { env, nowMs: 6 * dayMs }), secondReal);
+  assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 6 * dayMs }), [secondReal, firstReal]);
+
+  assert.equal(recordVaultAccess(thirdVault, { env, nowMs: 8 * dayMs }), thirdReal);
+  assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 8 * dayMs }), [thirdReal, secondReal]);
+
+  fs.rmSync(secondVault, { recursive: true, force: true });
+  assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 8 * dayMs }), [thirdReal]);
+  const state = JSON.parse(fs.readFileSync(vaultAccessPath(env), "utf8"));
+  assert.deepEqual(state.vaults.map((entry) => entry.realpath), [thirdReal, secondReal]);
+});
+
 test("core write/read preserves shell-sensitive raw payloads", async () => {
   const vault = tempVault();
   const { grepVault, readVaultFile, writeVaultFile } = await core();

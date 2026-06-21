@@ -63,29 +63,30 @@ export type OptsidianToolHandlers = {
 };
 
 export function createToolHandlers(resolveVaultRoot: () => string, onToolCall?: () => void): OptsidianToolHandlers {
-  const beforeTool = () => {
+  const afterTool = () => {
     onToolCall?.();
   };
   return {
-    command_map: () => runTool(() => {
-      beforeTool();
-      return usagePayload();
-    }),
+    command_map: () => runTool(() => usagePayload()),
     command_run: (args) => runTool(() => {
-      beforeTool();
-      return runOptsidianCommand(args);
+      const result = runOptsidianCommand(args);
+      afterTool();
+      return result;
     }),
     write: (args) => runTool(() => {
-      beforeTool();
-      return writeVaultFile(resolveVaultRoot(), args);
+      const result = writeVaultFile(resolveVaultRoot(), args);
+      afterTool();
+      return result;
     }),
     edit: (args) => runTool(() => {
-      beforeTool();
-      return editVaultFile(resolveVaultRoot(), editArgsToParams(args));
+      const result = editVaultFile(resolveVaultRoot(), editArgsToParams(args));
+      afterTool();
+      return result;
     }),
     apply_patch: (args) => runTool(() => {
-      beforeTool();
-      return applyVaultPatch(resolveVaultRoot(), args);
+      const result = applyVaultPatch(resolveVaultRoot(), args);
+      afterTool();
+      return result;
     })
   };
 }

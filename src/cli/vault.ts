@@ -1,5 +1,6 @@
 import { ParsedArgs } from "./args.js";
 import { UsageError } from "../errors.js";
+import { recordVaultAccess } from "../core/vault-access.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "../native/obsidian.js";
 
 export function vaultArg(args: ParsedArgs): string | undefined {
@@ -30,7 +31,12 @@ export function resolveVaultRoot(args: ParsedArgs, env: NodeJS.ProcessEnv = proc
     throw new UsageError("Use either vault-path=<path> or vault=<name>, not both");
   }
   if (vaultPath) {
-    return resolveVaultPathInput(vaultPath);
+    return rememberVaultAccess(resolveVaultPathInput(vaultPath), env);
   }
-  return resolveObsidianVaultRoot({ vault, env });
+  return rememberVaultAccess(resolveObsidianVaultRoot({ vault, env }), env);
+}
+
+function rememberVaultAccess(vaultRoot: string, env: NodeJS.ProcessEnv): string {
+  recordVaultAccess(vaultRoot, { env });
+  return vaultRoot;
 }

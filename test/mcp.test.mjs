@@ -250,6 +250,26 @@ test("mcp apply_patch returns structured results", async () => {
   assert.equal(fs.readFileSync(path.join(vault, "patch.md"), "utf8"), "$HOME\n`pwd`\n");
 });
 
+test("mcp warm hook runs after vault mutations", async () => {
+  const vault = tempVault();
+  const events = [];
+  const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));
+  const tools = createToolHandlers(
+    () => {
+      events.push("resolve");
+      return vault;
+    },
+    () => {
+      events.push(fs.existsSync(path.join(vault, "note.md")) ? "after-write" : "before-write");
+    }
+  );
+
+  tools.command_map({});
+  assert.deepEqual(events, []);
+  tools.write({ path: "note.md", content: "ok\n" });
+  assert.deepEqual(events, ["resolve", "after-write"]);
+});
+
 test("mcp config and native vault resolution use fake obsidian", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
@@ -358,7 +378,7 @@ test("mcp index warm interval can be overridden by config or env", async () => {
 
   maybePokeSearchIndexDaemonWarmForMcp({ env, settings: { search: { indexWarmIntervalMinutes: 0 } }, nowMs: 0, poke });
   maybePokeSearchIndexDaemonWarmForMcp({ env, settings: { search: { indexWarmIntervalMinutes: 0 } }, nowMs: 1, poke });
-  assert.deepEqual(pokes, [{ kind: "discovered" }, { kind: "discovered" }]);
+  assert.deepEqual(pokes, [{ kind: "recent" }, { kind: "recent" }]);
 
   const envOverride = { XDG_CACHE_HOME: path.join(dir, "env-cache"), OPTSIDIAN_INDEX_WARM_INTERVAL_MINUTES: "0" };
   maybePokeSearchIndexDaemonWarmForMcp({ env: envOverride, settings: {}, nowMs: 0, poke });

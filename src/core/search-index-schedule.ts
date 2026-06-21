@@ -1,8 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { UsageError } from "../errors.js";
 import { atomicWriteFile } from "./write-file.js";
+import { optsidianCacheRoot } from "./cache-root.js";
 import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 import { pokeSearchIndexDaemonWarmOnce, type SearchIndexDaemonWarmTarget } from "./search-index-daemon.js";
 
@@ -50,18 +50,13 @@ export function maybePokeSearchIndexDaemonWarmForMcp(options: MaybeWarmOptions =
     : env;
   const target: SearchIndexDaemonWarmTarget = options.vaultPath
     ? { kind: "vault", vaultRoot: options.vaultPath }
-    : { kind: "discovered" };
+    : { kind: "recent" };
   (options.poke ?? pokeSearchIndexDaemonWarmOnce)(target, warmEnv);
   return { triggered: true, statePath, target };
 }
 
 export function indexWarmSchedulePath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), INDEX_WARM_SCHEDULE_FILE);
-}
-
-function optsidianCacheRoot(env: NodeJS.ProcessEnv): string {
-  const base = env.XDG_CACHE_HOME?.trim() || path.join(os.homedir(), ".cache");
-  return path.join(base, "optsidian");
 }
 
 function indexWarmIntervalMinutes(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {

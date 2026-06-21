@@ -5,16 +5,17 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { RuntimeError, UsageError } from "../errors.js";
-import { discoverObsidianVaultRoots, resolveVaultPathInput } from "../native/obsidian.js";
+import { resolveVaultPathInput } from "../native/obsidian.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 import { warmSearchIndexes } from "./search.js";
 import type { SearchIndexWarmResult } from "./types.js";
+import { recentVaultAccessRoots } from "./vault-access.js";
 
 export type SearchIndexDaemonWarmTarget =
-  | { kind: "discovered" }
+  | { kind: "recent" }
   | { kind: "vault"; vaultRoot: string };
 
-type IndexDaemonMethod = "warmDiscovered" | "warmVault" | "status" | "shutdown";
+type IndexDaemonMethod = "warmRecent" | "warmVault" | "status" | "shutdown";
 
 type IndexDaemonRequest = {
   id: number;
@@ -42,7 +43,7 @@ type IndexDaemonStatus = {
 };
 
 type IndexDaemonJob =
-  | { kind: "discovered" }
+  | { kind: "recent" }
   | { kind: "vault"; vaultRoot: string };
 
 const INDEX_DAEMON_PROTOCOL_VERSION = "v1";
@@ -71,20 +72,20 @@ export function searchIndexDaemonCommand(): string {
   return INDEX_DAEMON_COMMAND;
 }
 
-export function pokeSearchIndexDaemonWarmDiscovered(env: NodeJS.ProcessEnv = process.env): void {
+export function pokeSearchIndexDaemonWarmRecent(env: NodeJS.ProcessEnv = process.env): void {
   if (indexDaemonDisabled(env)) return;
   if (!fs.existsSync(indexDaemonPaths(env).socketPath)) {
     spawnSearchIndexDaemon(env);
     return;
   }
-  void requestSearchIndexDaemon("warmDiscovered", undefined, env).catch(() => {
+  void requestSearchIndexDaemon("warmRecent", undefined, env).catch(() => {
     // Best-effort background indexing must never change the foreground command outcome.
   });
 }
 
 export function pokeSearchIndexDaemonWarmOnce(target: SearchIndexDaemonWarmTarget, env: NodeJS.ProcessEnv = process.env): void {
   if (indexDaemonDisabled(env)) return;
-  const method = target.kind === "vault" ? "warmVault" : "warmDiscovered";
+  const method = target.kind === "vault" ? "warmVault" : "warmRecent";
   const params = target.kind === "vault" ? { vaultRoot: target.vaultRoot } : undefined;
   void requestSearchIndexDaemon(method, params, env, { oneShot: true }).catch(() => {
     // Best-effort background indexing must never change the foreground command outcome.
@@ -152,8 +153,8 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
       lastRequestAt = Date.now();
       clearIdleTimer();
 
-      if (request.method === "warmDiscovered") {
-        enqueue({ kind: "discovered" });
+      if (request.method === "warmRecent") {
+        enqueue({ kind: "recent" });
         writeResult(socket, request.id, { accepted: true, status: status() });
         return;
       }
@@ -189,8 +190,8 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
 
   function enqueue(job: IndexDaemonJob): void {
     clearPollTimer();
-    if (job.kind === "discovered") {
-      if (queue.some((entry) => entry.kind === "discovered")) return;
+    if (job.kind === "recent") {
+      if (queue.some((entry) => entry.kind === "recent")) return;
       queue.push(job);
     } else if (!queue.some((entry) => entry.kind === "vault" && entry.vaultRoot === job.vaultRoot)) {
       queue.push(job);
@@ -206,8 +207,8 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
         const job = queue.shift();
         if (!job) continue;
         try {
-          lastRun = job.kind === "discovered"
-            ? await warmDiscoveredVaults(env)
+          lastRun = job.kind === "recent"
+            ? await warmRecentVaults(env)
             : await warmSearchIndexes([job.vaultRoot], [], { fastNoop: true });
           lastError = undefined;
         } catch (error) {
@@ -228,7 +229,7 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
     clearPollTimer();
     pollTimer = setTimeout(() => {
       pollTimer = undefined;
-      enqueue({ kind: "discovered" });
+      enqueue({ kind: "recent" });
     }, Math.min(pollMs, remainingIdleMs));
     pollTimer.unref();
   }
@@ -269,7 +270,7 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
   }
 
   await listen(server, paths.socketPath);
-  enqueue({ kind: "discovered" });
+  enqueue({ kind: "recent" });
   armIdleTimer();
 
   await new Promise<void>((resolve) => {
@@ -280,22 +281,8 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
   }
 }
 
-async function warmDiscoveredVaults(env: NodeJS.ProcessEnv): Promise<SearchIndexWarmResult> {
-  const warnings: string[] = [];
-  const roots: string[] = [];
-  const fixedVault = env.OPTSIDIAN_VAULT_PATH?.trim();
-  if (fixedVault) {
-    try {
-      roots.push(resolveVaultPathInput(fixedVault));
-    } catch (error) {
-      warnings.push(`Skipping OPTSIDIAN_VAULT_PATH: ${errorMessage(error)}`);
-    }
-  }
-
-  const discovered = discoverObsidianVaultRoots({ env });
-  roots.push(...discovered.vaults.map((vault) => vault.path));
-  warnings.push(...discovered.warnings);
-  return warmSearchIndexes(roots, warnings, { fastNoop: true });
+async function warmRecentVaults(env: NodeJS.ProcessEnv): Promise<SearchIndexWarmResult> {
+  return warmSearchIndexes(recentVaultAccessRoots({ env }), [], { fastNoop: true });
 }
 
 async function requestSearchIndexDaemon(

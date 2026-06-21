@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RuntimeError, isCliError } from "./errors.js";
 import { maybePokeSearchIndexDaemonWarmForMcp } from "./core/search-index-schedule.js";
+import { recordVaultAccess } from "./core/vault-access.js";
 import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
 import { createOptsidianMcpServer } from "./mcp/server.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./native/obsidian.js";
@@ -21,7 +22,7 @@ async function main(): Promise<void> {
 
   const resolveVaultRoot = createMcpVaultResolver(config);
   const maybeWarmIndex = createMcpIndexWarmTrigger(config);
-  maybeWarmIndex();
+  if (config.vaultPath) maybeWarmIndex();
   const server = createOptsidianMcpServer({ resolveVaultRoot, onToolCall: maybeWarmIndex });
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -29,9 +30,9 @@ async function main(): Promise<void> {
 
 function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => string {
   return () => {
-    if (config.vaultPath) return resolveVaultPathInput(config.vaultPath);
+    if (config.vaultPath) return rememberVaultAccess(resolveVaultPathInput(config.vaultPath));
     try {
-      return resolveObsidianVaultRoot();
+      return rememberVaultAccess(resolveObsidianVaultRoot());
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new RuntimeError(
@@ -41,12 +42,18 @@ function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => 
   };
 }
 
+function rememberVaultAccess(vaultRoot: string): string {
+  recordVaultAccess(vaultRoot);
+  return vaultRoot;
+}
+
 function createMcpIndexWarmTrigger(config: ReturnType<typeof parseMcpArgs>): () => void {
   const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
   return () => {
     try {
+      const vaultPath = config.vaultPath ? rememberVaultAccess(resolveVaultPathInput(config.vaultPath)) : undefined;
       maybePokeSearchIndexDaemonWarmForMcp({
-        vaultPath: config.vaultPath ? resolveVaultPathInput(config.vaultPath) : undefined,
+        vaultPath,
         cliBin
       });
     } catch {
