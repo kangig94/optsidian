@@ -886,7 +886,7 @@ async function loadOrBuildIndex(
         if (!hasManifestDiff(diff)) {
           return { db: persisted.db, manifest: persisted.manifest, analyzer, warnings: [] };
         }
-        return withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "incremental", () =>
+        return await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "incremental", () =>
           loadOrBuildIndexForWrite(vaultRoot, analyzer, requestReconcile, paths)
         );
       }

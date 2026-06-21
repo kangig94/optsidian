@@ -637,6 +637,38 @@ test("core search updates cache incrementally across add change rename delete an
   });
 });
 
+test("core search falls back to a full rebuild when incremental indexing fails", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { writeVaultFile } = await core();
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { resolveSearchAnalyzer } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    const analyzer = resolveSearchAnalyzer({}, {});
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\nproject alpha\n" });
+    let result = await searchVaultWithAnalyzer(vault, { query: "alpha", limit: 5 }, analyzer);
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Alpha.md"]);
+
+    let failNextBatch = true;
+    const flakyAnalyzer = {
+      ...analyzer,
+      tokenizeBatch: async (texts) => {
+        if (failNextBatch) {
+          failNextBatch = false;
+          throw new Error("simulated incremental analyzer failure");
+        }
+        return analyzer.tokenizeBatch(texts);
+      }
+    };
+
+    writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Beta\nproject beta\n", overwrite: true });
+    result = await searchVaultWithAnalyzer(vault, { query: "beta", limit: 5 }, flakyAnalyzer);
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Alpha.md"]);
+    assert.equal(failNextBatch, false);
+  });
+});
+
 test("core reranking favors note identity over body-only mentions and respects field scope", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));

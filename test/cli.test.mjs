@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -1333,37 +1334,110 @@ test("index warm prebuilds discovered Obsidian registry vaults", async () => {
   assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
 });
 
-test("search can use the analyzer daemon and the daemon exits after idle", () => {
+test("search can use the analyzer daemon and the daemon exits after idle", async () => {
   if (process.platform === "win32") {
     return;
   }
+  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search-analyzer.ts"));
   const { dir, vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");
   fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
   fs.writeFileSync(path.join(vault, "Notes", "search-ja.md"), "# メモ\n\n検索方式を改善する。\n");
+  const searchEnv = {
+    ...env,
+    XDG_CACHE_HOME: cache,
+    XDG_RUNTIME_DIR: runtime,
+    OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
+    OPTSIDIAN_ANALYZER_IDLE_MS: "50",
+    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
+  };
 
   const result = run(["search", "query=検索", "format=json"], {
-    env: {
-      ...env,
-      XDG_CACHE_HOME: cache,
-      XDG_RUNTIME_DIR: runtime,
-      OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
-      OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
-      OPTSIDIAN_ANALYZER_IDLE_MS: "50",
-      OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
-    }
+    env: searchEnv
   });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
 
-  const socketPath = path.join(runtime, "optsidian", "analyzer-v2.sock");
+  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline && fs.existsSync(socketPath)) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   assert.equal(fs.existsSync(socketPath), false);
+});
+
+test("search retires a mismatched analyzer daemon before retrying", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search-analyzer.ts"));
+  const { dir, vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  const runtime = path.join(dir, "runtime");
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 방식을 개선한다.\n");
+  const searchEnv = {
+    ...env,
+    XDG_CACHE_HOME: cache,
+    XDG_RUNTIME_DIR: runtime,
+    OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
+    OPTSIDIAN_ANALYZER_IDLE_MS: "50",
+    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
+  };
+  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  fs.rmSync(socketPath, { force: true });
+
+  let staleRequests = 0;
+  const staleServer = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      staleRequests += 1;
+      const request = JSON.parse(buffer.slice(0, newline));
+      socket.end(
+        `${JSON.stringify({
+          id: request.id,
+          result: {
+            analyzer: { name: "router", version: "stale", runtime: "node-intl", node: "0" },
+            tokens: request.params.texts.map(() => [])
+          }
+        })}\n`
+      );
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    staleServer.once("error", reject);
+    staleServer.listen(socketPath, () => {
+      staleServer.off("error", reject);
+      resolve();
+    });
+  });
+
+  try {
+    const result = await runAsync(["search", "query=한국어 검색", "format=json"], { env: searchEnv });
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ko.md"]);
+    assert.equal(staleRequests, 1);
+
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && fs.existsSync(socketPath)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    assert.equal(fs.existsSync(socketPath), false);
+  } finally {
+    await new Promise((resolve) => staleServer.close(resolve));
+    fs.rmSync(socketPath, { force: true });
+  }
 });
 
 test("config command writes global settings and reads project-local overrides", async () => {

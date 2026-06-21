@@ -65,6 +65,16 @@ export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 const ROUTER_VERSION = "script-router-v2";
 const INTL_ANALYZER_VERSION = "intl-segmenter-latin-v2";
 const DAEMON_PROTOCOL_VERSION = "v2";
+const ANALYZER_DAEMON_IDENTITY_MISMATCH = "Analyzer daemon identity does not match the active search analyzer";
+const DAEMON_RUNTIME_IDENTITY = stableHash(
+  stableStringify({
+    protocol: DAEMON_PROTOCOL_VERSION,
+    router: ROUTER_VERSION,
+    intl: INTL_ANALYZER_VERSION,
+    node: process.versions.node,
+    icu: process.versions.icu ?? null
+  })
+).slice(0, 16);
 const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
 const ANALYZER_IDLE_ENV = "OPTSIDIAN_ANALYZER_IDLE_MS";
 const ANALYZER_REQUEST_TIMEOUT_ENV = "OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS";
@@ -93,6 +103,14 @@ export class SearchAnalyzerTerminalLoadError extends Error {
     this.name = "SearchAnalyzerTerminalLoadError";
     this.cause = cause;
     Object.setPrototypeOf(this, SearchAnalyzerTerminalLoadError.prototype);
+  }
+}
+
+class AnalyzerDaemonIdentityMismatchError extends RuntimeError {
+  constructor() {
+    super(ANALYZER_DAEMON_IDENTITY_MISMATCH);
+    this.name = "AnalyzerDaemonIdentityMismatchError";
+    Object.setPrototypeOf(this, AnalyzerDaemonIdentityMismatchError.prototype);
   }
 }
 
@@ -646,7 +664,7 @@ async function requestRunningDaemon(
   const expectedIdentity = analyzerIdentityKey(routerIdentity(declaredAnalyzers, []));
   const actualIdentity = analyzerIdentityKey(response.result.analyzer);
   if (actualIdentity !== expectedIdentity) {
-    throw new RuntimeError("Analyzer daemon identity does not match the active search analyzer");
+    throw new AnalyzerDaemonIdentityMismatchError();
   }
   return response.result.tokens;
 }
@@ -726,22 +744,34 @@ function analyzerDaemonPaths(env: NodeJS.ProcessEnv): { runtimeDir: string; sock
   const base = env.XDG_RUNTIME_DIR || path.join(os.tmpdir(), `optsidian-${process.getuid?.() ?? "user"}`);
   const runtimeDir = path.join(base, "optsidian");
   if (process.platform === "win32") {
-    const key = stableHash(`${runtimeDir}:${DAEMON_PROTOCOL_VERSION}`).slice(0, 16);
+    const key = stableHash(`${runtimeDir}:${DAEMON_PROTOCOL_VERSION}:${DAEMON_RUNTIME_IDENTITY}`).slice(0, 16);
     return { runtimeDir, socketPath: `\\\\.\\pipe\\optsidian-analyzer-${key}` };
   }
-  return { runtimeDir, socketPath: path.join(runtimeDir, `analyzer-${DAEMON_PROTOCOL_VERSION}.sock`) };
+  return { runtimeDir, socketPath: path.join(runtimeDir, `analyzer-${DAEMON_PROTOCOL_VERSION}-${DAEMON_RUNTIME_IDENTITY}.sock`) };
 }
 
 function cleanupStaleSocketForError(error: unknown, env: NodeJS.ProcessEnv): void {
   if (process.platform === "win32") return;
-  if (!isConnectionRefused(error)) return;
+  if (!isStaleDaemonSocketError(error)) return;
   const { socketPath } = analyzerDaemonPaths(env);
   fs.rmSync(socketPath, { force: true });
+}
+
+export function __analyzerDaemonSocketPathForTests(env: NodeJS.ProcessEnv = process.env): string {
+  return analyzerDaemonPaths(env).socketPath;
+}
+
+function isStaleDaemonSocketError(error: unknown): boolean {
+  return isConnectionRefused(error) || isAnalyzerDaemonIdentityMismatch(error);
 }
 
 function isConnectionRefused(error: unknown): boolean {
   const code = (error as { code?: unknown } | undefined)?.code;
   return code === "ECONNREFUSED";
+}
+
+function isAnalyzerDaemonIdentityMismatch(error: unknown): boolean {
+  return error instanceof AnalyzerDaemonIdentityMismatchError || (error instanceof Error && error.message === ANALYZER_DAEMON_IDENTITY_MISMATCH);
 }
 
 function parseIdleMs(raw: string | undefined): number {
