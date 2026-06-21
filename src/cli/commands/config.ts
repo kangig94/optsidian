@@ -18,7 +18,8 @@ const SETTING_KEYS = new Set([
   "search.analyzerIdleMs",
   "search.analyzerRequestTimeoutMs",
   "search.overlayMaxFiles",
-  "search.overlayMaxBytes"
+  "search.overlayMaxBytes",
+  "search.indexWarmIntervalMinutes"
 ]);
 
 export function runConfig(args: ParsedArgs): void {
@@ -82,7 +83,7 @@ function parseSettingValue(key: string, value: string): unknown {
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
     throw new UsageError(
-      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes"
+      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes"
     );
   }
 }

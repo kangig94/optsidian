@@ -45,6 +45,15 @@ function strippedGuiEnv(overrides = {}) {
     PATH: process.env.PATH,
     LANG: process.env.LANG || "en_US.UTF-8",
     LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+    OPTSIDIAN_INDEX_DAEMON: "0",
+    ...overrides
+  };
+}
+
+function mcpProcessEnv(overrides = {}) {
+  return {
+    ...process.env,
+    OPTSIDIAN_INDEX_DAEMON: "0",
     ...overrides
   };
 }
@@ -273,6 +282,90 @@ test("mcp fixed vault path is used when native resolve fails", async () => {
   assert.throws(() => resolveObsidianVaultRootWithFallback({ fallbackPath: path.join(dir, "missing"), env }), /Vault path does not exist/);
 });
 
+test("mcp index warm schedule throttles daemon pokes", async () => {
+  const dir = tempRoot();
+  const cache = path.join(dir, "cache");
+  const vault = path.join(dir, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const env = { XDG_CACHE_HOME: cache };
+  const pokes = [];
+  const { maybePokeSearchIndexDaemonWarmForMcp, indexWarmSchedulePath } = await import(path.resolve("src/core/search-index-schedule.ts"));
+  const poke = (target, warmEnv) => {
+    pokes.push({ target, warmEnv });
+  };
+
+  let decision = maybePokeSearchIndexDaemonWarmForMcp({
+    vaultPath: vault,
+    cliBin: "/tmp/optsidian",
+    env,
+    settings: {},
+    nowMs: 0,
+    poke
+  });
+  assert.equal(decision.triggered, true);
+  assert.deepEqual(decision.target, { kind: "vault", vaultRoot: vault });
+  assert.equal(pokes.length, 1);
+  assert.equal(pokes[0].warmEnv.OPTSIDIAN_INDEX_DAEMON_BIN, "/tmp/optsidian");
+  assert.equal(fs.existsSync(indexWarmSchedulePath(env)), true);
+
+  decision = maybePokeSearchIndexDaemonWarmForMcp({
+    vaultPath: vault,
+    env,
+    settings: {},
+    nowMs: 29 * 60 * 1000,
+    poke
+  });
+  assert.deepEqual(decision, {
+    triggered: false,
+    statePath: indexWarmSchedulePath(env),
+    reason: "throttled"
+  });
+  assert.equal(pokes.length, 1);
+
+  decision = maybePokeSearchIndexDaemonWarmForMcp({
+    vaultPath: vault,
+    env,
+    settings: {},
+    nowMs: 30 * 60 * 1000,
+    poke
+  });
+  assert.equal(decision.triggered, true);
+  assert.equal(pokes.length, 2);
+
+  const disabled = maybePokeSearchIndexDaemonWarmForMcp({
+    env: { ...env, OPTSIDIAN_INDEX_DAEMON: "0" },
+    settings: {},
+    nowMs: 31 * 60 * 1000,
+    poke
+  });
+  assert.deepEqual(disabled, {
+    triggered: false,
+    statePath: indexWarmSchedulePath(env),
+    reason: "disabled"
+  });
+  assert.equal(pokes.length, 2);
+});
+
+test("mcp index warm interval can be overridden by config or env", async () => {
+  const dir = tempRoot();
+  const cache = path.join(dir, "cache");
+  const env = { XDG_CACHE_HOME: cache };
+  const pokes = [];
+  const { maybePokeSearchIndexDaemonWarmForMcp } = await import(path.resolve("src/core/search-index-schedule.ts"));
+  const poke = (target) => {
+    pokes.push(target);
+  };
+
+  maybePokeSearchIndexDaemonWarmForMcp({ env, settings: { search: { indexWarmIntervalMinutes: 0 } }, nowMs: 0, poke });
+  maybePokeSearchIndexDaemonWarmForMcp({ env, settings: { search: { indexWarmIntervalMinutes: 0 } }, nowMs: 1, poke });
+  assert.deepEqual(pokes, [{ kind: "discovered" }, { kind: "discovered" }]);
+
+  const envOverride = { XDG_CACHE_HOME: path.join(dir, "env-cache"), OPTSIDIAN_INDEX_WARM_INTERVAL_MINUTES: "0" };
+  maybePokeSearchIndexDaemonWarmForMcp({ env: envOverride, settings: {}, nowMs: 0, poke });
+  maybePokeSearchIndexDaemonWarmForMcp({ env: envOverride, settings: {}, nowMs: 1, poke });
+  assert.equal(pokes.length, 4);
+});
+
 test("optsidian-mcp help is available outside protocol mode", () => {
   const result = spawnSync(process.execPath, [mcpBin, "--help"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -302,12 +395,11 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake,
       FAKE_VAULT: vault,
       XDG_CACHE_HOME: cache
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-test", version: "1.0.0" });
@@ -429,11 +521,10 @@ test("optsidian-mcp stdio starts with a fixed vault path when native is unavaila
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake,
       OPTSIDIAN_VAULT_PATH: vault
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-fallback-test", version: "1.0.0" });
@@ -463,10 +554,9 @@ test("optsidian-mcp recovers in the same session once native vault resolution be
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-recovery-test", version: "1.0.0" });
@@ -508,10 +598,9 @@ test("optsidian-mcp follows the active vault on each tool call when no fixed vau
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-switch-test", version: "1.0.0" });
@@ -556,11 +645,10 @@ test("optsidian-mcp keeps using the configured vault path when the active vault 
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake,
       OPTSIDIAN_VAULT_PATH: fixedVault
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-fixed-vault-test", version: "1.0.0" });
@@ -599,10 +687,9 @@ test("optsidian-mcp connects without a resolved vault and returns a runtime erro
     command: process.execPath,
     args: [mcpBin],
     cwd: path.resolve("."),
-    env: {
-      ...process.env,
+    env: mcpProcessEnv({
       OPTSIDIAN_OBSIDIAN_BIN: fake
-    },
+    }),
     stderr: "pipe"
   });
   const client = new Client({ name: "optsidian-mcp-no-vault-test", version: "1.0.0" });

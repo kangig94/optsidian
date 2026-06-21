@@ -10,6 +10,7 @@ export type SearchSettings = {
   analyzerRequestTimeoutMs?: number;
   overlayMaxFiles?: number;
   overlayMaxBytes?: number;
+  indexWarmIntervalMinutes?: number;
 };
 
 export type OptsidianSettings = {
@@ -173,6 +174,12 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     if (value.search.overlayMaxBytes !== undefined) {
       settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value.search.overlayMaxBytes, "search.overlayMaxBytes");
     }
+    if (value.search.indexWarmIntervalMinutes !== undefined) {
+      settings.search.indexWarmIntervalMinutes = normalizeNonNegativeInteger(
+        value.search.indexWarmIntervalMinutes,
+        "search.indexWarmIntervalMinutes"
+      );
+    }
   }
   return settings;
 }
@@ -191,6 +198,8 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.overlayMaxFiles;
     case "search.overlayMaxBytes":
       return settings.search?.overlayMaxBytes;
+    case "search.indexWarmIntervalMinutes":
+      return settings.search?.indexWarmIntervalMinutes;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -217,6 +226,9 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
     case "search.overlayMaxBytes":
       settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value, key);
       return;
+    case "search.indexWarmIntervalMinutes":
+      settings.search.indexWarmIntervalMinutes = normalizeNonNegativeInteger(value, key);
+      return;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -241,6 +253,9 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.overlayMaxBytes":
       if (settings.search) delete settings.search.overlayMaxBytes;
+      return;
+    case "search.indexWarmIntervalMinutes":
+      if (settings.search) delete settings.search.indexWarmIntervalMinutes;
       return;
     default:
       throw new UsageError(knownSettingMessage());
@@ -290,7 +305,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

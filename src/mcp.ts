@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RuntimeError, isCliError } from "./errors.js";
+import { maybePokeSearchIndexDaemonWarmForMcp } from "./core/search-index-schedule.js";
 import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
 import { createOptsidianMcpServer } from "./mcp/server.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./native/obsidian.js";
@@ -18,7 +20,9 @@ async function main(): Promise<void> {
   }
 
   const resolveVaultRoot = createMcpVaultResolver(config);
-  const server = createOptsidianMcpServer({ resolveVaultRoot });
+  const maybeWarmIndex = createMcpIndexWarmTrigger(config);
+  maybeWarmIndex();
+  const server = createOptsidianMcpServer({ resolveVaultRoot, onToolCall: maybeWarmIndex });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -33,6 +37,20 @@ function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => 
       throw new RuntimeError(
         `Vault is not configured for this MCP session. Launch the Obsidian GUI, or configure optsidian-mcp with --vault-path <path> or OPTSIDIAN_VAULT_PATH=<path>. Native resolution failed: ${reason}`
       );
+    }
+  };
+}
+
+function createMcpIndexWarmTrigger(config: ReturnType<typeof parseMcpArgs>): () => void {
+  const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
+  return () => {
+    try {
+      maybePokeSearchIndexDaemonWarmForMcp({
+        vaultPath: config.vaultPath ? resolveVaultPathInput(config.vaultPath) : undefined,
+        cliBin
+      });
+    } catch {
+      // Index warmup is opportunistic; MCP startup and tool calls must remain foreground-stable.
     }
   };
 }

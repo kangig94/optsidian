@@ -10,6 +10,10 @@ import { OPTSIDIAN_VERSION } from "../version.js";
 import { warmSearchIndexes } from "./search.js";
 import type { SearchIndexWarmResult } from "./types.js";
 
+export type SearchIndexDaemonWarmTarget =
+  | { kind: "discovered" }
+  | { kind: "vault"; vaultRoot: string };
+
 type IndexDaemonMethod = "warmDiscovered" | "warmVault" | "status" | "shutdown";
 
 type IndexDaemonRequest = {
@@ -55,6 +59,7 @@ const INDEX_DAEMON_IDLE_ENV = "OPTSIDIAN_INDEX_DAEMON_IDLE_MS";
 const INDEX_DAEMON_POLL_ENV = "OPTSIDIAN_INDEX_DAEMON_POLL_MS";
 const INDEX_DAEMON_REQUEST_TIMEOUT_ENV = "OPTSIDIAN_INDEX_DAEMON_REQUEST_TIMEOUT_MS";
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
+const DEFAULT_ONESHOT_IDLE_MS = 30 * 1000;
 const DEFAULT_POLL_MS = 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 750;
 const STARTUP_TIMEOUT_MS = 2000;
@@ -73,6 +78,15 @@ export function pokeSearchIndexDaemonWarmDiscovered(env: NodeJS.ProcessEnv = pro
     return;
   }
   void requestSearchIndexDaemon("warmDiscovered", undefined, env).catch(() => {
+    // Best-effort background indexing must never change the foreground command outcome.
+  });
+}
+
+export function pokeSearchIndexDaemonWarmOnce(target: SearchIndexDaemonWarmTarget, env: NodeJS.ProcessEnv = process.env): void {
+  if (indexDaemonDisabled(env)) return;
+  const method = target.kind === "vault" ? "warmVault" : "warmDiscovered";
+  const params = target.kind === "vault" ? { vaultRoot: target.vaultRoot } : undefined;
+  void requestSearchIndexDaemon(method, params, env, { oneShot: true }).catch(() => {
     // Best-effort background indexing must never change the foreground command outcome.
   });
 }
@@ -194,7 +208,7 @@ export async function runSearchIndexDaemon(env: NodeJS.ProcessEnv = process.env)
         try {
           lastRun = job.kind === "discovered"
             ? await warmDiscoveredVaults(env)
-            : await warmSearchIndexes([job.vaultRoot]);
+            : await warmSearchIndexes([job.vaultRoot], [], { fastNoop: true });
           lastError = undefined;
         } catch (error) {
           lastError = errorMessage(error);
@@ -281,19 +295,20 @@ async function warmDiscoveredVaults(env: NodeJS.ProcessEnv): Promise<SearchIndex
   const discovered = discoverObsidianVaultRoots({ env });
   roots.push(...discovered.vaults.map((vault) => vault.path));
   warnings.push(...discovered.warnings);
-  return warmSearchIndexes(roots, warnings);
+  return warmSearchIndexes(roots, warnings, { fastNoop: true });
 }
 
 async function requestSearchIndexDaemon(
   method: IndexDaemonMethod,
   params: IndexDaemonRequest["params"] | undefined,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  spawnOptions: SearchIndexDaemonSpawnOptions = {}
 ): Promise<IndexDaemonCommandResult> {
   try {
     return await requestRunningSearchIndexDaemon(method, params, env);
   } catch (error) {
     cleanupStaleSocketForError(error, env);
-    spawnSearchIndexDaemon(env);
+    spawnSearchIndexDaemon(env, spawnOptions);
   }
 
   const startedAt = Date.now();
@@ -370,13 +385,24 @@ function listen(server: net.Server, socketPath: string): Promise<void> {
   });
 }
 
-function spawnSearchIndexDaemon(env: NodeJS.ProcessEnv): void {
+type SearchIndexDaemonSpawnOptions = {
+  oneShot?: boolean;
+};
+
+function spawnSearchIndexDaemon(env: NodeJS.ProcessEnv, options: SearchIndexDaemonSpawnOptions = {}): void {
   const bin = env[INDEX_DAEMON_BIN_ENV] || process.argv[1];
   if (!bin) return;
+  const childEnv = options.oneShot
+    ? {
+        ...env,
+        [INDEX_DAEMON_POLL_ENV]: env[INDEX_DAEMON_POLL_ENV] ?? "0",
+        [INDEX_DAEMON_IDLE_ENV]: env[INDEX_DAEMON_IDLE_ENV] ?? String(DEFAULT_ONESHOT_IDLE_MS)
+      }
+    : env;
   const child = spawn(process.execPath, [bin, INDEX_DAEMON_COMMAND], {
     detached: true,
     stdio: "ignore",
-    env
+    env: childEnv
   });
   child.unref();
 }

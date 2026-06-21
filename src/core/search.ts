@@ -173,6 +173,11 @@ export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnaly
 
 type SearchIndexWriteOptions = {
   serveStaleTier: boolean;
+  fastNoop?: boolean;
+};
+
+type SearchIndexWarmOptions = {
+  fastNoop?: boolean;
 };
 
 type SearchReconcileChildSpawner = (bin: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess;
@@ -535,7 +540,11 @@ export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndex
   return rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
 }
 
-export async function warmSearchIndexes(vaultRoots: readonly string[], warnings: readonly string[] = []): Promise<SearchIndexWarmResult> {
+export async function warmSearchIndexes(
+  vaultRoots: readonly string[],
+  warnings: readonly string[] = [],
+  options: SearchIndexWarmOptions = {}
+): Promise<SearchIndexWarmResult> {
   const seen = new Set<string>();
   const results: SearchIndexWarmVaultResult[] = [];
 
@@ -556,7 +565,7 @@ export async function warmSearchIndexes(vaultRoots: readonly string[], warnings:
     seen.add(root);
 
     try {
-      await ensureSearchIndex(root);
+      await ensureSearchIndex(root, options);
       results.push({ vaultRoot: root, status: "ready" });
     } catch (error) {
       results.push({
@@ -576,23 +585,34 @@ export async function warmSearchIndexes(vaultRoots: readonly string[], warnings:
   };
 }
 
-async function ensureSearchIndex(vaultRoot: string): Promise<void> {
+async function ensureSearchIndex(vaultRoot: string, options: SearchIndexWarmOptions = {}): Promise<void> {
   const analyzer = resolveSearchAnalyzer();
-  await ensureSearchIndexWithAnalyzer(vaultRoot, analyzer);
+  await ensureSearchIndexWithAnalyzer(vaultRoot, analyzer, options);
 }
 
-async function ensureSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
+async function ensureSearchIndexWithAnalyzer(
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  options: SearchIndexWarmOptions = {}
+): Promise<void> {
   const baselineAnalyzer = baselineAnalyzerForSearch(analyzer);
   if (baselineAnalyzer && analyzerIdentityKey(baselineAnalyzer.identity) !== analyzerIdentityKey(analyzer.identity)) {
-    await ensureSearchIndexWithLeasedAnalyzer(vaultRoot, baselineAnalyzer);
+    await ensureSearchIndexWithLeasedAnalyzer(vaultRoot, baselineAnalyzer, options);
   }
-  await withSearchAnalyzerLease(analyzer, (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer));
+  await withSearchAnalyzerLease(analyzer, (leasedAnalyzer) => ensureSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer, options));
 }
 
-async function ensureSearchIndexWithLeasedAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
+async function ensureSearchIndexWithLeasedAnalyzer(
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  options: SearchIndexWarmOptions = {}
+): Promise<void> {
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   await withSearchIndexWriterLock(paths.cacheDir, vaultRoot, analyzer, "ensure", async () => {
-    await loadOrBuildIndexForWrite(vaultRoot, analyzer, noSearchReconcile, paths, { serveStaleTier: false });
+    await loadOrBuildIndexForWrite(vaultRoot, analyzer, noSearchReconcile, paths, {
+      serveStaleTier: false,
+      fastNoop: options.fastNoop === true
+    });
   });
 }
 
@@ -1256,6 +1276,16 @@ async function loadOrBuildIndexForWrite(
   options: SearchIndexWriteOptions
 ): Promise<LoadedIndex> {
   const currentFiles = currentFileManifest(vaultRoot);
+  if (options.fastNoop) {
+    const manifest = readManifest(paths);
+    if (manifest && fs.existsSync(paths.indexPath)) {
+      const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
+      const diff = diffManifestFiles(manifest.files, currentFiles);
+      if (mismatch === "match" && !hasManifestDiff(diff)) {
+        return { db: createSearchDb(), manifest, analyzer, warnings: [] };
+      }
+    }
+  }
   const persisted = readPersistedIndex(paths);
   if (persisted) {
     const mismatch = classifySearchManifestMismatch(persisted.manifest, analyzer.identity);

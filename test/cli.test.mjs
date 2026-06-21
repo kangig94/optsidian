@@ -1547,6 +1547,14 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "search.overlayMaxFiles: 0");
 
+  result = run(["config", "set", "search.indexWarmIntervalMinutes=30", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.indexWarmIntervalMinutes, 30);
+
+  result = run(["config", "get", "search.indexWarmIntervalMinutes"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.indexWarmIntervalMinutes: 30");
+
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
     env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault }
@@ -1596,6 +1604,10 @@ test("config command writes global settings and reads project-local overrides", 
   assert.deepEqual(envOverrideManifest.analyzer.declaredAnalyzers, []);
 
   result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0, indexWarmIntervalMinutes: 30 } });
+
+  result = run(["config", "unset", "search.indexWarmIntervalMinutes", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0 } });
 

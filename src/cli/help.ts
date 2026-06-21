@@ -96,6 +96,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.analyzerRequestTimeoutMs=<ms>", description: "Daemon request timeout" },
       { name: "search.overlayMaxFiles=<n>", description: "Maximum changed files searched through foreground Intl overlay" },
       { name: "search.overlayMaxBytes=<n>", description: "Maximum changed bytes searched through foreground Intl overlay" },
+      { name: "search.indexWarmIntervalMinutes=<minutes>", description: "Minimum interval between MCP-triggered index warm attempts" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
