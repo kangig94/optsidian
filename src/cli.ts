@@ -83,6 +83,10 @@ async function main(): Promise<void> {
     runConfig(args);
     return;
   }
+  if (command === "index" && args.positionals[0] === "warm") {
+    await runIndex(args);
+    return;
+  }
 
   const vaultRoot = resolveVaultRoot(args);
   switch (command) {

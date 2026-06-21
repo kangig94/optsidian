@@ -1224,6 +1224,53 @@ test("search ranks notes and index commands manage cache", async () => {
     fs.rmSync(lockDir, { recursive: true, force: true });
   }
 
+  fs.writeFileSync(
+    path.join(statusPaths.cacheDir, "reconcile-status.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      lastRun: {
+        state: "failure",
+        reason: "manual",
+        startedAt: "2026-06-21T00:00:00.000Z",
+        finishedAt: "2026-06-21T00:00:01.000Z",
+        durationMs: 1000,
+        error: "simulated failure"
+      },
+      lastSuccess: {
+        state: "success",
+        reason: "stale-tier",
+        startedAt: "2026-06-20T00:00:00.000Z",
+        finishedAt: "2026-06-20T00:00:01.000Z",
+        durationMs: 1000
+      },
+      lastFailure: {
+        state: "failure",
+        reason: "manual",
+        startedAt: "2026-06-21T00:00:00.000Z",
+        finishedAt: "2026-06-21T00:00:01.000Z",
+        durationMs: 1000,
+        error: "simulated failure"
+      }
+    }) + "\n"
+  );
+  result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout,
+    "Index ready.\nLast reconcile: failure (reason: manual, finished: 2026-06-21T00:00:01.000Z, duration: 1000ms, error: simulated failure).\n"
+  );
+
+  result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).reconcileStatus.lastRun, {
+    state: "failure",
+    reason: "manual",
+    startedAt: "2026-06-21T00:00:00.000Z",
+    finishedAt: "2026-06-21T00:00:01.000Z",
+    durationMs: 1000,
+    error: "simulated failure"
+  });
+
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "Index cleared.\n");
@@ -1231,6 +1278,59 @@ test("search ranks notes and index commands manage cache", async () => {
   result = run(["index", "clear", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "clear" });
+});
+
+test("index warm prebuilds discovered Obsidian registry vaults", async () => {
+  const { dir, vault, env } = setup();
+  const secondVault = path.join(dir, "second-vault");
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.mkdirSync(path.join(secondVault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "alpha.md"), "# Alpha\n\nwarm registry alpha\n");
+  fs.writeFileSync(path.join(secondVault, "Notes", "beta.md"), "# Beta\n\nwarm registry beta\n");
+
+  const registryDir = path.join(env.XDG_CONFIG_HOME, "obsidian");
+  fs.mkdirSync(registryDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(registryDir, "obsidian.json"),
+    JSON.stringify({
+      vaults: {
+        first: { path: vault, open: true },
+        second: { path: secondVault, open: false }
+      }
+    })
+  );
+
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  let result = run(["index", "warm", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.action, "warm");
+  assert.deepEqual(
+    payload.vaults.map((entry) => ({ vaultRoot: entry.vaultRoot, status: entry.status })),
+    [
+      { vaultRoot: fs.realpathSync(vault), status: "rebuilt" },
+      { vaultRoot: fs.realpathSync(secondVault), status: "rebuilt" }
+    ]
+  );
+
+  result = run(["index", "status", "vault-path=" + secondVault], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "Index ready.\n");
+
+  const overrideRegistry = path.join(dir, "override-obsidian.json");
+  fs.writeFileSync(
+    overrideRegistry,
+    JSON.stringify({
+      vaults: {
+        secondOnly: { path: secondVault, open: true }
+      }
+    })
+  );
+  result = run(["index", "warm", "format=json"], {
+    env: { ...env, XDG_CACHE_HOME: cache, OBSIDIAN_CONFIG: overrideRegistry }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
 });
 
 test("search can use the analyzer daemon and the daemon exits after idle", () => {

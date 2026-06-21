@@ -97,6 +97,21 @@ export type SearchIndexReconcileStatus = {
   pid?: number;
 };
 
+export type SearchIndexReconcileRunStatus = {
+  state: "running" | "success" | "failure";
+  reason: SearchReconcileReason;
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  error?: string;
+};
+
+export type SearchIndexReconcileSnapshot = {
+  lastRun?: SearchIndexReconcileRunStatus;
+  lastSuccess?: SearchIndexReconcileRunStatus;
+  lastFailure?: SearchIndexReconcileRunStatus;
+};
+
 export type SearchIndexStatusResult = {
   ok: true;
   command: "index";
@@ -104,6 +119,21 @@ export type SearchIndexStatusResult = {
   ready: boolean;
   staleTier?: boolean;
   reconcile?: SearchIndexReconcileStatus;
+  reconcileStatus?: SearchIndexReconcileSnapshot;
+};
+
+export type SearchIndexWarmVaultResult = {
+  vaultRoot: string;
+  status: "rebuilt" | "failed";
+  error?: string;
+};
+
+export type SearchIndexWarmResult = {
+  ok: true;
+  command: "index";
+  action: "warm";
+  vaults: SearchIndexWarmVaultResult[];
+  warnings?: string[];
 };
 
 export type SearchIndexMutationResult = {

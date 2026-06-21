@@ -152,13 +152,16 @@ optsidian search query="#project alpha" format=json
 
 Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
 
-The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. The manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. During analyzer tier upgrades, a valid Intl-tier index can be served immediately while a background reconcile rebuilds the target tier. `index status` reports cache readiness plus stale-tier and reconcile-lock diagnostics when present:
+The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`, with `search.orama`, `manifest.json`, and `analysis-cache.json` for the default analyzer. The manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. During analyzer tier upgrades, a valid Intl-tier index can be served immediately while a background reconcile rebuilds the target tier. `index status` reports cache readiness plus stale-tier, reconcile-lock, and last reconcile result diagnostics when present:
 
 ```bash
 optsidian index status
 optsidian index rebuild
+optsidian index warm
 optsidian index clear
 ```
+
+`index warm` prebuilds search indexes for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
 Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` is parsed as a future Korean analyzer opt-in, but no dedicated Korean backend ships yet, so Hangul still falls back to the Intl baseline. This is mainly infrastructure for heavier analyzer backends.
 

@@ -379,7 +379,8 @@ test("core reconcile uses a cross-process lock and recovers stale locks", async 
       cachePaths,
       getSearchIndexStatus,
       reconcileSearchIndex,
-      searchReconcileLockPath
+      searchReconcileLockPath,
+      searchReconcileStatusPath
     } = await import(path.join(repoRoot, "src/core/search.ts"));
     writeVaultFile(vault, {
       path: "Notes/Locked.md",
@@ -439,6 +440,29 @@ test("core reconcile uses a cross-process lock and recovers stale locks", async 
     }
     const staleRecovered = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     assert.equal(staleRecovered.files["Notes/Locked.md"].size, fs.statSync(path.join(vault, "Notes/Locked.md")).size);
+
+    const statusPath = searchReconcileStatusPath(vault);
+    const successStatus = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    assert.equal(successStatus.schemaVersion, 1);
+    assert.equal(successStatus.lastRun.state, "success");
+    assert.equal(successStatus.lastRun.reason, "stale-tier");
+    assert.equal(successStatus.lastSuccess.state, "success");
+    assert.equal(successStatus.lastFailure, undefined);
+    assert.equal(getSearchIndexStatus(vault).reconcileStatus.lastRun.state, "success");
+
+    const paths = cachePaths(vault);
+    fs.rmSync(paths.indexPath, { recursive: true, force: true });
+    fs.mkdirSync(paths.indexPath);
+    await assert.rejects(() => reconcileSearchIndex(vault, "manual"));
+    const failureStatus = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    assert.equal(failureStatus.schemaVersion, 1);
+    assert.equal(failureStatus.recentRuns, undefined);
+    assert.equal(failureStatus.lastRun.state, "failure");
+    assert.equal(failureStatus.lastRun.reason, "manual");
+    assert.ok(failureStatus.lastRun.error.length <= 2048);
+    assert.equal(failureStatus.lastFailure.state, "failure");
+    assert.deepEqual(failureStatus.lastSuccess, successStatus.lastSuccess);
+    assert.equal(getSearchIndexStatus(vault).reconcileStatus.lastFailure.state, "failure");
   });
 });
 

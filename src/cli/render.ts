@@ -5,7 +5,9 @@ import type {
   MutationResult,
   ReadResult,
   SearchIndexMutationResult,
+  SearchIndexReconcileRunStatus,
   SearchIndexStatusResult,
+  SearchIndexWarmResult,
   SearchResult
 } from "../core/types.js";
 
@@ -84,7 +86,10 @@ export function renderFrontmatterRead(result: FrontmatterReadResult, format: Out
   ].join("\n").concat("\n");
 }
 
-export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexMutationResult, format: OutputFormat = "text"): string {
+export function renderIndexResult(
+  result: SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult,
+  format: OutputFormat = "text"
+): string {
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
@@ -99,12 +104,40 @@ export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexM
       const state = result.reconcile.stale ? "stale lock" : "running";
       lines.push(`Reconcile ${state}${details.length > 0 ? ` (${details.join(", ")})` : ""}.`);
     }
+    const lastRun = result.reconcileStatus?.lastRun;
+    if (lastRun && lastRun.state !== "running") {
+      lines.push(`Last reconcile: ${renderReconcileRun(lastRun)}.`);
+    }
     return `${lines.join("\n")}\n`;
   }
   if (result.action === "rebuild") {
     return "Index rebuilt.\n";
   }
+  if (result.action === "warm") {
+    const lines = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
+    if (result.vaults.length === 0) {
+      lines.push("No vaults found to warm.");
+      return `${lines.join("\n")}\n`;
+    }
+    const rebuilt = result.vaults.filter((vault) => vault.status === "rebuilt").length;
+    const failed = result.vaults.length - rebuilt;
+    lines.push(`Warmed ${rebuilt} vault${rebuilt === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}.`);
+    for (const vault of result.vaults) {
+      lines.push(`${vault.status === "rebuilt" ? "rebuilt" : "failed"}: ${vault.vaultRoot}${vault.error ? ` (${vault.error})` : ""}`);
+    }
+    return `${lines.join("\n")}\n`;
+  }
   return "Index cleared.\n";
+}
+
+function renderReconcileRun(run: SearchIndexReconcileRunStatus): string {
+  const details = [
+    `reason: ${run.reason}`,
+    run.finishedAt ? `finished: ${run.finishedAt}` : "",
+    run.durationMs !== undefined ? `duration: ${run.durationMs}ms` : "",
+    run.error ? `error: ${run.error}` : ""
+  ].filter(Boolean);
+  return `${run.state}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 
 export function renderMutation(result: MutationResult, format: OutputFormat = "text"): string {

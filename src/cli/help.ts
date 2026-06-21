@@ -61,14 +61,20 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   },
   index: {
     summary: "Manage the ranked search cache",
-    usage: ["optsidian index [status] [format=text|json]", "optsidian index rebuild [format=text|json]", "optsidian index clear [format=text|json]"],
+    usage: [
+      "optsidian index [status] [format=text|json]",
+      "optsidian index rebuild [format=text|json]",
+      "optsidian index warm [format=text|json]",
+      "optsidian index clear [format=text|json]"
+    ],
     options: [{ name: "format=text|json", description: "Output format (default: text)" }],
     notes: [
       "The search cache lives outside the vault and is rebuilt automatically as needed.",
+      "warm discovers Obsidian's vault registry and rebuilds indexes ahead of first search.",
       "The cache records schema, Node/ICU, tokenizer tier, and analyzer identity, then rebuilds when they change.",
       "During analyzer tier upgrades, a valid Intl-tier index can be served while a background reconcile rebuilds the target tier.",
       "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko is parsed, but currently falls back to Intl because no Korean backend ships yet.",
-      "status reports cache readiness plus stale-tier and reconcile-lock diagnostics when present."
+      "status reports cache readiness plus stale-tier, reconcile-lock, and last reconcile result diagnostics when present."
     ]
   },
   config: {

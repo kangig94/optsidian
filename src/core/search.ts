@@ -20,11 +20,16 @@ import {
 } from "./search-analyzer.js";
 import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
 import { decodeUtf8, splitText } from "./text.js";
+import { atomicWriteFile } from "./write-file.js";
 import type {
   SearchField,
   SearchIndexMutationResult,
+  SearchIndexReconcileRunStatus,
+  SearchIndexReconcileSnapshot,
   SearchIndexReconcileStatus,
   SearchIndexStatusResult,
+  SearchIndexWarmResult,
+  SearchIndexWarmVaultResult,
   SearchMatch,
   SearchParams,
   SearchReconcileReason,
@@ -42,8 +47,11 @@ const SEARCH_MANIFEST_FILE = "manifest.json";
 const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
 const SEARCH_RECONCILE_COMMAND = "__search-reconcile";
 const SEARCH_RECONCILE_LOCK_DIR = "reconcile.lock";
+const SEARCH_RECONCILE_STATUS_FILE = "reconcile-status.json";
 const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
 const SEARCH_RECONCILE_LOCK_STALE_MS = 30 * 60 * 1000;
+const SEARCH_RECONCILE_STATUS_SCHEMA_VERSION = 1;
+const SEARCH_RECONCILE_ERROR_MAX_LENGTH = 2048;
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_DB_SCHEMA = {
   path: "string",
@@ -133,6 +141,10 @@ type SearchReconcileLockOwner = {
   reason?: SearchReconcileReason;
   startedAt?: string;
   pid?: number;
+};
+
+type SearchReconcileStatusFile = SearchIndexReconcileSnapshot & {
+  schemaVersion: typeof SEARCH_RECONCILE_STATUS_SCHEMA_VERSION;
 };
 
 type PathFilter = {
@@ -313,26 +325,28 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
   const analyzer = resolveSearchAnalyzer();
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const reconcile = readSearchReconcileStatus(paths.cacheDir);
+  const reconcileStatus = readSearchReconcileSnapshot(paths.cacheDir);
   const manifest = readManifest(paths);
   if (!fs.existsSync(paths.indexPath) || !manifest) {
-    return searchIndexStatus(false, false, reconcile);
+    return searchIndexStatus(false, false, reconcile, reconcileStatus);
   }
   const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
   if (mismatch !== "match" && mismatch !== "tier-only-upgrade") {
-    return searchIndexStatus(false, false, reconcile);
+    return searchIndexStatus(false, false, reconcile, reconcileStatus);
   }
   try {
     restoreDb(paths.indexPath);
   } catch {
-    return searchIndexStatus(false, false, reconcile);
+    return searchIndexStatus(false, false, reconcile, reconcileStatus);
   }
-  return searchIndexStatus(true, mismatch === "tier-only-upgrade", reconcile);
+  return searchIndexStatus(true, mismatch === "tier-only-upgrade", reconcile, reconcileStatus);
 }
 
 function searchIndexStatus(
   ready: boolean,
   staleTier: boolean,
-  reconcile: SearchIndexReconcileStatus | undefined
+  reconcile: SearchIndexReconcileStatus | undefined,
+  reconcileStatus: SearchIndexReconcileSnapshot | undefined
 ): SearchIndexStatusResult {
   return {
     ok: true,
@@ -340,13 +354,55 @@ function searchIndexStatus(
     action: "status",
     ready,
     ...(staleTier ? { staleTier: true } : {}),
-    ...(reconcile ? { reconcile } : {})
+    ...(reconcile ? { reconcile } : {}),
+    ...(reconcileStatus ? { reconcileStatus } : {})
   };
 }
 
 export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndexMutationResult> {
   const analyzer = resolveSearchAnalyzer();
   return rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
+}
+
+export async function warmSearchIndexes(vaultRoots: readonly string[], warnings: readonly string[] = []): Promise<SearchIndexWarmResult> {
+  const seen = new Set<string>();
+  const results: SearchIndexWarmVaultResult[] = [];
+
+  for (const vaultRoot of vaultRoots) {
+    let root: string;
+    try {
+      root = vaultRealpath(vaultRoot);
+    } catch (error) {
+      results.push({
+        vaultRoot: path.resolve(vaultRoot),
+        status: "failed",
+        error: errorMessage(error)
+      });
+      continue;
+    }
+
+    if (seen.has(root)) continue;
+    seen.add(root);
+
+    try {
+      await rebuildSearchIndex(root);
+      results.push({ vaultRoot: root, status: "rebuilt" });
+    } catch (error) {
+      results.push({
+        vaultRoot: root,
+        status: "failed",
+        error: errorMessage(error)
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    command: "index",
+    action: "warm",
+    vaults: results,
+    ...(warnings.length > 0 ? { warnings: [...warnings] } : {})
+  };
 }
 
 async function rebuildSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<SearchIndexMutationResult> {
@@ -372,8 +428,33 @@ export async function reconcileSearchIndex(vaultRoot: string, reason: SearchReco
   const reconcileLock = acquireSearchReconcileLock(paths.cacheDir, vaultRoot, analyzer, reason);
   if (!reconcileLock) return;
 
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+  writeSearchReconcileSnapshot(paths.cacheDir, {
+    state: "running",
+    reason,
+    startedAt
+  });
+
   try {
     await rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
+    writeSearchReconcileSnapshot(paths.cacheDir, {
+      state: "success",
+      reason,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAtMs
+    });
+  } catch (error) {
+    writeSearchReconcileSnapshot(paths.cacheDir, {
+      state: "failure",
+      reason,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAtMs,
+      error: truncateSearchReconcileError(errorMessage(error))
+    });
+    throw error;
   } finally {
     reconcileLock.release();
   }
@@ -414,6 +495,10 @@ export function searchReconcileCommand(): string {
 
 export function searchReconcileLockPath(vaultRoot: string): string {
   return path.join(cachePaths(vaultRoot).cacheDir, SEARCH_RECONCILE_LOCK_DIR);
+}
+
+export function searchReconcileStatusPath(vaultRoot: string): string {
+  return path.join(cachePaths(vaultRoot).cacheDir, SEARCH_RECONCILE_STATUS_FILE);
 }
 
 export function parseSearchReconcileReason(raw: string | undefined): SearchReconcileReason {
@@ -555,6 +640,63 @@ function readSearchReconcileLockOwner(lockDir: string): SearchReconcileLockOwner
   }
 }
 
+function readSearchReconcileSnapshot(cacheDir: string): SearchIndexReconcileSnapshot | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(cacheDir, SEARCH_RECONCILE_STATUS_FILE), "utf8")) as unknown;
+    if (!isSearchReconcileStatusFile(parsed)) return undefined;
+    const snapshot: SearchIndexReconcileSnapshot = {
+      ...(parsed.lastRun ? { lastRun: parsed.lastRun } : {}),
+      ...(parsed.lastSuccess ? { lastSuccess: parsed.lastSuccess } : {}),
+      ...(parsed.lastFailure ? { lastFailure: parsed.lastFailure } : {})
+    };
+    return Object.keys(snapshot).length > 0 ? snapshot : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSearchReconcileSnapshot(cacheDir: string, run: SearchIndexReconcileRunStatus): void {
+  const previous = readSearchReconcileSnapshot(cacheDir);
+  const next: SearchReconcileStatusFile = {
+    schemaVersion: SEARCH_RECONCILE_STATUS_SCHEMA_VERSION,
+    lastRun: run,
+    ...(run.state === "success" ? { lastSuccess: run } : previous?.lastSuccess ? { lastSuccess: previous.lastSuccess } : {}),
+    ...(run.state === "failure" ? { lastFailure: run } : previous?.lastFailure ? { lastFailure: previous.lastFailure } : {})
+  };
+  try {
+    atomicWriteFile(path.join(cacheDir, SEARCH_RECONCILE_STATUS_FILE), `${JSON.stringify(next, null, 2)}\n`);
+  } catch {
+    // Status is diagnostic-only; never fail the reconcile because the sidecar failed to update.
+  }
+}
+
+function isSearchReconcileStatusFile(value: unknown): value is SearchReconcileStatusFile {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === SEARCH_RECONCILE_STATUS_SCHEMA_VERSION &&
+    isOptionalSearchReconcileRunStatus(value.lastRun) &&
+    isOptionalSearchReconcileRunStatus(value.lastSuccess) &&
+    isOptionalSearchReconcileRunStatus(value.lastFailure)
+  );
+}
+
+function isOptionalSearchReconcileRunStatus(value: unknown): value is SearchIndexReconcileRunStatus | undefined {
+  return value === undefined || isSearchReconcileRunStatus(value);
+}
+
+function isSearchReconcileRunStatus(value: unknown): value is SearchIndexReconcileRunStatus {
+  return (
+    isRecord(value) &&
+    (value.state === "running" || value.state === "success" || value.state === "failure") &&
+    typeof value.reason === "string" &&
+    isSearchReconcileReason(value.reason) &&
+    typeof value.startedAt === "string" &&
+    (value.finishedAt === undefined || typeof value.finishedAt === "string") &&
+    (value.durationMs === undefined || (typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0)) &&
+    (value.error === undefined || typeof value.error === "string")
+  );
+}
+
 function removeStaleSearchReconcileLock(lockDir: string): boolean {
   if (searchReconcileLockStaleMs < 1) return false;
   let stat: fs.Stats;
@@ -579,6 +721,16 @@ function isPathExistsError(error: unknown): boolean {
 
 function isNoEntryError(error: unknown): boolean {
   return (error as { code?: unknown } | undefined)?.code === "ENOENT";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncateSearchReconcileError(message: string): string {
+  return message.length <= SEARCH_RECONCILE_ERROR_MAX_LENGTH
+    ? message
+    : `${message.slice(0, SEARCH_RECONCILE_ERROR_MAX_LENGTH - 3)}...`;
 }
 
 async function loadOrBuildIndex(
