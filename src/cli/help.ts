@@ -205,7 +205,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     ],
     options: [
       { name: "id=<plugin-id>", description: "Native marketplace plugin id; passed through unchanged" },
-      { name: "url=<git-url>", description: "GitHub repo or git URL; prefers a published release, falls back to cloning" },
+      { name: "url=<git-url>", description: "GitHub/GitHub Enterprise repo shorthand or git URL; prefers a published release, falls back to cloning" },
       { name: "path=<plugin-dir>", description: "Local directory containing manifest.json and main.js" },
       { name: "ref=<git-ref>", description: "Release tag (preferred) or git branch/commit for url= installs" },
       { name: "dir=<subdir>", description: "Plugin subdirectory inside the git source (forces a clone)" },
@@ -215,7 +215,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     notes: [
       "id=<plugin-id> is native passthrough.",
       "url= and path= are Optsidian custom-source extensions.",
-      "GitHub url= installs prefer the latest published release; without one (or with dir=) they clone the repo.",
+      "GitHub-compatible url= installs prefer the latest published release; without one (or with dir=) they clone the repo.",
       "Custom installs try a best-effort native refresh when the target vault is active.",
       "plugin:enable, plugin:disable, plugin:reload, and plugin:uninstall remain native commands."
     ]

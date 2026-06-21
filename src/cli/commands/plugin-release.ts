@@ -10,21 +10,29 @@ const DEFAULT_GITHUB_API_BASE = "https://api.github.com";
 const PLUGIN_ASSET_NAMES = ["manifest.json", "main.js", "styles.css"] as const;
 const REQUIRED_ASSET_NAMES = ["manifest.json", "main.js"] as const;
 
-const HTTP_OR_SSH_GITHUB = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?(?:www\.)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
-const SCP_GITHUB = /^[^@\s]+@github\.com:([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
+const SCP_GIT_REPO = /^[^@\s]+@([^:\s]+):([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/;
 
-export function githubApiBase(env: NodeJS.ProcessEnv): string {
-  return (env.OPTSIDIAN_GITHUB_API_BASE || DEFAULT_GITHUB_API_BASE).replace(/\/+$/, "");
+type GithubRepo = {
+  host: string;
+  owner: string;
+  repo: string;
+  apiProtocol: "http" | "https";
+};
+
+export function githubApiBase(env: NodeJS.ProcessEnv, repo: Pick<GithubRepo, "host" | "apiProtocol">): string {
+  const override = env.OPTSIDIAN_GITHUB_API_BASE;
+  if (override) return override.replace(/\/+$/, "");
+  if (isGithubDotCom(repo.host)) return DEFAULT_GITHUB_API_BASE;
+  return `${repo.apiProtocol}://${repo.host}/api/v3`;
 }
 
-// Extracts owner/repo from a normalized GitHub URL (https, ssh, or scp-like). Returns
-// undefined for non-GitHub hosts, which signals the caller to clone instead.
-export function parseGithubRepo(url: string): { owner: string; repo: string } | undefined {
-  const match = HTTP_OR_SSH_GITHUB.exec(url) ?? SCP_GITHUB.exec(url);
-  if (!match) return undefined;
-  const [, owner, repo] = match;
-  if (!owner || !repo) return undefined;
-  return { owner, repo };
+// Extracts host/owner/repo from a normalized GitHub-compatible URL (https, ssh, git,
+// or scp-like). Any host is allowed: GitHub Enterprise uses the same releases API
+// shape under /api/v3. If that API is not present, the caller falls back to clone.
+export function parseGithubRepo(url: string): GithubRepo | undefined {
+  const parsed = parseUrlRepo(url) ?? parseScpRepo(url);
+  if (!parsed || !parsed.owner || !parsed.repo || !parsed.host) return undefined;
+  return parsed;
 }
 
 type ReleasePlugin = { tag: string; dir: string };
@@ -34,13 +42,15 @@ type ReleasePlugin = { tag: string; dir: string };
 // — a missing release, a draft, or absent required assets — so the caller falls back to
 // the git clone. A release that exists but whose asset download fails is a hard error.
 export async function fetchReleasePlugin(options: {
+  host: string;
   owner: string;
   repo: string;
+  apiProtocol: "http" | "https";
   tag?: string;
   env: NodeJS.ProcessEnv;
 }): Promise<ReleasePlugin | null> {
-  const { owner, repo, tag, env } = options;
-  const base = githubApiBase(env);
+  const { host, owner, repo, apiProtocol, tag, env } = options;
+  const base = githubApiBase(env, { host, apiProtocol });
   const repoPath = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const endpoint = tag
     ? `${base}/repos/${repoPath}/releases/tags/${encodeURIComponent(tag)}`
@@ -76,6 +86,45 @@ export async function fetchReleasePlugin(options: {
     fs.rmSync(dir, { recursive: true, force: true });
     throw error;
   }
+}
+
+function parseUrlRepo(input: string): GithubRepo | undefined {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return undefined;
+  }
+  if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol)) return undefined;
+  const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
+  if (parts.length !== 2) return undefined;
+  const [owner, rawRepo] = parts;
+  const repo = stripGitSuffix(rawRepo ?? "");
+  if (!owner || !repo) return undefined;
+  const host = url.protocol === "http:" || url.protocol === "https:" ? url.host : url.hostname;
+  return {
+    host,
+    owner,
+    repo,
+    apiProtocol: url.protocol === "http:" ? "http" : "https"
+  };
+}
+
+function parseScpRepo(input: string): GithubRepo | undefined {
+  const match = SCP_GIT_REPO.exec(input);
+  if (!match) return undefined;
+  const [, host, owner, rawRepo] = match;
+  const repo = stripGitSuffix(rawRepo ?? "");
+  if (!host || !owner || !repo) return undefined;
+  return { host, owner, repo, apiProtocol: "https" };
+}
+
+function stripGitSuffix(input: string): string {
+  return input.endsWith(".git") ? input.slice(0, -".git".length) : input;
+}
+
+function isGithubDotCom(host: string): boolean {
+  return host.toLowerCase() === "github.com" || host.toLowerCase() === "www.github.com";
 }
 
 function readReleaseAssets(release: Record<string, unknown>): Map<string, string> {

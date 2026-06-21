@@ -54,6 +54,8 @@ Optsidian extends `plugin:install` for custom plugin sources:
 
 ```bash
 optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable
+optsidian plugin:install url=user/my-plugin vault-path=/path/to/vault
+optsidian plugin:install url=github.company.com/user/my-plugin vault-path=/path/to/vault
 optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
 ```
 
@@ -287,11 +289,13 @@ optsidian plugin:install id=obsidian-git enable
 
 ```bash
 optsidian plugin:install url=git@github.com:user/my-plugin.git ref=main vault-path=/path/to/vault enable
+optsidian plugin:install url=user/my-plugin vault-path=/path/to/vault
 optsidian plugin:install url=github.com/user/my-plugin vault-path=/path/to/vault
+optsidian plugin:install url=github.company.com/user/my-plugin vault-path=/path/to/vault
 optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
 ```
 
-Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`. The source must contain `manifest.json` and `main.js`; use `dir=<subdir>` when a git repository stores the plugin artifact below the repository root. `enable` updates `community-plugins.json`. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
+Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`. `url=user/repo` resolves to GitHub.com; scheme-less hosts such as `github.company.com/user/repo` resolve to `https://github.company.com/user/repo` and use the GitHub Enterprise-style `/api/v3` releases API before falling back to clone. The source must contain `manifest.json` and `main.js`; use `dir=<subdir>` when a git repository stores the plugin artifact below the repository root. `enable` updates `community-plugins.json`. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
 
 ## JSON Output
 

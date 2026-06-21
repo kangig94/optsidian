@@ -149,8 +149,9 @@ function optionalValue(args: ParsedArgs, key: string): string | undefined {
 export function normalizeGitSource(input: string): string {
   if (/^(https?|ssh|git|file):\/\//.test(input)) return input;
   if (/^[^@\s]+@[^:\s]+:.+/.test(input)) return input;
-  if (/^github\.com\/[^\s]+$/.test(input)) return `https://${input}`;
   if (/^github:[^\s]+\/[^\s]+$/.test(input)) return `https://github.com/${input.slice("github:".length)}`;
+  if (/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(?:\.git)?$/.test(input)) return `https://github.com/${input}`;
+  if (/^[A-Za-z0-9.-]+(?::\d+)?\/[^\s]+\/[^\s]+(?:\.git)?\/?$/.test(input)) return `https://${input}`;
   return input;
 }
 
@@ -169,6 +170,8 @@ async function materializeSource(requested: RequestedPluginInstallSource): Promi
     const release = await fetchReleasePlugin({
       owner: repo.owner,
       repo: repo.repo,
+      host: repo.host,
+      apiProtocol: repo.apiProtocol,
       env: process.env,
       ...(requested.ref ? { tag: requested.ref } : {})
     });

@@ -657,6 +657,33 @@ test("plugin:install url installs from a published GitHub release instead of clo
   }
 });
 
+test("plugin:install url installs from a GitHub Enterprise-style release API", async () => {
+  const { vault, env } = setup();
+  const server = await startGithubReleaseServer({
+    tag: "3.0.0",
+    assets: {
+      "manifest.json": JSON.stringify({ id: "enterprise-plugin", name: "Enterprise", version: "3.0.0" }),
+      "main.js": "module.exports = { enterprise: true };\n"
+    }
+  });
+  try {
+    const sourceUrl = `${server.apiBase}/acme/enterprise-plugin`;
+    const result = await runAsync(
+      ["plugin:install", `url=${sourceUrl}`, `vault-path=${vault}`, "enable", "format=json"],
+      { env: { ...env, ...NO_PROXY_ENV, GITHUB_TOKEN: "enterprise-token" } }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.source.type, "release");
+    assert.equal(payload.source.url, sourceUrl);
+    assert.equal(payload.source.tag, "3.0.0");
+    assert.equal(payload.plugin.id, "enterprise-plugin");
+    assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "enterprise-plugin", "main.js")), true);
+  } finally {
+    await server.close();
+  }
+});
+
 test("plugin:install authenticates the asset API URL but drops auth on a cross-host CDN redirect", async () => {
   const { vault, env } = setup();
   const assets = {
@@ -775,8 +802,10 @@ test("plugin:install rejects combining native ids with custom sources", () => {
 test("plugin:install normalizes scheme-less GitHub URLs", async () => {
   const { normalizeGitSource } = await import(path.resolve("src/cli/commands/plugin.ts"));
 
+  assert.equal(normalizeGitSource("example-owner/example-plugin"), "https://github.com/example-owner/example-plugin");
   assert.equal(normalizeGitSource("github.com/user/sample-plugin"), "https://github.com/user/sample-plugin");
   assert.equal(normalizeGitSource("github.com/user/sample-plugin.git"), "https://github.com/user/sample-plugin.git");
+  assert.equal(normalizeGitSource("github.example.test/user/sample-plugin"), "https://github.example.test/user/sample-plugin");
   assert.equal(normalizeGitSource("github:user/sample-plugin"), "https://github.com/user/sample-plugin");
 });
 

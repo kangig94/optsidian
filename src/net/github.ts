@@ -71,7 +71,7 @@ async function requestBufferDirect(
         target,
         {
           method: "GET",
-          headers: githubHeaders(env, accept, sendAuth),
+          headers: githubHeaders(env, accept, sendAuth, credentialHostForUrl(target)),
           agent: false
         },
         (res) => {
@@ -125,7 +125,7 @@ async function requestBufferWithCurl(
   sendAuth: boolean
 ): Promise<{ statusCode: number; body: Buffer }> {
   const args = ["-fsSL", "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
-  const token = sendAuth ? resolveGithubToken(env) : undefined;
+  const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(new URL(url))) : undefined;
   if (token) {
     args.push("-H", `Authorization: Bearer ${token}`);
   }
@@ -146,13 +146,13 @@ async function requestBufferWithCurl(
   };
 }
 
-function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean): Record<string, string> {
+function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean, credentialHost: string): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: accept,
     "User-Agent": `optsidian/${OPTSIDIAN_VERSION}`,
     Connection: "close"
   };
-  const token = sendAuth ? resolveGithubToken(env) : undefined;
+  const token = sendAuth ? resolveGithubToken(env, credentialHost) : undefined;
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -161,20 +161,22 @@ function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean
 
 // Explicit GITHUB_TOKEN wins; otherwise fall back to the user's local login via `gh auth
 // token` or `git credential fill`, so a private-repo release install works without manually
-// exporting a token. The local lookup runs at most once per process.
-let cachedLocalToken: string | null | undefined;
+// exporting a token. The local lookup runs at most once per host per process.
+const cachedLocalTokens = new Map<string, string | null>();
 
-function resolveGithubToken(env: NodeJS.ProcessEnv): string | undefined {
+function resolveGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | undefined {
   const explicit = env.GITHUB_TOKEN?.trim();
   if (explicit) return explicit;
-  if (cachedLocalToken === undefined) {
-    cachedLocalToken = readLocalGithubToken(env);
+  const host = credentialHost || "github.com";
+  if (!cachedLocalTokens.has(host)) {
+    cachedLocalTokens.set(host, readLocalGithubToken(env, host));
   }
-  return cachedLocalToken ?? undefined;
+  return cachedLocalTokens.get(host) ?? undefined;
 }
 
-function readLocalGithubToken(env: NodeJS.ProcessEnv): string | null {
-  const gh = spawnSync("gh", ["auth", "token"], { env, encoding: "utf8" });
+function readLocalGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | null {
+  const ghArgs = credentialHost === "github.com" ? ["auth", "token"] : ["auth", "token", "--hostname", credentialHost];
+  const gh = spawnSync("gh", ghArgs, { env, encoding: "utf8" });
   if (!gh.error && (gh.status ?? 1) === 0) {
     const token = (gh.stdout ?? "").trim();
     if (token) return token;
@@ -182,7 +184,7 @@ function readLocalGithubToken(env: NodeJS.ProcessEnv): string | null {
   const cred = spawnSync("git", ["credential", "fill"], {
     env,
     encoding: "utf8",
-    input: "protocol=https\nhost=github.com\n\n"
+    input: `protocol=https\nhost=${credentialHost}\n\n`
   });
   if (!cred.error && (cred.status ?? 1) === 0) {
     const match = /^password=(.+)$/m.exec(cred.stdout ?? "");
@@ -190,6 +192,11 @@ function readLocalGithubToken(env: NodeJS.ProcessEnv): string | null {
     if (token) return token;
   }
   return null;
+}
+
+function credentialHostForUrl(url: URL): string {
+  if (url.hostname.toLowerCase() === "api.github.com") return "github.com";
+  return url.host || url.hostname;
 }
 
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
