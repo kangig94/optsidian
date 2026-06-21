@@ -28,9 +28,11 @@ export type {
   ReadParams,
   ReadResult,
   SearchIndexMutationResult,
+  SearchIndexReconcileStatus,
   SearchIndexStatusResult,
   SearchMatch,
   SearchParams,
+  SearchReconcileReason,
   SearchResult,
   SearchSnippet,
   WriteParams

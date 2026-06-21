@@ -1146,7 +1146,7 @@ test("grep is markdown-first and supports context", () => {
   assert.doesNotMatch(result.stdout, /ignored/);
 });
 
-test("search ranks notes and index commands manage cache", () => {
+test("search ranks notes and index commands manage cache", async () => {
   const { vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   fs.mkdirSync(path.join(vault, "Projects"), { recursive: true });
@@ -1197,6 +1197,32 @@ test("search ranks notes and index commands manage cache", () => {
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "status", ready: true });
+
+  const { cachePaths } = await import(path.resolve("src/core/search.ts"));
+  const statusPaths = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => cachePaths(vault));
+  const lockDir = path.join(statusPaths.cacheDir, "reconcile.lock");
+  fs.mkdirSync(lockDir, { recursive: true });
+  fs.writeFileSync(path.join(lockDir, "owner.json"), '{"pid":98765,"startedAt":"2026-06-21T00:00:00.000Z","reason":"stale-tier"}\n');
+  try {
+    result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      result.stdout,
+      "Index ready.\nReconcile running (reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00.000Z).\n"
+    );
+
+    result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).reconcile, {
+      active: true,
+      stale: false,
+      reason: "stale-tier",
+      startedAt: "2026-06-21T00:00:00.000Z",
+      pid: 98765
+    });
+  } finally {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+  }
 
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);

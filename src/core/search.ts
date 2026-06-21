@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,9 +23,11 @@ import { decodeUtf8, splitText } from "./text.js";
 import type {
   SearchField,
   SearchIndexMutationResult,
+  SearchIndexReconcileStatus,
   SearchIndexStatusResult,
   SearchMatch,
   SearchParams,
+  SearchReconcileReason,
   SearchResult,
   SearchSnippet
 } from "./types.js";
@@ -39,7 +41,9 @@ const SEARCH_INDEX_FILE = "search.orama";
 const SEARCH_MANIFEST_FILE = "manifest.json";
 const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
 const SEARCH_RECONCILE_COMMAND = "__search-reconcile";
+const SEARCH_RECONCILE_LOCK_DIR = "reconcile.lock";
 const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
+const SEARCH_RECONCILE_LOCK_STALE_MS = 30 * 60 * 1000;
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_DB_SCHEMA = {
   path: "string",
@@ -113,7 +117,23 @@ type LoadedIndex = {
   warnings: string[];
 };
 
-export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnalyzer) => void;
+export type SearchReconcileRequester = (vaultRoot: string, analyzer: SearchAnalyzer, reason: SearchReconcileReason) => void;
+
+type SearchReconcileChildSpawner = (bin: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess;
+
+type ActiveSearchReconcile = {
+  reasons: Set<SearchReconcileReason>;
+};
+
+type SearchReconcileLock = {
+  release(): void;
+};
+
+type SearchReconcileLockOwner = {
+  reason?: SearchReconcileReason;
+  startedAt?: string;
+  pid?: number;
+};
 
 type PathFilter = {
   rel: string;
@@ -202,7 +222,9 @@ const COVERAGE_FIELD_WEIGHT: Record<CoverageField, number> = {
   path: 1
 };
 
-const requestedSearchReconciles = new Set<string>();
+const activeSearchReconciles = new Map<string, ActiveSearchReconcile>();
+let spawnSearchReconcileChild: SearchReconcileChildSpawner = spawnDetachedSearchReconcileChild;
+let searchReconcileLockStaleMs = SEARCH_RECONCILE_LOCK_STALE_MS;
 
 export async function searchVault(vaultRoot: string, params: SearchParams): Promise<SearchResult> {
   return searchVaultWithAnalyzer(vaultRoot, params, resolveSearchAnalyzer());
@@ -217,7 +239,7 @@ export async function searchVaultWithAnalyzer(
   return withSearchAnalyzerLease(
     analyzer,
     (leasedAnalyzer) => searchVaultWithLeasedAnalyzer(vaultRoot, params, leasedAnalyzer, requestReconcile),
-    (event) => requestReconcile(vaultRoot, event.degradedAnalyzer)
+    (event) => requestReconcile(vaultRoot, event.degradedAnalyzer, "terminal-analyzer-failure")
   );
 }
 
@@ -290,38 +312,35 @@ function searchResult(matches: SearchMatch[], warnings: string[] = []): SearchRe
 export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult {
   const analyzer = resolveSearchAnalyzer();
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  const reconcile = readSearchReconcileStatus(paths.cacheDir);
   const manifest = readManifest(paths);
   if (!fs.existsSync(paths.indexPath) || !manifest) {
-    return {
-      ok: true,
-      command: "index",
-      action: "status",
-      ready: false
-    };
+    return searchIndexStatus(false, false, reconcile);
   }
-  if (!isManifestUsableForRead(manifest, analyzer.identity)) {
-    return {
-      ok: true,
-      command: "index",
-      action: "status",
-      ready: false
-    };
+  const mismatch = classifySearchManifestMismatch(manifest, analyzer.identity);
+  if (mismatch !== "match" && mismatch !== "tier-only-upgrade") {
+    return searchIndexStatus(false, false, reconcile);
   }
   try {
     restoreDb(paths.indexPath);
   } catch {
-    return {
-      ok: true,
-      command: "index",
-      action: "status",
-      ready: false
-    };
+    return searchIndexStatus(false, false, reconcile);
   }
+  return searchIndexStatus(true, mismatch === "tier-only-upgrade", reconcile);
+}
+
+function searchIndexStatus(
+  ready: boolean,
+  staleTier: boolean,
+  reconcile: SearchIndexReconcileStatus | undefined
+): SearchIndexStatusResult {
   return {
     ok: true,
     command: "index",
     action: "status",
-    ready: true
+    ready,
+    ...(staleTier ? { staleTier: true } : {}),
+    ...(reconcile ? { reconcile } : {})
   };
 }
 
@@ -347,8 +366,17 @@ async function rebuildSearchIndexWithLeasedAnalyzer(vaultRoot: string, analyzer:
   await buildAndPersistIndex(vaultRoot, currentFiles, paths, analyzer);
 }
 
-export async function reconcileSearchIndex(vaultRoot: string): Promise<void> {
-  await rebuildSearchIndex(vaultRoot);
+export async function reconcileSearchIndex(vaultRoot: string, reason: SearchReconcileReason = "manual"): Promise<void> {
+  const analyzer = resolveSearchAnalyzer();
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  const reconcileLock = acquireSearchReconcileLock(paths.cacheDir, vaultRoot, analyzer, reason);
+  if (!reconcileLock) return;
+
+  try {
+    await rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
+  } finally {
+    reconcileLock.release();
+  }
 }
 
 export function clearSearchIndex(vaultRoot: string): SearchIndexMutationResult {
@@ -384,25 +412,173 @@ export function searchReconcileCommand(): string {
   return SEARCH_RECONCILE_COMMAND;
 }
 
-function requestSearchReconcile(vaultRoot: string, analyzer: SearchAnalyzer): void {
+export function searchReconcileLockPath(vaultRoot: string): string {
+  return path.join(cachePaths(vaultRoot).cacheDir, SEARCH_RECONCILE_LOCK_DIR);
+}
+
+export function parseSearchReconcileReason(raw: string | undefined): SearchReconcileReason {
+  if (raw === undefined || raw.trim() === "") return "manual";
+  const value = raw.startsWith("reason=") ? raw.slice("reason=".length) : raw;
+  if (isSearchReconcileReason(value)) return value;
+  throw new UsageError(`search reconcile reason must be one of: ${SEARCH_RECONCILE_REASONS.join(", ")}`);
+}
+
+export function __setSearchReconcileChildSpawnerForTests(spawner: SearchReconcileChildSpawner | undefined): void {
+  spawnSearchReconcileChild = spawner ?? spawnDetachedSearchReconcileChild;
+  activeSearchReconciles.clear();
+}
+
+export function __setSearchReconcileLockStaleMsForTests(value: number | undefined): void {
+  searchReconcileLockStaleMs = value ?? SEARCH_RECONCILE_LOCK_STALE_MS;
+}
+
+function requestSearchReconcile(vaultRoot: string, analyzer: SearchAnalyzer, reason: SearchReconcileReason): void {
   const bin = process.argv[1];
   if (!bin) return;
 
   const root = vaultRealpath(vaultRoot);
   const key = `${root}\0${analyzerIdentityKey(analyzer.identity)}`;
-  if (requestedSearchReconciles.has(key)) return;
-  requestedSearchReconciles.add(key);
+  const active = activeSearchReconciles.get(key);
+  if (active) {
+    active.reasons.add(reason);
+    return;
+  }
+
+  const request: ActiveSearchReconcile = { reasons: new Set([reason]) };
+  activeSearchReconciles.set(key, request);
 
   try {
-    const child = spawn(process.execPath, [bin, SEARCH_RECONCILE_COMMAND, root], {
-      detached: true,
-      stdio: "ignore",
-      env: process.env
-    });
+    const child = spawnSearchReconcileChild(bin, [SEARCH_RECONCILE_COMMAND, root, `reason=${reason}`], process.env);
+    const clear = () => {
+      if (activeSearchReconciles.get(key) === request) activeSearchReconciles.delete(key);
+    };
+    child.once("error", clear);
+    child.once("exit", clear);
+    child.once("close", clear);
     child.unref();
   } catch {
-    requestedSearchReconciles.delete(key);
+    activeSearchReconciles.delete(key);
   }
+}
+
+const SEARCH_RECONCILE_REASONS = ["stale-tier", "incompatible", "terminal-analyzer-failure", "manual"] as const satisfies readonly SearchReconcileReason[];
+
+function isSearchReconcileReason(value: string): value is SearchReconcileReason {
+  return (SEARCH_RECONCILE_REASONS as readonly string[]).includes(value);
+}
+
+function spawnDetachedSearchReconcileChild(bin: string, args: string[], env: NodeJS.ProcessEnv): ChildProcess {
+  return spawn(process.execPath, [bin, ...args], {
+    detached: true,
+    stdio: "ignore",
+    env
+  });
+}
+
+function acquireSearchReconcileLock(
+  cacheDir: string,
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  reason: SearchReconcileReason
+): SearchReconcileLock | undefined {
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const lockDir = path.join(cacheDir, SEARCH_RECONCILE_LOCK_DIR);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.mkdirSync(lockDir);
+      writeSearchReconcileLockOwner(lockDir, vaultRoot, analyzer, reason);
+      return {
+        release() {
+          fs.rmSync(lockDir, { recursive: true, force: true });
+        }
+      };
+    } catch (error) {
+      if (!isPathExistsError(error)) throw error;
+      if (attempt === 0 && removeStaleSearchReconcileLock(lockDir)) continue;
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function writeSearchReconcileLockOwner(
+  lockDir: string,
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  reason: SearchReconcileReason
+): void {
+  const owner = {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    reason,
+    vaultRoot: vaultRealpath(vaultRoot),
+    analyzer: analyzer.identity
+  };
+  try {
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify(owner, null, 2)}\n`);
+  } catch {
+    // The lock itself is the directory; owner metadata is best-effort diagnostics.
+  }
+}
+
+function readSearchReconcileStatus(cacheDir: string): SearchIndexReconcileStatus | undefined {
+  const lockDir = path.join(cacheDir, SEARCH_RECONCILE_LOCK_DIR);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(lockDir);
+  } catch (error) {
+    if (isNoEntryError(error)) return undefined;
+    throw error;
+  }
+
+  const owner = readSearchReconcileLockOwner(lockDir);
+  return {
+    active: true,
+    stale: isSearchReconcileLockStale(stat),
+    ...(owner?.reason ? { reason: owner.reason } : {}),
+    ...(owner?.startedAt ? { startedAt: owner.startedAt } : {}),
+    ...(owner?.pid !== undefined ? { pid: owner.pid } : {})
+  };
+}
+
+function readSearchReconcileLockOwner(lockDir: string): SearchReconcileLockOwner | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")) as unknown;
+    if (!isRecord(parsed)) return undefined;
+    return {
+      ...(typeof parsed.reason === "string" && isSearchReconcileReason(parsed.reason) ? { reason: parsed.reason } : {}),
+      ...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
+      ...(typeof parsed.pid === "number" && Number.isSafeInteger(parsed.pid) ? { pid: parsed.pid } : {})
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function removeStaleSearchReconcileLock(lockDir: string): boolean {
+  if (searchReconcileLockStaleMs < 1) return false;
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(lockDir);
+  } catch (error) {
+    if (isNoEntryError(error)) return true;
+    throw error;
+  }
+  if (!isSearchReconcileLockStale(stat)) return false;
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  return true;
+}
+
+function isSearchReconcileLockStale(stat: fs.Stats): boolean {
+  return searchReconcileLockStaleMs >= 1 && Date.now() - stat.mtimeMs >= searchReconcileLockStaleMs;
+}
+
+function isPathExistsError(error: unknown): boolean {
+  return (error as { code?: unknown } | undefined)?.code === "EEXIST";
+}
+
+function isNoEntryError(error: unknown): boolean {
+  return (error as { code?: unknown } | undefined)?.code === "ENOENT";
 }
 
 async function loadOrBuildIndex(
@@ -429,7 +605,7 @@ async function loadOrBuildIndex(
       if (mismatch === "tier-only-upgrade" && !hasManifestDiff(diff)) {
         const servedAnalyzer = createServedSearchAnalyzer(manifest.analyzer);
         if (servedAnalyzer) {
-          requestReconcile(vaultRoot, analyzer);
+          requestReconcile(vaultRoot, analyzer, "stale-tier");
           return { db, manifest, analyzer: servedAnalyzer, warnings: [SEARCH_INDEX_STALE_TIER_WARNING] };
         }
       }

@@ -89,7 +89,17 @@ export function renderIndexResult(result: SearchIndexStatusResult | SearchIndexM
     return `${JSON.stringify(result)}\n`;
   }
   if (result.action === "status") {
-    return result.ready ? "Index ready.\n" : "Index missing.\n";
+    const lines = [result.ready ? (result.staleTier ? "Index ready (stale analyzer tier)." : "Index ready.") : "Index missing."];
+    if (result.reconcile) {
+      const details = [
+        result.reconcile.reason ? `reason: ${result.reconcile.reason}` : "",
+        result.reconcile.pid !== undefined ? `pid: ${result.reconcile.pid}` : "",
+        result.reconcile.startedAt ? `started: ${result.reconcile.startedAt}` : ""
+      ].filter(Boolean);
+      const state = result.reconcile.stale ? "stale lock" : "running";
+      lines.push(`Reconcile ${state}${details.length > 0 ? ` (${details.join(", ")})` : ""}.`);
+    }
+    return `${lines.join("\n")}\n`;
   }
   if (result.action === "rebuild") {
     return "Index rebuilt.\n";

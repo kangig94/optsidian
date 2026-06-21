@@ -87,11 +87,23 @@ export type SearchResult = {
   warnings?: string[];
 };
 
+export type SearchReconcileReason = "stale-tier" | "incompatible" | "terminal-analyzer-failure" | "manual";
+
+export type SearchIndexReconcileStatus = {
+  active: true;
+  stale: boolean;
+  reason?: SearchReconcileReason;
+  startedAt?: string;
+  pid?: number;
+};
+
 export type SearchIndexStatusResult = {
   ok: true;
   command: "index";
   action: "status";
   ready: boolean;
+  staleTier?: boolean;
+  reconcile?: SearchIndexReconcileStatus;
 };
 
 export type SearchIndexMutationResult = {

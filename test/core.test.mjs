@@ -297,16 +297,148 @@ test("core search serves a valid Intl index during analyzer tier upgrades", asyn
     };
     const reconcileRequests = [];
 
-    const stale = await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer, (root, analyzer) => {
-      reconcileRequests.push({ root, identity: analyzer.identity });
+    const stale = await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer, (root, analyzer, reason) => {
+      reconcileRequests.push({ root, identity: analyzer.identity, reason });
     });
 
     assert.deepEqual(stale.matches.map((match) => match.path), ["Notes/Stale.md"]);
     assert.deepEqual(stale.warnings, ["fts_index_stale_tier"]);
     assert.equal(reconcileRequests.length, 1);
     assert.equal(reconcileRequests[0].root, vault);
+    assert.equal(reconcileRequests[0].reason, "stale-tier");
     assert.deepEqual(reconcileRequests[0].identity.activeAnalyzers, ["ko"]);
     assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, "utf8")), manifest);
+  });
+});
+
+test("core search coalesces background reconcile requests until the child exits", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+    const { __setSearchReconcileChildSpawnerForTests, cachePaths, searchVaultWithAnalyzer } = await import(
+      path.join(repoRoot, "src/core/search.ts")
+    );
+    writeVaultFile(vault, {
+      path: "Notes/Coalesce.md",
+      content: "# Coalesce\n\nrunning studies\n"
+    });
+
+    await withProcessEnv({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, async () => {
+      const result = await searchVault(vault, { query: "running", limit: 5 });
+      assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Coalesce.md"]);
+    });
+
+    const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
+    const futureAnalyzer = {
+      identity: { ...manifest.analyzer, activeAnalyzers: ["ko"] },
+      tokenize: async (text) => [`kiwi_${text}`],
+      tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
+    };
+    const children = [];
+    const spawns = [];
+
+    __setSearchReconcileChildSpawnerForTests((bin, args) => {
+      const handlers = new Map();
+      const child = {
+        once(event, handler) {
+          handlers.set(event, handler);
+          return child;
+        },
+        unref() {},
+        emit(event) {
+          handlers.get(event)?.();
+        }
+      };
+      spawns.push({ bin, args });
+      children.push(child);
+      return child;
+    });
+    try {
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
+      assert.equal(spawns.length, 1);
+      assert.deepEqual(spawns[0].args, ["__search-reconcile", vault, "reason=stale-tier"]);
+
+      children[0].emit("close");
+      await searchVaultWithAnalyzer(vault, { query: "running", limit: 5 }, futureAnalyzer);
+      assert.equal(spawns.length, 2);
+    } finally {
+      __setSearchReconcileChildSpawnerForTests(undefined);
+    }
+  });
+});
+
+test("core reconcile uses a cross-process lock and recovers stale locks", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+    const {
+      __setSearchReconcileLockStaleMsForTests,
+      cachePaths,
+      getSearchIndexStatus,
+      reconcileSearchIndex,
+      searchReconcileLockPath
+    } = await import(path.join(repoRoot, "src/core/search.ts"));
+    writeVaultFile(vault, {
+      path: "Notes/Locked.md",
+      content: "# Locked\n\nalpha\n"
+    });
+    await searchVault(vault, { query: "alpha", limit: 5 });
+
+    const manifestPath = cachePaths(vault).manifestPath;
+    const before = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    writeVaultFile(vault, {
+      path: "Notes/Locked.md",
+      content: "# Locked\n\nalpha beta expanded\n",
+      overwrite: true
+    });
+
+    const lockDir = searchReconcileLockPath(vault);
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(path.join(lockDir, "owner.json"), '{"pid":12345,"startedAt":"2026-06-21T00:00:00.000Z","reason":"stale-tier"}\n');
+    assert.deepEqual(getSearchIndexStatus(vault).reconcile, {
+      active: true,
+      stale: false,
+      reason: "stale-tier",
+      startedAt: "2026-06-21T00:00:00.000Z",
+      pid: 12345
+    });
+    try {
+      await reconcileSearchIndex(vault, "stale-tier");
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+    const skipped = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.deepEqual(skipped, before);
+
+    await reconcileSearchIndex(vault, "stale-tier");
+    const rebuilt = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.equal(rebuilt.files["Notes/Locked.md"].size, fs.statSync(path.join(vault, "Notes/Locked.md")).size);
+    assert.notEqual(rebuilt.files["Notes/Locked.md"].size, before.files["Notes/Locked.md"].size);
+
+    writeVaultFile(vault, {
+      path: "Notes/Locked.md",
+      content: "# Locked\n\nalpha beta gamma expanded through stale lock\n",
+      overwrite: true
+    });
+    fs.mkdirSync(lockDir, { recursive: true });
+    const staleAt = new Date(Date.now() - 10_000);
+    fs.utimesSync(lockDir, staleAt, staleAt);
+    __setSearchReconcileLockStaleMsForTests(1);
+    assert.deepEqual(getSearchIndexStatus(vault).reconcile, {
+      active: true,
+      stale: true
+    });
+    try {
+      await reconcileSearchIndex(vault, "stale-tier");
+    } finally {
+      __setSearchReconcileLockStaleMsForTests(undefined);
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+    const staleRecovered = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    assert.equal(staleRecovered.files["Notes/Locked.md"].size, fs.statSync(path.join(vault, "Notes/Locked.md")).size);
   });
 });
 
@@ -345,14 +477,15 @@ test("core search degrades terminal analyzer load failures to Intl", async () =>
     };
     const reconcileRequests = [];
 
-    const result = await searchVaultWithAnalyzer(vault, { query: "한국어 검색", limit: 5 }, terminalAnalyzer, (root, analyzer) => {
-      reconcileRequests.push({ root, identity: analyzer.identity });
+    const result = await searchVaultWithAnalyzer(vault, { query: "한국어 검색", limit: 5 }, terminalAnalyzer, (root, analyzer, reason) => {
+      reconcileRequests.push({ root, identity: analyzer.identity, reason });
     });
 
     assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Degraded.md"]);
     assert.equal(result.warnings, undefined);
     assert.equal(reconcileRequests.length, 1);
     assert.equal(reconcileRequests[0].root, vault);
+    assert.equal(reconcileRequests[0].reason, "terminal-analyzer-failure");
     assert.deepEqual(reconcileRequests[0].identity.activeAnalyzers, []);
     assert.equal(fallbackLeases, 1);
   });
