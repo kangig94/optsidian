@@ -14,6 +14,7 @@ import {
   createServedSearchAnalyzer,
   resolveSearchAnalyzer,
   tokensToSearchText,
+  withSearchAnalyzerLease,
   type SearchAnalyzer,
   type SearchAnalyzerIdentity
 } from "./search-analyzer.js";
@@ -213,6 +214,19 @@ export async function searchVaultWithAnalyzer(
   analyzer: SearchAnalyzer,
   requestReconcile: SearchReconcileRequester = requestSearchReconcile
 ): Promise<SearchResult> {
+  return withSearchAnalyzerLease(
+    analyzer,
+    (leasedAnalyzer) => searchVaultWithLeasedAnalyzer(vaultRoot, params, leasedAnalyzer, requestReconcile),
+    (event) => requestReconcile(vaultRoot, event.degradedAnalyzer)
+  );
+}
+
+async function searchVaultWithLeasedAnalyzer(
+  vaultRoot: string,
+  params: SearchParams,
+  analyzer: SearchAnalyzer,
+  requestReconcile: SearchReconcileRequester
+): Promise<SearchResult> {
   const search = normalizeSearchParams(params);
   const pathFilter = search.path ? resolvePathFilter(vaultRoot, search.path) : undefined;
   const loaded = await loadOrBuildIndex(vaultRoot, analyzer, requestReconcile);
@@ -313,14 +327,24 @@ export function getSearchIndexStatus(vaultRoot: string): SearchIndexStatusResult
 
 export async function rebuildSearchIndex(vaultRoot: string): Promise<SearchIndexMutationResult> {
   const analyzer = resolveSearchAnalyzer();
+  return rebuildSearchIndexWithAnalyzer(vaultRoot, analyzer);
+}
+
+async function rebuildSearchIndexWithAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<SearchIndexMutationResult> {
+  return withSearchAnalyzerLease(analyzer, async (leasedAnalyzer) => {
+    await rebuildSearchIndexWithLeasedAnalyzer(vaultRoot, leasedAnalyzer);
+    return {
+      ok: true,
+      command: "index",
+      action: "rebuild"
+    };
+  });
+}
+
+async function rebuildSearchIndexWithLeasedAnalyzer(vaultRoot: string, analyzer: SearchAnalyzer): Promise<void> {
   const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
   const currentFiles = currentFileManifest(vaultRoot);
   await buildAndPersistIndex(vaultRoot, currentFiles, paths, analyzer);
-  return {
-    ok: true,
-    command: "index",
-    action: "rebuild"
-  };
 }
 
 export async function reconcileSearchIndex(vaultRoot: string): Promise<void> {

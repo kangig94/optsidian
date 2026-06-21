@@ -22,8 +22,18 @@ export type SearchAnalyzerIdentity = {
 
 export type SearchAnalyzer = {
   identity: SearchAnalyzerIdentity;
+  degradedAnalyzer?: SearchAnalyzer;
+  isTerminalLoadError?(error: unknown): boolean;
+  withLease?<T>(run: (analyzer: SearchAnalyzer) => T | Promise<T>): Promise<T>;
   tokenize(text: string): Promise<string[]>;
   tokenizeBatch(texts: readonly string[]): Promise<string[][]>;
+};
+
+export type SearchAnalyzerDegradedEvent = {
+  error: unknown;
+  analyzer: SearchAnalyzer;
+  degradedAnalyzer: SearchAnalyzer;
+  reason: "terminal-load-error";
 };
 
 type AnalyzerRequest = {
@@ -74,6 +84,21 @@ const COMBINING_MARKS_PATTERN = /\p{Mark}/gu;
 const ASCII_ALPHA_PATTERN = /^[a-z]+$/;
 
 let requestId = 0;
+
+export class SearchAnalyzerTerminalLoadError extends Error {
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "SearchAnalyzerTerminalLoadError";
+    this.cause = cause;
+    Object.setPrototypeOf(this, SearchAnalyzerTerminalLoadError.prototype);
+  }
+}
+
+export function isSearchAnalyzerTerminalLoadError(error: unknown): error is SearchAnalyzerTerminalLoadError {
+  return error instanceof SearchAnalyzerTerminalLoadError;
+}
 
 export function resolveSearchAnalyzer(
   env: NodeJS.ProcessEnv = process.env,
@@ -138,6 +163,43 @@ export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): Se
   if (name !== "router" && name !== "intl") return undefined;
   if ((identity.activeAnalyzers ?? []).length > 0) return undefined;
   return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(",")));
+}
+
+export async function withSearchAnalyzerLease<T>(
+  analyzer: SearchAnalyzer,
+  run: (analyzer: SearchAnalyzer) => T | Promise<T>,
+  onDegraded?: (event: SearchAnalyzerDegradedEvent) => void | Promise<void>
+): Promise<T> {
+  try {
+    return analyzer.withLease ? await analyzer.withLease(run) : await run(analyzer);
+  } catch (error) {
+    const degradedAnalyzer = analyzer.degradedAnalyzer;
+    if (!isTerminalAnalyzerError(analyzer, error) || !degradedAnalyzer || degradedAnalyzer === analyzer) {
+      throw error;
+    }
+    const event: SearchAnalyzerDegradedEvent = {
+      error,
+      analyzer,
+      degradedAnalyzer,
+      reason: "terminal-load-error"
+    };
+    notifySearchAnalyzerDegraded(onDegraded, event);
+    return withSearchAnalyzerLease(degradedAnalyzer, run, onDegraded);
+  }
+}
+
+function isTerminalAnalyzerError(analyzer: SearchAnalyzer, error: unknown): boolean {
+  return analyzer.isTerminalLoadError?.(error) === true || isSearchAnalyzerTerminalLoadError(error);
+}
+
+function notifySearchAnalyzerDegraded(
+  onDegraded: ((event: SearchAnalyzerDegradedEvent) => void | Promise<void>) | undefined,
+  event: SearchAnalyzerDegradedEvent
+): void {
+  if (!onDegraded) return;
+  void Promise.resolve()
+    .then(() => onDegraded(event))
+    .catch(() => {});
 }
 
 export function tokenizeIntlText(text: string): string[] {

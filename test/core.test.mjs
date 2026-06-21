@@ -310,6 +310,90 @@ test("core search serves a valid Intl index during analyzer tier upgrades", asyn
   });
 });
 
+test("core search degrades terminal analyzer load failures to Intl", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { writeVaultFile } = await core();
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    writeVaultFile(vault, {
+      path: "Notes/Degraded.md",
+      content: "# Degraded Analyzer\n\n한국어 검색 fallback marker\n"
+    });
+
+    const intlAnalyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+    let fallbackLeases = 0;
+    const degradedAnalyzer = {
+      identity: intlAnalyzer.identity,
+      withLease: async (run) => {
+        fallbackLeases += 1;
+        return run(intlAnalyzer);
+      },
+      tokenize: (text) => intlAnalyzer.tokenize(text),
+      tokenizeBatch: (texts) => intlAnalyzer.tokenizeBatch(texts)
+    };
+    const terminalAnalyzer = {
+      identity: { ...degradedAnalyzer.identity, activeAnalyzers: ["ko"] },
+      degradedAnalyzer,
+      isTerminalLoadError: (error) => error instanceof SearchAnalyzerTerminalLoadError,
+      withLease: async () => {
+        throw new SearchAnalyzerTerminalLoadError("simulated analyzer load failure");
+      },
+      tokenize: async (text) => [`kiwi_${text}`],
+      tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
+    };
+    const reconcileRequests = [];
+
+    const result = await searchVaultWithAnalyzer(vault, { query: "한국어 검색", limit: 5 }, terminalAnalyzer, (root, analyzer) => {
+      reconcileRequests.push({ root, identity: analyzer.identity });
+    });
+
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Degraded.md"]);
+    assert.equal(result.warnings, undefined);
+    assert.equal(reconcileRequests.length, 1);
+    assert.equal(reconcileRequests[0].root, vault);
+    assert.deepEqual(reconcileRequests[0].identity.activeAnalyzers, []);
+    assert.equal(fallbackLeases, 1);
+  });
+});
+
+test("core search isolates terminal analyzer degrade observer failures", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { writeVaultFile } = await core();
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    writeVaultFile(vault, {
+      path: "Notes/Observer.md",
+      content: "# Observer Failure\n\n한국어 검색 observer fallback\n"
+    });
+
+    const degradedAnalyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
+    const terminalAnalyzer = {
+      identity: { ...degradedAnalyzer.identity, activeAnalyzers: ["ko"] },
+      degradedAnalyzer,
+      isTerminalLoadError: (error) => error instanceof SearchAnalyzerTerminalLoadError,
+      withLease: async () => {
+        throw new SearchAnalyzerTerminalLoadError("simulated analyzer load failure");
+      },
+      tokenize: async (text) => [`kiwi_${text}`],
+      tokenizeBatch: async (texts) => texts.map((text) => [`kiwi_${text}`])
+    };
+    let observerCalls = 0;
+
+    const result = await searchVaultWithAnalyzer(vault, { query: "한국어 검색", limit: 5 }, terminalAnalyzer, () => {
+      observerCalls += 1;
+      throw new Error("observer failure must be isolated");
+    });
+
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Observer.md"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(observerCalls, 1);
+  });
+});
+
 test("core search updates cache incrementally across add change rename delete and parse failure", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
