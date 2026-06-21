@@ -400,6 +400,7 @@ function setup() {
     OPTSIDIAN_OBSIDIAN_BIN: fake,
     FAKE_VAULT: vault,
     FAKE_OBSIDIAN_LOG: log,
+    OPTSIDIAN_INDEX_DAEMON: "0",
     XDG_CONFIG_HOME: path.join(dir, "config")
   };
   return { dir, vault, env, log };
@@ -1332,6 +1333,63 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
+});
+
+test("search wakes the index daemon to warm discovered vaults", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const { __searchIndexDaemonSocketPathForTests } = await import(path.resolve("src/core/search-index-daemon.ts"));
+  const { dir, vault, env } = setup();
+  const secondVault = path.join(dir, "second-vault");
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  const runtime = path.join(dir, "runtime");
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.mkdirSync(path.join(secondVault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "alpha.md"), "# Alpha\n\nindex daemon alpha\n");
+  fs.writeFileSync(path.join(secondVault, "Notes", "beta.md"), "# Beta\n\nindex daemon beta\n");
+
+  const registryDir = path.join(env.XDG_CONFIG_HOME, "obsidian");
+  fs.mkdirSync(registryDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(registryDir, "obsidian.json"),
+    JSON.stringify({
+      vaults: {
+        first: { path: vault, open: true },
+        second: { path: secondVault, open: false }
+      }
+    })
+  );
+
+  const searchEnv = {
+    ...env,
+    OPTSIDIAN_INDEX_DAEMON: "1",
+    OPTSIDIAN_INDEX_DAEMON_BIN: cli,
+    OPTSIDIAN_INDEX_DAEMON_IDLE_MS: "50",
+    OPTSIDIAN_INDEX_DAEMON_POLL_MS: "0",
+    XDG_CACHE_HOME: cache,
+    XDG_RUNTIME_DIR: runtime
+  };
+  const result = run(["search", "query=alpha", "format=json"], { env: searchEnv });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/alpha.md"]);
+
+  const deadline = Date.now() + 3000;
+  let ready = false;
+  while (Date.now() < deadline && !ready) {
+    const status = run(["index", "status", "vault-path=" + secondVault], { env: searchEnv });
+    assert.equal(status.status, 0, status.stderr);
+    ready = status.stdout === "Index ready.\n";
+    if (!ready) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  assert.equal(ready, true);
+
+  const socketPath = __searchIndexDaemonSocketPathForTests({ ...process.env, ...searchEnv });
+  const idleDeadline = Date.now() + 2000;
+  while (Date.now() < idleDeadline && fs.existsSync(socketPath)) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  assert.equal(fs.existsSync(socketPath), false);
 });
 
 test("search can use the analyzer daemon and the daemon exits after idle", async () => {

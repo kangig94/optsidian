@@ -20,6 +20,7 @@ import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
 import { runSearchAnalyzerDaemon } from "./core/search-analyzer.js";
+import { runSearchIndexDaemon, searchIndexDaemonCommand } from "./core/search-index-daemon.js";
 import { parseSearchReconcileReason, reconcileSearchIndex, searchReconcileCommand } from "./core/search.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
@@ -35,6 +36,10 @@ async function main(): Promise<void> {
   }
   if (argv[0] === "__analyzer-daemon") {
     await runSearchAnalyzerDaemon();
+    return;
+  }
+  if (argv[0] === searchIndexDaemonCommand()) {
+    await runSearchIndexDaemon();
     return;
   }
   if (argv[0] === searchReconcileCommand()) {

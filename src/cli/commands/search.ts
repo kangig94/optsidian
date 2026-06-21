@@ -1,6 +1,7 @@
 import { getValue, parsePositiveInt, ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
 import { searchVault } from "../../core/search.js";
+import { pokeSearchIndexDaemonWarmDiscovered } from "../../core/search-index-daemon.js";
 
 export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<void> {
   const result = await searchVault(vaultRoot, {
@@ -11,6 +12,7 @@ export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<vo
     limit: parsePositiveInt(getValue(args, "limit"), "limit")
   });
   process.stdout.write(renderSearch(result, parseFormat(getValue(args, "format"))));
+  pokeSearchIndexDaemonWarmDiscovered();
 }
 
 function parseList(value: string | undefined): string[] | undefined {
