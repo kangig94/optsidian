@@ -435,6 +435,14 @@ test("top-level and implemented command help stay local", () => {
   assert.match(result.stdout, /MCP tools: command_map, command_run, write, edit, apply_patch/);
   assert.doesNotMatch(result.stdout, /Addons:/);
 
+  const topLevelHelpValue = run(["help=true"], { env });
+  assert.equal(topLevelHelpValue.status, 0, topLevelHelpValue.stderr);
+  assert.match(topLevelHelpValue.stdout, /Detailed help:/);
+
+  const bareTopLevelHelp = run(["help"], { env });
+  assert.equal(bareTopLevelHelp.status, 2);
+  assert.match(bareTopLevelHelp.stderr, /Use --help or help=true/);
+
   const searchHelp = run(["search", "--help"]);
   assert.equal(searchHelp.status, 0, searchHelp.stderr);
   assert.match(searchHelp.stdout, /Command: search/);
@@ -446,6 +454,14 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(updateHelp.status, 0, updateHelp.stderr);
   assert.match(updateHelp.stdout, /Command: update/);
   assert.match(updateHelp.stdout, /optsidian update/);
+
+  const readHelpValue = run(["read", "help=true"], { env });
+  assert.equal(readHelpValue.status, 0, readHelpValue.stderr);
+  assert.match(readHelpValue.stdout, /Command: read/);
+
+  const bareReadHelp = run(["read", "help"], { env });
+  assert.equal(bareReadHelp.status, 2);
+  assert.match(bareReadHelp.stderr, /Missing required argument: path=<value>/);
 
   const frontmatterHelp = run(["frontmatter", "--help"]);
   assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
@@ -879,6 +895,13 @@ test("destructive native command help never executes the command", () => {
     assert.deepEqual(calls.at(-1), ["help", "delete"], `${helpForm.join(" ")} must delegate as \`help delete\``);
     assert.ok(!calls.some((call) => call[0] === "delete"), `delete must never be executed for ${helpForm.join(" ")}`);
   }
+
+  const { env, log } = setup();
+  const result = run(["delete", "help"], { env });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["delete", "help"]);
+  assert.ok(!calls.some((call) => call[0] === "help"), "bare help must not be rewritten to native help");
 });
 
 test("delete remains delegated to native Obsidian", () => {

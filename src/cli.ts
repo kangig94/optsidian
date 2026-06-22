@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { hasFlag, parseArgs } from "./cli/args.js";
+import { parseArgs } from "./cli/args.js";
 import { delegateToObsidian } from "./cli/delegate.js";
 import { UsageError, isCliError } from "./errors.js";
 import { commandHelpText, helpText } from "./cli/help.js";
@@ -26,9 +26,12 @@ import { OPTSIDIAN_VERSION } from "./version.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "help") {
+  if (argv.length === 0 || argv[0] === "--help" || (argv.length === 1 && argv[0] === "help=true")) {
     process.stdout.write(helpText());
     return;
+  }
+  if (argv[0] === "help") {
+    throw new UsageError("Use --help or help=true for help");
   }
   if (argv[0] === "--version") {
     process.stdout.write(`${OPTSIDIAN_VERSION}\n`);
@@ -131,11 +134,7 @@ async function main(): Promise<void> {
 }
 
 function isCommandHelpRequest(args: ReturnType<typeof parseArgs>): boolean {
-  return (
-    args.raw.includes("--help") ||
-    args.values.get("help") === "true" ||
-    (args.command !== "search" && hasFlag(args, "help"))
-  );
+  return args.raw.includes("--help") || args.values.get("help") === "true";
 }
 
 function rejectVaultPathForNative(args: ReturnType<typeof parseArgs>): void {
