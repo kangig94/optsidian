@@ -2,7 +2,7 @@
 import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RuntimeError, isCliError } from "./errors.js";
-import { maybePokeSearchIndexDaemonWarmForMcp } from "./core/search-index-schedule.js";
+import { maybePokeSearchIndexDaemonWarmForMcp } from "./core/search/warm-schedule.js";
 import { recordVaultAccess } from "./core/vault-access.js";
 import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
 import { createOptsidianMcpServer } from "./mcp/server.js";

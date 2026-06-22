@@ -1402,7 +1402,7 @@ test("search wakes the index daemon to warm recently accessed vaults", async () 
   if (process.platform === "win32") {
     return;
   }
-  const { __searchIndexDaemonSocketPathForTests } = await import(path.resolve("src/core/search-index-daemon.ts"));
+  const { __searchIndexDaemonSocketPathForTests } = await import(path.resolve("src/core/search/warm-daemon.ts"));
   const { dir, vault, env } = setup();
   const secondVault = path.join(dir, "second-vault");
   const thirdVault = path.join(dir, "third-vault");
@@ -1471,7 +1471,7 @@ test("search can use the analyzer daemon and the daemon exits after idle", async
   if (process.platform === "win32") {
     return;
   }
-  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search-analyzer.ts"));
+  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search/analyzer.ts"));
   const { dir, vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");
@@ -1506,7 +1506,7 @@ test("search falls back when Kiwi analyzer daemon load exceeds the foreground ti
     return;
   }
   const { __analyzerDaemonSocketPathForTests, resolveSearchAnalyzer, tokenizeRoutedText } = await import(
-    path.resolve("src/core/search-analyzer.ts")
+    path.resolve("src/core/search/analyzer.ts")
   );
   const { searchVaultWithAnalyzer } = await import(path.resolve("src/core/search/index.ts"));
   const { dir, vault, env } = setup();
@@ -1576,7 +1576,7 @@ test("search retires a mismatched analyzer daemon before retrying", async () => 
   if (process.platform === "win32") {
     return;
   }
-  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search-analyzer.ts"));
+  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search/analyzer.ts"));
   const { dir, vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");

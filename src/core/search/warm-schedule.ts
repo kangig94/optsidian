@@ -1,11 +1,11 @@
-import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
+import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
 import {
   indexWarmIntervalMinutes,
   indexWarmSchedulePath,
   readIndexWarmSchedule,
   writeIndexWarmSchedule
-} from "./search-index-schedule-state.js";
-import { pokeSearchIndexDaemonWarmOnce, type SearchIndexDaemonWarmTarget } from "./search-index-daemon.js";
+} from "./warm-schedule-state.js";
+import { pokeSearchIndexDaemonWarmOnce, type SearchIndexDaemonWarmTarget } from "./warm-daemon.js";
 
 type MaybeWarmOptions = {
   vaultPath?: string;
@@ -51,4 +51,4 @@ function indexWarmDisabled(env: NodeJS.ProcessEnv): boolean {
   return value === "0" || value === "false" || value === "off" || value === "no";
 }
 
-export { indexWarmSchedulePath } from "./search-index-schedule-state.js";
+export { indexWarmSchedulePath } from "./warm-schedule-state.js";

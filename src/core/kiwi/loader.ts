@@ -8,7 +8,7 @@ import {
   readVerifiedKiwiModelFiles,
   readVerifiedKiwiWasmBinary,
   type KiwiModelFileName
-} from "./kiwi-artifact.js";
+} from "./artifact.js";
 
 export type KiwiAnalyzerIdentity = {
   engine: "kiwi";

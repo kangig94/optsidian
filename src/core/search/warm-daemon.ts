@@ -4,13 +4,13 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { RuntimeError, UsageError } from "../errors.js";
-import { resolveVaultPathInput } from "../native/obsidian.js";
-import { OPTSIDIAN_VERSION } from "../version.js";
-import { warmSearchIndexes } from "./search/index.js";
-import { readOptsidianSettings } from "./settings.js";
-import type { SearchIndexWarmResult } from "./types.js";
-import { recentVaultAccessRoots } from "./vault-access.js";
+import { RuntimeError, UsageError } from "../../errors.js";
+import { resolveVaultPathInput } from "../../native/obsidian.js";
+import { OPTSIDIAN_VERSION } from "../../version.js";
+import { warmSearchIndexes } from "./index.js";
+import { readOptsidianSettings } from "../settings.js";
+import type { SearchIndexWarmResult } from "../types.js";
+import { recentVaultAccessRoots } from "../vault-access.js";
 
 export type SearchIndexDaemonWarmTarget =
   | { kind: "recent" }

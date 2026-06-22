@@ -2,36 +2,27 @@
 
 ## Project Layout
 
-```text
-src/cli.ts                         CLI binary entrypoint
-src/cli/args.ts                    CLI key=value parsing and @file reads
-src/cli/policy.ts                  native-first routing table
-src/cli/delegate.ts                native Obsidian process delegation
-src/cli/vault.ts                   vault root resolution through native Obsidian
-src/cli/render.ts                  CLI text/json rendering
-src/cli/commands/*.ts              thin CLI adapters
-src/update/installer.ts            release lookup, managed install state, and updater
-src/mcp.ts                         MCP stdio binary entrypoint
-src/mcp/*.ts                       MCP tool registration, config, result mapping
-src/native/obsidian.ts             shared native Obsidian process helpers
-src/core/index.ts                  public core API for future non-shell adapters
-src/core/path.ts                   vault path safety
-src/core/read.ts                   bounded file reads
-src/core/search/index.ts           ranked note search and cache management entrypoint
-src/core/search/*                  search internals split by analysis, retrieval, ranking, and cache concerns
-src/core/search-parse.ts           Markdown metadata extraction for search
-src/core/frontmatter.ts            YAML frontmatter parsing and mutation
-src/core/grep.ts                   line-oriented vault grep
-src/core/edit.ts                   exact/regex/line/range edits
-src/core/write.ts                  whole-file writes
-src/core/apply-patch.ts            Codex-compatible patch engine
-test/cli.test.mjs                  end-to-end tests with fake Obsidian
-test/core.test.mjs                 direct core API tests
-test/mcp.test.mjs                  MCP adapter and tool handler tests
-test/release.test.mjs              release packaging, installer, and updater tests
-```
-
 The core layer must not depend on `process.argv`, `process.stdin`, `process.stdout`, or native Obsidian process delegation. CLI and MCP adapters only translate external inputs into core params and render returned results.
+
+Kiwi runtime code lives under `src/core/kiwi/*` as Korean text-analysis infrastructure. Search adapts it through `src/core/search/analyzer.ts`; Kiwi modules must not import search modules.
+
+## Search Layout Rules
+
+`search` is an Optsidian-extended command. Keep the public core surface at `src/core/search/index.ts`; split internals under `src/core/search/*` by pipeline concern, not by caller.
+
+- `analysis/*` owns query/document token analysis, Korean analyzer behavior, and channel construction.
+- `retrieval/*` owns Orama lookups, candidate limits, and per-channel result merging.
+- `ranking/*` owns exact identity ranking, phrase ranking, coverage ranking, RRF, and final scoring.
+- `planner.ts` owns read-time plan selection across target persisted index, compatible baseline index, empty building response, and full-build fallback.
+- Analyzer routing, Markdown parsing, warm daemon, warm schedule state, cache paths, documents, manifests, locks, persistence, overlays, projections, warmup, reconcile, snippets, debug, and status each stay in their matching top-level search module.
+
+Layout-only skeleton files are allowed only while an active search migration is in progress. A functional search change should populate the matching module and avoid adding new behavior to `index.ts` unless it is preserving the public entrypoint, re-exporting public helpers, or coordinating modules.
+
+If a new search concern does not fit the existing modules, update these layout rules before adding the module. Avoid catch-all utility modules; name the module after the pipeline responsibility it owns.
+
+Analyzer and token semantics are part of search index identity. If a change alters token fields, analyzer fallback, channel construction, ranking identity, or persisted query behavior, update the relevant schema/cache/identity version and keep persisted index, overlay index, and live query analysis on the same semantics.
+
+Korean search changes should model token channels explicitly, for example surface, morph, stem or lemma, and ngram. Retrieve per channel, fuse with explicit weights, and expose enough debug detail to explain which channel matched; avoid one-off string trimming inside ranking code.
 
 ## Commands
 

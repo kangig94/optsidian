@@ -17,6 +17,18 @@ export type SearchDocument = ParsedMarkdownNote & {
   tagsTokens: string;
   headingsTokens: string;
   bodyTokens: string;
+  pathSurfaceTokens: string;
+  titleSurfaceTokens: string;
+  aliasesSurfaceTokens: string;
+  tagsSurfaceTokens: string;
+  headingsSurfaceTokens: string;
+  bodySurfaceTokens: string;
+  pathNgramTokens: string;
+  titleNgramTokens: string;
+  aliasesNgramTokens: string;
+  tagsNgramTokens: string;
+  headingsNgramTokens: string;
+  bodyNgramTokens: string;
 };
 
 type Frontmatter = {

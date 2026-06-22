@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { RuntimeError } from "../errors.js";
-import { optsidianCacheRoot } from "./cache-root.js";
+import { RuntimeError } from "../../errors.js";
+import { optsidianCacheRoot } from "../cache-root.js";
 
 export const KIWI_NLP_VERSION = "0.23.0";
 export const KIWI_MODEL_VERSION = "0.23.0";

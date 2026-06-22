@@ -1,7 +1,7 @@
 import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
 import { searchVault } from "../../core/search/index.js";
-import { pokeSearchIndexDaemonWarmRecent } from "../../core/search-index-daemon.js";
+import { pokeSearchIndexDaemonWarmRecent } from "../../core/search/warm-daemon.js";
 import { UsageError } from "../../errors.js";
 
 export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<void> {

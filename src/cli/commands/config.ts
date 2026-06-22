@@ -9,7 +9,7 @@ import {
   type ConfigMutationResult,
   type ConfigReadResult
 } from "../../core/settings.js";
-import { parseDeclaredSearchAnalyzers } from "../../core/search-analyzer.js";
+import { parseDeclaredSearchAnalyzers } from "../../core/search/analyzer.js";
 import { UsageError } from "../../errors.js";
 
 const SETTING_KEYS = new Set([

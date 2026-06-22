@@ -1,4 +1,3 @@
-import type { SearchDeclaredAnalyzer } from "./search-analyzer.js";
 import {
   inspectKiwiModelArtifact,
   inspectKiwiWasmArtifact,
@@ -6,8 +5,10 @@ import {
   type KiwiModelArtifactInspectOptions,
   type KiwiModelArtifactState,
   type KiwiWasmArtifactState
-} from "./kiwi-artifact.js";
-import type { KiwiAnalyzer, KiwiAnalyzerIdentity } from "./kiwi-loader.js";
+} from "./artifact.js";
+import type { KiwiAnalyzer, KiwiAnalyzerIdentity } from "./loader.js";
+
+export type KiwiDeclaredAnalyzer = "ko";
 
 export type KiwiManagerStatus =
   | {
@@ -35,7 +36,7 @@ export type KiwiManagerStatus =
 
 type KiwiLease = {
   analyzer: KiwiAnalyzer | null;
-  activeAnalyzers: SearchDeclaredAnalyzer[];
+  activeAnalyzers: KiwiDeclaredAnalyzer[];
   release(): Promise<void>;
 };
 
@@ -88,7 +89,7 @@ export class KiwiAnalyzerManager {
   constructor(options: KiwiManagerOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? KIWI_IDLE_TTL_MS;
     this.loadAnalyzer = options.loadAnalyzer ?? (async (loadOptions) => {
-      const { loadKiwiAnalyzer } = await import("./kiwi-loader.js");
+      const { loadKiwiAnalyzer } = await import("./loader.js");
       return loadKiwiAnalyzer(loadOptions);
     });
     this.inspectModelArtifact = options.inspectModelArtifact ?? inspectKiwiModelArtifact;
@@ -126,9 +127,9 @@ export class KiwiAnalyzerManager {
 
   async withAnalyzerLease<T>(
     env: NodeJS.ProcessEnv,
-    declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+    declaredAnalyzers: readonly KiwiDeclaredAnalyzer[],
     options: { wait: boolean; installIfMissing: boolean },
-    run: (lease: { analyzer: KiwiAnalyzer | null; activeAnalyzers: SearchDeclaredAnalyzer[] }) => T | Promise<T>
+    run: (lease: { analyzer: KiwiAnalyzer | null; activeAnalyzers: KiwiDeclaredAnalyzer[] }) => T | Promise<T>
   ): Promise<T> {
     const lease = await this.acquire(env, declaredAnalyzers, options);
     try {
@@ -150,7 +151,7 @@ export class KiwiAnalyzerManager {
 
   private async acquire(
     env: NodeJS.ProcessEnv,
-    declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+    declaredAnalyzers: readonly KiwiDeclaredAnalyzer[],
     options: { wait: boolean; installIfMissing: boolean }
   ): Promise<KiwiLease> {
     const normalized = normalizeDeclaredAnalyzers(declaredAnalyzers);
@@ -237,7 +238,7 @@ export class KiwiAnalyzerManager {
     }
   }
 
-  private leaseHandle(handle: ActiveKiwiHandle, activeAnalyzers: SearchDeclaredAnalyzer[]): KiwiLease {
+  private leaseHandle(handle: ActiveKiwiHandle, activeAnalyzers: KiwiDeclaredAnalyzer[]): KiwiLease {
     this.clearIdleTimer();
     handle.leaseCount += 1;
     let released = false;
@@ -294,7 +295,7 @@ export class KiwiAnalyzerManager {
   }
 }
 
-function noopLease(activeAnalyzers: SearchDeclaredAnalyzer[]): KiwiLease {
+function noopLease(activeAnalyzers: KiwiDeclaredAnalyzer[]): KiwiLease {
   return {
     analyzer: null,
     activeAnalyzers,
@@ -302,11 +303,11 @@ function noopLease(activeAnalyzers: SearchDeclaredAnalyzer[]): KiwiLease {
   };
 }
 
-function normalizeDeclaredAnalyzers(values: readonly SearchDeclaredAnalyzer[]): SearchDeclaredAnalyzer[] {
+function normalizeDeclaredAnalyzers(values: readonly KiwiDeclaredAnalyzer[]): KiwiDeclaredAnalyzer[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
-function withoutKiwi(values: readonly SearchDeclaredAnalyzer[]): SearchDeclaredAnalyzer[] {
+function withoutKiwi(values: readonly KiwiDeclaredAnalyzer[]): KiwiDeclaredAnalyzer[] {
   return normalizeDeclaredAnalyzers(values).filter((value) => value !== "ko");
 }
 

@@ -88,6 +88,9 @@ export type SearchAnalyzerDebug = {
 export type SearchMatchDebug = {
   source: "persisted" | "overlay";
   queryTerms: string[];
+  queryChannels?: Record<string, string[]>;
+  matchedChannels?: string[];
+  channelScores?: Record<string, number>;
   analyzer: SearchAnalyzerDebug;
   oramaScore?: number;
   rerankScore?: number;
@@ -111,6 +114,8 @@ export type SearchDebugInfo = {
   query?: {
     raw: string;
     terms: string[];
+    primaryChannel?: string;
+    channels?: Record<string, string[]>;
   };
   projection: {
     source: "persisted" | "overlay" | "mixed" | "none";

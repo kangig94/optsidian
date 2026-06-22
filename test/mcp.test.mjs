@@ -309,7 +309,7 @@ test("mcp index warm schedule throttles daemon pokes", async () => {
   fs.mkdirSync(vault, { recursive: true });
   const env = { XDG_CACHE_HOME: cache };
   const pokes = [];
-  const { maybePokeSearchIndexDaemonWarmForMcp, indexWarmSchedulePath } = await import(path.resolve("src/core/search-index-schedule.ts"));
+  const { maybePokeSearchIndexDaemonWarmForMcp, indexWarmSchedulePath } = await import(path.resolve("src/core/search/warm-schedule.ts"));
   const poke = (target, warmEnv) => {
     pokes.push({ target, warmEnv });
   };
@@ -371,7 +371,7 @@ test("mcp index warm interval can be overridden by config or env", async () => {
   const cache = path.join(dir, "cache");
   const env = { XDG_CACHE_HOME: cache };
   const pokes = [];
-  const { maybePokeSearchIndexDaemonWarmForMcp } = await import(path.resolve("src/core/search-index-schedule.ts"));
+  const { maybePokeSearchIndexDaemonWarmForMcp } = await import(path.resolve("src/core/search/warm-schedule.ts"));
   const poke = (target) => {
     pokes.push(target);
   };

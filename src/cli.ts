@@ -19,8 +19,8 @@ import { runConfig } from "./cli/commands/config.js";
 import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
-import { runSearchAnalyzerDaemon } from "./core/search-analyzer.js";
-import { runSearchIndexDaemon, searchIndexDaemonCommand } from "./core/search-index-daemon.js";
+import { runSearchAnalyzerDaemon } from "./core/search/analyzer.js";
+import { runSearchIndexDaemon, searchIndexDaemonCommand } from "./core/search/warm-daemon.js";
 import { parseSearchReconcileReason, reconcileSearchIndex, searchReconcileCommand } from "./core/search/index.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 

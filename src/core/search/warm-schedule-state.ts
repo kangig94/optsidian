@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { UsageError } from "../errors.js";
-import { optsidianCacheRoot } from "./cache-root.js";
-import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
-import type { SearchIndexWarmScheduleStatus } from "./types.js";
-import { atomicWriteFile } from "./write-file.js";
+import { UsageError } from "../../errors.js";
+import { optsidianCacheRoot } from "../cache-root.js";
+import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
+import type { SearchIndexWarmScheduleStatus } from "../types.js";
+import { atomicWriteFile } from "../write-file.js";
 
 type IndexWarmScheduleFile = {
   schemaVersion: typeof INDEX_WARM_SCHEDULE_SCHEMA_VERSION;

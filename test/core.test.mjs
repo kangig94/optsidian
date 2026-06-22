@@ -82,7 +82,7 @@ async function withSearchProcess(cache, fn) {
 }
 
 test("markdown search parser extracts title aliases tags headings and body", async () => {
-  const { parseMarkdownNote } = await import(path.join(repoRoot, "src/core/search-parse.ts"));
+  const { parseMarkdownNote } = await import(path.join(repoRoot, "src/core/search/markdown.ts"));
   const doc = parseMarkdownNote(
     "Projects/alpha.md",
     `---
@@ -111,7 +111,7 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
     resolveSearchAnalyzer,
     tokenizeIntlText,
     tokenizeRoutedText
-  } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+  } = await import(path.join(repoRoot, "src/core/search/analyzer.ts"));
 
   assert.ok(tokenizeIntlText("検索方式を改善する").includes("検索"));
   assert.ok(tokenizeIntlText("中文搜索方式需要改善").includes("搜索"));
@@ -135,7 +135,7 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
 });
 
 test("kiwi search token filter drops Korean function tokens", async () => {
-  const { __filterKiwiTokensForTests } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const { __filterKiwiTokensForTests } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
 
   assert.deepEqual(__filterKiwiTokensForTests([
     { str: "보행", tag: "NNG" },
@@ -160,7 +160,7 @@ test("kiwi search token filter drops Korean function tokens", async () => {
 });
 
 test("kiwi analyzer manager supports non-blocking and blocking modes", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
 
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
@@ -225,7 +225,7 @@ test("kiwi analyzer manager supports non-blocking and blocking modes", async () 
 });
 
 test("kiwi analyzer manager does not share an in-flight load across cache envs", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   let releaseFirstLoad;
   const firstLoadGate = new Promise((resolve) => {
     releaseFirstLoad = resolve;
@@ -306,7 +306,7 @@ test("kiwi analyzer manager does not share an in-flight load across cache envs",
 });
 
 test("kiwi analyzer manager retires active leases before disposing old envs", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   const loadCalls = [];
   const disposals = [];
   const manager = new KiwiAnalyzerManager({
@@ -379,7 +379,7 @@ test("kiwi analyzer manager retires active leases before disposing old envs", as
 });
 
 test("kiwi analyzer manager reports runtime status for the requested cache env", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   const inspectModes = [];
   const manager = new KiwiAnalyzerManager({
     inspectModelArtifact: (env, options = {}) => {
@@ -432,7 +432,7 @@ test("kiwi analyzer manager reports runtime status for the requested cache env",
 });
 
 test("kiwi analyzer manager reuses active handles without rechecking model files", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   let inspectCalls = 0;
   let loadCalls = 0;
   const manager = new KiwiAnalyzerManager({
@@ -495,7 +495,7 @@ test("kiwi analyzer manager reuses active handles without rechecking model files
 });
 
 test("kiwi analyzer manager does not apply degraded state across cache envs", async () => {
-  const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
     inspectModelArtifact: (env) => ({
@@ -576,7 +576,7 @@ test("kiwi analyzer manager does not apply degraded state across cache envs", as
 });
 
 test("kiwi analyzer manager retries transient missing wasm failures", async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   let wasmInstalled = false;
   let attempts = 0;
   const manager = new KiwiAnalyzerManager({
@@ -671,8 +671,8 @@ test("kiwi wasm binary installs at runtime instead of using a bundled wasm impor
       arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
     };
   };
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
-  const { inspectKiwiWasmArtifact } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
+  const { inspectKiwiWasmArtifact } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
   try {
     const env = { XDG_CACHE_HOME: cache };
     const binary = await loadKiwiWasmBinary(env);
@@ -689,7 +689,7 @@ test("kiwi wasm binary installs at runtime instead of using a bundled wasm impor
 });
 
 test("kiwi loader resolves direct and wrapped wasm initializer imports", async () => {
-  const { __resolveKiwiWasmInitializerForTests } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const { __resolveKiwiWasmInitializerForTests } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
   const wasmModule = {
     FS: {},
     api: () => "null"
@@ -715,8 +715,8 @@ test("kiwi wasm install recovers stale install locks", async () => {
     __setKiwiInstallLockStaleMsForTests,
     inspectKiwiWasmArtifact,
     kiwiDataDir
-  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
   const env = { XDG_CACHE_HOME: cache };
   const lockDir = path.join(kiwiDataDir(env), "wasm-install.lock");
 
@@ -760,8 +760,8 @@ test("kiwi wasm install repairs corrupt installed wasm files", async () => {
     kiwiWasmDir,
     kiwiWasmFilePath,
     kiwiWasmManifestPath
-  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
@@ -805,7 +805,7 @@ test("kiwi wasm inspection can skip digest for lightweight status", async () => 
     kiwiWasmFilePath,
     kiwiWasmManifestPath,
     readVerifiedKiwiWasmBinary
-  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
@@ -844,7 +844,7 @@ test("kiwi model inspection rejects corrupt installed model files", async () => 
     kiwiModelFilePath,
     kiwiModelManifestPath,
     readVerifiedKiwiModelFiles
-  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiModelDir(env), { recursive: true });
@@ -1016,9 +1016,10 @@ The rollout is blocked by review.
     assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-latin-v2");
     assert.deepEqual(analysisCache.analyzer.activeAnalyzers, []);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
+    assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodySurfaceTokens.length > 0);
     const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
-    assert.equal(manifest.identitySchemaVersion, 1);
-    assert.equal(manifest.schemaVersion, 3);
+    assert.equal(manifest.identitySchemaVersion, 2);
+    assert.equal(manifest.schemaVersion, 4);
     assert.match(manifest.schemaDigest, /^[a-f0-9]{64}$/);
     assert.equal(manifest.tokenizerTier, "intl");
     assert.deepEqual(manifest.declaredAnalyzers, []);
@@ -1547,7 +1548,7 @@ test("core search degrades terminal analyzer load failures to Intl", async () =>
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
     const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
-    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search/analyzer.ts"));
     writeVaultFile(vault, {
       path: "Notes/Degraded.md",
       content: "# Degraded Analyzer\n\n한국어 검색 fallback marker\n"
@@ -1597,7 +1598,7 @@ test("core search isolates terminal analyzer degrade observer failures", async (
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
     const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
-    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search/analyzer.ts"));
     writeVaultFile(vault, {
       path: "Notes/Observer.md",
       content: "# Observer Failure\n\n한국어 검색 observer fallback\n"
@@ -1693,7 +1694,7 @@ test("core search retries a small overlay when analyzer tokenization fails once"
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
     const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
-    const { resolveSearchAnalyzer } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
+    const { resolveSearchAnalyzer } = await import(path.join(repoRoot, "src/core/search/analyzer.ts"));
     const analyzer = resolveSearchAnalyzer({}, {});
 
     writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\nproject alpha\n" });
@@ -1770,6 +1771,25 @@ Minimal body.
 
     result = await searchVault(vault, { query: "roadmap", fields: ["body"], limit: 3 });
     assert.equal(result.matches[0].path, "Notes/Roadmap Body.md");
+  });
+});
+
+test("core search uses Korean ngram channel for attached forms", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, {
+      path: "Notes/search-ko.md",
+      content: "# 기록\n\n한국어 검색하면서 발견한 내용을 정리한다.\n"
+    });
+
+    const result = await searchVault(vault, { query: "검색", limit: 5, debug: true });
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/search-ko.md"]);
+    assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /검색하면서/);
+    assert.ok(result.debug?.query?.channels?.ngram?.includes("검색"));
+    assert.ok(result.matches[0].debug?.matchedChannels?.includes("ngram"));
   });
 });
 

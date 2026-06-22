@@ -4,11 +4,11 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { RuntimeError, UsageError } from "../errors.js";
-import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "./kiwi-artifact.js";
-import { getKiwiAnalyzerManager } from "./kiwi-manager.js";
-import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
-import type { SearchAnalyzerRuntimeStatus } from "./types.js";
+import { RuntimeError, UsageError } from "../../errors.js";
+import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../kiwi/artifact.js";
+import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from "../kiwi/manager.js";
+import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
+import type { SearchAnalyzerRuntimeStatus } from "../types.js";
 
 export type SearchAnalyzerIdentity = {
   name: string;
@@ -73,7 +73,7 @@ type DaemonTokenizationOptions = {
   requestTimeoutMs?: number;
 };
 
-export type SearchDeclaredAnalyzer = "ko";
+export type SearchDeclaredAnalyzer = KiwiDeclaredAnalyzer;
 
 export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
