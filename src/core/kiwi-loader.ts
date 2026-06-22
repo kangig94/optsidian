@@ -46,6 +46,7 @@ type KiwiWasmModule = {
 };
 
 type KiwiWasmInitializer = (moduleArg?: Record<string, unknown>) => Promise<KiwiWasmModule>;
+type KiwiWasmInitializerImport = KiwiWasmInitializer | { default?: KiwiWasmInitializer };
 
 type KiwiApi = {
   cmd<T = unknown>(command: Record<string, unknown>): T;
@@ -55,8 +56,20 @@ type KiwiApi = {
   }>;
 };
 
-const initKiwi = initKiwiModule as unknown as KiwiWasmInitializer;
+const initKiwi = resolveKiwiWasmInitializer(initKiwiModule as unknown as KiwiWasmInitializerImport);
 const KIWI_MATCH_ALL_WITH_NORMALIZING = 8_454_207;
+
+export function __resolveKiwiWasmInitializerForTests(imported: unknown): KiwiWasmInitializer {
+  return resolveKiwiWasmInitializer(imported as KiwiWasmInitializerImport);
+}
+
+function resolveKiwiWasmInitializer(imported: KiwiWasmInitializerImport): KiwiWasmInitializer {
+  const initializer = typeof imported === "function" ? imported : imported.default;
+  if (typeof initializer !== "function") {
+    throw new Error("Kiwi wasm initializer is not available");
+  }
+  return initializer;
+}
 
 export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): Promise<KiwiAnalyzer> {
   const env = options.env ?? process.env;

@@ -102,8 +102,15 @@ const KIWI_MODEL_DIR_NAME = "cong-base";
 const KIWI_MODEL_MANIFEST_FILE = "manifest.json";
 const KIWI_WASM_MANIFEST_FILE = "manifest.json";
 const KIWI_INSTALL_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
+const KIWI_INSTALL_LOCK_STALE_MS = 30 * 60 * 1000;
+const KIWI_INSTALL_LOCK_POLL_MS = 25;
 const TAR_BLOCK_SIZE = 512;
 const TAR_FILE_TYPES = new Set(["0", ""]);
+let kiwiInstallLockStaleMs = KIWI_INSTALL_LOCK_STALE_MS;
+
+export function __setKiwiInstallLockStaleMsForTests(value: number | undefined): void {
+  kiwiInstallLockStaleMs = value ?? KIWI_INSTALL_LOCK_STALE_MS;
+}
 
 export function kiwiDataDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), "kiwi");
@@ -440,27 +447,51 @@ function createWasmManifest(): KiwiWasmArtifactManifest {
   };
 }
 
-function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<() => void> {
+async function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<() => void> {
   const startedAt = Date.now();
-  return new Promise((resolve, reject) => {
-    const attempt = () => {
-      try {
-        fs.mkdirSync(lockDir, { recursive: false });
-        resolve(() => fs.rmSync(lockDir, { recursive: true, force: true }));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          reject(error);
-          return;
-        }
-        if (Date.now() - startedAt >= timeoutMs) {
-          reject(new RuntimeError(`Timed out waiting for Kiwi model install lock: ${lockDir}`));
-          return;
-        }
-        setTimeout(attempt, 25);
+  while (true) {
+    try {
+      fs.mkdirSync(lockDir, { recursive: false });
+      writeInstallLockOwner(lockDir);
+      return () => fs.rmSync(lockDir, { recursive: true, force: true });
+    } catch (error) {
+      if (!isPathExistsError(error)) throw error;
+      if (removeStaleInstallLock(lockDir)) continue;
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new RuntimeError(`Timed out waiting for Kiwi model install lock: ${lockDir}`);
       }
-    };
-    attempt();
-  });
+      await sleep(KIWI_INSTALL_LOCK_POLL_MS);
+    }
+  }
+}
+
+function writeInstallLockOwner(lockDir: string): void {
+  try {
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
+      pid: process.pid,
+      startedAt: new Date().toISOString()
+    }, null, 2)}\n`);
+  } catch {
+    // The lock itself is the directory; owner metadata is best-effort diagnostics.
+  }
+}
+
+function removeStaleInstallLock(lockDir: string): boolean {
+  if (kiwiInstallLockStaleMs < 1) return false;
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(lockDir);
+  } catch (error) {
+    if (isNoEntryError(error)) return true;
+    throw error;
+  }
+  if (Date.now() - stat.mtimeMs < kiwiInstallLockStaleMs) return false;
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function tarFieldToString(buffer: Buffer): string {
@@ -490,4 +521,12 @@ function errorCode(error: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isPathExistsError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST";
+}
+
+function isNoEntryError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }

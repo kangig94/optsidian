@@ -69,6 +69,8 @@ export class KiwiAnalyzerManager {
   private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv) => KiwiModelArtifactState;
   private activeHandle: ActiveKiwiHandle | null = null;
   private loadPromise: Promise<ActiveKiwiHandle> | null = null;
+  private loadPromiseKey: string | null = null;
+  private loadPromiseInstallsIfMissing = false;
   private idleTimer: NodeJS.Timeout | undefined;
   private degraded: DegradedState | null = null;
 
@@ -167,14 +169,31 @@ export class KiwiAnalyzerManager {
     if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return this.activeHandle;
     }
-    if (this.loadPromise) return this.loadPromise;
+    while (this.loadPromise) {
+      const pending = this.loadPromise;
+      if (this.loadPromiseKey === key && (this.loadPromiseInstallsIfMissing || !installIfMissing)) {
+        return pending;
+      }
+      try {
+        await pending;
+      } catch {
+        // The caller needs the requested env/load mode; retry after the in-flight load settles.
+      }
+      if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
+        return this.activeHandle;
+      }
+    }
 
     this.clearIdleTimer();
+    this.loadPromiseKey = key;
+    this.loadPromiseInstallsIfMissing = installIfMissing;
     this.loadPromise = this.loadFresh(env, key, installIfMissing);
     try {
       return await this.loadPromise;
     } finally {
       this.loadPromise = null;
+      this.loadPromiseKey = null;
+      this.loadPromiseInstallsIfMissing = false;
     }
   }
 

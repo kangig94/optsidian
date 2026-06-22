@@ -208,6 +208,71 @@ test("kiwi analyzer lease is non-blocking for search and blocking for warm", asy
   }
 });
 
+test("kiwi analyzer manager does not share an in-flight load across cache envs", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  let releaseFirstLoad;
+  const firstLoadGate = new Promise((resolve) => {
+    releaseFirstLoad = resolve;
+  });
+  const loadCalls = [];
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    loadAnalyzer: async ({ env }) => {
+      loadCalls.push(env.XDG_CACHE_HOME);
+      if (loadCalls.length === 1) await firstLoadGate;
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: env.XDG_CACHE_HOME,
+          modelType: "cong-global"
+        },
+        tokens: (text) => [`${env.XDG_CACHE_HOME}:${text}`],
+        dispose: async () => {}
+      };
+    }
+  });
+
+  try {
+    const first = manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-a" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("검색")
+    );
+    while (loadCalls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    const second = manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-b" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("검색")
+    );
+    releaseFirstLoad();
+
+    assert.deepEqual(await first, ["/tmp/kiwi-a:검색"]);
+    assert.deepEqual(await second, ["/tmp/kiwi-b:검색"]);
+    assert.deepEqual(loadCalls, ["/tmp/kiwi-a", "/tmp/kiwi-b"]);
+  } finally {
+    await manager.close();
+  }
+});
+
 test("kiwi wasm binary installs at runtime instead of using a bundled wasm import", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
@@ -235,6 +300,54 @@ test("kiwi wasm binary installs at runtime instead of using a bundled wasm impor
     assert.equal(state.manifest.wasmSha256, sha256(wasm));
     assert.deepEqual(calls, ["https://registry.npmjs.org/kiwi-nlp/-/kiwi-nlp-0.23.0.tgz"]);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("kiwi loader resolves direct and wrapped wasm initializer imports", async () => {
+  const { __resolveKiwiWasmInitializerForTests } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const wasmModule = {
+    FS: {},
+    api: () => "null"
+  };
+  const initializer = async () => wasmModule;
+
+  assert.equal(await __resolveKiwiWasmInitializerForTests(initializer)(), wasmModule);
+  assert.equal(await __resolveKiwiWasmInitializerForTests({ default: initializer })(), wasmModule);
+  assert.throws(() => __resolveKiwiWasmInitializerForTests({}), /Kiwi wasm initializer is not available/);
+});
+
+test("kiwi wasm install recovers stale install locks", async () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
+  const archive = zlib.gzipSync(tarSingleFile("package/dist/kiwi-wasm.wasm", wasm));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
+  });
+  const {
+    __setKiwiInstallLockStaleMsForTests,
+    inspectKiwiWasmArtifact,
+    kiwiDataDir
+  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const env = { XDG_CACHE_HOME: cache };
+  const lockDir = path.join(kiwiDataDir(env), "wasm-install.lock");
+
+  fs.mkdirSync(lockDir, { recursive: true });
+  const staleAt = new Date(Date.now() - 10_000);
+  fs.utimesSync(lockDir, staleAt, staleAt);
+  __setKiwiInstallLockStaleMsForTests(1);
+  try {
+    const binary = await loadKiwiWasmBinary(env);
+    const state = inspectKiwiWasmArtifact(env);
+    assert.equal(binary.length, wasm.length);
+    assert.equal(state.installed, true);
+    assert.equal(fs.existsSync(lockDir), false);
+  } finally {
+    __setKiwiInstallLockStaleMsForTests(undefined);
     globalThis.fetch = originalFetch;
   }
 });
