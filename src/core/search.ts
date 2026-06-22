@@ -17,7 +17,8 @@ import {
   tokensToSearchText,
   withSearchAnalyzerLease,
   type SearchAnalyzer,
-  type SearchAnalyzerIdentity
+  type SearchAnalyzerIdentity,
+  type SearchAnalyzerLeaseOptions
 } from "./search-analyzer.js";
 import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
 import { indexWarmScheduleStatus } from "./search-index-schedule-state.js";
@@ -69,8 +70,10 @@ const SEARCH_INDEX_WRITER_LOCK_WAIT_MS = 60 * 1000;
 const SEARCH_INDEX_WRITER_LOCK_POLL_MS = 50;
 const SEARCH_OVERLAY_MAX_FILES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES";
 const SEARCH_OVERLAY_MAX_BYTES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES";
+const SEARCH_ANALYZER_LOAD_TIMEOUT_ENV = "OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS";
 const SEARCH_OVERLAY_MAX_FILES_DEFAULT = 20;
 const SEARCH_OVERLAY_MAX_BYTES_DEFAULT = 2 * 1024 * 1024;
+const SEARCH_ANALYZER_LOAD_TIMEOUT_MS_DEFAULT = 5000;
 const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 const SEARCH_DB_SCHEMA = {
   path: "string",
@@ -334,12 +337,48 @@ export async function searchVaultWithAnalyzer(
   analyzer: SearchAnalyzer,
   requestReconcile: SearchReconcileRequester = requestSearchReconcile
 ): Promise<SearchResult> {
+  const leaseOptions = await foregroundSearchAnalyzerLeaseOptions(vaultRoot, analyzer);
   return withSearchAnalyzerLease(
     analyzer,
     (leasedAnalyzer) => searchVaultWithLeasedAnalyzer(vaultRoot, params, leasedAnalyzer, requestReconcile),
     (event) => requestReconcile(vaultRoot, event.degradedAnalyzer, "terminal-analyzer-failure"),
-    { wait: false }
+    leaseOptions
   );
+}
+
+async function foregroundSearchAnalyzerLeaseOptions(
+  vaultRoot: string,
+  analyzer: SearchAnalyzer
+): Promise<SearchAnalyzerLeaseOptions> {
+  if (!analyzer.withLease) return {};
+  const paths = cachePaths(vaultRoot, analyzerCacheKey(analyzer.identity));
+  const persisted = await readStablePersistedIndex(paths, { waitForWriter: false });
+  if (!persisted) return { wait: false };
+  if (classifySearchManifestMismatch(persisted.manifest, analyzer.identity) !== "match") {
+    return { wait: false };
+  }
+  return { wait: true, installIfMissing: true, loadTimeoutMs: searchAnalyzerLoadTimeoutMs() };
+}
+
+function searchAnalyzerLoadTimeoutMs(
+  settings: OptsidianSettings = readOptsidianSettings(),
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = env[SEARCH_ANALYZER_LOAD_TIMEOUT_ENV];
+  if (raw !== undefined) return parseSearchAnalyzerLoadTimeoutMs(raw);
+  return settings.search?.analyzerLoadTimeoutMs ?? SEARCH_ANALYZER_LOAD_TIMEOUT_MS_DEFAULT;
+}
+
+function parseSearchAnalyzerLoadTimeoutMs(raw: string): number {
+  if (raw.trim() === "") return SEARCH_ANALYZER_LOAD_TIMEOUT_MS_DEFAULT;
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new UsageError(`${SEARCH_ANALYZER_LOAD_TIMEOUT_ENV} must be a positive integer`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new UsageError(`${SEARCH_ANALYZER_LOAD_TIMEOUT_ENV} must be a positive integer`);
+  }
+  return parsed;
 }
 
 async function searchVaultWithLeasedAnalyzer(

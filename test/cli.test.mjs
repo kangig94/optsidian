@@ -1492,6 +1492,77 @@ test("search can use the analyzer daemon and the daemon exits after idle", async
   assert.equal(fs.existsSync(socketPath), false);
 });
 
+test("search falls back when Kiwi analyzer daemon load exceeds the foreground timeout", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const { __analyzerDaemonSocketPathForTests, resolveSearchAnalyzer, tokenizeRoutedText } = await import(
+    path.resolve("src/core/search-analyzer.ts")
+  );
+  const { searchVaultWithAnalyzer } = await import(path.resolve("src/core/search.ts"));
+  const { dir, vault, env } = setup();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
+  const runtime = path.join(dir, "runtime");
+  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 방식을 개선한다.\n");
+
+  const searchEnv = {
+    ...env,
+    XDG_CACHE_HOME: cache,
+    XDG_RUNTIME_DIR: runtime,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
+    OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS: "1",
+    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
+  };
+
+  const previousCache = process.env.XDG_CACHE_HOME;
+  try {
+    process.env.XDG_CACHE_HOME = cache;
+    const identity = resolveSearchAnalyzer(searchEnv, {}).identity;
+    const indexAnalyzer = {
+      identity,
+      tokenize: async (text) => tokenizeRoutedText(text, ["ko"]),
+      tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, ["ko"]))
+    };
+    await searchVaultWithAnalyzer(vault, { query: "한국어", limit: 1 }, indexAnalyzer, () => {});
+  } finally {
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCache;
+  }
+
+  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  fs.rmSync(socketPath, { force: true });
+  const sockets = new Set();
+  const hangingServer = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+
+  await new Promise((resolve, reject) => {
+    hangingServer.once("error", reject);
+    hangingServer.listen(socketPath, () => {
+      hangingServer.off("error", reject);
+      resolve();
+    });
+  });
+
+  try {
+    const startedAt = Date.now();
+    const result = await runAsync(["search", "한국어", "format=json"], { env: searchEnv, timeoutMs: 5000 });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(elapsedMs < 3000, `expected timeout fallback under 3000ms, got ${elapsedMs}ms`);
+    const payload = JSON.parse(result.stdout);
+    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ko.md"]);
+    assert.deepEqual(payload.warnings, ["fts_index_stale_tier"]);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => hangingServer.close(resolve));
+    fs.rmSync(socketPath, { force: true });
+  }
+});
+
 test("search retires a mismatched analyzer daemon before retrying", async () => {
   if (process.platform === "win32") {
     return;
@@ -1586,6 +1657,14 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), 'search.extraLangs: ["ko"]');
 
+  result = run(["config", "set", "search.analyzerLoadTimeoutMs=5000", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.analyzerLoadTimeoutMs, 5000);
+
+  result = run(["config", "get", "search.analyzerLoadTimeoutMs"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "search.analyzerLoadTimeoutMs: 5000");
+
   result = run(["config", "set", "search.overlayMaxFiles=0", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).config.search.overlayMaxFiles, 0);
@@ -1659,6 +1738,7 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, {
     search: {
+      analyzerLoadTimeoutMs: 5000,
       overlayMaxFiles: 0,
       indexWarmIntervalMinutes: 30,
       indexWarmAccessMaxAgeDays: 5,
@@ -1670,6 +1750,7 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, {
     search: {
+      analyzerLoadTimeoutMs: 5000,
       overlayMaxFiles: 0,
       indexWarmIntervalMinutes: 30,
       indexWarmConcurrency: 2
@@ -1678,9 +1759,19 @@ test("config command writes global settings and reads project-local overrides", 
 
   result = run(["config", "unset", "search.indexWarmConcurrency", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0, indexWarmIntervalMinutes: 30 } });
+  assert.deepEqual(JSON.parse(result.stdout).config, {
+    search: {
+      analyzerLoadTimeoutMs: 5000,
+      overlayMaxFiles: 0,
+      indexWarmIntervalMinutes: 30
+    }
+  });
 
   result = run(["config", "unset", "search.indexWarmIntervalMinutes", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config, { search: { analyzerLoadTimeoutMs: 5000, overlayMaxFiles: 0 } });
+
+  result = run(["config", "unset", "search.analyzerLoadTimeoutMs", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0 } });
 

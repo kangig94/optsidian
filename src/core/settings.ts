@@ -8,6 +8,7 @@ export type SearchSettings = {
   extraLangs?: string[];
   analyzerIdleMs?: number;
   analyzerRequestTimeoutMs?: number;
+  analyzerLoadTimeoutMs?: number;
   overlayMaxFiles?: number;
   overlayMaxBytes?: number;
   indexWarmIntervalMinutes?: number;
@@ -170,6 +171,12 @@ function normalizeSettings(value: unknown): OptsidianSettings {
         "search.analyzerRequestTimeoutMs"
       );
     }
+    if (value.search.analyzerLoadTimeoutMs !== undefined) {
+      settings.search.analyzerLoadTimeoutMs = normalizePositiveInteger(
+        value.search.analyzerLoadTimeoutMs,
+        "search.analyzerLoadTimeoutMs"
+      );
+    }
     if (value.search.overlayMaxFiles !== undefined) {
       settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value.search.overlayMaxFiles, "search.overlayMaxFiles");
     }
@@ -208,6 +215,8 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.analyzerIdleMs;
     case "search.analyzerRequestTimeoutMs":
       return settings.search?.analyzerRequestTimeoutMs;
+    case "search.analyzerLoadTimeoutMs":
+      return settings.search?.analyzerLoadTimeoutMs;
     case "search.overlayMaxFiles":
       return settings.search?.overlayMaxFiles;
     case "search.overlayMaxBytes":
@@ -237,6 +246,9 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
       return;
     case "search.analyzerRequestTimeoutMs":
       settings.search.analyzerRequestTimeoutMs = normalizePositiveInteger(value, key);
+      return;
+    case "search.analyzerLoadTimeoutMs":
+      settings.search.analyzerLoadTimeoutMs = normalizePositiveInteger(value, key);
       return;
     case "search.overlayMaxFiles":
       settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value, key);
@@ -272,6 +284,9 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
     case "search.analyzerRequestTimeoutMs":
       if (settings.search) delete settings.search.analyzerRequestTimeoutMs;
       return;
+    case "search.analyzerLoadTimeoutMs":
+      if (settings.search) delete settings.search.analyzerLoadTimeoutMs;
+      return;
     case "search.overlayMaxFiles":
       if (settings.search) delete settings.search.overlayMaxFiles;
       return;
@@ -296,7 +311,6 @@ function normalizeAnalyzer(value: unknown): "intl" | "intl-daemon" {
   if (typeof value !== "string") throw new UsageError("search.analyzer must be intl or intl-daemon");
   const normalized = value.trim().toLowerCase();
   if (normalized === "intl" || normalized === "intl-daemon") return normalized;
-  if (normalized === "daemon-intl") return "intl-daemon";
   throw new UsageError("search.analyzer must be intl or intl-daemon");
 }
 
@@ -335,7 +349,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.analyzerLoadTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

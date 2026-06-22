@@ -36,6 +36,7 @@ export type SearchAnalyzer = {
 export type SearchAnalyzerLeaseOptions = {
   wait?: boolean;
   installIfMissing?: boolean;
+  loadTimeoutMs?: number;
 };
 
 export type SearchAnalyzerDegradedEvent = {
@@ -67,13 +68,18 @@ type AnalyzerResponse =
   | { id: number; result: { analyzer: SearchAnalyzerIdentity; tokens: string[][] } }
   | { id: number; error: { message: string } };
 
+type DaemonTokenizationOptions = {
+  activeAnalyzers?: readonly SearchDeclaredAnalyzer[];
+  requestTimeoutMs?: number;
+};
+
 export type SearchDeclaredAnalyzer = "ko";
 
 export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
 const ROUTER_VERSION = "script-router-v2";
 const INTL_ANALYZER_VERSION = "intl-segmenter-latin-v2";
-const DAEMON_PROTOCOL_VERSION = "v2";
+const DAEMON_PROTOCOL_VERSION = "v3";
 const ANALYZER_DAEMON_IDENTITY_MISMATCH = "Analyzer daemon identity does not match the active search analyzer";
 const DAEMON_RUNTIME_IDENTITY = stableHash(
   stableStringify({
@@ -141,19 +147,18 @@ export function resolveSearchAnalyzer(
     : createRouterAnalyzer(declaredAnalyzers);
   if (mode === "intl" || mode === "intl-daemon") {
     return declaredAnalyzers.includes("ko")
-      ? createKiwiAnalyzer(env, declaredAnalyzers, baseline)
+      ? createKiwiAnalyzer(env, settings, declaredAnalyzers, baseline)
       : baseline;
   }
   if (mode === "kiwi") {
-    return createKiwiAnalyzer(env, declaredAnalyzers, baseline);
+    return createKiwiAnalyzer(env, settings, declaredAnalyzers, baseline);
   }
   throw new UsageError(`${ANALYZER_MODE_ENV} must be one of: intl, intl-daemon, kiwi`);
 }
 
 function searchAnalyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string {
   const raw = env[ANALYZER_MODE_ENV] ?? settings.search?.analyzer ?? "intl";
-  const mode = raw.trim().toLowerCase();
-  return mode === "daemon-intl" ? "intl-daemon" : mode;
+  return raw.trim().toLowerCase();
 }
 
 function searchExtraLangsValue(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string | undefined {
@@ -573,7 +578,7 @@ export async function runSearchAnalyzerDaemon(
       while (newline >= 0) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        handleAnalyzerLine(socket, line);
+        void handleAnalyzerLine(socket, line, env);
         newline = buffer.indexOf("\n");
       }
     });
@@ -645,6 +650,7 @@ function createDaemonAnalyzer(
 
 function createKiwiAnalyzer(
   env: NodeJS.ProcessEnv,
+  settings: OptsidianSettings,
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   degradedAnalyzer: SearchAnalyzer
 ): SearchAnalyzer {
@@ -668,20 +674,34 @@ function createKiwiAnalyzer(
       tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, normalizedDeclared, kiwi))
     };
   };
+  const createDaemonLeasedAnalyzer = (): SearchAnalyzer => ({
+    identity,
+    degradedAnalyzer,
+    isTerminalLoadError: (error) => manager.isTerminalLoadError(error),
+    tokenize: async (text) => (await requestDaemonTokenization([text], normalizedDeclared, env, settings, {
+      activeAnalyzers: ["ko"]
+    }))[0] ?? [],
+    tokenizeBatch: async (texts) => requestDaemonTokenization([...texts], normalizedDeclared, env, settings, {
+      activeAnalyzers: ["ko"]
+    })
+  });
 
   targetAnalyzer = {
     identity,
     degradedAnalyzer,
     isTerminalLoadError: (error) => manager.isTerminalLoadError(error),
-    withLease: async (run, options = {}) => manager.withAnalyzerLease(
-      env,
-      normalizedDeclared,
-      {
-        wait: options.wait === true,
-        installIfMissing: options.installIfMissing === true
-      },
-      (lease) => run(createLeasedAnalyzer(lease.activeAnalyzers, lease.analyzer))
-    ),
+    withLease: async (run, options = {}) => {
+      if (options.wait !== true) return run(createLeasedAnalyzer([], null));
+      try {
+        await requestDaemonTokenization([""], normalizedDeclared, env, settings, {
+          activeAnalyzers: ["ko"],
+          requestTimeoutMs: options.loadTimeoutMs
+        });
+        return run(createDaemonLeasedAnalyzer());
+      } catch {
+        return run(createLeasedAnalyzer([], null));
+      }
+    },
     tokenize: async (text) => degradedAnalyzer.tokenize(text),
     tokenizeBatch: async (texts) => degradedAnalyzer.tokenizeBatch(texts)
   };
@@ -710,6 +730,7 @@ export function searchAnalyzerRuntimeStatus(
   }
 
   const managerStatus = getKiwiAnalyzerManager().status(env);
+  const analyzerState = managerStatus.state === "unloaded" && isAnalyzerDaemonRunning(env) ? "daemon" : managerStatus.state;
   return {
     targetTier,
     declaredAnalyzers,
@@ -718,33 +739,42 @@ export function searchAnalyzerRuntimeStatus(
       modelState: managerStatus.model.installed ? "installed" : "missing",
       modelPath: managerStatus.model.targetDir,
       missingFiles: managerStatus.model.missingFiles,
-      analyzerState: managerStatus.state,
+      analyzerState,
       leaseCount: managerStatus.leaseCount,
       ...(managerStatus.state === "degraded" ? { reason: managerStatus.reason } : {})
     }
   };
 }
 
+function isAnalyzerDaemonRunning(env: NodeJS.ProcessEnv): boolean {
+  return fs.existsSync(analyzerDaemonPaths(env).socketPath);
+}
+
 async function requestDaemonTokenization(
   texts: string[],
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   env: NodeJS.ProcessEnv,
-  settings: OptsidianSettings
+  settings: OptsidianSettings,
+  options: DaemonTokenizationOptions = {}
 ): Promise<string[][]> {
   if (texts.length === 0) return [];
+  const deadline = options.requestTimeoutMs === undefined ? undefined : Date.now() + options.requestTimeoutMs;
   try {
-    return await requestRunningDaemon(texts, declaredAnalyzers, env, settings);
+    return await requestRunningDaemon(texts, declaredAnalyzers, env, settings, optionsWithRemainingTimeout(options, deadline));
   } catch (error) {
     cleanupStaleSocketForError(error, env);
     spawnAnalyzerDaemon(env);
   }
 
   const startedAt = Date.now();
+  const startupTimeoutMs = options.requestTimeoutMs ?? STARTUP_TIMEOUT_MS;
   let lastError: unknown;
-  while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-    await sleep(50);
+  while (Date.now() - startedAt < startupTimeoutMs) {
+    const remaining = remainingTimeoutMs(deadline);
+    if (remaining !== undefined && remaining < 1) break;
+    await sleep(Math.min(50, remaining ?? 50));
     try {
-      return await requestRunningDaemon(texts, declaredAnalyzers, env, settings);
+      return await requestRunningDaemon(texts, declaredAnalyzers, env, settings, optionsWithRemainingTimeout(options, deadline));
     } catch (error) {
       lastError = error;
     }
@@ -752,27 +782,45 @@ async function requestDaemonTokenization(
   throw new RuntimeError(`Analyzer daemon is unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
+function optionsWithRemainingTimeout(
+  options: DaemonTokenizationOptions,
+  deadline: number | undefined
+): DaemonTokenizationOptions {
+  const requestTimeoutMs = remainingTimeoutMs(deadline) ?? options.requestTimeoutMs;
+  return requestTimeoutMs === options.requestTimeoutMs ? options : { ...options, requestTimeoutMs };
+}
+
+function remainingTimeoutMs(deadline: number | undefined): number | undefined {
+  return deadline === undefined ? undefined : Math.max(1, deadline - Date.now());
+}
+
 async function requestRunningDaemon(
   texts: string[],
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   env: NodeJS.ProcessEnv,
-  settings: OptsidianSettings
+  settings: OptsidianSettings,
+  options: DaemonTokenizationOptions
 ): Promise<string[][]> {
   const paths = analyzerDaemonPaths(env);
   const id = ++requestId;
+  const activeAnalyzers = normalizeDeclaredSearchAnalyzers(options.activeAnalyzers ?? []);
   const request: AnalyzerRequest = {
     id,
     method: "tokenizeBatch",
     params: {
-      analyzer: { name: "router", declaredAnalyzers: [...declaredAnalyzers], activeAnalyzers: [] },
+      analyzer: { name: "router", declaredAnalyzers: [...declaredAnalyzers], activeAnalyzers },
       texts
     }
   };
-  const response = await sendAnalyzerRequest(paths.socketPath, request, env, settings);
+  const response = await sendAnalyzerRequest(paths.socketPath, request, env, settings, options.requestTimeoutMs);
   if ("error" in response) {
     throw new RuntimeError(response.error.message);
   }
-  const expectedIdentity = analyzerIdentityKey(routerIdentity(declaredAnalyzers, []));
+  const expectedIdentity = analyzerIdentityKey(
+    activeAnalyzers.includes("ko")
+      ? kiwiRouterIdentity(declaredAnalyzers, activeAnalyzers)
+      : routerIdentity(declaredAnalyzers, [])
+  );
   const actualIdentity = analyzerIdentityKey(response.result.analyzer);
   if (actualIdentity !== expectedIdentity) {
     throw new AnalyzerDaemonIdentityMismatchError();
@@ -784,7 +832,8 @@ function sendAnalyzerRequest(
   socketPath: string,
   request: AnalyzerRequest,
   env: NodeJS.ProcessEnv,
-  settings: OptsidianSettings
+  settings: OptsidianSettings,
+  requestTimeoutMs?: number
 ): Promise<AnalyzerResponse> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -792,7 +841,7 @@ function sendAnalyzerRequest(
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new RuntimeError("Analyzer daemon request timed out"));
-    }, parseRequestTimeoutMs(settingNumberValue(env[ANALYZER_REQUEST_TIMEOUT_ENV], settings.search?.analyzerRequestTimeoutMs)));
+    }, requestTimeoutMs ?? parseRequestTimeoutMs(settingNumberValue(env[ANALYZER_REQUEST_TIMEOUT_ENV], settings.search?.analyzerRequestTimeoutMs)));
     timer.unref();
     socket.setEncoding("utf8");
     socket.on("connect", () => {
@@ -817,7 +866,7 @@ function sendAnalyzerRequest(
   });
 }
 
-function handleAnalyzerLine(socket: net.Socket, line: string): void {
+async function handleAnalyzerLine(socket: net.Socket, line: string, env: NodeJS.ProcessEnv): Promise<void> {
   let request: AnalyzerRequest | undefined;
   try {
     request = JSON.parse(line) as AnalyzerRequest;
@@ -825,8 +874,14 @@ function handleAnalyzerLine(socket: net.Socket, line: string): void {
       throw new Error("unsupported analyzer request");
     }
     const declaredAnalyzers = parseSelectorDeclaredAnalyzers(request.params.analyzer);
-    const tokens = request.params.texts.map((text) => tokenizeRoutedText(String(text), declaredAnalyzers));
-    socket.write(`${JSON.stringify({ id: request.id, result: { analyzer: routerIdentity(declaredAnalyzers, []), tokens } })}\n`);
+    const activeAnalyzers = parseSelectorActiveAnalyzers(request.params.analyzer);
+    const result = activeAnalyzers.includes("ko")
+      ? await tokenizeWithKiwiDaemonLease(request.params.texts, declaredAnalyzers, activeAnalyzers, env)
+      : {
+          analyzer: routerIdentity(declaredAnalyzers, []),
+          tokens: request.params.texts.map((text) => tokenizeRoutedText(String(text), declaredAnalyzers))
+        };
+    socket.write(`${JSON.stringify({ id: request.id, result })}\n`);
   } catch (error) {
     const id = typeof request?.id === "number" ? request.id : 0;
     socket.write(`${JSON.stringify({ id, error: { message: error instanceof Error ? error.message : String(error) } })}\n`);
@@ -838,6 +893,36 @@ function parseSelectorDeclaredAnalyzers(selector: SearchAnalyzerSelector): Searc
     throw new Error("unsupported analyzer request");
   }
   return parseDeclaredSearchAnalyzers((selector.declaredAnalyzers ?? []).join(","));
+}
+
+function parseSelectorActiveAnalyzers(selector: SearchAnalyzerSelector): SearchDeclaredAnalyzer[] {
+  if (selector.name !== "router" && selector.name !== "intl") {
+    throw new Error("unsupported analyzer request");
+  }
+  return parseDeclaredSearchAnalyzers((selector.activeAnalyzers ?? []).join(","));
+}
+
+async function tokenizeWithKiwiDaemonLease(
+  texts: readonly string[],
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  activeAnalyzers: readonly SearchDeclaredAnalyzer[],
+  env: NodeJS.ProcessEnv
+): Promise<{ analyzer: SearchAnalyzerIdentity; tokens: string[][] }> {
+  const manager = getKiwiAnalyzerManager();
+  const normalizedDeclared = normalizeDeclaredSearchAnalyzers(declaredAnalyzers);
+  const normalizedActive = normalizeDeclaredSearchAnalyzers(activeAnalyzers);
+  return manager.withAnalyzerLease(
+    env,
+    normalizedDeclared,
+    { wait: true, installIfMissing: true },
+    (lease) => {
+      const active = lease.analyzer ? normalizedActive : normalizedActive.filter((name) => name !== "ko");
+      return {
+        analyzer: active.includes("ko") ? kiwiRouterIdentity(normalizedDeclared, active) : routerIdentity(normalizedDeclared, []),
+        tokens: texts.map((text) => tokenizeRoutedText(String(text), normalizedDeclared, lease.analyzer))
+      };
+    }
+  );
 }
 
 function spawnAnalyzerDaemon(env: NodeJS.ProcessEnv): void {

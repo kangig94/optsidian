@@ -163,13 +163,14 @@ optsidian index clear
 
 `index warm` prepares search indexes for discovered vaults, using incremental updates when a compatible cache already exists. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
-Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables the Kiwi Korean target tier. Foreground search does not wait for Kiwi model download, cold load, or rebuild; it serves the Intl baseline and warns `fts_index_stale_tier` while background warm/reconcile/rebuild lazily downloads the ~88 MB model into `$XDG_CACHE_HOME/optsidian/kiwi/` and evicts the loaded analyzer after 5 minutes idle.
+Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables the Kiwi Korean target tier. While the Kiwi model or target projection is missing or rebuilding, foreground search serves the Intl baseline and warns `fts_index_stale_tier`; once a compatible Kiwi projection is ready, foreground search asks the analyzer daemon to load Kiwi and waits up to 5 seconds before falling back. Change that load wait with `search.analyzerLoadTimeoutMs` or `OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS=<ms>`. Background warm/reconcile/rebuild lazily downloads the ~88 MB model into `$XDG_CACHE_HOME/optsidian/kiwi/`. Kiwi tokenization runs in the analyzer daemon, so CLI searches reuse a loaded analyzer until the daemon exits after 5 minutes idle.
 
 Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
 
 ```bash
 optsidian config set search.analyzer=intl-daemon
 optsidian config set search.extraLangs=ko
+optsidian config set search.analyzerLoadTimeoutMs=5000
 optsidian config set search.overlayMaxFiles=20
 optsidian config set search.overlayMaxBytes=2097152
 optsidian config set search.indexWarmIntervalMinutes=30

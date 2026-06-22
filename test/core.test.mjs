@@ -133,15 +133,8 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
   assert.throws(() => parseDeclaredSearchAnalyzers("ja"), /registered analyzers: ko/);
 });
 
-test("kiwi analyzer lease is non-blocking for search and blocking for warm", async () => {
-  const {
-    resolveSearchAnalyzer,
-    withSearchAnalyzerLease
-  } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
-  const {
-    KiwiAnalyzerManager,
-    __setKiwiAnalyzerManagerForTests
-  } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+test("kiwi analyzer manager supports non-blocking and blocking modes", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
 
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
@@ -177,34 +170,31 @@ test("kiwi analyzer lease is non-blocking for search and blocking for warm", asy
     }
   });
 
-  __setKiwiAnalyzerManagerForTests(manager);
   try {
-    const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
-    const nonBlocking = await withSearchAnalyzerLease(
-      analyzer,
-      async (leased) => ({
-        tokens: await leased.tokenize("한국어"),
-        hasTarget: Boolean(leased.reconcileTargetAnalyzer)
-      }),
-      undefined,
-      { wait: false }
+    const nonBlocking = await manager.withAnalyzerLease(
+      {},
+      ["ko"],
+      { wait: false, installIfMissing: false },
+      (lease) => ({
+        hasAnalyzer: Boolean(lease.analyzer),
+        activeAnalyzers: lease.activeAnalyzers
+      })
     );
     assert.deepEqual(loadCalls, []);
-    assert.equal(nonBlocking.hasTarget, true);
-    assert.ok(nonBlocking.tokens.includes("한국어"));
+    assert.equal(nonBlocking.hasAnalyzer, false);
+    assert.deepEqual(nonBlocking.activeAnalyzers, []);
 
-    const blocking = await withSearchAnalyzerLease(
-      analyzer,
-      async (leased) => leased.tokenize("한국어"),
-      undefined,
-      { wait: true, installIfMissing: true }
+    const blocking = await manager.withAnalyzerLease(
+      {},
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      (lease) => lease.analyzer?.tokens("한국어")
     );
     assert.deepEqual(blocking, ["kiwi:한국어"]);
     assert.equal(loadCalls.length, 1);
     assert.equal(loadCalls[0].installIfMissing, true);
   } finally {
     await manager.close();
-    __setKiwiAnalyzerManagerForTests(null);
   }
 });
 
@@ -1112,6 +1102,61 @@ test("core search serves a valid Intl index during analyzer tier upgrades", asyn
     assert.equal(reconcileRequests[0].reason, "stale-tier");
     assert.deepEqual(reconcileRequests[0].identity.activeAnalyzers, ["ko"]);
     assert.deepEqual(JSON.parse(fs.readFileSync(manifestPath, "utf8")), manifest);
+  });
+});
+
+test("core search waits for a ready target analyzer projection", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { writeVaultFile } = await core();
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    writeVaultFile(vault, {
+      path: "Notes/Kiwi.md",
+      content: "# Kiwi\n\nload-me marker\n"
+    });
+
+    const identity = {
+      name: "custom-kiwi",
+      version: "1",
+      runtime: "test",
+      node: process.versions.node,
+      declaredAnalyzers: ["ko"],
+      activeAnalyzers: ["ko"]
+    };
+    const tokenizeKiwi = (text) => (text.toLowerCase().match(/[a-z0-9-]+/g) ?? []).map((token) => `kiwi:${token}`);
+    const tokenizeFallback = (text) => (text.toLowerCase().match(/[a-z0-9-]+/g) ?? []).map((token) => `fallback:${token}`);
+    const loadedAnalyzer = {
+      identity,
+      tokenize: async (text) => tokenizeKiwi(text),
+      tokenizeBatch: async (texts) => texts.map((text) => tokenizeKiwi(text))
+    };
+    const built = await searchVaultWithAnalyzer(vault, { query: "load-me", limit: 5 }, loadedAnalyzer);
+    assert.deepEqual(built.matches.map((match) => match.path), ["Notes/Kiwi.md"]);
+
+    const leaseOptions = [];
+    const analyzerWithLease = {
+      identity,
+      withLease: async (run, options = {}) => {
+        leaseOptions.push(options);
+        const analyzer = options.wait === true
+          ? loadedAnalyzer
+          : {
+              identity,
+              tokenize: async (text) => tokenizeFallback(text),
+              tokenizeBatch: async (texts) => texts.map((text) => tokenizeFallback(text))
+            };
+        return run(analyzer);
+      },
+      tokenize: async (text) => tokenizeFallback(text),
+      tokenizeBatch: async (texts) => texts.map((text) => tokenizeFallback(text))
+    };
+
+    const result = await searchVaultWithAnalyzer(vault, { query: "load-me", limit: 5 }, analyzerWithLease);
+    assert.deepEqual(result.matches.map((match) => match.path), ["Notes/Kiwi.md"]);
+    assert.equal(result.warnings, undefined);
+    assert.equal(leaseOptions.length, 1);
+    assert.deepEqual(leaseOptions[0], { wait: true, installIfMissing: true, loadTimeoutMs: 5000 });
   });
 });
 

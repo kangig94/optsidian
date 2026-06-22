@@ -78,7 +78,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "The cache records schema, Node/ICU, tokenizer tier, and analyzer identity, then rebuilds when they change.",
       "During analyzer tier upgrades, a valid Intl-tier index can be served while a background reconcile rebuilds the target tier.",
       "Small stale file diffs are searched through an in-memory Intl overlay; tune with OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES and OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES.",
-      "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko enables the Kiwi Korean target tier with an Intl foreground fallback while Kiwi is missing, loading, or rebuilding.",
+      "OPTSIDIAN_SEARCH_EXTRA_LANGS=ko enables the Kiwi Korean target tier with an Intl foreground fallback while Kiwi is missing, rebuilding, or exceeds the load timeout.",
       "status reports cache readiness plus stale-tier, reconcile-lock, and last reconcile result diagnostics when present."
     ]
   },
@@ -96,6 +96,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.extraLangs=ko", description: "Enable the Kiwi Korean target tier with Intl fallback" },
       { name: "search.analyzerIdleMs=<ms>", description: "Daemon idle timeout" },
       { name: "search.analyzerRequestTimeoutMs=<ms>", description: "Daemon request timeout" },
+      { name: "search.analyzerLoadTimeoutMs=<ms>", description: "Foreground analyzer load timeout" },
       { name: "search.overlayMaxFiles=<n>", description: "Maximum changed files searched through foreground Intl overlay" },
       { name: "search.overlayMaxBytes=<n>", description: "Maximum changed bytes searched through foreground Intl overlay" },
       { name: "search.indexWarmIntervalMinutes=<minutes>", description: "Minimum interval between MCP-triggered index warm attempts" },

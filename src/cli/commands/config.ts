@@ -17,6 +17,7 @@ const SETTING_KEYS = new Set([
   "search.extraLangs",
   "search.analyzerIdleMs",
   "search.analyzerRequestTimeoutMs",
+  "search.analyzerLoadTimeoutMs",
   "search.overlayMaxFiles",
   "search.overlayMaxBytes",
   "search.indexWarmIntervalMinutes",
@@ -85,7 +86,7 @@ function parseSettingValue(key: string, value: string): unknown {
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
     throw new UsageError(
-      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency"
+      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.analyzerLoadTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency"
     );
   }
 }
