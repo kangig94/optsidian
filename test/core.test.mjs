@@ -743,7 +743,7 @@ test("kiwi model inspection rejects corrupt installed model files", async () => 
   const state = inspectKiwiModelArtifact(env);
   assert.equal(state.installed, false);
   assert.equal(state.missingFiles.length, KIWI_MODEL_FILES.length);
-  assert.match(state.missingFiles.join(","), /size mismatch/);
+  assert.match(state.missingFiles.join(","), /digest mismatch/);
 });
 
 test("read caps by lines and pages without gaps", async () => {

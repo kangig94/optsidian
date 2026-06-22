@@ -33,16 +33,17 @@ export const KIWI_MODEL_FILES = [
 
 export type KiwiModelFileName = (typeof KIWI_MODEL_FILES)[number];
 
-const KIWI_MODEL_FILE_SIZE_BYTES: Record<KiwiModelFileName, number> = {
-  "sj.morph": 8_462_892,
-  "default.dict": 3_090_954,
-  "dialect.dict": 644,
-  "multi.dict": 12_064_440,
-  "typo.dict": 395,
-  "combiningRule.txt": 3_584,
-  "cong.mdl": 75_667_563,
-  "extract.mdl": 17_370,
-  "nounchr.mdl": 9_734_234
+// Extracted file hashes for the archive pinned by KIWI_MODEL_SHA256.
+const KIWI_MODEL_FILE_SHA256: Record<KiwiModelFileName, string> = {
+  "sj.morph": "5e3dab2def6d2cc079e21d5477bd610a391c69045d08caf1e0bbeabda8db8d1b",
+  "default.dict": "d4293e44b2588d0c3aabbce607a0f41ad3534abd31b34139847b127254e01549",
+  "dialect.dict": "bb6f0ab37dbfcc0fd33dc679121218d24725ae438f31bb362f9b24703e93cda2",
+  "multi.dict": "e9eff7712d163b214c750333a5d388ab77b50ec386ae55b360babcd24c0c3195",
+  "typo.dict": "aa15e48fcd32886441fc1ff9719a3109d3192e91d4b67efbd64260610d68322d",
+  "combiningRule.txt": "3d864f76eade67b250d37f4ee83de848b04fb14d0cd6ed36c36d0b210ad38ebc",
+  "cong.mdl": "bd9ca89ee1b72e750c8e2166a17c80a0fe3fabd828c78b1f0928486a6b1833a7",
+  "extract.mdl": "a0c92ffc051e43ae497845cdb8d4c8b9e2f359893cb55c67279c76d1d531ee17",
+  "nounchr.mdl": "4b687e36836dd60dcb7addcfcf369ac082b339bab76549574ac1ce2b7ccd6836"
 };
 
 export type KiwiModelArtifactManifest = {
@@ -406,8 +407,9 @@ function inspectKiwiModelFiles(env: NodeJS.ProcessEnv): string[] {
       missingFiles.push(fileName);
       continue;
     }
-    if (stat.size !== KIWI_MODEL_FILE_SIZE_BYTES[fileName]) {
-      missingFiles.push(`${fileName} (size mismatch)`);
+    const digest = crypto.createHash("sha256").update(fs.readFileSync(modelPath)).digest("hex");
+    if (digest !== KIWI_MODEL_FILE_SHA256[fileName]) {
+      missingFiles.push(`${fileName} (digest mismatch)`);
     }
   }
   return missingFiles;
