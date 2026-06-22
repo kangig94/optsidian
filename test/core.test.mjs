@@ -89,6 +89,8 @@ test("markdown search parser extracts title aliases tags headings and body", asy
 title: Alpha Project
 aliases:
   - Project A
+keywords:
+  - Neural Search
 tags: [project, alpha]
 ---
 # Alpha Heading
@@ -98,10 +100,18 @@ Body with #rollout tag.
   );
 
   assert.equal(doc.title, "Alpha Project");
-  assert.deepEqual(doc.aliases, ["Project A"]);
+  assert.deepEqual(doc.aliases, ["Project A", "Neural Search"]);
   assert.deepEqual(doc.tags.sort(), ["alpha", "project", "rollout"]);
   assert.deepEqual(doc.headings, ["Alpha Heading"]);
   assert.match(doc.body, /Body with #rollout tag/);
+});
+
+test("search surface analyzer expands compound path title and acronym terms", async () => {
+  const { surfaceSearchTerms } = await import(path.join(repoRoot, "src/core/search/analysis/index.ts"));
+  const terms = surfaceSearchTerms("Research/HumanoidMotionTracking-DDPMScheduler Sim2Real.md");
+  for (const term of ["research", "humanoidmotiontracking", "humanoid", "motion", "tracking", "ddpmscheduler", "ddpm", "scheduler", "sim2real", "sim", "real"]) {
+    assert.ok(terms.includes(term), `expected ${term} in ${JSON.stringify(terms)}`);
+  }
 });
 
 test("intl search analyzer segments CJK text for lexical search", async () => {
@@ -1007,7 +1017,7 @@ The rollout is blocked by review.
     const debugResult = await searchVault(vault, { query: "project alpha", limit: 1, debug: true });
     assert.deepEqual(Object.keys(debugResult).sort(), ["command", "debug", "matches", "ok"]);
     assert.deepEqual(debugResult.debug.query.terms, ["project", "alpha"]);
-    assert.equal(debugResult.debug.reranker, "rrf-metadata-v1");
+    assert.equal(debugResult.debug.reranker, "rrf-metadata-v2");
     assert.equal(debugResult.matches[0].debug.bucket, "exact");
     assert.deepEqual(debugResult.matches[0].debug.queryTerms, ["project", "alpha"]);
     assert.equal(typeof debugResult.matches[0].debug.oramaScore, "number");
@@ -1018,8 +1028,8 @@ The rollout is blocked by review.
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodySurfaceTokens.length > 0);
     const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
-    assert.equal(manifest.identitySchemaVersion, 2);
-    assert.equal(manifest.schemaVersion, 4);
+    assert.equal(manifest.identitySchemaVersion, 3);
+    assert.equal(manifest.schemaVersion, 5);
     assert.match(manifest.schemaDigest, /^[a-f0-9]{64}$/);
     assert.equal(manifest.tokenizerTier, "intl");
     assert.deepEqual(manifest.declaredAnalyzers, []);
@@ -1774,6 +1784,54 @@ Minimal body.
   });
 });
 
+test("core search expands compound metadata and uses cautious ranking fallbacks", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, {
+      path: "Research/HumanoidMotionTracking.md",
+      content: `---
+keywords:
+  - Motion Policy
+---
+# Controller
+
+Tracking policy notes.
+`
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Body Mention.md",
+      content: "motion tracking appears repeatedly in body.\nmotion tracking appears repeatedly in body.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Bodies/Near.md",
+      content: "alpha zettelkasten\n"
+    });
+    writeVaultFile(vault, {
+      path: "Bodies/Far.md",
+      content: "alpha filler filler filler filler filler zettelkasten\n"
+    });
+
+    let result = await searchVault(vault, { query: "motion tracking", limit: 3 });
+    assert.equal(result.matches[0].path, "Research/HumanoidMotionTracking.md");
+
+    result = await searchVault(vault, { query: "HumanoidMotionTracking", limit: 3, debug: true });
+    assert.equal(result.matches[0].path, "Research/HumanoidMotionTracking.md");
+    assert.equal(result.matches[0].debug.bucket, "exact");
+
+    result = await searchVault(vault, { query: "motion policy", limit: 3 });
+    assert.equal(result.matches[0].path, "Research/HumanoidMotionTracking.md");
+
+    result = await searchVault(vault, { query: "alpha zettelkasten", fields: ["body"], limit: 3 });
+    assert.equal(result.matches[0].path, "Bodies/Near.md");
+
+    result = await searchVault(vault, { query: "trackng", limit: 3 });
+    assert.equal(result.matches[0].path, "Research/HumanoidMotionTracking.md");
+  });
+});
+
 test("core search uses Korean ngram channel for attached forms", async () => {
   const vault = tempVault();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
@@ -1790,6 +1848,9 @@ test("core search uses Korean ngram channel for attached forms", async () => {
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /검색하면서/);
     assert.ok(result.debug?.query?.channels?.ngram?.includes("검색"));
     assert.ok(result.matches[0].debug?.matchedChannels?.includes("ngram"));
+
+    const attachedQuery = await searchVault(vault, { query: "한국어검색", limit: 5 });
+    assert.deepEqual(attachedQuery.matches.map((match) => match.path), ["Notes/search-ko.md"]);
   });
 });
 

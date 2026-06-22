@@ -85,7 +85,7 @@ function parseSimpleFrontmatter(lines: string[]): Frontmatter {
       output.title = stripQuotes(raw);
       continue;
     }
-    if (key !== "tags" && key !== "aliases" && key !== "alias") continue;
+    if (key !== "tags" && key !== "aliases" && key !== "alias" && key !== "keywords" && key !== "keyword") continue;
 
     const block: string[] = [];
     let next = index + 1;

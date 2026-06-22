@@ -203,10 +203,13 @@ export type RankedCandidate = {
   phrasePriority: number;
   coverageTerms: number;
   coverageFieldScore: number;
+  rarityScore: number;
+  proximityScore: number;
 };
 
 export type QueryContext = {
   phrase: string;
+  phrases: string[];
   terms: string[];
   allowed: Set<SearchField>;
 };

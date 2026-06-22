@@ -7,6 +7,7 @@ import {
   CANDIDATE_LIMIT_MIN,
   CANDIDATE_LIMIT_MULTIPLIER,
   RRF_K,
+  SEARCH_FUZZY_WEIGHT_MULTIPLIER,
   SEARCH_TOKEN_CHANNEL_WEIGHT
 } from "../constants.js";
 import type { NormalizedSearchParams } from "../internal-types.js";
@@ -46,6 +47,24 @@ export async function searchOramaCandidates(
     })));
   }
 
+  if (channelHits.length === 0) {
+    for (const channel of fuzzySearchChannels(queryAnalysis)) {
+      const terms = queryAnalysis.channels[channel];
+      const results = (await oramaSearch(db, {
+        limit: rawSearchLimit(documentCount, search),
+        term: terms.join(" "),
+        properties: searchFields(search.fields).map((field) => SEARCH_FIELD_CHANNEL_INDEX_PROPERTY[channel][field]),
+        boost: boostForChannelFields(channel, search.fields),
+        tolerance: 1
+      })) as Results<SearchDocument>;
+      channelHits.push(...results.hits.map((hit, index) => ({
+        document: hit.document,
+        channel,
+        score: (SEARCH_TOKEN_CHANNEL_WEIGHT[channel] * SEARCH_FUZZY_WEIGHT_MULTIPLIER) / (RRF_K + index + 1)
+      })));
+    }
+  }
+
   return mergeChannelHits(channelHits, queryAnalysis.primaryTerms);
 }
 
@@ -74,6 +93,18 @@ function searchChannels(queryAnalysis: SearchTextAnalysis): SearchTokenChannel[]
   if (queryAnalysis.channels.surface.length > 0) channels.push("surface");
   if (queryAnalysis.channels.ngram.length > 0) channels.push("ngram");
   return channels;
+}
+
+function fuzzySearchChannels(queryAnalysis: SearchTextAnalysis): SearchTokenChannel[] {
+  return searchChannels(queryAnalysis).filter((channel) => {
+    if (channel === "ngram") return false;
+    const terms = queryAnalysis.channels[channel];
+    return terms.length > 0 && terms.every(isFuzzyEligibleTerm);
+  });
+}
+
+function isFuzzyEligibleTerm(term: string): boolean {
+  return term.length >= 5 && /^[a-z0-9]+$/u.test(term);
 }
 
 function searchFields(fields: SearchField[] | undefined): SearchField[] {

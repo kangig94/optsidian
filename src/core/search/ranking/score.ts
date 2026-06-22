@@ -1,11 +1,12 @@
 import type { SearchDocument } from "../markdown.js";
 import type { SearchField, SearchMatch } from "../../types.js";
-import { RANK_BUCKET, RRF_WEIGHTS } from "../constants.js";
+import { RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_WEIGHTS } from "../constants.js";
 import type { QueryContext, RankedCandidate } from "../internal-types.js";
 import { SEARCH_PROPERTIES } from "../schema.js";
 import { metadataCoverage } from "./coverage.js";
-import { bestExactPriority, bestPhrasePriority, normalizeIdentityText } from "./identity.js";
+import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates } from "./identity.js";
 import { rankMap, rrfContribution } from "./rrf.js";
+import { candidateRankSignals, EMPTY_RANK_SIGNALS, type CandidateRankSignals } from "./signals.js";
 
 export function rerankCandidates(
   query: string,
@@ -14,7 +15,10 @@ export function rerankCandidates(
   fields?: SearchField[]
 ): RankedCandidate[] {
   const context = queryContext(query, queryTerms, fields);
-  const candidates = hits.map((hit, index) => rankedCandidate(hit.document, index + 1, context));
+  const signals = candidateRankSignals(hits.map((hit) => hit.document), context);
+  const candidates = hits.map((hit, index) =>
+    rankedCandidate(hit.document, index + 1, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
+  );
   const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.exact), compareIdentityRank);
   const phraseRanks = rankMap(
     candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.phrase),
@@ -53,14 +57,24 @@ export function compareTagOnlyMatches(left: { path: string }, right: { path: str
 }
 
 function queryContext(query: string, queryTerms: string[], fields?: SearchField[]): QueryContext {
+  const phrases = uniquePhrases([
+    ...identityPhraseCandidates(query),
+    ...identityPhraseCandidates(queryTerms.join(" "))
+  ]);
   return {
-    phrase: normalizeIdentityText(query),
+    phrase: phrases[0] ?? "",
+    phrases,
     terms: queryTerms,
     allowed: new Set(searchFields(fields))
   };
 }
 
-function rankedCandidate(doc: SearchDocument, baseRank: number, context: QueryContext): RankedCandidate {
+function rankedCandidate(
+  doc: SearchDocument,
+  baseRank: number,
+  context: QueryContext,
+  signals: CandidateRankSignals
+): RankedCandidate {
   const exactPriority = bestExactPriority(doc, context);
   const phrasePriority = bestPhrasePriority(doc, context);
   const coverage = metadataCoverage(doc, context);
@@ -74,7 +88,9 @@ function rankedCandidate(doc: SearchDocument, baseRank: number, context: QueryCo
     exactPriority,
     phrasePriority,
     coverageTerms: coverage.terms,
-    coverageFieldScore: coverage.fieldScore
+    coverageFieldScore: coverage.fieldScore,
+    rarityScore: signals.rarityScore,
+    proximityScore: signals.proximityScore
   };
 }
 
@@ -86,6 +102,10 @@ function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): nu
 
 function searchFields(fields: SearchField[] | undefined): SearchField[] {
   return fields ?? [...SEARCH_PROPERTIES];
+}
+
+function uniquePhrases(phrases: readonly string[]): string[] {
+  return [...new Set(phrases.filter(Boolean))];
 }
 
 function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {
@@ -114,6 +134,8 @@ function rerankScore(
     const coverageRank = coverageRanks.get(candidate.path);
     if (coverageRank) score += rrfContribution(coverageRank, RRF_WEIGHTS.coverage);
   }
+  score += candidate.rarityScore * RANK_SIGNAL_WEIGHTS.rarity;
+  score += candidate.proximityScore * RANK_SIGNAL_WEIGHTS.proximity;
   return score;
 }
 
@@ -127,6 +149,8 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
   if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
+  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
   return left.path.localeCompare(right.path);
 }
@@ -134,6 +158,8 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
 function compareCoverageRank(left: RankedCandidate, right: RankedCandidate): number {
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
+  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
   return left.path.localeCompare(right.path);
 }

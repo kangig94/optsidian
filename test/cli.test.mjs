@@ -1198,7 +1198,7 @@ test("search ranks notes and index commands manage cache", async () => {
   const debugPayload = JSON.parse(result.stdout);
   assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok"]);
   assert.deepEqual(debugPayload.debug.query.terms, ["project", "alpha"]);
-  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v1");
+  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v2");
   assert.equal(debugPayload.matches[0].debug.bucket, "exact");
   assert.deepEqual(debugPayload.matches[0].debug.queryTerms, ["project", "alpha"]);
   assert.equal(typeof debugPayload.matches[0].debug.oramaScore, "number");

@@ -100,6 +100,8 @@ export type SearchMatchDebug = {
   phrasePriority?: number | null;
   coverageTerms?: number;
   coverageFieldScore?: number;
+  rarityScore?: number;
+  proximityScore?: number;
 };
 
 export type SearchMatch = {
@@ -125,7 +127,7 @@ export type SearchDebugInfo = {
   };
   analyzer: SearchAnalyzerDebug;
   candidates: number;
-  reranker?: "rrf-metadata-v1";
+  reranker?: "rrf-metadata-v2";
 };
 
 export type SearchResult = {

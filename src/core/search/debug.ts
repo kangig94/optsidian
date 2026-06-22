@@ -38,7 +38,7 @@ export function searchDebugInfo(
     },
     analyzer: analyzerDebugInfo(projection.manifest.analyzer),
     candidates: hits.length,
-    ...(search.query ? { reranker: "rrf-metadata-v1" as const } : {})
+    ...(search.query ? { reranker: "rrf-metadata-v2" as const } : {})
   };
 }
 
@@ -62,7 +62,9 @@ export function searchMatchDebug(
           exactPriority: nullableRankPriority(rank.exactPriority),
           phrasePriority: nullableRankPriority(rank.phrasePriority),
           coverageTerms: rank.coverageTerms,
-          coverageFieldScore: rank.coverageFieldScore
+          coverageFieldScore: rank.coverageFieldScore,
+          rarityScore: rank.rarityScore,
+          proximityScore: rank.proximityScore
         }
       : {})
   };

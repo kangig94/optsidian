@@ -1,7 +1,7 @@
 import type { SearchTokenChannel } from "./analysis/index.js";
 
-export const SEARCH_IDENTITY_SCHEMA_VERSION = 2;
-export const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 3;
+export const SEARCH_IDENTITY_SCHEMA_VERSION = 3;
+export const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 4;
 export const SEARCH_INDEX_FILE = "search.orama";
 export const SEARCH_MANIFEST_FILE = "manifest.json";
 export const SEARCH_COMMIT_FILE = "commit.json";
@@ -35,11 +35,16 @@ export const RRF_WEIGHTS = {
   coverage: 2,
   base: 1
 } as const;
+export const RANK_SIGNAL_WEIGHTS = {
+  rarity: 0.04,
+  proximity: 0.06
+} as const;
 export const SEARCH_TOKEN_CHANNEL_WEIGHT: Record<SearchTokenChannel, number> = {
   morph: 1,
   surface: 0.65,
   ngram: 0.3
 };
+export const SEARCH_FUZZY_WEIGHT_MULTIPLIER = 0.2;
 export const RANK_BUCKET = {
   exact: 0,
   phrase: 1,
