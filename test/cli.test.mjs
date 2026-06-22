@@ -1686,11 +1686,19 @@ test("config command writes global settings and reads project-local overrides", 
 test("search requires query or tag and validates fields", () => {
   const { vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  fs.writeFileSync(path.join(vault, "note.md"), "alpha\n");
+  fs.writeFileSync(path.join(vault, "note.md"), "alpha help\n");
 
   let result = run(["search", "path=note.md"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /query=<text> or tag=<tag>/);
+
+  result = run(["search", "help", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["note.md"]);
+
+  result = run(["search", "query=alpha", "help"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /either positional search terms or query=<text>/);
 
   result = run(["search", "query=alpha", "field=unknown"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
@@ -1723,7 +1731,7 @@ test("search favors exact note identity over body-only mentions and respects fie
   fs.writeFileSync(path.join(vault, "Roadmap", "Plan.md"), "# Plan\nMinimal body.\n");
   fs.writeFileSync(path.join(vault, "Notes", "Roadmap Body.md"), "roadmap roadmap roadmap roadmap\n");
 
-  let result = run(["search", "query=launch alpha", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  let result = run(["search", "launch", "alpha", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Project Alpha.md");
 

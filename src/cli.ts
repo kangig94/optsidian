@@ -55,7 +55,7 @@ async function main(): Promise<void> {
 
   const args = parseArgs(argv);
   const command = args.command;
-  if (command && hasFlag(args, "help")) {
+  if (command && isCommandHelpRequest(args)) {
     if (commandPolicy(command) === "delegate") {
       rejectVaultPathForNative(args);
       delegateToObsidian(["help", command]);
@@ -128,6 +128,14 @@ async function main(): Promise<void> {
     default:
       delegateToObsidian(argv);
   }
+}
+
+function isCommandHelpRequest(args: ReturnType<typeof parseArgs>): boolean {
+  return (
+    args.raw.includes("--help") ||
+    args.values.get("help") === "true" ||
+    (args.command !== "search" && hasFlag(args, "help"))
+  );
 }
 
 function rejectVaultPathForNative(args: ReturnType<typeof parseArgs>): void {

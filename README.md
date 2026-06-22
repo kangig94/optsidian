@@ -211,16 +211,16 @@ truncated: false
 Rank notes by title, tags, aliases, headings, path, and body.
 
 ```bash
-optsidian search query="alpha rollout"
-optsidian search query="alpha rollout" limit=10
-optsidian search query="alpha rollout" path=Projects
-optsidian search query="review" field=body
-optsidian search query="rollout" tag=project path=Projects
+optsidian search "alpha rollout"
+optsidian search "alpha rollout" limit=10
+optsidian search "alpha rollout" path=Projects
+optsidian search review field=body
+optsidian search rollout tag=project path=Projects
 optsidian search tag=project,alpha
-optsidian search query="#project alpha" format=json
+optsidian search "#project alpha" format=json
 ```
 
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `field=` is only valid when `query=` is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming for a zero-config multilingual baseline.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming for a zero-config multilingual baseline.
 
 The search index is stored outside the vault under the OS cache directory and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; tokenizer projections live under `indexes/<tier-key>/` with `search.orama`, `manifest.json`, `commit.json`, and `analysis-cache.json`. Index writes are protected by a per-vault writer lock, atomic file replacement, and a digest-bound commit sidecar so foreground search only serves a completed persisted pair while another process is rebuilding. Its manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. During analyzer tier upgrades, a valid Intl-tier index can be served immediately while a background reconcile rebuilds the target tier. When a persisted index is stale but only a small number of files changed, foreground search builds an in-memory Intl overlay so added/changed files can still match while background indexing catches up; tune this with `search.overlayMaxFiles`/`search.overlayMaxBytes` or the overriding `OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES`/`OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES` env vars. `index status` reports cache readiness, analyzer runtime state, tier projection status, stale-tier, reconcile-lock, recent-access warm eligibility, MCP warm throttle, and last reconcile result diagnostics when present. CLI `search` wakes a background index daemon that incrementally warms vaults Optsidian accessed in the last 7 days and exits after 5 minutes idle; access is recorded by realpath under `$XDG_CACHE_HOME/optsidian/vault-access.json`. Set `OPTSIDIAN_INDEX_DAEMON=0` to disable it, `OPTSIDIAN_INDEX_DAEMON_IDLE_MS=<ms>` to change idle shutdown, `OPTSIDIAN_INDEX_DAEMON_POLL_MS=<ms>` to change the follow-up warm interval, `OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS=<days>` to change recent-access retention, or `OPTSIDIAN_INDEX_WARM_CONCURRENCY=<n>` to change background warm concurrency. MCP startup and tool calls also wake a one-shot index warm at most once every 30 minutes, recorded in `$XDG_CACHE_HOME/optsidian/index-warm-schedule.json`; tune this with `search.indexWarmIntervalMinutes` or the overriding `OPTSIDIAN_INDEX_WARM_INTERVAL_MINUTES`. `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` routes the default Intl analyzer through the analyzer daemon, which exits after 5 minutes idle by default. Analyzer request timeout defaults to 60 seconds and can be changed with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables the Kiwi Korean target tier. Foreground search does not wait for Kiwi model download, cold load, or rebuild; it serves the Intl baseline and warns `fts_index_stale_tier` while background warm/reconcile/rebuild lazily downloads the ~88 MB model into `$XDG_CACHE_HOME/optsidian/kiwi/` and evicts the loaded analyzer after 5 minutes idle.
 

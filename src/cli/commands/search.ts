@@ -2,10 +2,11 @@ import { getValue, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
 import { searchVault } from "../../core/search.js";
 import { pokeSearchIndexDaemonWarmRecent } from "../../core/search-index-daemon.js";
+import { UsageError } from "../../errors.js";
 
 export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<void> {
   const result = await searchVault(vaultRoot, {
-    query: getValue(args, "query"),
+    query: searchQuery(args),
     path: getValue(args, "path"),
     tags: parseList(getValue(args, "tag")),
     fields: parseList(getValue(args, "field")),
@@ -13,6 +14,18 @@ export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<vo
   });
   process.stdout.write(renderSearch(result, parseFormat(getValue(args, "format"))));
   pokeSearchIndexDaemonWarmRecent();
+}
+
+function searchQuery(args: ParsedArgs): string | undefined {
+  const explicitQuery = getValue(args, "query");
+  if (explicitQuery !== undefined) {
+    if (args.positionals.length > 0) {
+      throw new UsageError("Use either positional search terms or query=<text>, not both");
+    }
+    return explicitQuery;
+  }
+  if (args.positionals.length === 0) return undefined;
+  return args.positionals.join(" ");
 }
 
 function parseList(value: string | undefined): string[] | undefined {
