@@ -3,6 +3,7 @@ import {
   inspectKiwiModelArtifact,
   inspectKiwiWasmArtifact,
   kiwiDataDir,
+  type KiwiModelArtifactInspectOptions,
   type KiwiModelArtifactState,
   type KiwiWasmArtifactState
 } from "./kiwi-artifact.js";
@@ -49,7 +50,7 @@ type ActiveKiwiHandle = {
 type KiwiManagerOptions = {
   idleTtlMs?: number;
   loadAnalyzer?: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
-  inspectModelArtifact?: (env: NodeJS.ProcessEnv) => KiwiModelArtifactState;
+  inspectModelArtifact?: (env: NodeJS.ProcessEnv, options?: KiwiModelArtifactInspectOptions) => KiwiModelArtifactState;
   inspectWasmArtifact?: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
 };
 
@@ -75,7 +76,7 @@ export class KiwiAnalyzerTerminalLoadError extends Error {
 export class KiwiAnalyzerManager {
   private readonly idleTtlMs: number;
   private readonly loadAnalyzer: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
-  private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv) => KiwiModelArtifactState;
+  private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv, options?: KiwiModelArtifactInspectOptions) => KiwiModelArtifactState;
   private readonly inspectWasmArtifact: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
   private activeHandle: ActiveKiwiHandle | null = null;
   private loadPromise: Promise<ActiveKiwiHandle> | null = null;
@@ -96,7 +97,7 @@ export class KiwiAnalyzerManager {
 
   status(env: NodeJS.ProcessEnv = process.env): KiwiManagerStatus {
     const key = envKey(env);
-    const model = this.inspectModelArtifact(env);
+    const model = this.inspectModelArtifact(env, { verifyFiles: "metadata" });
     if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return {
         state: "loaded",
@@ -156,14 +157,16 @@ export class KiwiAnalyzerManager {
     if (!normalized.includes("ko")) return noopLease(normalized);
     const key = envKey(env);
 
-    const model = this.inspectModelArtifact(env);
-    if (this.degraded && this.degraded.envKey === key && (!model.installed || artifactStateKey(model, this.inspectWasmArtifact(env)) !== this.degraded.artifactStateKey)) {
-      this.degraded = null;
+    const existing = this.activeHandle;
+    if (existing && !existing.closed && existing.envKey === key) {
+      return this.leaseHandle(existing, normalized);
     }
 
-    const existing = this.activeHandle;
-    if (existing && !existing.closed && existing.envKey === envKey(env)) {
-      return this.leaseHandle(existing, normalized);
+    if (this.degraded && this.degraded.envKey === key) {
+      const model = this.inspectModelArtifact(env, { verifyFiles: "digest" });
+      if (!model.installed || artifactStateKey(model, this.inspectWasmArtifact(env)) !== this.degraded.artifactStateKey) {
+        this.degraded = null;
+      }
     }
 
     if (!options.wait) return noopLease(withoutKiwi(normalized));

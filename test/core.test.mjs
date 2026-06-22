@@ -364,24 +364,28 @@ test("kiwi analyzer manager retires active leases before disposing old envs", as
 
 test("kiwi analyzer manager reports runtime status for the requested cache env", async () => {
   const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const inspectModes = [];
   const manager = new KiwiAnalyzerManager({
-    inspectModelArtifact: (env) => ({
-      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
-      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
-      installed: true,
-      manifest: {
-        packageId: "kiwi",
-        kiwiNlpVersion: "0.23.0",
-        modelVersion: "0.23.0",
-        modelType: "cong-global",
-        sourceUrl: "test",
-        archiveSha256: "sha",
-        archiveSizeBytes: 1,
-        files: [],
-        installedAt: "2026-06-22T00:00:00.000Z"
-      },
-      missingFiles: []
-    }),
+    inspectModelArtifact: (env, options = {}) => {
+      inspectModes.push(options.verifyFiles ?? "digest");
+      return {
+        targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+        manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+        installed: true,
+        manifest: {
+          packageId: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: "0.23.0",
+          modelType: "cong-global",
+          sourceUrl: "test",
+          archiveSha256: "sha",
+          archiveSizeBytes: 1,
+          files: [],
+          installedAt: "2026-06-22T00:00:00.000Z"
+        },
+        missingFiles: []
+      };
+    },
     loadAnalyzer: async ({ env }) => ({
       identity: {
         engine: "kiwi",
@@ -402,8 +406,73 @@ test("kiwi analyzer manager reports runtime status for the requested cache env",
       ({ analyzer }) => analyzer.tokens("검색")
     );
 
+    assert.deepEqual(inspectModes, []);
     assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-status-a" }).state, "loaded");
     assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-status-b" }).state, "unloaded");
+    assert.deepEqual(inspectModes, ["metadata", "metadata"]);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("kiwi analyzer manager reuses active handles without rechecking model files", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  let inspectCalls = 0;
+  let loadCalls = 0;
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => {
+      inspectCalls += 1;
+      return {
+        targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+        manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+        installed: true,
+        manifest: {
+          packageId: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: "0.23.0",
+          modelType: "cong-global",
+          sourceUrl: "test",
+          archiveSha256: "sha",
+          archiveSizeBytes: 1,
+          files: [],
+          installedAt: "2026-06-22T00:00:00.000Z"
+        },
+        missingFiles: []
+      };
+    },
+    loadAnalyzer: async ({ env }) => {
+      loadCalls += 1;
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: env.XDG_CACHE_HOME,
+          modelType: "cong-global"
+        },
+        tokens: (text) => [`${env.XDG_CACHE_HOME}:${text}`],
+        dispose: async () => {}
+      };
+    }
+  });
+
+  try {
+    const first = await manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-active-reuse" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("first")
+    );
+    const second = await manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-active-reuse" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("second")
+    );
+
+    assert.deepEqual(first, ["/tmp/kiwi-active-reuse:first"]);
+    assert.deepEqual(second, ["/tmp/kiwi-active-reuse:second"]);
+    assert.equal(loadCalls, 1);
+    assert.equal(inspectCalls, 0);
   } finally {
     await manager.close();
   }
@@ -720,7 +789,8 @@ test("kiwi model inspection rejects corrupt installed model files", async () => 
     inspectKiwiModelArtifact,
     kiwiModelDir,
     kiwiModelFilePath,
-    kiwiModelManifestPath
+    kiwiModelManifestPath,
+    readVerifiedKiwiModelFiles
   } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
   const env = { XDG_CACHE_HOME: cache };
 
@@ -740,10 +810,14 @@ test("kiwi model inspection rejects corrupt installed model files", async () => 
     installedAt: "2026-06-22T00:00:00.000Z"
   }, null, 2)}\n`);
 
+  const metadataState = inspectKiwiModelArtifact(env, { verifyFiles: "metadata" });
+  assert.equal(metadataState.installed, true);
+
   const state = inspectKiwiModelArtifact(env);
   assert.equal(state.installed, false);
   assert.equal(state.missingFiles.length, KIWI_MODEL_FILES.length);
   assert.match(state.missingFiles.join(","), /digest mismatch/);
+  assert.throws(() => readVerifiedKiwiModelFiles(env), /digest mismatch/);
 });
 
 test("read caps by lines and pages without gaps", async () => {

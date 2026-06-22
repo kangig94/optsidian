@@ -1,14 +1,12 @@
 import fs from "node:fs";
 import initKiwiModule from "kiwi-nlp/dist/build/kiwi-wasm.js";
 import {
-  KIWI_MODEL_FILES,
   KIWI_MODEL_TYPE,
   KIWI_MODEL_VERSION,
   KIWI_NLP_VERSION,
   ensureKiwiModelArtifact,
   ensureKiwiWasmArtifact,
-  inspectKiwiModelArtifact,
-  kiwiModelFilePath,
+  readVerifiedKiwiModelFiles,
   kiwiWasmFilePath,
   type KiwiModelFileName
 } from "./kiwi-artifact.js";
@@ -74,16 +72,13 @@ function resolveKiwiWasmInitializer(imported: KiwiWasmInitializerImport): KiwiWa
 export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): Promise<KiwiAnalyzer> {
   const env = options.env ?? process.env;
   if (options.installIfMissing === true) {
-    const installed = await ensureKiwiModelArtifact(env);
+    const installed = await ensureKiwiModelArtifact(env, { verifyFiles: "metadata" });
     if (installed.status === "error") throw new Error(installed.message);
   }
 
-  const state = inspectKiwiModelArtifact(env);
-  if (!state.installed) {
-    throw new Error("Kiwi model artifact is not installed");
-  }
+  const modelFiles = await readLoadableModelFiles(env, options.installIfMissing === true);
 
-  const loaded = await buildDisposableKiwi(readModelFiles(env), env);
+  const loaded = await buildDisposableKiwi(modelFiles, env);
   if (!loaded.ready()) {
     await loaded.dispose();
     throw new Error("Kiwi analyzer was constructed but is not ready");
@@ -119,12 +114,15 @@ export async function loadKiwiWasmBinary(env: NodeJS.ProcessEnv = process.env): 
   return new Uint8Array(Buffer.from(fs.readFileSync(kiwiWasmFilePath(env))));
 }
 
-function readModelFiles(env: NodeJS.ProcessEnv): Record<KiwiModelFileName, Uint8Array> {
-  const files = {} as Record<KiwiModelFileName, Uint8Array>;
-  for (const fileName of KIWI_MODEL_FILES) {
-    files[fileName] = new Uint8Array(Buffer.from(fs.readFileSync(kiwiModelFilePath(fileName, env))));
+async function readLoadableModelFiles(env: NodeJS.ProcessEnv, repairIfInvalid: boolean): Promise<Record<KiwiModelFileName, Uint8Array>> {
+  try {
+    return readVerifiedKiwiModelFiles(env);
+  } catch (error) {
+    if (!repairIfInvalid) throw new Error("Kiwi model artifact is not installed", { cause: error });
+    const installed = await ensureKiwiModelArtifact(env, { forceInstall: true });
+    if (installed.status === "error") throw new Error(installed.message);
+    return readVerifiedKiwiModelFiles(env);
   }
-  return files;
 }
 
 async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Array>, env: NodeJS.ProcessEnv): Promise<{

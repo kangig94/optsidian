@@ -66,6 +66,14 @@ export type KiwiModelArtifactState = {
   missingFiles: string[];
 };
 
+export type KiwiModelArtifactInspectOptions = {
+  verifyFiles?: "digest" | "metadata";
+};
+
+export type KiwiModelArtifactEnsureOptions = KiwiModelArtifactInspectOptions & {
+  forceInstall?: boolean;
+};
+
 export type KiwiWasmArtifactManifest = {
   packageId: "kiwi-wasm";
   kiwiNlpVersion: string;
@@ -153,9 +161,12 @@ export function kiwiWasmFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(kiwiWasmDir(env), KIWI_WASM_FILE_NAME);
 }
 
-export function inspectKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): KiwiModelArtifactState {
+export function inspectKiwiModelArtifact(
+  env: NodeJS.ProcessEnv = process.env,
+  options: KiwiModelArtifactInspectOptions = {}
+): KiwiModelArtifactState {
   const manifest = readInstalledManifest(env);
-  const missingFiles = inspectKiwiModelFiles(env);
+  const missingFiles = inspectKiwiModelFiles(env, options.verifyFiles ?? "digest");
   return {
     targetDir: kiwiModelDir(env),
     manifestPath: kiwiModelManifestPath(env),
@@ -163,6 +174,14 @@ export function inspectKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): 
     manifest,
     missingFiles
   };
+}
+
+export function readVerifiedKiwiModelFiles(env: NodeJS.ProcessEnv = process.env): Record<KiwiModelFileName, Uint8Array> {
+  const files = {} as Record<KiwiModelFileName, Uint8Array>;
+  for (const fileName of KIWI_MODEL_FILES) {
+    files[fileName] = readVerifiedKiwiModelFile(fileName, env);
+  }
+  return files;
 }
 
 export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): KiwiWasmArtifactState {
@@ -178,20 +197,25 @@ export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): K
   };
 }
 
-export async function ensureKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): Promise<KiwiModelArtifactInstallResult> {
+export async function ensureKiwiModelArtifact(
+  env: NodeJS.ProcessEnv = process.env,
+  options: KiwiModelArtifactEnsureOptions = {}
+): Promise<KiwiModelArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
   fs.mkdirSync(dataDir, { recursive: true });
   let release: (() => void) | undefined;
   try {
     release = await acquireInstallLock(path.join(dataDir, "install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
-    const current = inspectKiwiModelArtifact(env);
-    if (current.installed) {
-      return {
-        status: "already_installed",
-        method: "github-release",
-        version: KIWI_MODEL_VERSION,
-        targetDir: current.targetDir
-      };
+    if (options.forceInstall !== true) {
+      const current = inspectKiwiModelArtifact(env, { verifyFiles: options.verifyFiles ?? "digest" });
+      if (current.installed) {
+        return {
+          status: "already_installed",
+          method: "github-release",
+          version: KIWI_MODEL_VERSION,
+          targetDir: current.targetDir
+        };
+      }
     }
     return await installDownloadedModel(env);
   } catch (error) {
@@ -392,7 +416,7 @@ function extractKiwiModelFiles(archiveBuffer: Buffer): Map<KiwiModelFileName, Bu
   return files;
 }
 
-function inspectKiwiModelFiles(env: NodeJS.ProcessEnv): string[] {
+function inspectKiwiModelFiles(env: NodeJS.ProcessEnv, verifyFiles: "digest" | "metadata"): string[] {
   const missingFiles: string[] = [];
   for (const fileName of KIWI_MODEL_FILES) {
     const modelPath = kiwiModelFilePath(fileName, env);
@@ -407,12 +431,38 @@ function inspectKiwiModelFiles(env: NodeJS.ProcessEnv): string[] {
       missingFiles.push(fileName);
       continue;
     }
-    const digest = crypto.createHash("sha256").update(fs.readFileSync(modelPath)).digest("hex");
+    if (verifyFiles === "metadata") continue;
+    let digest: string;
+    try {
+      digest = kiwiModelFileDigest(fs.readFileSync(modelPath));
+    } catch {
+      missingFiles.push(`${fileName} (read failed)`);
+      continue;
+    }
     if (digest !== KIWI_MODEL_FILE_SHA256[fileName]) {
       missingFiles.push(`${fileName} (digest mismatch)`);
     }
   }
   return missingFiles;
+}
+
+function readVerifiedKiwiModelFile(fileName: KiwiModelFileName, env: NodeJS.ProcessEnv): Uint8Array {
+  const modelPath = kiwiModelFilePath(fileName, env);
+  let content: Buffer;
+  try {
+    content = fs.readFileSync(modelPath);
+  } catch (error) {
+    throw new RuntimeError(`Kiwi model file ${fileName} is not readable: ${errorMessage(error)}`);
+  }
+  const digest = kiwiModelFileDigest(content);
+  if (digest !== KIWI_MODEL_FILE_SHA256[fileName]) {
+    throw new RuntimeError(`Kiwi model file ${fileName} digest mismatch: expected ${KIWI_MODEL_FILE_SHA256[fileName]}, got ${digest}`);
+  }
+  return content;
+}
+
+function kiwiModelFileDigest(content: Uint8Array): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
 }
 
 function inspectKiwiWasmFile(env: NodeJS.ProcessEnv): string[] {
