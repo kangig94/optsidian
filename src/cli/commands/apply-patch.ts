@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { getValue, hasFlag, ParsedArgs, readValueOrFile } from "../args.js";
+import { getValue, hasFlag, readValueOrFile, type ParsedArgs } from "../args.js";
 import { applyVaultPatch } from "../../core/apply-patch.js";
 import { UsageError } from "../../errors.js";
 import { renderMutation } from "../render.js";

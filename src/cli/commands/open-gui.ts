@@ -1,4 +1,4 @@
-import { getValue, hasFlag, ParsedArgs } from "../args.js";
+import { getValue, hasFlag, type ParsedArgs } from "../args.js";
 import { parseFormat } from "../render.js";
 import { UsageError } from "../../errors.js";
 import { openObsidianGui, type OpenObsidianGuiResult } from "../../native/gui.js";

@@ -1,4 +1,4 @@
-import { getValue, hasFlag, ParsedArgs, requireValue } from "../args.js";
+import { getValue, hasFlag, requireValue, type ParsedArgs } from "../args.js";
 import { mkdirVaultPath } from "../../core/mkdir.js";
 import { renderMutation } from "../render.js";
 

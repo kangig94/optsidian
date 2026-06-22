@@ -1,4 +1,4 @@
-import { hasFlag, ParsedArgs, requireValue } from "../args.js";
+import { hasFlag, requireValue, type ParsedArgs } from "../args.js";
 import { copyVaultPath } from "../../core/copy.js";
 import { renderMutation } from "../render.js";
 

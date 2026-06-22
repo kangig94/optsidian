@@ -1,4 +1,4 @@
-import { getValue, hasFlag, parsePositiveInt, ParsedArgs, requireValue } from "../args.js";
+import { getValue, hasFlag, parsePositiveInt, requireValue, type ParsedArgs } from "../args.js";
 import { grepVault } from "../../core/grep.js";
 import { parseFormat, renderGrep } from "../render.js";
 

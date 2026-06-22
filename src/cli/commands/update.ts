@@ -1,4 +1,4 @@
-import { getValue, ParsedArgs } from "../args.js";
+import { getValue, type ParsedArgs } from "../args.js";
 import { installRelease, checkForUpdate } from "../../update/installer.js";
 import { UsageError } from "../../errors.js";
 

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { UsageError } from "../errors.js";
-import { resolveVaultPath, SafePath } from "./path.js";
+import { resolveVaultPath, type SafePath } from "./path.js";
 import { simpleDiff } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
 import type { ChangeCode, MutationResult, PatchParams } from "./types.js";

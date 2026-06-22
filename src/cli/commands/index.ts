@@ -1,4 +1,4 @@
-import { getValue, ParsedArgs } from "../args.js";
+import { getValue, type ParsedArgs } from "../args.js";
 import { parseFormat, renderIndexResult } from "../render.js";
 import { clearSearchIndex, getSearchIndexStatus, rebuildSearchIndex, warmSearchIndexes } from "../../core/search.js";
 import { discoverObsidianVaultRoots, resolveVaultPathInput } from "../../native/obsidian.js";

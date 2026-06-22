@@ -1,4 +1,4 @@
-import { getValue, hasFlag, ParsedArgs, readRawValueOrFile, readValueOrFile, requireValue } from "../args.js";
+import { getValue, hasFlag, readRawValueOrFile, readValueOrFile, requireValue, type ParsedArgs } from "../args.js";
 import { parseFormat, renderFrontmatterRead, renderMutation } from "../render.js";
 import {
   addFrontmatterValue,

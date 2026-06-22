@@ -1,4 +1,4 @@
-import { getValue, hasFlag, parseLineRange, parsePositiveInt, ParsedArgs, requireValue } from "../args.js";
+import { getValue, hasFlag, parseLineRange, parsePositiveInt, requireValue, type ParsedArgs } from "../args.js";
 import { DEFAULT_READ_MAX_LINES, readVaultFile } from "../../core/read.js";
 import { UsageError } from "../../errors.js";
 import { parseFormat, renderRead } from "../render.js";

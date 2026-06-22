@@ -1,4 +1,4 @@
-import { getValue, parsePositiveInt, ParsedArgs } from "../args.js";
+import { getValue, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
 import { searchVault } from "../../core/search.js";
 import { pokeSearchIndexDaemonWarmRecent } from "../../core/search-index-daemon.js";

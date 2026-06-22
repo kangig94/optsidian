@@ -1,4 +1,4 @@
-import { getValue, hasFlag, ParsedArgs, readValueOrFile, requireValue } from "../args.js";
+import { getValue, hasFlag, readValueOrFile, requireValue, type ParsedArgs } from "../args.js";
 import { writeVaultFile } from "../../core/write.js";
 import { UsageError } from "../../errors.js";
 import { renderMutation } from "../render.js";

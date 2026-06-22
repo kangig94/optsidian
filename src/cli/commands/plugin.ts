@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { getValue, hasFlag, ParsedArgs } from "../args.js";
+import { getValue, hasFlag, type ParsedArgs } from "../args.js";
 import { delegateToObsidian } from "../delegate.js";
 import { parseFormat, type OutputFormat } from "../render.js";
 import { hasVaultPathArg, resolveVaultRoot } from "../vault.js";

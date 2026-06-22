@@ -1,4 +1,4 @@
-import { decodeCliEscapes, getValue, hasFlag, parseLineRange, ParsedArgs, readValueOrFile, requireValue } from "../args.js";
+import { decodeCliEscapes, getValue, hasFlag, parseLineRange, readValueOrFile, requireValue, type ParsedArgs } from "../args.js";
 import { editVaultFile } from "../../core/edit.js";
 import type { EditSelector } from "../../core/types.js";
 import { UsageError } from "../../errors.js";

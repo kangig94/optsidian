@@ -1,4 +1,4 @@
-import { ParsedArgs } from "./args.js";
+import type { ParsedArgs } from "./args.js";
 import { UsageError } from "../errors.js";
 import { recordVaultAccess } from "../core/vault-access.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "../native/obsidian.js";

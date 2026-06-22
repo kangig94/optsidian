@@ -1,4 +1,4 @@
-import { getValue, ParsedArgs, requireValue } from "../args.js";
+import { getValue, requireValue, type ParsedArgs } from "../args.js";
 import { parseFormat, type OutputFormat } from "../render.js";
 import {
   configPathResult,
