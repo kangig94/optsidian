@@ -101,6 +101,7 @@ const REGISTERED_ANALYZER_SET: ReadonlySet<string> = new Set(REGISTERED_ANALYZER
 const DEFAULT_IDLE_MS = 5 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60 * 1000;
 const STARTUP_TIMEOUT_MS = 2000;
+const DAEMON_SOCKET_FIRST_LINE_TIMEOUT_MS = 250;
 const WORD_SCRIPT_RUN_PATTERN =
   /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
 const SCRIPT_RUN_PATTERN =
@@ -567,28 +568,46 @@ export async function runSearchAnalyzerDaemon(
   fs.mkdirSync(paths.runtimeDir, { recursive: true });
 
   const idleMs = parseIdleMs(settingNumberValue(env[ANALYZER_IDLE_ENV], settings.search?.analyzerIdleMs));
+  const allSockets = new Set<net.Socket>();
   const sockets = new Set<net.Socket>();
+  let closing = false;
+  let activeRequests = 0;
   let idleTimer: NodeJS.Timeout | undefined;
   const server = net.createServer((socket) => {
     clearIdleTimer();
+    allSockets.add(socket);
     sockets.add(socket);
     socket.setEncoding("utf8");
     let buffer = "";
+    let receivedRequest = false;
+    const firstLineTimer = setTimeout(() => socket.destroy(), DAEMON_SOCKET_FIRST_LINE_TIMEOUT_MS);
+    firstLineTimer.unref();
     socket.on("data", (chunk) => {
       buffer += chunk;
       let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        void handleAnalyzerLine(socket, line, env);
-        newline = buffer.indexOf("\n");
-      }
+      if (newline < 0 || receivedRequest) return;
+      clearTimeout(firstLineTimer);
+      receivedRequest = true;
+      const line = buffer.slice(0, newline);
+      sockets.delete(socket);
+      activeRequests += 1;
+      void handleAnalyzerLine(socket, line, env).finally(() => {
+        activeRequests -= 1;
+        armIdleTimer();
+      });
     });
     socket.on("close", () => {
+      allSockets.delete(socket);
+      sockets.delete(socket);
+      armIdleTimer();
+    });
+    socket.on("finish", () => {
+      allSockets.delete(socket);
       sockets.delete(socket);
       armIdleTimer();
     });
     socket.on("error", () => {
+      allSockets.delete(socket);
       sockets.delete(socket);
       armIdleTimer();
     });
@@ -596,11 +615,10 @@ export async function runSearchAnalyzerDaemon(
   });
 
   function armIdleTimer(): void {
-    if (sockets.size > 0) return;
+    if (closing || sockets.size > 0 || activeRequests > 0) return;
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      server.close();
-      for (const socket of sockets) socket.destroy();
+      closeDaemon();
     }, idleMs);
     idleTimer.unref();
   }
@@ -609,6 +627,21 @@ export async function runSearchAnalyzerDaemon(
     if (!idleTimer) return;
     clearTimeout(idleTimer);
     idleTimer = undefined;
+  }
+
+  function closeDaemon(): void {
+    if (closing) return;
+    closing = true;
+    clearIdleTimer();
+    cleanupSocket();
+    server.close();
+    for (const socket of allSockets) socket.destroy();
+  }
+
+  function cleanupSocket(): void {
+    if (process.platform !== "win32") {
+      fs.rmSync(paths.socketPath, { force: true });
+    }
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -623,9 +656,7 @@ export async function runSearchAnalyzerDaemon(
   await new Promise<void>((resolve) => {
     server.once("close", resolve);
   });
-  if (process.platform !== "win32") {
-    fs.rmSync(paths.socketPath, { force: true });
-  }
+  cleanupSocket();
 }
 
 function createRouterAnalyzer(declaredAnalyzers: readonly SearchDeclaredAnalyzer[]): SearchAnalyzer {
@@ -884,11 +915,17 @@ async function handleAnalyzerLine(socket: net.Socket, line: string, env: NodeJS.
           analyzer: routerIdentity(declaredAnalyzers, []),
           tokens: request.params.texts.map((text) => tokenizeRoutedText(String(text), declaredAnalyzers))
         };
-    socket.write(`${JSON.stringify({ id: request.id, result })}\n`);
+    endAnalyzerResponse(socket, { id: request.id, result });
   } catch (error) {
     const id = typeof request?.id === "number" ? request.id : 0;
-    socket.write(`${JSON.stringify({ id, error: { message: error instanceof Error ? error.message : String(error) } })}\n`);
+    endAnalyzerResponse(socket, { id, error: { message: error instanceof Error ? error.message : String(error) } });
   }
+}
+
+function endAnalyzerResponse(socket: net.Socket, response: AnalyzerResponse): void {
+  socket.end(`${JSON.stringify(response)}\n`, () => socket.destroy());
+  const timer = setTimeout(() => socket.destroy(), 100);
+  timer.unref();
 }
 
 function parseSelectorDeclaredAnalyzers(selector: SearchAnalyzerSelector): SearchDeclaredAnalyzer[] {

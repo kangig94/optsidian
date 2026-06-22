@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { count, create, insertMultiple, load, remove, save, search as oramaSearch } from "@orama/orama";
 import type { AnyOrama, RawData, Results } from "@orama/orama";
-import { OPTSIDIAN_VERSION } from "../version.js";
-import { RuntimeError, UsageError } from "../errors.js";
-import { resolveVaultPath, vaultRealpath, vaultRelative, walkFiles } from "./path.js";
+import { OPTSIDIAN_VERSION } from "../../version.js";
+import { RuntimeError, UsageError } from "../../errors.js";
+import { resolveVaultPath, vaultRealpath, vaultRelative, walkFiles } from "../path.js";
 import {
   analyzerCacheKey,
   analyzerIdentityKey,
@@ -19,13 +19,13 @@ import {
   type SearchAnalyzer,
   type SearchAnalyzerIdentity,
   type SearchAnalyzerLeaseOptions
-} from "./search-analyzer.js";
-import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "./search-parse.js";
-import { indexWarmScheduleStatus } from "./search-index-schedule-state.js";
-import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
-import { decodeUtf8, splitText } from "./text.js";
-import { atomicWriteFile } from "./write-file.js";
-import { vaultAccessStatus } from "./vault-access.js";
+} from "../search-analyzer.js";
+import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from "../search-parse.js";
+import { indexWarmScheduleStatus } from "../search-index-schedule-state.js";
+import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
+import { decodeUtf8, splitText } from "../text.js";
+import { atomicWriteFile } from "../write-file.js";
+import { vaultAccessStatus } from "../vault-access.js";
 import type {
   SearchAnalyzerDebug,
   SearchDebugInfo,
@@ -46,8 +46,8 @@ import type {
   SearchReconcileReason,
   SearchResult,
   SearchSnippet
-} from "./types.js";
-import { assertOptionalPositiveInteger } from "./validation.js";
+} from "../types.js";
+import { assertOptionalPositiveInteger } from "../validation.js";
 
 const SEARCH_SCHEMA_VERSION = 3;
 const SEARCH_IDENTITY_SCHEMA_VERSION = 1;

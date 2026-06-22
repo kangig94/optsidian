@@ -1,6 +1,6 @@
 import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
-import { searchVault } from "../../core/search.js";
+import { searchVault } from "../../core/search/index.js";
 import { pokeSearchIndexDaemonWarmRecent } from "../../core/search-index-daemon.js";
 import { UsageError } from "../../errors.js";
 

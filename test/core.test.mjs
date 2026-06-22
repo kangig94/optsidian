@@ -974,7 +974,7 @@ test("core ranked search uses metadata fields and external cache", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { getSearchIndexStatus, searchVault, writeVaultFile } = await core();
-    const { cachePaths, classifySearchManifestMismatch } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths, classifySearchManifestMismatch } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     writeVaultFile(vault, {
       path: "Projects/Alpha.md",
       content: `---
@@ -1100,7 +1100,7 @@ test("core search serves a valid Intl index during analyzer tier upgrades", asyn
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { searchVault, writeVaultFile } = await core();
-    const { cachePaths, searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths, searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     writeVaultFile(vault, {
       path: "Notes/Stale.md",
       content: "# Stale Tier\n\nrésumés running studies\n"
@@ -1143,7 +1143,7 @@ test("core search waits for a ready target analyzer projection", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
-    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     writeVaultFile(vault, {
       path: "Notes/Kiwi.md",
       content: "# Kiwi\n\nload-me marker\n"
@@ -1199,7 +1199,7 @@ test("core search coalesces background reconcile requests until the child exits"
   await withSearchProcess(cache, async () => {
     const { searchVault, writeVaultFile } = await core();
     const { __setSearchReconcileChildSpawnerForTests, cachePaths, searchVaultWithAnalyzer } = await import(
-      path.join(repoRoot, "src/core/search.ts")
+      path.join(repoRoot, "src/core/search/index.ts")
     );
     writeVaultFile(vault, {
       path: "Notes/Coalesce.md",
@@ -1263,7 +1263,7 @@ test("core reconcile uses a cross-process lock and recovers stale locks", async 
       reconcileSearchIndex,
       searchReconcileLockPath,
       searchReconcileStatusPath
-    } = await import(path.join(repoRoot, "src/core/search.ts"));
+    } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     writeVaultFile(vault, {
       path: "Notes/Locked.md",
       content: "# Locked\n\nalpha\n"
@@ -1353,7 +1353,7 @@ test("core reconcile refreshes search index incrementally", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { searchVault, writeVaultFile } = await core();
-    const { cachePaths, reconcileSearchIndex } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths, reconcileSearchIndex } = await import(path.join(repoRoot, "src/core/search/index.ts"));
 
     writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha original\n" });
     writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\n\nbeta stable\n" });
@@ -1381,7 +1381,7 @@ test("core warm refreshes search index incrementally", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { searchVault, warmSearchIndexes, writeVaultFile } = await core();
-    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths } = await import(path.join(repoRoot, "src/core/search/index.ts"));
 
     writeVaultFile(vault, { path: "Notes/Alpha.md", content: "# Alpha\n\nalpha original\n" });
     writeVaultFile(vault, { path: "Notes/Beta.md", content: "# Beta\n\nbeta stable\n" });
@@ -1435,7 +1435,7 @@ test("core search index writer lock protects reads and recovers stale locks", as
       __setSearchIndexWriterLockWaitMsForTests,
       cachePaths,
       searchIndexWriterLockPath
-    } = await import(path.join(repoRoot, "src/core/search.ts"));
+    } = await import(path.join(repoRoot, "src/core/search/index.ts"));
 
     writeVaultFile(vault, {
       path: "Notes/Writer.md",
@@ -1481,7 +1481,7 @@ test("core search requires a committed index pair while a writer is active", asy
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { rebuildSearchIndex, searchVault, writeVaultFile } = await core();
-    const { cachePaths, searchIndexWriterLockPath } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths, searchIndexWriterLockPath } = await import(path.join(repoRoot, "src/core/search/index.ts"));
 
     writeVaultFile(vault, {
       path: "Notes/Commit.md",
@@ -1516,7 +1516,7 @@ test("core search rebuilds an uncommitted persisted index pair after a torn writ
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { rebuildSearchIndex, searchVault, writeVaultFile } = await core();
-    const { cachePaths } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { cachePaths } = await import(path.join(repoRoot, "src/core/search/index.ts"));
 
     writeVaultFile(vault, {
       path: "Notes/Torn.md",
@@ -1546,7 +1546,7 @@ test("core search degrades terminal analyzer load failures to Intl", async () =>
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
-    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
     writeVaultFile(vault, {
       path: "Notes/Degraded.md",
@@ -1596,7 +1596,7 @@ test("core search isolates terminal analyzer degrade observer failures", async (
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
-    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     const { resolveSearchAnalyzer, SearchAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
     writeVaultFile(vault, {
       path: "Notes/Observer.md",
@@ -1692,7 +1692,7 @@ test("core search retries a small overlay when analyzer tokenization fails once"
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   await withSearchProcess(cache, async () => {
     const { writeVaultFile } = await core();
-    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search.ts"));
+    const { searchVaultWithAnalyzer } = await import(path.join(repoRoot, "src/core/search/index.ts"));
     const { resolveSearchAnalyzer } = await import(path.join(repoRoot, "src/core/search-analyzer.ts"));
     const analyzer = resolveSearchAnalyzer({}, {});
 

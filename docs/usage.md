@@ -148,9 +148,10 @@ optsidian search review field=body
 optsidian search rollout tag=project path=Projects
 optsidian search tag=project,alpha
 optsidian search "#project alpha" format=json
+optsidian search "project alpha" format=json debug=true
 ```
 
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
+Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Add `debug=true` with `format=json` to include analyzer tokens and ranking diagnostics. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
 
 The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; tokenizer projections live under `indexes/<tier-key>/` with `search.orama`, `manifest.json`, `commit.json`, and `analysis-cache.json`. Index writes are protected by a per-vault writer lock, atomic file replacement, and a digest-bound commit sidecar so foreground search only serves a completed persisted pair while another process is rebuilding. The manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. During analyzer tier upgrades, a valid Intl-tier index can be served immediately while a background reconcile rebuilds the target tier. When a persisted index is stale but only a small number of files changed, foreground search builds an in-memory Intl overlay so added/changed files can still match while background indexing catches up; tune this with `search.overlayMaxFiles`/`search.overlayMaxBytes` or the overriding `OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES`/`OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES` env vars. `index status` reports cache readiness, analyzer runtime state, tier projection status, stale-tier, reconcile-lock, recent-access warm eligibility, MCP warm throttle, and last reconcile result diagnostics when present. CLI `search` wakes a background index daemon that incrementally warms vaults Optsidian accessed in the last 7 days and exits after 5 minutes idle; access is recorded by realpath under `$XDG_CACHE_HOME/optsidian/vault-access.json`. Set `OPTSIDIAN_INDEX_DAEMON=0` to disable it, `OPTSIDIAN_INDEX_DAEMON_IDLE_MS=<ms>` to change idle shutdown, `OPTSIDIAN_INDEX_DAEMON_POLL_MS=<ms>` to change the follow-up warm interval, `OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS=<days>` to change recent-access retention, or `OPTSIDIAN_INDEX_WARM_CONCURRENCY=<n>` to change background warm concurrency. MCP startup and tool calls also wake a one-shot index warm at most once every 30 minutes, recorded in `$XDG_CACHE_HOME/optsidian/index-warm-schedule.json`; tune this with `search.indexWarmIntervalMinutes` or the overriding `OPTSIDIAN_INDEX_WARM_INTERVAL_MINUTES`:
 
@@ -323,7 +324,7 @@ The `read`, `search`, `grep`, `frontmatter`, `config`, and custom-source `plugin
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
-optsidian search TODO format=json
+optsidian search TODO format=json debug=true
 optsidian grep query=TODO format=json
 optsidian frontmatter read path=note.md format=json
 optsidian config list format=json

@@ -21,7 +21,7 @@ import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
 import { runSearchAnalyzerDaemon } from "./core/search-analyzer.js";
 import { runSearchIndexDaemon, searchIndexDaemonCommand } from "./core/search-index-daemon.js";
-import { parseSearchReconcileReason, reconcileSearchIndex, searchReconcileCommand } from "./core/search.js";
+import { parseSearchReconcileReason, reconcileSearchIndex, searchReconcileCommand } from "./core/search/index.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
 async function main(): Promise<void> {

@@ -1262,7 +1262,7 @@ test("search ranks notes and index commands manage cache", async () => {
     }
   ]);
 
-  const { cachePaths } = await import(path.resolve("src/core/search.ts"));
+  const { cachePaths } = await import(path.resolve("src/core/search/index.ts"));
   const statusPaths = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => cachePaths(vault));
   const lockDir = path.join(statusPaths.cacheDir, "reconcile.lock");
   fs.mkdirSync(lockDir, { recursive: true });
@@ -1482,7 +1482,6 @@ test("search can use the analyzer daemon and the daemon exits after idle", async
     XDG_CACHE_HOME: cache,
     XDG_RUNTIME_DIR: runtime,
     OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
-    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
     OPTSIDIAN_ANALYZER_IDLE_MS: "50",
     OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
   };
@@ -1509,7 +1508,7 @@ test("search falls back when Kiwi analyzer daemon load exceeds the foreground ti
   const { __analyzerDaemonSocketPathForTests, resolveSearchAnalyzer, tokenizeRoutedText } = await import(
     path.resolve("src/core/search-analyzer.ts")
   );
-  const { searchVaultWithAnalyzer } = await import(path.resolve("src/core/search.ts"));
+  const { searchVaultWithAnalyzer } = await import(path.resolve("src/core/search/index.ts"));
   const { dir, vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");
@@ -1582,13 +1581,12 @@ test("search retires a mismatched analyzer daemon before retrying", async () => 
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   const runtime = path.join(dir, "runtime");
   fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 방식을 개선한다.\n");
+  fs.writeFileSync(path.join(vault, "Notes", "search-ja.md"), "# メモ\n\n検索方式を改善する。\n");
   const searchEnv = {
     ...env,
     XDG_CACHE_HOME: cache,
     XDG_RUNTIME_DIR: runtime,
     OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
-    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
     OPTSIDIAN_ANALYZER_IDLE_MS: "50",
     OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
   };
@@ -1627,10 +1625,10 @@ test("search retires a mismatched analyzer daemon before retrying", async () => 
   });
 
   try {
-    const result = await runAsync(["search", "query=한국어 검색", "format=json"], { env: searchEnv });
+    const result = await runAsync(["search", "query=検索", "format=json"], { env: searchEnv });
     assert.equal(result.status, 0, result.stderr);
     const payload = JSON.parse(result.stdout);
-    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ko.md"]);
+    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
     assert.equal(staleRequests, 1);
 
     const deadline = Date.now() + 2000;
@@ -1723,7 +1721,7 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-new.md"]);
 
-  const { cachePaths } = await import(path.resolve("src/core/search.ts"));
+  const { cachePaths } = await import(path.resolve("src/core/search/index.ts"));
   const manifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
     JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"))
   );
