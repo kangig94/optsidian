@@ -79,6 +79,7 @@ export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
 const ROUTER_VERSION = "script-router-v2";
 const INTL_ANALYZER_VERSION = "intl-segmenter-latin-v2";
+const KIWI_TOKEN_FILTER_VERSION = "kiwi-pos-filter-v1";
 const DAEMON_PROTOCOL_VERSION = "v3";
 const ANALYZER_DAEMON_IDENTITY_MISMATCH = "Analyzer daemon identity does not match the active search analyzer";
 const DAEMON_RUNTIME_IDENTITY = stableHash(
@@ -86,6 +87,7 @@ const DAEMON_RUNTIME_IDENTITY = stableHash(
     protocol: DAEMON_PROTOCOL_VERSION,
     router: ROUTER_VERSION,
     intl: INTL_ANALYZER_VERSION,
+    kiwiFilter: KIWI_TOKEN_FILTER_VERSION,
     node: process.versions.node,
     icu: process.versions.icu ?? null
   })
@@ -714,7 +716,8 @@ function kiwiRouterIdentity(
 ): SearchAnalyzerIdentity {
   return {
     ...routerIdentity(declaredAnalyzers, activeAnalyzers),
-    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`
+    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`,
+    optionsHash: KIWI_TOKEN_FILTER_VERSION
   };
 }
 

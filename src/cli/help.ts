@@ -40,8 +40,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   search: {
     summary: "Ranked note search over title, tags, aliases, headings, path, and body",
     usage: [
-      "optsidian search <query> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [format=text|json]",
-      "optsidian search query=<text> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [format=text|json]",
+      "optsidian search <query> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
+      "optsidian search query=<text> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
       "optsidian search tag=<tag>[,<tag>...] [path=<dir|file>] [limit=<n>] [format=text|json]"
     ],
     options: [
@@ -51,6 +51,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "path=<dir|file>", description: "Vault-relative search scope" },
       { name: "field=<field,...>", description: "Restrict query matching to title, aliases, tags, headings, path, or body" },
       { name: "limit=<n>", description: "Maximum notes to return (default: 10)" },
+      { name: "debug=true", description: "Include analyzer tokens and ranking diagnostics in JSON output" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [

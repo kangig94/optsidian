@@ -1193,6 +1193,16 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.deepEqual(Object.keys(payload.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
+  result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(result.status, 0, result.stderr);
+  const debugPayload = JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok"]);
+  assert.deepEqual(debugPayload.debug.query.terms, ["project", "alpha"]);
+  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v1");
+  assert.equal(debugPayload.matches[0].debug.bucket, "exact");
+  assert.deepEqual(debugPayload.matches[0].debug.queryTerms, ["project", "alpha"]);
+  assert.equal(typeof debugPayload.matches[0].debug.oramaScore, "number");
+
   result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /1\. Projects\/Alpha\.md/);

@@ -1,4 +1,4 @@
-import { getValue, parsePositiveInt, type ParsedArgs } from "../args.js";
+import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderSearch } from "../render.js";
 import { searchVault } from "../../core/search.js";
 import { pokeSearchIndexDaemonWarmRecent } from "../../core/search-index-daemon.js";
@@ -10,7 +10,8 @@ export async function runSearch(args: ParsedArgs, vaultRoot: string): Promise<vo
     path: getValue(args, "path"),
     tags: parseList(getValue(args, "tag")),
     fields: parseList(getValue(args, "field")),
-    limit: parsePositiveInt(getValue(args, "limit"), "limit")
+    limit: parsePositiveInt(getValue(args, "limit"), "limit"),
+    debug: hasFlag(args, "debug")
   });
   process.stdout.write(renderSearch(result, parseFormat(getValue(args, "format"))));
   pokeSearchIndexDaemonWarmRecent();

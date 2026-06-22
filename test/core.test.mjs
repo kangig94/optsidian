@@ -122,6 +122,7 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
   const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {});
   assert.deepEqual(analyzer.identity.declaredAnalyzers, ["ko"]);
   assert.deepEqual(analyzer.identity.activeAnalyzers, ["ko"]);
+  assert.equal(analyzer.identity.optionsHash, "kiwi-pos-filter-v1");
   assert.ok((await analyzer.tokenize("한국어 검색")).includes("한국어"));
   const envOverSettings = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }, { search: { extraLangs: ["ko"] } });
   assert.deepEqual(envOverSettings.identity.declaredAnalyzers, []);
@@ -131,6 +132,31 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
     analyzerIdentityKey({ runtime: "daemon", model: "m", node: "20", version: "1", name: "custom" })
   );
   assert.throws(() => parseDeclaredSearchAnalyzers("ja"), /registered analyzers: ko/);
+});
+
+test("kiwi search token filter drops Korean function tokens", async () => {
+  const { __filterKiwiTokensForTests } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+
+  assert.deepEqual(__filterKiwiTokensForTests([
+    { str: "보행", tag: "NNG" },
+    { str: "을", tag: "JKO" },
+    { str: "하", tag: "XSV" },
+    { str: "다", tag: "EF" }
+  ]), ["보행"]);
+  assert.deepEqual(__filterKiwiTokensForTests([
+    { str: "만들", tag: "VV" },
+    { str: "었다", tag: "EP" }
+  ]), ["만들"]);
+  assert.deepEqual(__filterKiwiTokensForTests([
+    { str: "아니", tag: "VCN" },
+    { str: "보", tag: "VX" },
+    { str: "좋", tag: "VA" }
+  ]), ["좋"]);
+  assert.deepEqual(__filterKiwiTokensForTests([
+    { str: "API", tag: "SL" },
+    { str: "42", tag: "SN" },
+    { str: ".", tag: "SF" }
+  ]), ["API", "42"]);
 });
 
 test("kiwi analyzer manager supports non-blocking and blocking modes", async () => {
@@ -978,6 +1004,13 @@ The rollout is blocked by review.
     assert.deepEqual(Object.keys(result.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
     assert.match(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /Rollout|project|alpha/i);
     assert.doesNotMatch(result.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
+    const debugResult = await searchVault(vault, { query: "project alpha", limit: 1, debug: true });
+    assert.deepEqual(Object.keys(debugResult).sort(), ["command", "debug", "matches", "ok"]);
+    assert.deepEqual(debugResult.debug.query.terms, ["project", "alpha"]);
+    assert.equal(debugResult.debug.reranker, "rrf-metadata-v1");
+    assert.equal(debugResult.matches[0].debug.bucket, "exact");
+    assert.deepEqual(debugResult.matches[0].debug.queryTerms, ["project", "alpha"]);
+    assert.equal(typeof debugResult.matches[0].debug.oramaScore, "number");
     const analysisCache = JSON.parse(fs.readFileSync(cachePaths(vault).analysisPath, "utf8"));
     assert.equal(analysisCache.analyzer.name, "router");
     assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-latin-v2");

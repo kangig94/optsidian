@@ -27,6 +27,8 @@ import { decodeUtf8, splitText } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
 import { vaultAccessStatus } from "./vault-access.js";
 import type {
+  SearchAnalyzerDebug,
+  SearchDebugInfo,
   SearchField,
   SearchIndexMutationResult,
   SearchIndexProjectionStatus,
@@ -228,6 +230,7 @@ type NormalizedSearchParams = {
   tags?: string[];
   fields?: SearchField[];
   limit: number;
+  debug: boolean;
 };
 
 type ManifestDiff = {
@@ -410,7 +413,7 @@ async function searchVaultWithLeasedAnalyzer(
   const projectionResults = await Promise.all(projectionSearches);
   const mergedHits = mergeProjectionHits(projectionResults.flat());
   if (search.query && mergedHits.length === 0 && projectionResults.every((hits) => hits.length === 0)) {
-    return searchResult([], plan.warnings);
+    return searchResult([], plan.warnings, search.debug ? searchDebugInfo(search, plan.projection, mergedHits) : undefined);
   }
 
   const sourceByPath = new Map(mergedHits.map((hit) => [hit.document.path, hit]));
@@ -428,23 +431,81 @@ async function searchVaultWithLeasedAnalyzer(
 
   const withSnippets = await Promise.all(matches.map(async (match) => {
     const source = sourceByPath.get(match.path);
+    const matchDebug = search.debug && source ? searchMatchDebug(source, isRankedCandidate(match) ? match : undefined) : undefined;
     return {
       path: match.path,
       title: match.title,
       tags: match.tags,
-      snippets: await snippetsForDocument(vaultRoot, match.path, search.query, source?.queryTerms ?? rankingQueryTerms, source?.analyzer ?? plan.projection.analyzer)
+      snippets: await snippetsForDocument(vaultRoot, match.path, search.query, source?.queryTerms ?? rankingQueryTerms, source?.analyzer ?? plan.projection.analyzer),
+      ...(matchDebug ? { debug: matchDebug } : {})
     };
   }));
 
-  return searchResult(withSnippets, plan.warnings);
+  return searchResult(withSnippets, plan.warnings, search.debug ? searchDebugInfo(search, plan.projection, mergedHits) : undefined);
 }
 
-function searchResult(matches: SearchMatch[], warnings: string[] = []): SearchResult {
+function searchResult(matches: SearchMatch[], warnings: string[] = [], debug?: SearchDebugInfo): SearchResult {
   return {
     ok: true,
     command: "search",
     matches,
+    ...(debug ? { debug } : {}),
     ...(warnings.length > 0 ? { warnings } : {})
+  };
+}
+
+function searchDebugInfo(search: NormalizedSearchParams, projection: SearchProjection, hits: SearchProjectionHit[]): SearchDebugInfo {
+  return {
+    ...(search.query ? { query: { raw: search.query, terms: firstQueryTerms(hits) } } : {}),
+    projection: {
+      source: searchDebugProjectionSource(hits),
+      tokenizerTier: projection.manifest.tokenizerTier,
+      documents: projection.manifest.documents,
+      files: Object.keys(projection.manifest.files).length
+    },
+    analyzer: analyzerDebugInfo(projection.manifest.analyzer),
+    candidates: hits.length,
+    ...(search.query ? { reranker: "rrf-metadata-v1" as const } : {})
+  };
+}
+
+function searchMatchDebug(hit: SearchProjectionHit, rank: RankedCandidate | undefined): NonNullable<SearchMatch["debug"]> {
+  return {
+    source: hit.source,
+    queryTerms: hit.queryTerms,
+    analyzer: analyzerDebugInfo(hit.analyzer.identity),
+    ...(Number.isFinite(hit.score) ? { oramaScore: hit.score } : {}),
+    ...(rank
+      ? {
+          rerankScore: rank.score,
+          baseRank: rank.baseRank,
+          bucket: rankBucketName(rank.bucket),
+          exactPriority: nullableRankPriority(rank.exactPriority),
+          phrasePriority: nullableRankPriority(rank.phrasePriority),
+          coverageTerms: rank.coverageTerms,
+          coverageFieldScore: rank.coverageFieldScore
+        }
+      : {})
+  };
+}
+
+function searchDebugProjectionSource(hits: SearchProjectionHit[]): SearchDebugInfo["projection"]["source"] {
+  if (hits.length === 0) return "none";
+  const sources = new Set(hits.map((hit) => hit.source));
+  if (sources.size > 1) return "mixed";
+  return hits[0]?.source ?? "none";
+}
+
+function analyzerDebugInfo(identity: SearchAnalyzerIdentity): SearchAnalyzerDebug {
+  return {
+    name: identity.name,
+    version: identity.version,
+    ...(identity.baseline ? { baseline: identity.baseline } : {}),
+    ...(identity.runtime ? { runtime: identity.runtime } : {}),
+    ...(identity.model ? { model: identity.model } : {}),
+    ...(identity.optionsHash ? { optionsHash: identity.optionsHash } : {}),
+    ...(identity.declaredAnalyzers ? { declaredAnalyzers: [...identity.declaredAnalyzers] } : {}),
+    ...(identity.activeAnalyzers ? { activeAnalyzers: [...identity.activeAnalyzers] } : {})
   };
 }
 
@@ -2032,7 +2093,8 @@ function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {
     path: params.path,
     tags,
     fields,
-    limit: params.limit ?? 10
+    limit: params.limit ?? 10,
+    debug: params.debug === true
   };
 }
 
@@ -2204,6 +2266,21 @@ function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): nu
   if (left.bucket !== right.bucket) return left.bucket - right.bucket;
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
+}
+
+function isRankedCandidate(match: { path: string }): match is RankedCandidate {
+  return "baseRank" in match && "bucket" in match;
+}
+
+function rankBucketName(bucket: number): NonNullable<SearchMatch["debug"]>["bucket"] {
+  if (bucket === RANK_BUCKET.exact) return "exact";
+  if (bucket === RANK_BUCKET.phrase) return "phrase";
+  if (bucket === RANK_BUCKET.coverage) return "coverage";
+  return "base";
+}
+
+function nullableRankPriority(priority: number): number | null {
+  return Number.isFinite(priority) ? priority : null;
 }
 
 function compareTagOnlyMatches(left: { path: string }, right: { path: string }): number {

@@ -30,6 +30,7 @@ export type LoadKiwiAnalyzerOptions = {
 
 type KiwiTokenInfo = {
   str?: string;
+  tag?: string;
 };
 
 type KiwiWasmModule = {
@@ -55,9 +56,47 @@ type KiwiApi = {
 
 const initKiwi = resolveKiwiWasmInitializer(initKiwiModule as unknown as KiwiWasmInitializerImport);
 const KIWI_MATCH_ALL_WITH_NORMALIZING = 8_454_207;
+const KIWI_DROPPED_TAG_PREFIXES = ["E", "J", "S"] as const;
+const KIWI_DROPPED_TAGS = new Set(["VCP", "VCN", "VX", "XPN", "XSA", "XSN", "XSV", "Z_CODA"]);
+const KIWI_CONTENT_TAG_PREFIXES = ["N", "M", "V"] as const;
+const KIWI_CONTENT_TAGS = new Set(["IC", "SL", "SH", "SN", "W_URL", "W_EMAIL", "XR"]);
+const KIWI_STOPWORDS = new Set([
+  "것",
+  "곳",
+  "수",
+  "등",
+  "및",
+  "또",
+  "더",
+  "그",
+  "이",
+  "저",
+  "하",
+  "되",
+  "있",
+  "없",
+  "같",
+  "않",
+  "위하",
+  "대하",
+  "통하",
+  "따르",
+  "의하",
+  "대한",
+  "위한",
+  "통해",
+  "그리고",
+  "그러나",
+  "하지만",
+  "또는"
+]);
 
 export function __resolveKiwiWasmInitializerForTests(imported: unknown): KiwiWasmInitializer {
   return resolveKiwiWasmInitializer(imported as KiwiWasmInitializerImport);
+}
+
+export function __filterKiwiTokensForTests(tokens: readonly KiwiTokenInfo[]): string[] {
+  return filteredKiwiTokenStrings(tokens);
 }
 
 function resolveKiwiWasmInitializer(imported: KiwiWasmInitializerImport): KiwiWasmInitializer {
@@ -88,7 +127,7 @@ export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): P
     identity: kiwiAnalyzerIdentity(),
     tokens(text: string): string[] {
       if (disposed) throw new Error("Kiwi analyzer has been disposed");
-      return loaded.tokenize(text).map((token) => token.str).filter((token): token is string => Boolean(token));
+      return filteredKiwiTokenStrings(loaded.tokenize(text));
     },
     async dispose(): Promise<void> {
       if (disposed) return;
@@ -96,6 +135,28 @@ export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): P
       await loaded.dispose();
     }
   };
+}
+
+function filteredKiwiTokenStrings(tokens: readonly KiwiTokenInfo[]): string[] {
+  const values: string[] = [];
+  for (const token of tokens) {
+    if (isSearchableKiwiToken(token)) values.push(token.str!.trim());
+  }
+  return values;
+}
+
+function isSearchableKiwiToken(token: KiwiTokenInfo): boolean {
+  const value = token.str?.trim();
+  if (!value) return false;
+  if (KIWI_STOPWORDS.has(value)) return false;
+
+  const tag = token.tag?.trim().toUpperCase();
+  if (!tag) return true;
+  if (KIWI_CONTENT_TAGS.has(tag)) return true;
+  if (KIWI_DROPPED_TAGS.has(tag)) return false;
+  if (KIWI_DROPPED_TAG_PREFIXES.some((prefix) => tag.startsWith(prefix))) return false;
+  if (KIWI_CONTENT_TAG_PREFIXES.some((prefix) => tag.startsWith(prefix))) return true;
+  return false;
 }
 
 export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {

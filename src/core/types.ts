@@ -64,6 +64,7 @@ export type SearchParams = {
   tags?: string[];
   fields?: string[];
   limit?: number;
+  debug?: boolean;
 };
 
 export type SearchField = "title" | "aliases" | "tags" | "headings" | "path" | "body";
@@ -73,17 +74,60 @@ export type SearchSnippet = {
   text: string;
 };
 
+export type SearchAnalyzerDebug = {
+  name: string;
+  version: string;
+  baseline?: string;
+  runtime?: string;
+  model?: string;
+  optionsHash?: string;
+  declaredAnalyzers?: string[];
+  activeAnalyzers?: string[];
+};
+
+export type SearchMatchDebug = {
+  source: "persisted" | "overlay";
+  queryTerms: string[];
+  analyzer: SearchAnalyzerDebug;
+  oramaScore?: number;
+  rerankScore?: number;
+  baseRank?: number;
+  bucket?: "exact" | "phrase" | "coverage" | "base";
+  exactPriority?: number | null;
+  phrasePriority?: number | null;
+  coverageTerms?: number;
+  coverageFieldScore?: number;
+};
+
 export type SearchMatch = {
   path: string;
   title: string;
   tags: string[];
   snippets: SearchSnippet[];
+  debug?: SearchMatchDebug;
+};
+
+export type SearchDebugInfo = {
+  query?: {
+    raw: string;
+    terms: string[];
+  };
+  projection: {
+    source: "persisted" | "overlay" | "mixed" | "none";
+    tokenizerTier: "intl" | "kiwi";
+    documents: number;
+    files: number;
+  };
+  analyzer: SearchAnalyzerDebug;
+  candidates: number;
+  reranker?: "rrf-metadata-v1";
 };
 
 export type SearchResult = {
   ok: true;
   command: "search";
   matches: SearchMatch[];
+  debug?: SearchDebugInfo;
   warnings?: string[];
 };
 
