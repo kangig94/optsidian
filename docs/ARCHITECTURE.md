@@ -48,7 +48,7 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 | Directory | Modification rule |
 |-----------|-------------------|
 | `src/core/*` | Pure and shared. No `process.*` I/O, no native delegation. New logic lives here so both adapters get it; adapters stay thin. |
-| `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects index contents requires bumping `SEARCH_SCHEMA_VERSION` and/or the analyzer/cache identity (see [Search](#search)). Persisted index, in-memory overlay, and live analysis must stay consistent. |
+| `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects index contents requires bumping `SEARCH_CACHE_VERSION` (see [Search](#search)). Persisted index, in-memory overlay, and live analysis must stay consistent. |
 | `src/core/kiwi/*` | Standalone. Must not import `search/*`. |
 | `src/cli/policy.ts` | The native-first policy table. Classify every new command (delegate / optimize / extend) and keep the table, its regression test, and the docs in sync. |
 | `src/mcp/tools.ts` | MCP tool registration. zod input schemas and the `destructiveHint` / `openWorldHint` annotations must match real behavior. |
@@ -111,10 +111,10 @@ verifies its SHA256 and version, installs atomically, and refreshes the MCP regi
 
 The search subsystem (`src/core/search/*`, ~5,800 LOC) is the most complex part of the codebase.
 
-- **Index identity is versioned.** `SEARCH_SCHEMA_VERSION` plus the analyzer/cache identity make
-  stale indexes detectable. Any change that alters index contents (analyzer, the `morph` / `surface`
-  / `ngram` token channels, the indexed field set, or ranking) must bump the relevant version
-  (`development.md` search-layout rules).
+- **Index identity has one cache version.** `SEARCH_CACHE_VERSION` covers the persisted Orama index,
+  manifest identity, and analysis-cache payload. During unreleased development, collapse multiple
+  incompatible edits into one bump instead of incrementing per commit. Runtime-only ranking changes
+  do not require an index/cache version bump; `index warm` can force a rebuild when needed.
 - **Three retrieval paths must agree.** A persisted on-disk index, an in-memory overlay for small
   recent diffs, and live analysis all feed results; the read-time planner selects among them and
   they must stay consistent.

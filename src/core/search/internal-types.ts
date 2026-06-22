@@ -19,8 +19,7 @@ export type SearchTokenizerTier = "intl" | "kiwi";
 export type SearchManifestMismatch = "match" | "tier-only-upgrade" | "incompatible";
 
 export type SearchManifest = {
-  identitySchemaVersion: number;
-  schemaVersion: number;
+  cacheVersion: number;
   schemaDigest: string;
   engine: string;
   optsidianVersion: string;
@@ -170,7 +169,7 @@ export type AnalysisCacheEntry = FileManifest & {
 };
 
 export type AnalysisCache = {
-  schemaVersion: number;
+  cacheVersion: number;
   analyzer: SearchAnalyzerIdentity;
   files: Record<string, AnalysisCacheEntry>;
 };
@@ -186,7 +185,7 @@ export type PersistedIndex = {
 };
 
 export type SearchIndexCommit = {
-  schemaVersion: 1;
+  cacheVersion: number;
   indexSha256: string;
   manifestSha256: string;
   writtenAt: string;
@@ -211,6 +210,7 @@ export type QueryContext = {
   phrase: string;
   phrases: string[];
   terms: string[];
+  channels: SearchTokenChannelTerms;
   allowed: Set<SearchField>;
 };
 

@@ -1,7 +1,6 @@
 import type { SearchTokenChannel } from "./analysis/index.js";
 
-export const SEARCH_IDENTITY_SCHEMA_VERSION = 3;
-export const SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION = 4;
+export const SEARCH_CACHE_VERSION = 1;
 export const SEARCH_INDEX_FILE = "search.orama";
 export const SEARCH_MANIFEST_FILE = "manifest.json";
 export const SEARCH_COMMIT_FILE = "commit.json";

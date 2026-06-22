@@ -1,9 +1,7 @@
 import fs from "node:fs";
 import { OPTSIDIAN_VERSION } from "../../version.js";
 import { analyzerIdentityKey, type SearchAnalyzerIdentity } from "./analyzer.js";
-import {
-  SEARCH_IDENTITY_SCHEMA_VERSION
-} from "./constants.js";
+import { SEARCH_CACHE_VERSION } from "./constants.js";
 import type {
   CachePaths,
   FileManifest,
@@ -15,8 +13,7 @@ import type {
 } from "./internal-types.js";
 import {
   SEARCH_ENGINE,
-  SEARCH_SCHEMA_DIGEST,
-  SEARCH_SCHEMA_VERSION
+  SEARCH_SCHEMA_DIGEST
 } from "./schema.js";
 
 export function createSearchManifest(
@@ -54,8 +51,7 @@ export function classifySearchManifestMismatch(
   if (!hasCompleteSearchManifestIdentity(manifest)) return "incompatible";
   const expected = searchManifestIdentity(analyzer);
   const structurallyCompatible =
-    manifest.identitySchemaVersion === expected.identitySchemaVersion &&
-    manifest.schemaVersion === expected.schemaVersion &&
+    manifest.cacheVersion === expected.cacheVersion &&
     manifest.schemaDigest === expected.schemaDigest &&
     manifest.engine === expected.engine &&
     manifest.optsidianVersion === expected.optsidianVersion &&
@@ -126,8 +122,7 @@ export function searchTokenizerTier(analyzer: SearchAnalyzerIdentity): SearchTok
 function searchManifestIdentity(analyzer: SearchAnalyzerIdentity): Omit<SearchManifest, "builtAt" | "documents" | "analyzer" | "files"> {
   const activeAnalyzers = normalizeAnalyzerList(analyzer.activeAnalyzers ?? []);
   return {
-    identitySchemaVersion: SEARCH_IDENTITY_SCHEMA_VERSION,
-    schemaVersion: SEARCH_SCHEMA_VERSION,
+    cacheVersion: SEARCH_CACHE_VERSION,
     schemaDigest: SEARCH_SCHEMA_DIGEST,
     engine: SEARCH_ENGINE,
     optsidianVersion: OPTSIDIAN_VERSION,
@@ -166,8 +161,7 @@ function isSearchManifest(value: unknown): value is SearchManifest {
 function hasCompleteSearchManifestIdentity(value: unknown): value is SearchManifest {
   return (
     isRecord(value) &&
-    value.identitySchemaVersion === SEARCH_IDENTITY_SCHEMA_VERSION &&
-    typeof value.schemaVersion === "number" &&
+    value.cacheVersion === SEARCH_CACHE_VERSION &&
     typeof value.schemaDigest === "string" &&
     typeof value.engine === "string" &&
     typeof value.optsidianVersion === "string" &&

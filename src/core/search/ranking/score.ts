@@ -3,6 +3,12 @@ import type { SearchField, SearchMatch } from "../../types.js";
 import { RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_WEIGHTS } from "../constants.js";
 import type { QueryContext, RankedCandidate } from "../internal-types.js";
 import { SEARCH_PROPERTIES } from "../schema.js";
+import {
+  emptySearchTokenChannels,
+  SEARCH_TOKEN_CHANNELS,
+  uniqueSearchTerms,
+  type SearchTokenChannelTerms
+} from "../analysis/index.js";
 import { metadataCoverage } from "./coverage.js";
 import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates } from "./identity.js";
 import { rankMap, rrfContribution } from "./rrf.js";
@@ -11,10 +17,10 @@ import { candidateRankSignals, EMPTY_RANK_SIGNALS, type CandidateRankSignals } f
 export function rerankCandidates(
   query: string,
   queryTerms: string[],
-  hits: Array<{ document: SearchDocument; score: number }>,
+  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
   fields?: SearchField[]
 ): RankedCandidate[] {
-  const context = queryContext(query, queryTerms, fields);
+  const context = queryContext(query, queryTerms, firstQueryChannels(hits), fields);
   const signals = candidateRankSignals(hits.map((hit) => hit.document), context);
   const candidates = hits.map((hit, index) =>
     rankedCandidate(hit.document, index + 1, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
@@ -56,7 +62,12 @@ export function compareTagOnlyMatches(left: { path: string }, right: { path: str
   return left.path.localeCompare(right.path);
 }
 
-function queryContext(query: string, queryTerms: string[], fields?: SearchField[]): QueryContext {
+function queryContext(
+  query: string,
+  queryTerms: string[],
+  queryChannels?: SearchTokenChannelTerms,
+  fields?: SearchField[]
+): QueryContext {
   const phrases = uniquePhrases([
     ...identityPhraseCandidates(query),
     ...identityPhraseCandidates(queryTerms.join(" "))
@@ -65,6 +76,7 @@ function queryContext(query: string, queryTerms: string[], fields?: SearchField[
     phrase: phrases[0] ?? "",
     phrases,
     terms: queryTerms,
+    channels: normalizedQueryChannels(queryTerms, queryChannels),
     allowed: new Set(searchFields(fields))
   };
 }
@@ -106,6 +118,25 @@ function searchFields(fields: SearchField[] | undefined): SearchField[] {
 
 function uniquePhrases(phrases: readonly string[]): string[] {
   return [...new Set(phrases.filter(Boolean))];
+}
+
+function firstQueryChannels(
+  hits: Array<{ queryChannels?: SearchTokenChannelTerms }>
+): SearchTokenChannelTerms | undefined {
+  return hits.find((hit) => hit.queryChannels)?.queryChannels;
+}
+
+function normalizedQueryChannels(
+  queryTerms: readonly string[],
+  queryChannels: SearchTokenChannelTerms | undefined
+): SearchTokenChannelTerms {
+  const channels = emptySearchTokenChannels();
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    channels[channel] = uniqueSearchTerms(queryChannels?.[channel] ?? []);
+  }
+  if (SEARCH_TOKEN_CHANNELS.some((channel) => channels[channel].length > 0)) return channels;
+  channels.morph = uniqueSearchTerms(queryTerms);
+  return channels;
 }
 
 function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {

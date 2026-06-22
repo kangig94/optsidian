@@ -3,7 +3,6 @@ import type { SearchDocument } from "./markdown.js";
 import type { SearchField } from "../types.js";
 import type { SearchTokenChannel } from "./analysis/index.js";
 
-export const SEARCH_SCHEMA_VERSION = 5;
 export const SEARCH_ENGINE = "orama";
 export const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 export const SEARCH_DB_SCHEMA = {

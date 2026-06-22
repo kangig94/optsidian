@@ -51,12 +51,20 @@ export function identityPhraseCandidates(value: string): string[] {
 
 function hasExactIdentityPhrase(value: string, phrases: readonly string[]): boolean {
   const available = new Set(identityPhraseCandidates(value));
-  return phrases.some((phrase) => available.has(phrase));
+  const compactAvailable = new Set([...available].map(compactIdentityPhrase).filter(Boolean));
+  return phrases.some((phrase) => available.has(phrase) || compactAvailable.has(compactIdentityPhrase(phrase)));
 }
 
 function containsAnyIdentityPhrase(value: string, phrases: readonly string[]): boolean {
   const candidates = identityPhraseCandidates(value);
-  return candidates.some((candidate) => phrases.some((phrase) => candidate.includes(phrase)));
+  return candidates.some((candidate) => {
+    const compactCandidate = compactIdentityPhrase(candidate);
+    return phrases.some((phrase) => candidate.includes(phrase) || compactCandidate.includes(compactIdentityPhrase(phrase)));
+  });
+}
+
+function compactIdentityPhrase(value: string): string {
+  return value.replace(/\s+/gu, "");
 }
 
 function hasExplicitTermBoundary(value: string): boolean {

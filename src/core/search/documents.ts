@@ -6,7 +6,7 @@ import { parseMarkdownNote, type ParsedMarkdownNote, type SearchDocument } from 
 import { decodeUtf8 } from "../text.js";
 import { atomicWriteFile } from "../write-file.js";
 import { searchFieldTokenTexts } from "./analysis/index.js";
-import { SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION } from "./constants.js";
+import { SEARCH_CACHE_VERSION } from "./constants.js";
 import type {
   AnalysisCache,
   AnalysisCacheEntry,
@@ -47,7 +47,7 @@ export function readAnalysisCache(paths: CachePaths, analyzer: SearchAnalyzerIde
   if (!fs.existsSync(paths.analysisPath)) return undefined;
   try {
     const parsed = JSON.parse(fs.readFileSync(paths.analysisPath, "utf8")) as AnalysisCache;
-    if (parsed.schemaVersion !== SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION) return undefined;
+    if (parsed.cacheVersion !== SEARCH_CACHE_VERSION) return undefined;
     if (analyzerIdentityKey(parsed.analyzer) !== analyzerIdentityKey(analyzer)) return undefined;
     if (!parsed.files || typeof parsed.files !== "object") return undefined;
     return parsed;
@@ -79,7 +79,7 @@ export function writeAnalysisCache(
     };
   }
   const cache: AnalysisCache = {
-    schemaVersion: SEARCH_ANALYSIS_CACHE_SCHEMA_VERSION,
+    cacheVersion: SEARCH_CACHE_VERSION,
     analyzer,
     files: nextFiles
   };

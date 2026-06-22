@@ -7,7 +7,7 @@ import {
   type SearchAnalyzer
 } from "./analyzer.js";
 import { atomicWriteFile } from "../write-file.js";
-import { SEARCH_INDEX_STALE_TIER_WARNING } from "./constants.js";
+import { SEARCH_CACHE_VERSION, SEARCH_INDEX_STALE_TIER_WARNING } from "./constants.js";
 import {
   buildDocuments,
   currentFileManifest,
@@ -226,7 +226,7 @@ function writeJsonFile(filePath: string, value: unknown, spaces?: number): strin
 
 function createSearchIndexCommit(indexRaw: string, manifestRaw: string): SearchIndexCommit {
   return {
-    schemaVersion: 1,
+    cacheVersion: SEARCH_CACHE_VERSION,
     indexSha256: sha256(indexRaw),
     manifestSha256: sha256(manifestRaw),
     writtenAt: new Date().toISOString()
@@ -245,7 +245,7 @@ function readSearchIndexCommit(paths: CachePaths): SearchIndexCommit | undefined
 function isSearchIndexCommit(value: unknown): value is SearchIndexCommit {
   return (
     isRecord(value) &&
-    value.schemaVersion === 1 &&
+    value.cacheVersion === SEARCH_CACHE_VERSION &&
     typeof value.indexSha256 === "string" &&
     typeof value.manifestSha256 === "string" &&
     typeof value.writtenAt === "string"

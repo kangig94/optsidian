@@ -42,7 +42,7 @@ function recommitSearchIndexPair(paths) {
   const indexRaw = fs.readFileSync(paths.indexPath, "utf8");
   const manifestRaw = fs.readFileSync(paths.manifestPath, "utf8");
   fs.writeFileSync(paths.commitPath, `${JSON.stringify({
-    schemaVersion: 1,
+    cacheVersion: 1,
     indexSha256: sha256(indexRaw),
     manifestSha256: sha256(manifestRaw),
     writtenAt: new Date().toISOString()
@@ -1022,14 +1022,17 @@ The rollout is blocked by review.
     assert.deepEqual(debugResult.matches[0].debug.queryTerms, ["project", "alpha"]);
     assert.equal(typeof debugResult.matches[0].debug.oramaScore, "number");
     const analysisCache = JSON.parse(fs.readFileSync(cachePaths(vault).analysisPath, "utf8"));
+    assert.equal(analysisCache.cacheVersion, 1);
+    assert.equal(analysisCache.schemaVersion, undefined);
     assert.equal(analysisCache.analyzer.name, "router");
     assert.equal(analysisCache.analyzer.baseline, "intl-segmenter-latin-v2");
     assert.deepEqual(analysisCache.analyzer.activeAnalyzers, []);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodyTokens.length > 0);
     assert.ok(analysisCache.files["Projects/Alpha.md"].tokens.bodySurfaceTokens.length > 0);
     const manifest = JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"));
-    assert.equal(manifest.identitySchemaVersion, 3);
-    assert.equal(manifest.schemaVersion, 5);
+    assert.equal(manifest.cacheVersion, 1);
+    assert.equal(manifest.identitySchemaVersion, undefined);
+    assert.equal(manifest.schemaVersion, undefined);
     assert.match(manifest.schemaDigest, /^[a-f0-9]{64}$/);
     assert.equal(manifest.tokenizerTier, "intl");
     assert.deepEqual(manifest.declaredAnalyzers, []);
@@ -1851,6 +1854,52 @@ test("core search uses Korean ngram channel for attached forms", async () => {
 
     const attachedQuery = await searchVault(vault, { query: "한국어검색", limit: 5 });
     assert.deepEqual(attachedQuery.matches.map((match) => match.path), ["Notes/search-ko.md"]);
+  });
+});
+
+test("core reranking treats compact Korean queries as spaced metadata identity", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, {
+      path: "Notes/Korean Metadata.md",
+      content: "# 정책 학습\n\nMetadata title should rank above body-only ngram hits.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Korean Body.md",
+      content: "정책 학습 내용이 본문에서 반복된다.\n정책 학습 내용이 본문에서 반복된다.\n"
+    });
+
+    const result = await searchVault(vault, { query: "정책학습", limit: 3, debug: true });
+    assert.equal(result.matches[0].path, "Notes/Korean Metadata.md");
+    assert.equal(result.matches[0].debug.bucket, "exact");
+    assert.equal(result.matches[0].debug.exactPriority, 0);
+    assert.ok(result.matches[0].debug.matchedChannels?.includes("ngram"));
+  });
+});
+
+test("core reranking uses ngram metadata coverage for compact Korean queries", async () => {
+  const vault = tempVault();
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  await withSearchProcess(cache, async () => {
+    const { searchVault, writeVaultFile } = await core();
+
+    writeVaultFile(vault, {
+      path: "Notes/Korean Metadata.md",
+      content: "# 정책과 학습\n\nMetadata title should rank above body-only ngram hits.\n"
+    });
+    writeVaultFile(vault, {
+      path: "Notes/Korean Body.md",
+      content: "정책 학습 내용이 본문에서 반복된다.\n정책 학습 내용이 본문에서 반복된다.\n"
+    });
+
+    const result = await searchVault(vault, { query: "정책학습", limit: 3, debug: true });
+    assert.equal(result.matches[0].path, "Notes/Korean Metadata.md");
+    assert.equal(result.matches[0].debug.bucket, "coverage");
+    assert.ok(result.matches[0].debug.coverageTerms > 0);
+    assert.ok(result.matches[0].debug.matchedChannels?.includes("ngram"));
   });
 });
 
