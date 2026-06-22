@@ -233,6 +233,22 @@ test("kiwi analyzer manager does not share an in-flight load across cache envs",
       },
       missingFiles: []
     }),
+    inspectWasmArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-wasm"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "manifest.json"),
+      wasmPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "kiwi-wasm.wasm"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi-wasm",
+        kiwiNlpVersion: "0.23.0",
+        sourceUrl: "test",
+        wasmSha256: "sha",
+        wasmSizeBytes: 1,
+        file: "kiwi-wasm.wasm",
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
     loadAnalyzer: async ({ env }) => {
       loadCalls.push(env.XDG_CACHE_HOME);
       if (loadCalls.length === 1) await firstLoadGate;
@@ -346,6 +362,216 @@ test("kiwi analyzer manager retires active leases before disposing old envs", as
   }
 });
 
+test("kiwi analyzer manager reports runtime status for the requested cache env", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    loadAnalyzer: async ({ env }) => ({
+      identity: {
+        engine: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: env.XDG_CACHE_HOME,
+        modelType: "cong-global"
+      },
+      tokens: (text) => [`${env.XDG_CACHE_HOME}:${text}`],
+      dispose: async () => {}
+    })
+  });
+
+  try {
+    await manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-status-a" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("검색")
+    );
+
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-status-a" }).state, "loaded");
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-status-b" }).state, "unloaded");
+  } finally {
+    await manager.close();
+  }
+});
+
+test("kiwi analyzer manager does not apply degraded state across cache envs", async () => {
+  const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const loadCalls = [];
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    inspectWasmArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-wasm"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "manifest.json"),
+      wasmPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "kiwi-wasm.wasm"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi-wasm",
+        kiwiNlpVersion: "0.23.0",
+        sourceUrl: "test",
+        wasmSha256: "sha",
+        wasmSizeBytes: 1,
+        file: "kiwi-wasm.wasm",
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    loadAnalyzer: async ({ env }) => {
+      loadCalls.push(env.XDG_CACHE_HOME);
+      if (env.XDG_CACHE_HOME === "/tmp/kiwi-degraded-a") {
+        throw new Error("simulated load failure");
+      }
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: env.XDG_CACHE_HOME,
+          modelType: "cong-global"
+        },
+        tokens: (text) => [`${env.XDG_CACHE_HOME}:${text}`],
+        dispose: async () => {}
+      };
+    }
+  });
+
+  try {
+    await assert.rejects(
+      () => manager.withAnalyzerLease(
+        { XDG_CACHE_HOME: "/tmp/kiwi-degraded-a" },
+        ["ko"],
+        { wait: true, installIfMissing: true },
+        ({ analyzer }) => analyzer.tokens("first")
+      ),
+      KiwiAnalyzerTerminalLoadError
+    );
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-degraded-a" }).state, "degraded");
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-degraded-b" }).state, "unloaded");
+
+    const second = await manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-degraded-b" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("second")
+    );
+    assert.deepEqual(second, ["/tmp/kiwi-degraded-b:second"]);
+    assert.deepEqual(loadCalls, ["/tmp/kiwi-degraded-a", "/tmp/kiwi-degraded-b"]);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("kiwi analyzer manager retries transient missing wasm failures", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  let wasmInstalled = false;
+  let attempts = 0;
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    inspectWasmArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-wasm"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "manifest.json"),
+      wasmPath: path.join(env.XDG_CACHE_HOME, "kiwi-wasm", "kiwi-wasm.wasm"),
+      installed: wasmInstalled,
+      manifest: wasmInstalled
+        ? {
+            packageId: "kiwi-wasm",
+            kiwiNlpVersion: "0.23.0",
+            sourceUrl: "test",
+            wasmSha256: "sha",
+            wasmSizeBytes: 1,
+            file: "kiwi-wasm.wasm",
+            installedAt: "2026-06-22T00:00:00.000Z"
+          }
+        : null,
+      missingFiles: wasmInstalled ? [] : ["kiwi-wasm.wasm"]
+    }),
+    loadAnalyzer: async ({ env }) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("simulated wasm download failure");
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: env.XDG_CACHE_HOME,
+          modelType: "cong-global"
+        },
+        tokens: (text) => [`${env.XDG_CACHE_HOME}:${text}`],
+        dispose: async () => {}
+      };
+    }
+  });
+
+  try {
+    await assert.rejects(
+      () => manager.withAnalyzerLease(
+        { XDG_CACHE_HOME: "/tmp/kiwi-missing-wasm" },
+        ["ko"],
+        { wait: true, installIfMissing: true },
+        ({ analyzer }) => analyzer.tokens("first")
+      ),
+      /simulated wasm download failure/
+    );
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-missing-wasm" }).state, "unloaded");
+
+    wasmInstalled = true;
+    const second = await manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-missing-wasm" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      ({ analyzer }) => analyzer.tokens("second")
+    );
+    assert.deepEqual(second, ["/tmp/kiwi-missing-wasm:second"]);
+    assert.equal(attempts, 2);
+  } finally {
+    await manager.close();
+  }
+});
+
 test("kiwi wasm binary installs at runtime instead of using a bundled wasm import", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
@@ -423,6 +649,101 @@ test("kiwi wasm install recovers stale install locks", async () => {
     __setKiwiInstallLockStaleMsForTests(undefined);
     globalThis.fetch = originalFetch;
   }
+});
+
+test("kiwi wasm install repairs corrupt installed wasm files", async () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
+  const archive = zlib.gzipSync(tarSingleFile("package/dist/kiwi-wasm.wasm", wasm));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
+    };
+  };
+  const {
+    KIWI_NLP_VERSION,
+    KIWI_WASM_FILE_NAME,
+    KIWI_WASM_NPM_TARBALL_URL,
+    KIWI_WASM_SHA256,
+    KIWI_WASM_SIZE_BYTES,
+    inspectKiwiWasmArtifact,
+    kiwiWasmDir,
+    kiwiWasmFilePath,
+    kiwiWasmManifestPath
+  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi-loader.ts"));
+  const env = { XDG_CACHE_HOME: cache };
+
+  fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
+  fs.writeFileSync(kiwiWasmFilePath(env), "corrupt wasm");
+  fs.writeFileSync(kiwiWasmManifestPath(env), `${JSON.stringify({
+    packageId: "kiwi-wasm",
+    kiwiNlpVersion: KIWI_NLP_VERSION,
+    sourceUrl: KIWI_WASM_NPM_TARBALL_URL,
+    wasmSha256: KIWI_WASM_SHA256,
+    wasmSizeBytes: KIWI_WASM_SIZE_BYTES,
+    file: KIWI_WASM_FILE_NAME,
+    installedAt: "2026-06-22T00:00:00.000Z"
+  }, null, 2)}\n`);
+
+  try {
+    const before = inspectKiwiWasmArtifact(env);
+    assert.equal(before.installed, false);
+    assert.match(before.missingFiles.join(","), /size mismatch|digest mismatch/);
+
+    const binary = await loadKiwiWasmBinary(env);
+    const after = inspectKiwiWasmArtifact(env);
+    assert.equal(binary.length, wasm.length);
+    assert.equal(sha256(binary), sha256(wasm));
+    assert.equal(after.installed, true);
+    assert.deepEqual(calls, [KIWI_WASM_NPM_TARBALL_URL]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("kiwi model inspection rejects corrupt installed model files", async () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const {
+    KIWI_MODEL_ARCHIVE_SIZE_BYTES,
+    KIWI_MODEL_FILES,
+    KIWI_MODEL_SHA256,
+    KIWI_MODEL_TYPE,
+    KIWI_MODEL_URL,
+    KIWI_MODEL_VERSION,
+    KIWI_NLP_VERSION,
+    inspectKiwiModelArtifact,
+    kiwiModelDir,
+    kiwiModelFilePath,
+    kiwiModelManifestPath
+  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  const env = { XDG_CACHE_HOME: cache };
+
+  fs.mkdirSync(kiwiModelDir(env), { recursive: true });
+  for (const fileName of KIWI_MODEL_FILES) {
+    fs.writeFileSync(kiwiModelFilePath(fileName, env), "corrupt model");
+  }
+  fs.writeFileSync(kiwiModelManifestPath(env), `${JSON.stringify({
+    packageId: "kiwi",
+    kiwiNlpVersion: KIWI_NLP_VERSION,
+    modelVersion: KIWI_MODEL_VERSION,
+    modelType: KIWI_MODEL_TYPE,
+    sourceUrl: KIWI_MODEL_URL,
+    archiveSha256: KIWI_MODEL_SHA256,
+    archiveSizeBytes: KIWI_MODEL_ARCHIVE_SIZE_BYTES,
+    files: [...KIWI_MODEL_FILES],
+    installedAt: "2026-06-22T00:00:00.000Z"
+  }, null, 2)}\n`);
+
+  const state = inspectKiwiModelArtifact(env);
+  assert.equal(state.installed, false);
+  assert.equal(state.missingFiles.length, KIWI_MODEL_FILES.length);
+  assert.match(state.missingFiles.join(","), /size mismatch/);
 });
 
 test("read caps by lines and pages without gaps", async () => {

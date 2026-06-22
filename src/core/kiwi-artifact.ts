@@ -33,6 +33,18 @@ export const KIWI_MODEL_FILES = [
 
 export type KiwiModelFileName = (typeof KIWI_MODEL_FILES)[number];
 
+const KIWI_MODEL_FILE_SIZE_BYTES: Record<KiwiModelFileName, number> = {
+  "sj.morph": 8_462_892,
+  "default.dict": 3_090_954,
+  "dialect.dict": 644,
+  "multi.dict": 12_064_440,
+  "typo.dict": 395,
+  "combiningRule.txt": 3_584,
+  "cong.mdl": 75_667_563,
+  "extract.mdl": 17_370,
+  "nounchr.mdl": 9_734_234
+};
+
 export type KiwiModelArtifactManifest = {
   packageId: "kiwi";
   kiwiNlpVersion: string;
@@ -142,7 +154,7 @@ export function kiwiWasmFilePath(env: NodeJS.ProcessEnv = process.env): string {
 
 export function inspectKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): KiwiModelArtifactState {
   const manifest = readInstalledManifest(env);
-  const missingFiles = KIWI_MODEL_FILES.filter((fileName) => !isFile(kiwiModelFilePath(fileName, env)));
+  const missingFiles = inspectKiwiModelFiles(env);
   return {
     targetDir: kiwiModelDir(env),
     manifestPath: kiwiModelManifestPath(env),
@@ -154,7 +166,7 @@ export function inspectKiwiModelArtifact(env: NodeJS.ProcessEnv = process.env): 
 
 export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): KiwiWasmArtifactState {
   const manifest = readInstalledWasmManifest(env);
-  const missingFiles = isFile(kiwiWasmFilePath(env)) ? [] : [KIWI_WASM_FILE_NAME];
+  const missingFiles = inspectKiwiWasmFile(env);
   return {
     targetDir: kiwiWasmDir(env),
     manifestPath: kiwiWasmManifestPath(env),
@@ -379,6 +391,43 @@ function extractKiwiModelFiles(archiveBuffer: Buffer): Map<KiwiModelFileName, Bu
   return files;
 }
 
+function inspectKiwiModelFiles(env: NodeJS.ProcessEnv): string[] {
+  const missingFiles: string[] = [];
+  for (const fileName of KIWI_MODEL_FILES) {
+    const modelPath = kiwiModelFilePath(fileName, env);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(modelPath);
+    } catch {
+      missingFiles.push(fileName);
+      continue;
+    }
+    if (!stat.isFile()) {
+      missingFiles.push(fileName);
+      continue;
+    }
+    if (stat.size !== KIWI_MODEL_FILE_SIZE_BYTES[fileName]) {
+      missingFiles.push(`${fileName} (size mismatch)`);
+    }
+  }
+  return missingFiles;
+}
+
+function inspectKiwiWasmFile(env: NodeJS.ProcessEnv): string[] {
+  const wasmPath = kiwiWasmFilePath(env);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(wasmPath);
+  } catch {
+    return [KIWI_WASM_FILE_NAME];
+  }
+  if (!stat.isFile()) return [KIWI_WASM_FILE_NAME];
+  if (stat.size !== KIWI_WASM_SIZE_BYTES) return [`${KIWI_WASM_FILE_NAME} (size mismatch)`];
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(wasmPath)).digest("hex");
+  if (digest !== KIWI_WASM_SHA256) return [`${KIWI_WASM_FILE_NAME} (digest mismatch)`];
+  return [];
+}
+
 function writeWasmFileAtomic(env: NodeJS.ProcessEnv, wasm: Buffer): void {
   const targetDir = kiwiWasmDir(env);
   const parentDir = path.dirname(targetDir);
@@ -501,14 +550,6 @@ function tarFieldToString(buffer: Buffer): string {
 function tarFieldToNumber(buffer: Buffer): number {
   const raw = tarFieldToString(buffer);
   return raw === "" ? 0 : Number.parseInt(raw, 8);
-}
-
-function isFile(filePath: string): boolean {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,5 +1,11 @@
 import type { SearchDeclaredAnalyzer } from "./search-analyzer.js";
-import { inspectKiwiModelArtifact, type KiwiModelArtifactState } from "./kiwi-artifact.js";
+import {
+  inspectKiwiModelArtifact,
+  inspectKiwiWasmArtifact,
+  kiwiDataDir,
+  type KiwiModelArtifactState,
+  type KiwiWasmArtifactState
+} from "./kiwi-artifact.js";
 import type { KiwiAnalyzer, KiwiAnalyzerIdentity } from "./kiwi-loader.js";
 
 export type KiwiManagerStatus =
@@ -44,11 +50,13 @@ type KiwiManagerOptions = {
   idleTtlMs?: number;
   loadAnalyzer?: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
   inspectModelArtifact?: (env: NodeJS.ProcessEnv) => KiwiModelArtifactState;
+  inspectWasmArtifact?: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
 };
 
 type DegradedState = {
+  envKey: string;
   reason: string;
-  modelStateKey: string;
+  artifactStateKey: string;
 };
 
 const KIWI_IDLE_TTL_MS = 5 * 60 * 1000;
@@ -68,6 +76,7 @@ export class KiwiAnalyzerManager {
   private readonly idleTtlMs: number;
   private readonly loadAnalyzer: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
   private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv) => KiwiModelArtifactState;
+  private readonly inspectWasmArtifact: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
   private activeHandle: ActiveKiwiHandle | null = null;
   private loadPromise: Promise<ActiveKiwiHandle> | null = null;
   private loadPromiseKey: string | null = null;
@@ -82,14 +91,13 @@ export class KiwiAnalyzerManager {
       return loadKiwiAnalyzer(loadOptions);
     });
     this.inspectModelArtifact = options.inspectModelArtifact ?? inspectKiwiModelArtifact;
+    this.inspectWasmArtifact = options.inspectWasmArtifact ?? inspectKiwiWasmArtifact;
   }
 
   status(env: NodeJS.ProcessEnv = process.env): KiwiManagerStatus {
+    const key = envKey(env);
     const model = this.inspectModelArtifact(env);
-    if (this.loadPromise) {
-      return { state: "loading", leaseCount: this.activeHandle?.leaseCount ?? 0, model };
-    }
-    if (this.activeHandle && !this.activeHandle.closed) {
+    if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return {
         state: "loaded",
         leaseCount: this.activeHandle.leaseCount,
@@ -97,7 +105,10 @@ export class KiwiAnalyzerManager {
         identity: this.activeHandle.analyzer.identity
       };
     }
-    if (this.degraded) {
+    if (this.loadPromise && this.loadPromiseKey === key) {
+      return { state: "loading", leaseCount: 0, model };
+    }
+    if (this.degraded && this.degraded.envKey === key) {
       return {
         state: "degraded",
         leaseCount: 0,
@@ -143,9 +154,10 @@ export class KiwiAnalyzerManager {
   ): Promise<KiwiLease> {
     const normalized = normalizeDeclaredAnalyzers(declaredAnalyzers);
     if (!normalized.includes("ko")) return noopLease(normalized);
+    const key = envKey(env);
 
     const model = this.inspectModelArtifact(env);
-    if (this.degraded && model.installed && modelStateKey(model) !== this.degraded.modelStateKey) {
+    if (this.degraded && this.degraded.envKey === key && (!model.installed || artifactStateKey(model, this.inspectWasmArtifact(env)) !== this.degraded.artifactStateKey)) {
       this.degraded = null;
     }
 
@@ -155,7 +167,7 @@ export class KiwiAnalyzerManager {
     }
 
     if (!options.wait) return noopLease(withoutKiwi(normalized));
-    if (this.degraded) return noopLease(withoutKiwi(normalized));
+    if (this.degraded && this.degraded.envKey === key) return noopLease(withoutKiwi(normalized));
 
     const handle = await this.ensureLoaded(env, options.installIfMissing);
     return this.leaseHandle(handle, normalized);
@@ -209,10 +221,12 @@ export class KiwiAnalyzerManager {
       return handle;
     } catch (error) {
       const model = this.inspectModelArtifact(env);
-      if (model.installed) {
+      const wasm = this.inspectWasmArtifact(env);
+      if (model.installed && wasm.installed) {
         this.degraded = {
+          envKey: key,
           reason: errorMessage(error),
-          modelStateKey: modelStateKey(model)
+          artifactStateKey: artifactStateKey(model, wasm)
         };
         throw new KiwiAnalyzerTerminalLoadError(`Kiwi analyzer load failed: ${errorMessage(error)}`, error);
       }
@@ -294,12 +308,21 @@ function withoutKiwi(values: readonly SearchDeclaredAnalyzer[]): SearchDeclaredA
 }
 
 function envKey(env: NodeJS.ProcessEnv): string {
-  return env.XDG_CACHE_HOME ?? "";
+  return kiwiDataDir(env);
 }
 
 function modelStateKey(state: KiwiModelArtifactState): string {
   if (!state.installed || !state.manifest) return `missing:${state.missingFiles.join(",")}`;
   return `${state.manifest.kiwiNlpVersion}:${state.manifest.modelVersion}:${state.manifest.archiveSha256}:${state.manifest.installedAt}`;
+}
+
+function wasmStateKey(state: KiwiWasmArtifactState): string {
+  if (!state.installed || !state.manifest) return `missing:${state.missingFiles.join(",")}`;
+  return `${state.manifest.kiwiNlpVersion}:${state.manifest.wasmSha256}:${state.manifest.installedAt}`;
+}
+
+function artifactStateKey(model: KiwiModelArtifactState, wasm: KiwiWasmArtifactState): string {
+  return `model:${modelStateKey(model)}|wasm:${wasmStateKey(wasm)}`;
 }
 
 function errorMessage(error: unknown): string {
