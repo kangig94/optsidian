@@ -273,6 +273,79 @@ test("kiwi analyzer manager does not share an in-flight load across cache envs",
   }
 });
 
+test("kiwi analyzer manager retires active leases before disposing old envs", async () => {
+  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, "src/core/kiwi-manager.ts"));
+  const loadCalls = [];
+  const disposals = [];
+  const manager = new KiwiAnalyzerManager({
+    inspectModelArtifact: (env) => ({
+      targetDir: path.join(env.XDG_CACHE_HOME, "kiwi-model"),
+      manifestPath: path.join(env.XDG_CACHE_HOME, "kiwi-model", "manifest.json"),
+      installed: true,
+      manifest: {
+        packageId: "kiwi",
+        kiwiNlpVersion: "0.23.0",
+        modelVersion: "0.23.0",
+        modelType: "cong-global",
+        sourceUrl: "test",
+        archiveSha256: "sha",
+        archiveSizeBytes: 1,
+        files: [],
+        installedAt: "2026-06-22T00:00:00.000Z"
+      },
+      missingFiles: []
+    }),
+    loadAnalyzer: async ({ env }) => {
+      const key = env.XDG_CACHE_HOME;
+      loadCalls.push(key);
+      let disposed = false;
+      return {
+        identity: {
+          engine: "kiwi",
+          kiwiNlpVersion: "0.23.0",
+          modelVersion: key,
+          modelType: "cong-global"
+        },
+        tokens: (text) => {
+          if (disposed) throw new Error(`${key} was disposed while leased`);
+          return [`${key}:${text}`];
+        },
+        dispose: async () => {
+          if (disposed) return;
+          disposed = true;
+          disposals.push(key);
+        }
+      };
+    }
+  });
+
+  try {
+    const first = manager.withAnalyzerLease(
+      { XDG_CACHE_HOME: "/tmp/kiwi-a" },
+      ["ko"],
+      { wait: true, installIfMissing: true },
+      async ({ analyzer }) => {
+        const second = manager.withAnalyzerLease(
+          { XDG_CACHE_HOME: "/tmp/kiwi-b" },
+          ["ko"],
+          { wait: true, installIfMissing: true },
+          ({ analyzer: secondAnalyzer }) => secondAnalyzer.tokens("second")
+        );
+        while (loadCalls.length < 2) await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(analyzer.tokens("still-active"), ["/tmp/kiwi-a:still-active"]);
+        assert.deepEqual(disposals, []);
+        assert.deepEqual(await second, ["/tmp/kiwi-b:second"]);
+        return analyzer.tokens("done");
+      }
+    );
+
+    assert.deepEqual(await first, ["/tmp/kiwi-a:done"]);
+    assert.deepEqual(disposals, ["/tmp/kiwi-a"]);
+  } finally {
+    await manager.close();
+  }
+});
+
 test("kiwi wasm binary installs at runtime instead of using a bundled wasm import", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));

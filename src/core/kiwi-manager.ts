@@ -37,6 +37,7 @@ type ActiveKiwiHandle = {
   envKey: string;
   leaseCount: number;
   closed: boolean;
+  disposed: boolean;
 };
 
 type KiwiManagerOptions = {
@@ -132,11 +133,7 @@ export class KiwiAnalyzerManager {
   async close(): Promise<void> {
     this.clearIdleTimer();
     const handle = this.activeHandle;
-    if (handle && !handle.closed) {
-      handle.closed = true;
-      await handle.analyzer.dispose();
-    }
-    this.activeHandle = null;
+    if (handle) await this.disposeHandle(handle);
   }
 
   private async acquire(
@@ -199,18 +196,15 @@ export class KiwiAnalyzerManager {
 
   private async loadFresh(env: NodeJS.ProcessEnv, key: string, installIfMissing: boolean): Promise<ActiveKiwiHandle> {
     try {
-      if (this.activeHandle && !this.activeHandle.closed) {
-        this.activeHandle.closed = true;
-        await this.activeHandle.analyzer.dispose();
-      }
       const analyzer = await this.loadAnalyzer({ env, installIfMissing });
       const handle: ActiveKiwiHandle = {
         analyzer,
         envKey: key,
         leaseCount: 0,
-        closed: false
+        closed: false,
+        disposed: false
       };
-      this.activeHandle = handle;
+      await this.replaceActiveHandle(handle);
       this.degraded = null;
       return handle;
     } catch (error) {
@@ -237,21 +231,41 @@ export class KiwiAnalyzerManager {
         if (released) return;
         released = true;
         handle.leaseCount = Math.max(0, handle.leaseCount - 1);
-        if (handle.leaseCount === 0 && this.activeHandle === handle && !handle.closed) {
-          this.scheduleIdleEviction(handle);
+        if (handle.leaseCount === 0) {
+          if (handle.closed || this.activeHandle !== handle) {
+            await this.disposeHandle(handle);
+          } else {
+            this.scheduleIdleEviction(handle);
+          }
         }
       }
     };
+  }
+
+  private async replaceActiveHandle(next: ActiveKiwiHandle): Promise<void> {
+    const previous = this.activeHandle;
+    this.activeHandle = next;
+    if (!previous || previous === next || previous.disposed) return;
+    if (previous.leaseCount > 0) {
+      previous.closed = true;
+      return;
+    }
+    await this.disposeHandle(previous);
+  }
+
+  private async disposeHandle(handle: ActiveKiwiHandle): Promise<void> {
+    if (handle.disposed) return;
+    handle.closed = true;
+    handle.disposed = true;
+    await handle.analyzer.dispose();
+    if (this.activeHandle === handle) this.activeHandle = null;
   }
 
   private scheduleIdleEviction(handle: ActiveKiwiHandle): void {
     this.clearIdleTimer();
     this.idleTimer = setTimeout(() => {
       if (handle.leaseCount > 0 || this.activeHandle !== handle || handle.closed) return;
-      handle.closed = true;
-      void handle.analyzer.dispose().finally(() => {
-        if (this.activeHandle === handle) this.activeHandle = null;
-      });
+      void this.disposeHandle(handle);
     }, this.idleTtlMs);
     this.idleTimer.unref();
   }
