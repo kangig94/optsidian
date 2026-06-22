@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import initKiwiModule from "kiwi-nlp/dist/build/kiwi-wasm.js";
 import {
   KIWI_MODEL_TYPE,
@@ -7,7 +6,7 @@ import {
   ensureKiwiModelArtifact,
   ensureKiwiWasmArtifact,
   readVerifiedKiwiModelFiles,
-  kiwiWasmFilePath,
+  readVerifiedKiwiWasmBinary,
   type KiwiModelFileName
 } from "./kiwi-artifact.js";
 
@@ -109,9 +108,9 @@ export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
 }
 
 export async function loadKiwiWasmBinary(env: NodeJS.ProcessEnv = process.env): Promise<Uint8Array> {
-  const installed = await ensureKiwiWasmArtifact(env);
+  const installed = await ensureKiwiWasmArtifact(env, { verifyFile: "metadata" });
   if (installed.status === "error") throw new Error(installed.message);
-  return new Uint8Array(Buffer.from(fs.readFileSync(kiwiWasmFilePath(env))));
+  return readLoadableWasmBinary(env);
 }
 
 async function readLoadableModelFiles(env: NodeJS.ProcessEnv, repairIfInvalid: boolean): Promise<Record<KiwiModelFileName, Uint8Array>> {
@@ -122,6 +121,16 @@ async function readLoadableModelFiles(env: NodeJS.ProcessEnv, repairIfInvalid: b
     const installed = await ensureKiwiModelArtifact(env, { forceInstall: true });
     if (installed.status === "error") throw new Error(installed.message);
     return readVerifiedKiwiModelFiles(env);
+  }
+}
+
+async function readLoadableWasmBinary(env: NodeJS.ProcessEnv): Promise<Uint8Array> {
+  try {
+    return readVerifiedKiwiWasmBinary(env);
+  } catch {
+    const installed = await ensureKiwiWasmArtifact(env, { forceInstall: true });
+    if (installed.status === "error") throw new Error(installed.message);
+    return readVerifiedKiwiWasmBinary(env);
   }
 }
 

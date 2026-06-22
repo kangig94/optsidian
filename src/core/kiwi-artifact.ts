@@ -93,6 +93,14 @@ export type KiwiWasmArtifactState = {
   missingFiles: string[];
 };
 
+export type KiwiWasmArtifactInspectOptions = {
+  verifyFile?: "digest" | "metadata";
+};
+
+export type KiwiWasmArtifactEnsureOptions = KiwiWasmArtifactInspectOptions & {
+  forceInstall?: boolean;
+};
+
 export type KiwiModelArtifactInstallResult =
   | {
       status: "installed" | "already_installed";
@@ -184,9 +192,12 @@ export function readVerifiedKiwiModelFiles(env: NodeJS.ProcessEnv = process.env)
   return files;
 }
 
-export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): KiwiWasmArtifactState {
+export function inspectKiwiWasmArtifact(
+  env: NodeJS.ProcessEnv = process.env,
+  options: KiwiWasmArtifactInspectOptions = {}
+): KiwiWasmArtifactState {
   const manifest = readInstalledWasmManifest(env);
-  const missingFiles = inspectKiwiWasmFile(env);
+  const missingFiles = inspectKiwiWasmFile(env, options.verifyFile ?? "digest");
   return {
     targetDir: kiwiWasmDir(env),
     manifestPath: kiwiWasmManifestPath(env),
@@ -195,6 +206,24 @@ export function inspectKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): K
     manifest,
     missingFiles
   };
+}
+
+export function readVerifiedKiwiWasmBinary(env: NodeJS.ProcessEnv = process.env): Uint8Array {
+  const wasmPath = kiwiWasmFilePath(env);
+  let content: Buffer;
+  try {
+    content = fs.readFileSync(wasmPath);
+  } catch (error) {
+    throw new RuntimeError(`Kiwi wasm file is not readable: ${errorMessage(error)}`);
+  }
+  const digest = kiwiWasmDigest(content);
+  if (content.length !== KIWI_WASM_SIZE_BYTES) {
+    throw new RuntimeError(`Kiwi wasm size mismatch: expected ${KIWI_WASM_SIZE_BYTES}, got ${content.length}`);
+  }
+  if (digest !== KIWI_WASM_SHA256) {
+    throw new RuntimeError(`Kiwi wasm digest mismatch: expected ${KIWI_WASM_SHA256}, got ${digest}`);
+  }
+  return content;
 }
 
 export async function ensureKiwiModelArtifact(
@@ -229,20 +258,25 @@ export async function ensureKiwiModelArtifact(
   }
 }
 
-export async function ensureKiwiWasmArtifact(env: NodeJS.ProcessEnv = process.env): Promise<KiwiWasmArtifactInstallResult> {
+export async function ensureKiwiWasmArtifact(
+  env: NodeJS.ProcessEnv = process.env,
+  options: KiwiWasmArtifactEnsureOptions = {}
+): Promise<KiwiWasmArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
   fs.mkdirSync(dataDir, { recursive: true });
   let release: (() => void) | undefined;
   try {
     release = await acquireInstallLock(path.join(dataDir, "wasm-install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
-    const current = inspectKiwiWasmArtifact(env);
-    if (current.installed) {
-      return {
-        status: "already_installed",
-        method: "npm-tarball",
-        version: KIWI_NLP_VERSION,
-        targetDir: current.targetDir
-      };
+    if (options.forceInstall !== true) {
+      const current = inspectKiwiWasmArtifact(env, { verifyFile: options.verifyFile ?? "digest" });
+      if (current.installed) {
+        return {
+          status: "already_installed",
+          method: "npm-tarball",
+          version: KIWI_NLP_VERSION,
+          targetDir: current.targetDir
+        };
+      }
     }
     return await installDownloadedWasm(env);
   } catch (error) {
@@ -465,7 +499,7 @@ function kiwiModelFileDigest(content: Uint8Array): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-function inspectKiwiWasmFile(env: NodeJS.ProcessEnv): string[] {
+function inspectKiwiWasmFile(env: NodeJS.ProcessEnv, verifyFile: "digest" | "metadata"): string[] {
   const wasmPath = kiwiWasmFilePath(env);
   let stat: fs.Stats;
   try {
@@ -475,9 +509,19 @@ function inspectKiwiWasmFile(env: NodeJS.ProcessEnv): string[] {
   }
   if (!stat.isFile()) return [KIWI_WASM_FILE_NAME];
   if (stat.size !== KIWI_WASM_SIZE_BYTES) return [`${KIWI_WASM_FILE_NAME} (size mismatch)`];
-  const digest = crypto.createHash("sha256").update(fs.readFileSync(wasmPath)).digest("hex");
+  if (verifyFile === "metadata") return [];
+  let digest: string;
+  try {
+    digest = kiwiWasmDigest(fs.readFileSync(wasmPath));
+  } catch {
+    return [`${KIWI_WASM_FILE_NAME} (read failed)`];
+  }
   if (digest !== KIWI_WASM_SHA256) return [`${KIWI_WASM_FILE_NAME} (digest mismatch)`];
   return [];
+}
+
+function kiwiWasmDigest(content: Uint8Array): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
 }
 
 function writeWasmFileAtomic(env: NodeJS.ProcessEnv, wasm: Buffer): void {

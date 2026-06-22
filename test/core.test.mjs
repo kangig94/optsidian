@@ -776,6 +776,43 @@ test("kiwi wasm install repairs corrupt installed wasm files", async () => {
   }
 });
 
+test("kiwi wasm inspection can skip digest for lightweight status", async () => {
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
+  const {
+    KIWI_NLP_VERSION,
+    KIWI_WASM_FILE_NAME,
+    KIWI_WASM_NPM_TARBALL_URL,
+    KIWI_WASM_SHA256,
+    KIWI_WASM_SIZE_BYTES,
+    inspectKiwiWasmArtifact,
+    kiwiWasmDir,
+    kiwiWasmFilePath,
+    kiwiWasmManifestPath,
+    readVerifiedKiwiWasmBinary
+  } = await import(path.join(repoRoot, "src/core/kiwi-artifact.ts"));
+  const env = { XDG_CACHE_HOME: cache };
+
+  fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
+  fs.writeFileSync(kiwiWasmFilePath(env), Buffer.alloc(KIWI_WASM_SIZE_BYTES, 0));
+  fs.writeFileSync(kiwiWasmManifestPath(env), `${JSON.stringify({
+    packageId: "kiwi-wasm",
+    kiwiNlpVersion: KIWI_NLP_VERSION,
+    sourceUrl: KIWI_WASM_NPM_TARBALL_URL,
+    wasmSha256: KIWI_WASM_SHA256,
+    wasmSizeBytes: KIWI_WASM_SIZE_BYTES,
+    file: KIWI_WASM_FILE_NAME,
+    installedAt: "2026-06-22T00:00:00.000Z"
+  }, null, 2)}\n`);
+
+  const metadataState = inspectKiwiWasmArtifact(env, { verifyFile: "metadata" });
+  assert.equal(metadataState.installed, true);
+
+  const digestState = inspectKiwiWasmArtifact(env);
+  assert.equal(digestState.installed, false);
+  assert.deepEqual(digestState.missingFiles, [`${KIWI_WASM_FILE_NAME} (digest mismatch)`]);
+  assert.throws(() => readVerifiedKiwiWasmBinary(env), /digest mismatch/);
+});
+
 test("kiwi model inspection rejects corrupt installed model files", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   const {
