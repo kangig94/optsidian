@@ -5,7 +5,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   SEARCH_DAEMON_PROTOCOL_VERSION,
-  SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION,
   type OwnerStatus
 } from "./protocol.js";
 
@@ -15,7 +14,6 @@ export const OWNER_RECORD_FIELDS = [
   "runtimeHash",
   "binaryVersion",
   "protocolVersion",
-  "settingsSchemaVersion",
   "nonce",
   "socketPath",
   "startedAt"
@@ -28,7 +26,6 @@ export type DesiredOwnerIdentity = {
   runtimeHash: string;
   binaryVersion: string;
   protocolVersion: number;
-  settingsSchemaVersion: number;
 };
 
 export type OwnerRegistry = {
@@ -125,8 +122,7 @@ export function desiredOwnerIdentity(binaryPath: string): DesiredOwnerIdentity {
     uid: currentUid(),
     runtimeHash: computeRuntimeHash(binaryPath),
     binaryVersion: computeBinaryVersion(binaryPath),
-    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-    settingsSchemaVersion: SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
   };
 }
 
@@ -152,7 +148,6 @@ export function createOwnerRecord(
     runtimeHash: desired.runtimeHash,
     binaryVersion: desired.binaryVersion,
     protocolVersion: desired.protocolVersion,
-    settingsSchemaVersion: desired.settingsSchemaVersion,
     nonce,
     socketPath,
     startedAt
@@ -163,8 +158,7 @@ export function ownerMatchesDesired(owner: OwnerRecord, desired: DesiredOwnerIde
   return owner.uid === desired.uid
     && owner.runtimeHash === desired.runtimeHash
     && owner.binaryVersion === desired.binaryVersion
-    && owner.protocolVersion === desired.protocolVersion
-    && owner.settingsSchemaVersion === desired.settingsSchemaVersion;
+    && owner.protocolVersion === desired.protocolVersion;
 }
 
 export function ownerPidIsLive(owner: OwnerRecord): boolean {
@@ -230,9 +224,6 @@ export function createOwnerRegistryForTests(options: {
       break;
     case "binary-mismatch":
       registry.writeOwner(incompatible({ binaryVersion: "old-binary-version" }));
-      break;
-    case "settings-mismatch":
-      registry.writeOwner(incompatible({ settingsSchemaVersion: options.desired.settingsSchemaVersion + 1 }));
       break;
     case "stale-pid-lock":
       registry.writeOwner(incompatible({ pid: 999999, nonce: "stale" }));
@@ -322,7 +313,7 @@ function isOwnerRecord(value: unknown): value is OwnerRecord {
   return OWNER_RECORD_FIELDS.every((field) => (
     field === "pid"
       ? Number.isInteger(record[field])
-      : field === "uid" || field === "protocolVersion" || field === "settingsSchemaVersion"
+      : field === "uid" || field === "protocolVersion"
         ? Number.isInteger(record[field])
         : typeof record[field] === "string"
   ));

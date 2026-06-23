@@ -518,8 +518,8 @@ function explainTrace(input: {
   const rankedOutput = rankedOutputFromRanked(input.ranked);
   return {
     schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
-    rankingAlgorithmId: "rrf-metadata-v2",
-    frozenReplayFormulaVersion: "rrf-metadata-v2/offline-1",
+    rankingAlgorithmId: "rrf-metadata-v1",
+    frozenReplayFormulaVersion: "rrf-metadata-v1/offline-1",
     rankingConfig,
     inputs: {
       candidateSet: input.candidateSet,
@@ -688,7 +688,7 @@ function searchResult(
             analyzer: analyzerDebugInfo(analyzer),
             candidates,
             snapshotId,
-            ...(search.query ? { reranker: "rrf-metadata-v2" as const } : {})
+            ...(search.query ? { reranker: "rrf-metadata-v1" as const } : {})
           }
         }
       : {})
@@ -729,10 +729,8 @@ function analyzerDebugInfo(identity: SearchAnalyzerIdentity) {
   return {
     name: identity.name,
     version: identity.version,
-    ...(identity.baseline ? { baseline: identity.baseline } : {}),
     ...(identity.runtime ? { runtime: identity.runtime } : {}),
     ...(identity.model ? { model: identity.model } : {}),
-    ...(identity.optionsHash ? { optionsHash: identity.optionsHash } : {}),
     ...(identity.declaredAnalyzers ? { declaredAnalyzers: [...identity.declaredAnalyzers] } : {}),
     ...(identity.activeAnalyzers ? { activeAnalyzers: [...identity.activeAnalyzers] } : {})
   };

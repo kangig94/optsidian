@@ -7,8 +7,10 @@ import type {
 import type { SearchDocument } from "../../core/search/markdown.js";
 import type { SearchSnippet } from "../../core/types.js";
 
-export const SNAPSHOT_ENVELOPE_SCHEMA_VERSION = 1;
-export const ACTIVE_POINTER_SCHEMA_VERSION = 1;
+// One persistence-format version gates every on-disk snapshot artifact (envelope
+// + active pointer). Bump when the snapshot envelope or active-pointer layout
+// changes so an old artifact is refused at the read boundary.
+export const SNAPSHOT_PERSISTENCE_VERSION = 1;
 
 export type PersistedDocumentRecord = {
   documentId: string;
@@ -21,14 +23,14 @@ export type PersistedDocumentRecord = {
 };
 
 export type SnapshotDiagnostics = {
-  schemaVersion: typeof SNAPSHOT_ENVELOPE_SCHEMA_VERSION;
+  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
   analyzer: SearchAnalyzerIdentity;
   documents: readonly PersistedDocumentRecord[];
   warnings?: readonly string[];
 };
 
 export type SnapshotEnvelope = {
-  schemaVersion: typeof SNAPSHOT_ENVELOPE_SCHEMA_VERSION;
+  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
   snapshotId: string;
   manifest: CanonicalSnapshotManifest;
   canonicalManifestSha256: string;
@@ -36,7 +38,7 @@ export type SnapshotEnvelope = {
 };
 
 export type ActivePointer = {
-  schemaVersion: typeof ACTIVE_POINTER_SCHEMA_VERSION;
+  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
   snapshotId: string;
   canonicalManifestSha256: string;
 };

@@ -2,9 +2,7 @@ import fs from "node:fs";
 import {
   deadlineFromNow,
   isSearchDaemonMethod,
-  rpcError,
   SEARCH_DAEMON_PROTOCOL_VERSION,
-  SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION,
   type OwnerStatus,
   type SearchDaemonPhase,
   type SearchDaemonRequest
@@ -43,7 +41,6 @@ export async function runSearchDaemon(options: RunSearchDaemonOptions = {}): Pro
     const owner = resolveOwnerFromEnv(env);
     process.stdout.write(`${JSON.stringify({
       protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-      settingsSchemaVersion: SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION,
       socketPath: owner.socketPath,
       runtimeHash: owner.runtimeHash,
       binaryVersion: owner.binaryVersion
@@ -264,7 +261,6 @@ class SearchDaemon {
       phase: this.phase,
       nonce: this.owner.nonce,
       protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-      settingsSchemaVersion: SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION,
               owner: this.owner satisfies OwnerStatus,
       metrics: this.metrics.snapshot(),
       pools: this.pools.stats(),
@@ -315,8 +311,7 @@ function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {
     uid: env.OPTSIDIAN_SEARCH_DAEMON_UID ? Number(env.OPTSIDIAN_SEARCH_DAEMON_UID) : currentUid(),
     runtimeHash: env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH?.trim() || computeRuntimeHash(binaryPath),
     binaryVersion: env.OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION?.trim() || computeBinaryVersion(binaryPath),
-    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-    settingsSchemaVersion: SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
   };
   const socketPath = env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim() || socketPathForOwner(runtimeDir, desired);
   return createOwnerRecord(

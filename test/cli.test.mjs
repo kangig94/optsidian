@@ -1214,7 +1214,7 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.match(debugPayload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
   assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
   assert.deepEqual(debugPayload.debug.query.terms, ["project", "alpha"]);
-  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v2");
+  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v1");
   assert.equal(debugPayload.matches[0].debug.bucket, "exact");
   assert.deepEqual(debugPayload.matches[0].debug.queryTerms, ["project", "alpha"]);
   assert.equal(typeof debugPayload.matches[0].debug.candidateScore, "number");

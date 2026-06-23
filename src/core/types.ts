@@ -77,10 +77,8 @@ export type SearchSnippet = {
 export type SearchAnalyzerDebug = {
   name: string;
   version: string;
-  baseline?: string;
   runtime?: string;
   model?: string;
-  optionsHash?: string;
   declaredAnalyzers?: string[];
   activeAnalyzers?: string[];
 };
@@ -131,7 +129,7 @@ export type SearchDebugInfo = {
   analyzer: SearchAnalyzerDebug;
   candidates: number;
   snapshotId?: string;
-  reranker?: "rrf-metadata-v2";
+  reranker?: "rrf-metadata-v1";
 };
 
 export type SearchResult = {

@@ -106,8 +106,9 @@ verifies its SHA256 and version, installs atomically, and refreshes the MCP regi
 The search subsystem spans `src/core/search/*` and `src/daemon/search-store/*`.
 
 - **Snapshot identity is content-addressed.** The active snapshot id is the hash of the canonical
-  snapshot manifest. The identity tuple includes schema, field-set, partition, analyzer, settings,
-  builder, ranking-feature, and retriever identity.
+  snapshot manifest. The identity tuple includes build version (segment encoding, partition scheme,
+  engine, and identity normalizer), field-set, partition bits, analyzer, settings, ranking-feature,
+  and retriever identity.
 - **MVCC, not read-time planning.** Search pins one immutable snapshot for each request. Index jobs
   build and publish new snapshots atomically, and active requests keep their pinned snapshot until
   release.

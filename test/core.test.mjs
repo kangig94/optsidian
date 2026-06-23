@@ -95,7 +95,7 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
   const analyzer = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" }, {}, runtime);
   assert.deepEqual(analyzer.identity.declaredAnalyzers, ["ko"]);
   assert.deepEqual(analyzer.identity.activeAnalyzers, ["ko"]);
-  assert.equal(analyzer.identity.optionsHash, "kiwi-pos-filter-v1");
+  assert.match(analyzer.identity.model ?? "", /^kiwi-nlp:/);
   assert.ok((await analyzer.tokenize("한국어 검색")).includes("한국어"));
   const envOverSettings = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }, { search: { extraLangs: ["ko"] } }, runtime);
   assert.deepEqual(envOverSettings.identity.declaredAnalyzers, []);

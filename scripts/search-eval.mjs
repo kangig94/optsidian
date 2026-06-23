@@ -239,10 +239,10 @@ function runOfflineExplainTrace(options) {
 
 function validateOfflineExplainTrace(trace) {
   if (trace?.schemaVersion !== 1) throwTraceValidation("trace validation failed: schemaVersion must be 1");
-  if (trace.rankingAlgorithmId !== "rrf-metadata-v2") {
+  if (trace.rankingAlgorithmId !== "rrf-metadata-v1") {
     throwTraceValidation(`ranking algorithm mismatch: ${trace.rankingAlgorithmId}`);
   }
-  if (trace.frozenReplayFormulaVersion !== "rrf-metadata-v2/offline-1") {
+  if (trace.frozenReplayFormulaVersion !== "rrf-metadata-v1/offline-1") {
     throwTraceValidation(`ranking algorithm replay formula mismatch: ${trace.frozenReplayFormulaVersion}`);
   }
   if (!deepEqualCanonical(trace.rankingConfig, trace.inputs?.rankingConfig)) {

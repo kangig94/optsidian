@@ -8,12 +8,10 @@ import type { SearchAnalyzerRuntimeStatus } from "../types.js";
 export type SearchAnalyzerIdentity = {
   name: string;
   version: string;
-  baseline?: string;
   runtime?: string;
   node: string;
   icu?: string;
   model?: string;
-  optionsHash?: string;
   declaredAnalyzers?: string[];
   activeAnalyzers?: string[];
 };
@@ -50,9 +48,10 @@ export type SearchDeclaredAnalyzer = KiwiDeclaredAnalyzer;
 
 export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
-const ROUTER_VERSION = "script-router-v2";
-const INTL_ANALYZER_VERSION = "intl-segmenter-latin-v2";
-const KIWI_TOKEN_FILTER_VERSION = "kiwi-pos-filter-v1";
+// Single tokenizer-identity lever. Bump on any change to script routing, the Intl
+// latin baseline, or the Kiwi POS filter. Kept distinct from INDEX_BUILD_VERSION
+// because the analyzer identity is also the query-analysis cache key.
+const ANALYZER_VERSION = "router-intl-kiwi-v1";
 const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
 const REGISTERED_ANALYZERS = ["ko"] as const satisfies readonly SearchDeclaredAnalyzer[];
 const REGISTERED_ANALYZER_SET: ReadonlySet<string> = new Set(REGISTERED_ANALYZERS);
@@ -568,8 +567,7 @@ function kiwiRouterIdentity(
 ): SearchAnalyzerIdentity {
   return {
     ...routerIdentity(declaredAnalyzers, activeAnalyzers, runtime),
-    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`,
-    optionsHash: KIWI_TOKEN_FILTER_VERSION
+    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`
   };
 }
 
@@ -620,8 +618,7 @@ function routerIdentity(
 ): SearchAnalyzerIdentity {
   return {
     name: "router",
-    version: ROUTER_VERSION,
-    baseline: INTL_ANALYZER_VERSION,
+    version: ANALYZER_VERSION,
     runtime: "node-intl",
     node: runtime.node,
     ...(runtime.icu ? { icu: runtime.icu } : {}),

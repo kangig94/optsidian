@@ -8,7 +8,7 @@ paths:
 - `npm run typecheck` passes (zero errors), `npm run build` succeeds, and `npm test` is green.
 - No command is both implemented and native-sufficient — the `src/cli/policy.ts` regression test holds.
 - Every vault mutation resolves its path through `resolveVaultPath` (`src/core/path.ts`); no cwd-relative writes, no symlink escape, absolute paths only if inside the vault.
-- Any change to the search analyzer, token channels, indexed fields, or ranking that affects index contents bumps `SEARCH_SCHEMA_VERSION` and/or the analyzer/cache identity.
+- Any change to the search analyzer, token channels, indexed fields, or ranking that affects index contents bumps `INDEX_BUILD_VERSION` (builder/field/partition/engine) and/or `ANALYZER_VERSION`/the analyzer-cache identity.
 - `src/core/*` does not touch `process.argv`/`stdin`/`stdout` or perform native delegation; `src/core/kiwi/*` does not import `src/core/search/*`.
 
 ## STRONG (must document if skipped)

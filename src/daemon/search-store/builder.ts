@@ -20,24 +20,35 @@ import {
   type CanonicalSegment,
   type SnapshotIdentityTuple
 } from "../../core/search/segments/index.js";
-import { SEARCH_ENGINE, SEARCH_FIELD_CHANNEL_INDEX_PROPERTY, SEARCH_PROPERTIES, SEARCH_SCHEMA_DIGEST } from "../../core/search/schema.js";
+import { SEARCH_FIELD_CHANNEL_INDEX_PROPERTY, SEARCH_PROPERTIES, SEARCH_SCHEMA_DIGEST } from "../../core/search/schema.js";
 import { decodeUtf8 } from "../../core/text.js";
 import type { SearchField, SearchSnippet } from "../../core/types.js";
 import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/index.js";
 import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
 import {
-  SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
+  SNAPSHOT_PERSISTENCE_VERSION,
   type BuiltSegment,
   type BuiltSnapshot,
   type PersistedDocumentRecord,
   type SnapshotSnippetLine
 } from "./types.js";
 
-export const SNAPSHOT_SCHEMA_VERSION = 1;
-export const PARTITION_VERSION = 1;
 export const DEFAULT_PARTITION_BITS = 4;
-export const INDEX_BUILDER_VERSION = "daemon-positional-builder-b5-v1";
-export const INDEX_AFFECTING_SEARCH_SETTINGS_HASH = sha256(canonicalValueBytes({ indexAffectingSettings: {} }));
+
+// INDEX_BUILD_VERSION — the single manual lever for index identity (domain A).
+// It folds the snapshot-tuple shape, the partition scheme, the segment-encoding
+// builder, the engine family, and the identity-phrase normalizer into one knob.
+// Bump it when any of those change in a way the auto-derived digests
+// (fieldSetVersion = sha256(schema), rankingFeatureVersion = sha256(RANKING_CONSTANTS))
+// do not already capture. NEVER derive it from the binary hash: index identity is
+// deliberately decoupled from the build so unrelated code changes don't force a reindex.
+export const INDEX_BUILD_VERSION = "daemon-positional-build-v1";
+
+// No index-affecting search settings exist yet; the empty object makes that explicit.
+// When one is added, put it here and the hash — the shared invalidation key between
+// the snapshot identity and the query-analysis cache — falls out automatically.
+const INDEX_AFFECTING_SETTINGS = {} as const;
+export const INDEX_AFFECTING_SEARCH_SETTINGS_HASH = sha256(canonicalValueBytes({ indexAffectingSettings: INDEX_AFFECTING_SETTINGS }));
 
 type BuildInput = {
   vaultRoot: string;
@@ -119,7 +130,7 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
     canonicalManifestSha256: snapshotId,
     segments: builtSegments,
     diagnostics: {
-      schemaVersion: SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
+      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
       analyzer: input.analyzer.identity,
       documents: persistedDocuments
     }
@@ -135,18 +146,15 @@ export function snapshotIdentityTupleForAnalyzerIdentity(
   partitionBits = DEFAULT_PARTITION_BITS
 ): SnapshotIdentityTuple {
   return {
-    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    buildVersion: INDEX_BUILD_VERSION,
     fieldSetVersion: SEARCH_SCHEMA_DIGEST,
-    partitionVersion: PARTITION_VERSION,
     partitionBits,
     analyzerIdentity: {
       analyzer: analyzerIdentity,
       channels: [...SEARCH_TOKEN_CHANNELS],
-      ngram: { min: MIN_NGRAM, max: MAX_NGRAM },
-      identityNormalizer: "identityPhraseCandidates-v1"
+      ngram: { min: MIN_NGRAM, max: MAX_NGRAM }
     },
     searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH,
-    indexBuilderVersion: sha256(canonicalValueBytes({ engine: SEARCH_ENGINE, builder: INDEX_BUILDER_VERSION })),
     rankingFeatureVersion: sha256(canonicalValueBytes(RANKING_CONSTANTS)),
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY
   };

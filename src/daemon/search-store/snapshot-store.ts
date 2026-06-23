@@ -22,8 +22,7 @@ import {
   type DurableRename
 } from "./publication.js";
 import {
-  ACTIVE_POINTER_SCHEMA_VERSION,
-  SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
+  SNAPSHOT_PERSISTENCE_VERSION,
   type ActivePointer,
   type BuiltSnapshot,
   type PersistedDocumentRecord,
@@ -349,7 +348,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       fsyncDirSync(paths.snapshotsDir);
 
       const activePointer: ActivePointer = {
-        schemaVersion: ACTIVE_POINTER_SCHEMA_VERSION,
+        schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
         snapshotId: built.snapshotId,
         canonicalManifestSha256: built.canonicalManifestSha256
       };
@@ -602,7 +601,7 @@ export function createDaemonSnapshotStore(options: DaemonSnapshotStoreOptions = 
 
 function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
   return {
-    schemaVersion: SNAPSHOT_ENVELOPE_SCHEMA_VERSION,
+    schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
     snapshotId: built.snapshotId,
     manifest: built.manifest,
     canonicalManifestSha256: built.canonicalManifestSha256,
@@ -700,12 +699,12 @@ function compareCodePoint(left: string, right: string): number {
 function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
   return (
     isRecord(value) &&
-    value.schemaVersion === SNAPSHOT_ENVELOPE_SCHEMA_VERSION &&
+    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
     typeof value.snapshotId === "string" &&
     isRecord(value.manifest) &&
     typeof value.canonicalManifestSha256 === "string" &&
     isRecord(value.diagnostics) &&
-    value.diagnostics.schemaVersion === SNAPSHOT_ENVELOPE_SCHEMA_VERSION &&
+    value.diagnostics.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
     Array.isArray(value.diagnostics.documents)
   );
 }
@@ -713,7 +712,7 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
 function isActivePointer(value: unknown): value is ActivePointer {
   return (
     isRecord(value) &&
-    value.schemaVersion === ACTIVE_POINTER_SCHEMA_VERSION &&
+    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
     typeof value.snapshotId === "string" &&
     typeof value.canonicalManifestSha256 === "string"
   );

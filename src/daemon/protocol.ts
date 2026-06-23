@@ -9,7 +9,6 @@ import type {
 import type { ExplainTrace } from "../core/search/contracts.js";
 
 export const SEARCH_DAEMON_PROTOCOL_VERSION = 1;
-export const SEARCH_DAEMON_SETTINGS_SCHEMA_VERSION = 1;
 export const SEARCH_DAEMON_METHODS = [
   "Search",
   "Explain",
@@ -94,7 +93,6 @@ export type OwnerStatus = {
   runtimeHash: string;
   binaryVersion: string;
   protocolVersion: number;
-  settingsSchemaVersion: number;
   nonce: string;
   socketPath: string;
   startedAt: string;
@@ -110,7 +108,6 @@ export type StatusResult = {
   phase: SearchDaemonPhase;
   nonce: string;
   protocolVersion: number;
-  settingsSchemaVersion: number;
   owner: OwnerStatus;
   metrics: {
     requests: number;
@@ -118,6 +115,8 @@ export type StatusResult = {
     activeRequests: number;
     startedAt: string;
   };
+  pools: unknown;
+  searchStore: unknown;
   vaults: Array<{
     vault: string;
     state: VaultState;

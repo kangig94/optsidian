@@ -30,7 +30,6 @@ const AC18_OWNER_FIELDS = [
   "runtimeHash",
   "binaryVersion",
   "protocolVersion",
-  "settingsSchemaVersion",
   "nonce",
   "socketPath",
   "startedAt"
@@ -268,7 +267,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
       request: async (request) => {
         seen.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, settingsSchemaVersion: 1, owner: { nonce: request.nonce } };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, owner: { nonce: request.nonce } };
         }
         assert.equal(request.method, "Search");
         assert.equal(typeof request.nonce, "string");
@@ -368,13 +367,11 @@ test("AC9 canonical segment bytes and snapshot id are history-independent", asyn
   const { canonicalValueBytes } = await futureImport("src/core/search/segments/index.ts");
   const { RANKING_CONSTANTS } = await futureImport("src/core/search/constants.ts");
   const identityTuple = {
-    schemaVersion: 1,
+    buildVersion: "positional-build-v1",
     fieldSetVersion: "field-set-v1",
-    partitionVersion: 1,
     partitionBits: 4,
     analyzerIdentity: { name: "router", channels: ["morph", "surface", "ngram"], ngram: { min: 2, max: 3 } },
     searchSettingsHash: sha256("index-affecting-settings-only"),
-    indexBuilderVersion: "positional-v1",
     rankingFeatureVersion: sha256(canonicalValueBytes(RANKING_CONSTANTS)),
     retrieverIdentity: null
   };
@@ -431,6 +428,20 @@ test("golden ranking identity is derived from canonical RANKING_CONSTANTS bytes"
 
   assert.equal(built.identityTuple.rankingFeatureVersion, expected);
   assert.equal(built.manifest.identityTuple.rankingFeatureVersion, expected);
+});
+
+test("snapshot identity carries the production INDEX_BUILD_VERSION lever", async () => {
+  const { buildCanonicalSearchSnapshot, INDEX_BUILD_VERSION } = await futureImport("src/daemon/search-store/builder.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nNeedle project alpha\n");
+
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer: testAnalyzer()
+  });
+
+  assert.equal(built.identityTuple.buildVersion, INDEX_BUILD_VERSION);
+  assert.equal(built.manifest.identityTuple.buildVersion, INDEX_BUILD_VERSION);
 });
 
 test("AC7 rebuild during an in-flight search keeps the pinned snapshot stable", async () => {
@@ -1051,13 +1062,11 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     uid: process.getuid?.() ?? 0,
     runtimeHash: "runtime-a",
     binaryVersion: "binary-content-hash-b",
-    protocolVersion: 1,
-    settingsSchemaVersion: 1
+    protocolVersion: 1
   };
   const scenarios = [
     "protocol-mismatch",
     "binary-mismatch",
-    "settings-mismatch",
     "stale-pid-lock",
     "orphaned-socket"
   ];
@@ -1067,7 +1076,6 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     const result = await convergeOnCompatibleDaemonForTests(registry, desired);
     assert.equal(result.owner.binaryVersion, desired.binaryVersion, scenario);
     assert.equal(result.owner.protocolVersion, desired.protocolVersion, scenario);
-    assert.equal(result.owner.settingsSchemaVersion, desired.settingsSchemaVersion, scenario);
     assert.equal(registry.compatibleOwners().length, 1, scenario);
   }
 

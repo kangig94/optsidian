@@ -26,8 +26,8 @@ model: sonnet
     Binary verdict. PASS only when none of the BLOCKING conditions hold; otherwise NEEDS WORK.
 
     BLOCKING:
-    - A change to the analyzer, token channels (`morph`/`surface`/`ngram`), indexed field set, or ranking that affects index contents WITHOUT a bump to `SEARCH_SCHEMA_VERSION` and/or the analyzer/cache identity.
-    - The persisted index, the in-memory overlay, and live analysis are left inconsistent (analysis changed in one path but not the others).
+    - A change to the analyzer, token channels (`morph`/`surface`/`ngram`), indexed field set, or ranking that affects index contents WITHOUT a bump to `INDEX_BUILD_VERSION`/`ANALYZER_VERSION` and/or the analyzer/cache identity.
+    - An index-affecting change does not flow into the snapshot identity tuple, so a stale snapshot can be published as active or served as current.
     - `src/core/kiwi/*` imports `src/core/search/*` (forbidden direction).
     - A daemon change breaks the socket protocol versioning (same socket name, new shape), the lock discipline (mkdir-exclusive), or the idle-shutdown cleanup — leaking a socket, lock, or process.
   </Success_Criteria>
@@ -36,8 +36,8 @@ model: sonnet
 
     | DO | DON'T |
     |----|-------|
-    | Require a `SEARCH_SCHEMA_VERSION`/identity bump whenever stored tokens or fields change | Let a tokenization change reuse an existing on-disk index |
-    | Verify persisted + overlay + live analysis are updated together | Accept a fix to one retrieval path that desyncs the others |
+    | Require an `INDEX_BUILD_VERSION`/`ANALYZER_VERSION`/identity bump whenever stored tokens or fields change | Let a tokenization change reuse an existing on-disk index |
+    | Confirm every index-affecting input flows into the snapshot identity tuple | Accept an index change that leaves an old snapshot servable as current |
     | Confirm `kiwi/*` imports no `search/*` module | Wave through a convenience import from kiwi into search |
     | Check daemon exits release locks and honor idle-shutdown on every path | Trust cleanup happens without reading the error paths |
     | Confirm the socket name encodes the protocol version when the protocol changes | Change the request/response shape on the existing socket name |

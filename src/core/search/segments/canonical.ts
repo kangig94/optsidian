@@ -55,13 +55,11 @@ export type CanonicalSegment = {
 };
 
 export type SnapshotIdentityTuple = {
-  schemaVersion: number;
+  buildVersion: string;
   fieldSetVersion: string;
-  partitionVersion: number;
   partitionBits: number;
   analyzerIdentity: unknown;
   searchSettingsHash: string;
-  indexBuilderVersion: string;
   rankingFeatureVersion: string;
   retrieverIdentity?: unknown;
 };

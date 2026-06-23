@@ -11,7 +11,7 @@ Node ≥ 20.
 - Never corrupt or let a write escape the user's vault — writes are atomic (temp+rename) and every path resolves through `resolveVaultPath`.
 - Keep `src/core/*` shell-independent: no `process.argv`/`stdin`/`stdout`, no native delegation.
 - Native-first: wrap the Obsidian CLI, don't reimplement it. Classify every command delegate/optimize/extend in `src/cli/policy.ts`.
-- Version index identity (`SEARCH_SCHEMA_VERSION` / analyzer identity) on any change that affects search index contents.
+- Version index identity (`INDEX_BUILD_VERSION` / `ANALYZER_VERSION` / analyzer identity) on any change that affects search index contents.
 
 **Key Documentation**:
 - `docs/ARCHITECTURE.md` - layer graph, dependency rules, modification policy, command + MCP surface, single-daemon topology
