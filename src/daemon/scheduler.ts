@@ -35,11 +35,13 @@ export type RequestScheduler = {
   }): { shedQueues: string[]; queryWorkShed: boolean; backgroundQueueDepth: number };
 };
 
+const MAX_CANCELLED_IDS = 4096;
+
 export function createRequestScheduler(): RequestScheduler {
   const cancelled = new Set<string>();
   return {
     cancel(cancellationId) {
-      cancelled.add(cancellationId);
+      rememberCancelled(cancelled, cancellationId);
     },
     async run(request, task) {
       assertRunnable(request.deadline, request.cancellationId, cancelled);
@@ -73,6 +75,16 @@ export function createRequestScheduler(): RequestScheduler {
 
 function compareCodePoint(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function rememberCancelled(cancelled: Set<string>, cancellationId: string): void {
+  cancelled.delete(cancellationId);
+  cancelled.add(cancellationId);
+  while (cancelled.size > MAX_CANCELLED_IDS) {
+    const oldest = cancelled.values().next();
+    if (oldest.done) break;
+    cancelled.delete(oldest.value);
+  }
 }
 
 export function createDeterministicSearchSchedulerForTests(options: {

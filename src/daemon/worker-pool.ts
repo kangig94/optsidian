@@ -61,6 +61,11 @@ type QueueItem<T> = {
   timer?: NodeJS.Timeout;
 };
 
+type ReadyCallbacks = {
+  resolveReady(): void;
+  rejectReady(error: Error): void;
+};
+
 type WorkerSlot = {
   id: number;
   worker: Worker;
@@ -68,12 +73,22 @@ type WorkerSlot = {
   restarting: boolean;
   ready: Promise<void>;
   warmupResult: unknown;
+  restartAttempts: number;
+};
+
+type RestartPlan = {
+  restartAttempts: number;
+  delayMs: number;
 };
 
 const DEFAULT_MAX_QUEUE_SIZE = 1024;
 const DEFAULT_MAX_CRASH_RETRIES = 2;
 const DEFAULT_MICROBATCH_SIZE = 64;
 const DEFAULT_WORKER_MEMORY_BYTES = 512 * 1024 * 1024;
+const MAX_CANCELLED_IDS = 4096;
+const MAX_SLOT_RESTART_ATTEMPTS = 3;
+const SLOT_RESTART_BACKOFF_BASE_MS = 100;
+const SLOT_RESTART_BACKOFF_CAP_MS = 5_000;
 
 export class DaemonWorkerPool {
   private readonly options: Required<WorkerPoolOptions>;
@@ -97,7 +112,7 @@ export class DaemonWorkerPool {
       ...options,
       size
     };
-    for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot());
+    for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(0));
   }
 
   get name(): string {
@@ -114,7 +129,7 @@ export class DaemonWorkerPool {
   }
 
   cancel(cancellationId: string): void {
-    this.cancelled.add(cancellationId);
+    this.rememberCancelled(cancellationId);
     for (let index = this.queue.length - 1; index >= 0; index -= 1) {
       const item = this.queue[index];
       if (item.options.cancellationId !== cancellationId) continue;
@@ -178,7 +193,7 @@ export class DaemonWorkerPool {
     };
   }
 
-  private createSlot(): WorkerSlot {
+  private createSlot(restartAttempts: number): WorkerSlot {
     const id = this.nextSlotId++;
     let resolveReady!: () => void;
     let rejectReady!: (error: Error) => void;
@@ -197,31 +212,38 @@ export class DaemonWorkerPool {
       env: this.options.env,
       execArgv: workerExecArgv()
     });
-    const slot: WorkerSlot = { id, worker, busy: undefined, restarting: false, ready, warmupResult: undefined };
-    worker.on("message", (message: unknown) => this.handleMessage(slot, message as WorkerReply, resolveReady));
+    const slot: WorkerSlot = {
+      id,
+      worker,
+      busy: undefined,
+      restarting: false,
+      ready,
+      warmupResult: undefined,
+      restartAttempts
+    };
+    const readyCallbacks: ReadyCallbacks = { resolveReady, rejectReady };
+    worker.on("message", (message: unknown) => this.handleMessage(slot, message as WorkerReply, readyCallbacks));
     worker.on("error", (error) => {
       const workerError = error instanceof Error ? error : new Error(String(error));
-      rejectReady(workerError);
-      this.handleWorkerFailure(slot, workerError);
+      this.handleWorkerFailure(slot, workerError, readyCallbacks);
     });
     worker.on("exit", (code) => {
       if (this.closed || slot.restarting) return;
       const error = poolError("INTERNAL", `${this.options.name} worker exited with code ${code}`);
-      rejectReady(error);
-      this.handleWorkerFailure(slot, error);
+      this.handleWorkerFailure(slot, error, readyCallbacks);
     });
     worker.postMessage({ id: 0, request: { type: "warmup" } } satisfies WorkerEnvelope);
     return slot;
   }
 
-  private handleMessage(slot: WorkerSlot, message: WorkerReply, resolveReady: () => void): void {
+  private handleMessage(slot: WorkerSlot, message: WorkerReply, readyCallbacks: ReadyCallbacks): void {
     if (message.id === 0) {
       if (message.ok) {
         slot.warmupResult = message.result;
-        resolveReady();
+        readyCallbacks.resolveReady();
         this.drain();
       } else {
-        this.handleWorkerFailure(slot, poolError(message.error.code ?? "INTERNAL", message.error.message));
+        this.handleWorkerFailure(slot, poolError(message.error.code ?? "INTERNAL", message.error.message), readyCallbacks);
       }
       return;
     }
@@ -229,6 +251,7 @@ export class DaemonWorkerPool {
     const item = slot.busy;
     if (!item || item.id !== message.id) return;
     slot.busy = undefined;
+    slot.restartAttempts = 0;
     this.clearDeadline(item);
     if (message.ok) {
       item.resolve(message.result);
@@ -239,7 +262,7 @@ export class DaemonWorkerPool {
     this.drain();
   }
 
-  private handleWorkerFailure(slot: WorkerSlot, error: Error): void {
+  private handleWorkerFailure(slot: WorkerSlot, error: Error, readyCallbacks?: ReadyCallbacks): void {
     const item = slot.busy;
     slot.busy = undefined;
     if (item) {
@@ -252,17 +275,42 @@ export class DaemonWorkerPool {
         item.reject(poolError("INTERNAL", `${this.options.name} worker crash retry budget exhausted: ${error.message}`));
       }
     }
-    this.restartSlot(slot);
+    this.restartSlot(slot, error, readyCallbacks);
   }
 
-  private restartSlot(slot: WorkerSlot): void {
-    if (this.closed || slot.restarting) return;
+  private restartSlot(slot: WorkerSlot, error?: Error, readyCallbacks?: ReadyCallbacks): void {
+    const restartError = error ?? poolError("INTERNAL", `${this.options.name} worker restart failed`);
+    if (this.closed) {
+      readyCallbacks?.rejectReady(restartError);
+      return;
+    }
+    if (slot.restarting) return;
+    const plan = this.restartPlan(slot);
     slot.restarting = true;
+    if (!plan) {
+      void slot.worker.terminate().catch(() => 0).finally(() => {
+        const index = this.slots.indexOf(slot);
+        if (index >= 0) this.slots.splice(index, 1);
+      });
+      readyCallbacks?.rejectReady(restartError);
+      return;
+    }
     void slot.worker.terminate().catch(() => 0).finally(() => {
       const index = this.slots.indexOf(slot);
       if (index >= 0 && !this.closed) {
-        this.slots[index] = this.createSlot();
-        void this.slots[index].ready.then(() => this.drain(), () => {});
+        const timer = setTimeout(() => {
+          if (this.closed) {
+            readyCallbacks?.rejectReady(restartError);
+            return;
+          }
+          const replacement = this.createSlot(plan.restartAttempts);
+          this.slots[index] = replacement;
+          if (readyCallbacks) void replacement.ready.then(readyCallbacks.resolveReady, readyCallbacks.rejectReady);
+          void replacement.ready.then(() => this.drain(), () => {});
+        }, plan.delayMs);
+        timer.unref();
+      } else {
+        readyCallbacks?.rejectReady(restartError);
       }
     });
   }
@@ -314,7 +362,7 @@ export class DaemonWorkerPool {
       for (const slot of this.slots) {
         if (slot.busy !== item) continue;
         slot.busy = undefined;
-        this.restartSlot(slot);
+        this.restartSlot(slot, poolError("DEADLINE_EXCEEDED", `${this.options.name} deadline expired`));
       }
       this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} deadline expired`);
     }, Math.max(1, remaining));
@@ -330,6 +378,27 @@ export class DaemonWorkerPool {
   private rejectItem(item: QueueItem<unknown>, code: string, message: string): void {
     this.clearDeadline(item);
     item.reject(poolError(code, message));
+  }
+
+  private rememberCancelled(cancellationId: string): void {
+    this.cancelled.delete(cancellationId);
+    this.cancelled.add(cancellationId);
+    while (this.cancelled.size > MAX_CANCELLED_IDS) {
+      const oldest = this.cancelled.values().next();
+      if (oldest.done) break;
+      this.cancelled.delete(oldest.value);
+    }
+  }
+
+  private restartPlan(slot: WorkerSlot): RestartPlan | undefined {
+    if (slot.restartAttempts < MAX_SLOT_RESTART_ATTEMPTS) {
+      const restartAttempts = slot.restartAttempts + 1;
+      return {
+        restartAttempts,
+        delayMs: restartBackoffMs(restartAttempts)
+      };
+    }
+    return undefined;
   }
 }
 
@@ -362,6 +431,10 @@ function envBytes(env: NodeJS.ProcessEnv, key: string): number | undefined {
   const raw = env[key]?.trim();
   if (!raw || !/^\d+$/.test(raw)) return undefined;
   return Math.max(1, Number(raw)) * 1024 * 1024;
+}
+
+function restartBackoffMs(attempts: number): number {
+  return Math.min(SLOT_RESTART_BACKOFF_CAP_MS, SLOT_RESTART_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
 }
 
 function poolError(code: string, message: string): Error {

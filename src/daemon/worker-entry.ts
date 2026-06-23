@@ -20,11 +20,13 @@ type WorkerContext = {
 };
 
 let analyzer: SearchAnalyzer | undefined;
+let searchDaemonWorkerProcessErrorHandlersInstalled = false;
 
 export async function runSearchDaemonWorker(): Promise<void> {
   if (isMainThread || !parentPort) return;
   const context = workerData as WorkerContext;
   if (context.optsidianSearchWorker !== true) return;
+  installSearchDaemonWorkerProcessErrorHandlers();
   const env = context.env ?? process.env;
   parentPort.on("message", (message: WorkerEnvelope) => {
     void handleMessage(message, context, env);
@@ -107,4 +109,24 @@ function analyzerForWorker(env: NodeJS.ProcessEnv): SearchAnalyzer {
     ...(process.versions.icu ? { icu: process.versions.icu } : {})
   });
   return analyzer;
+}
+
+function installSearchDaemonWorkerProcessErrorHandlers(): void {
+  if (searchDaemonWorkerProcessErrorHandlersInstalled) return;
+  searchDaemonWorkerProcessErrorHandlersInstalled = true;
+  process.on("uncaughtException", (error) => {
+    logSearchDaemonWorkerProcessError("uncaughtException", error);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    logSearchDaemonWorkerProcessError("unhandledRejection", reason);
+    process.exit(1);
+  });
+}
+
+function logSearchDaemonWorkerProcessError(kind: string, error: unknown): void {
+  const message = error instanceof Error && error.stack ? error.stack : String(error);
+  try {
+    process.stderr.write(`[optsidian search worker] ${kind}: ${message}\n`);
+  } catch {}
 }

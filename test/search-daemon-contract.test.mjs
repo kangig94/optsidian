@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { unpack } from "msgpackr";
 
 const repoRoot = process.cwd();
 const AC17_PUBLICATION_STEPS = [
@@ -80,6 +82,117 @@ function asBytes(value) {
   if (Buffer.isBuffer(value)) return value;
   if (typeof value === "string") return Buffer.from(value);
   return Buffer.from(JSON.stringify(value));
+}
+
+function msgpackPayloadFrame(payload) {
+  const frame = Buffer.allocUnsafe(4 + payload.length);
+  frame.writeUInt32BE(payload.length, 0);
+  payload.copy(frame, 4);
+  return frame;
+}
+
+function connectRawSocket(socketPath) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function readRawRpcFrame(socket, timeoutMs = 1000) {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for RPC frame"));
+    }, timeoutMs);
+    timer.unref?.();
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length < 4) return;
+      const length = buffer.readUInt32BE(0);
+      if (buffer.length < 4 + length) return;
+      const payload = buffer.subarray(4, 4 + length);
+      cleanup();
+      resolve(unpack(payload));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("socket closed before RPC frame"));
+    };
+
+    socket.on("data", onData);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
+function waitForSocketClose(socket, timeoutMs = 1000) {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("timed out waiting for socket close"));
+    }, timeoutMs);
+    timer.unref?.();
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {};
+    socket.once("close", onClose);
+    socket.once("error", onError);
+  });
+}
+
+async function requestRawRpc(socketPath, encodeFrame, request) {
+  const socket = await connectRawSocket(socketPath);
+  try {
+    socket.write(encodeFrame(request));
+    return await readRawRpcFrame(socket);
+  } finally {
+    socket.destroy();
+  }
+}
+
+function statusRequest(requestId) {
+  return {
+    protocolVersion: 1,
+    requestId,
+    method: "Status",
+    deadline: Date.now() + 1000,
+    payload: { nonce: "test" }
+  };
+}
+
+async function assertBadFrameThenAlive({ socketPath, frame, encodeFrame, label }) {
+  const socket = await connectRawSocket(socketPath);
+  socket.write(frame);
+  const response = await readRawRpcFrame(socket);
+  assert.equal(response.requestId, "invalid-frame", label);
+  assert.equal(response.ok, false, label);
+  assert.equal(response.error.code, "BAD_REQUEST", label);
+  await waitForSocketClose(socket);
+
+  const alive = await requestRawRpc(socketPath, encodeFrame, statusRequest(`alive-${label}`));
+  assert.equal(alive.ok, true, `${label}: server should accept a subsequent connection`);
+  assert.equal(alive.result.alive, true);
 }
 
 function listFiles(root, predicate) {
@@ -183,6 +296,342 @@ function searchIdentityPayload(result) {
     snippets: match.snippets.map((snippet) => snippet.text)
   }));
 }
+
+test("AC2/AC3 transport rejects nil and malformed frames without killing the server", async () => {
+  const { createRpcServer } = await futureImport("src/daemon/transport.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const root = tempRoot();
+  const socketPath = path.join(root, "rpc.sock");
+  const server = await createRpcServer({
+    socketPath,
+    handleRequest: async () => ({ alive: true })
+  });
+
+  try {
+    await assertBadFrameThenAlive({
+      socketPath,
+      encodeFrame,
+      label: "nil-frame",
+      frame: msgpackPayloadFrame(Buffer.from([0xc0]))
+    });
+    await assertBadFrameThenAlive({
+      socketPath,
+      encodeFrame,
+      label: "malformed-frame",
+      frame: msgpackPayloadFrame(Buffer.from([0xc1]))
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("AC3 transport survives an abruptly destroyed client socket mid-request", async () => {
+  const { createRpcServer } = await futureImport("src/daemon/transport.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const root = tempRoot();
+  const socketPath = path.join(root, "rpc.sock");
+  let slowRequestSeen = false;
+  const server = await createRpcServer({
+    socketPath,
+    handleRequest: async (request) => {
+      if (request.requestId === "slow-request") {
+        slowRequestSeen = true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return { alive: true };
+    }
+  });
+
+  try {
+    const socket = await connectRawSocket(socketPath);
+    socket.on("error", () => {});
+    await new Promise((resolve, reject) => {
+      socket.write(encodeFrame(statusRequest("slow-request")), (error) => {
+        if (error) reject(error);
+        else {
+          socket.destroy();
+          resolve();
+        }
+      });
+    });
+    await waitForSocketClose(socket);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(slowRequestSeen, true);
+    const alive = await requestRawRpc(socketPath, encodeFrame, statusRequest("after-destroy"));
+    assert.equal(alive.ok, true);
+    assert.equal(alive.result.alive, true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("AC3 transport converts synchronous handler throws into RPC errors without killing the server", async () => {
+  const { createRpcServer } = await futureImport("src/daemon/transport.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const root = tempRoot();
+  const socketPath = path.join(root, "rpc.sock");
+  const server = await createRpcServer({
+    socketPath,
+    handleRequest: (request) => {
+      if (request.requestId === "sync-throw") {
+        throw Object.assign(new Error("search daemon is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
+      }
+      return Promise.resolve({ alive: true });
+    }
+  });
+
+  try {
+    const rejected = await requestRawRpc(socketPath, encodeFrame, statusRequest("sync-throw"));
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "SEARCH_DAEMON_NOT_READY");
+    assert.match(rejected.error.message, /not ready/);
+
+    const alive = await requestRawRpc(socketPath, encodeFrame, statusRequest("after-sync-throw"));
+    assert.equal(alive.ok, true);
+    assert.equal(alive.result.alive, true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("AC11 transport rejects oversized declared frames and keeps serving", async () => {
+  const { createRpcServer } = await futureImport("src/daemon/transport.ts");
+  const { SEARCH_DAEMON_MAX_FRAME_BYTES, encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const root = tempRoot();
+  const socketPath = path.join(root, "rpc.sock");
+  const server = await createRpcServer({
+    socketPath,
+    handleRequest: async () => ({ alive: true })
+  });
+  const oversizedHeader = Buffer.alloc(4);
+  oversizedHeader.writeUInt32BE(SEARCH_DAEMON_MAX_FRAME_BYTES + 1, 0);
+
+  try {
+    await assertBadFrameThenAlive({
+      socketPath,
+      encodeFrame,
+      label: "oversized-frame",
+      frame: oversizedHeader
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("AC5 worker pool warmup failures reject instead of hanging or degrading", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "warmup-fails.mjs");
+  fs.writeFileSync(workerScript, `
+import { parentPort } from "node:worker_threads";
+
+parentPort.on("message", (message) => {
+  if (message?.id !== 0) return;
+  parentPort.postMessage({
+    id: 0,
+    ok: false,
+    error: { code: "WARMUP_FAILED", message: "x" },
+    memoryRss: process.memoryUsage().rss
+  });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "ac5-warmup-fail-fast",
+    kind: "analyzer",
+    size: 1,
+    workerScript,
+    env: { ...process.env }
+  });
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("warmup did not settle")), 6000);
+  });
+  const started = Date.now();
+
+  try {
+    await assert.rejects(
+      () => Promise.race([pool.warmup(), timeout]),
+      (error) => {
+        assert.equal(error.code, "WARMUP_FAILED");
+        assert.match(error.message, /x/);
+        return true;
+      }
+    );
+    assert.ok(Date.now() - started < 6000);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("search store service rejects excessive analyzed query terms per channel", async () => {
+  const { UsageError } = await futureImport("src/errors.ts");
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const released = [];
+  const fakeStore = {
+    pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a" }),
+    release: (pin) => {
+      released.push(pin.pinToken);
+    }
+  };
+  const tooManyTerms = Array.from({ length: 2049 }, (_, index) => `term-${index}`);
+  const fakeAnalyzer = {
+    analyzerIdentity: { name: "test-analyzer", version: "1", node: "test" },
+    analyzeQuery: async (raw) => ({
+      analyzerIdentity: { name: "test-analyzer", version: "1", node: "test" },
+      analysis: {
+        raw,
+        primaryChannel: "morph",
+        primaryTerms: tooManyTerms,
+        channels: { morph: tooManyTerms, surface: [], ngram: [] }
+      }
+    })
+  };
+  const fakeSearchExecution = {
+    search: async () => {
+      throw new Error("search execution should not run after analysis cap failure");
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 1 });
+
+  await assert.rejects(
+    () => service.search(
+      { vault: tempRoot(), query: "needle", limit: 1 },
+      { deadline: Date.now() + 1000, cancellationId: "ac-service-cap", requestId: "ac-service-cap" }
+    ),
+    (error) => {
+      assert.equal(error instanceof UsageError, true);
+      assert.match(error.message, /too many morph terms \(2049; max 2048\)/);
+      return true;
+    }
+  );
+  assert.deepEqual(released, ["pin-a"]);
+});
+
+test("AC10 owner registry treats a 20 second control lock age as the stale boundary", async () => {
+  const { createOwnerRegistry } = await futureImport("src/daemon/owner-registry.ts");
+  const fresh = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-fresh-") });
+  fs.mkdirSync(fresh.lockPath, { recursive: true });
+  const nineteenSecondsAgo = new Date(Date.now() - 19_000);
+  fs.utimesSync(fresh.lockPath, nineteenSecondsAgo, nineteenSecondsAgo);
+
+  await assert.rejects(
+    () => fresh.withControlLock(1, async () => "unreachable"),
+    (error) => {
+      assert.equal(error.code, "SEARCH_DAEMON_UNAVAILABLE");
+      return true;
+    }
+  );
+  assert.equal(fs.existsSync(fresh.lockPath), true);
+
+  const stale = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-stale-") });
+  fs.mkdirSync(stale.lockPath, { recursive: true });
+  const twentyOneSecondsAgo = new Date(Date.now() - 21_000);
+  fs.utimesSync(stale.lockPath, twentyOneSecondsAgo, twentyOneSecondsAgo);
+  assert.equal(await stale.withControlLock(100, async () => "acquired"), "acquired");
+});
+
+test("AC8 snapshot tmp sweep removes only files aged at least five minutes", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
+  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  await store.loadVault(vault);
+
+  const paths = searchStoreCachePaths(vault, env);
+  fs.mkdirSync(paths.tmpDir, { recursive: true });
+  const oldTmp = path.join(paths.tmpDir, "old.segment.tmp");
+  const youngTmp = path.join(paths.tmpDir, "young.segment.tmp");
+  fs.writeFileSync(oldTmp, "old");
+  fs.writeFileSync(youngTmp, "young");
+  const now = Date.now();
+  fs.utimesSync(oldTmp, new Date(now - 6 * 60_000), new Date(now - 6 * 60_000));
+  fs.utimesSync(youngTmp, new Date(now - 60_000), new Date(now - 60_000));
+
+  await store.compact(vault);
+
+  assert.equal(fs.existsSync(oldTmp), false);
+  assert.equal(fs.existsSync(youngTmp), true);
+});
+
+test("AC9 request scheduler caps remembered cancellations and detects post-task cancellation", async () => {
+  const { createRequestScheduler } = await futureImport("src/daemon/scheduler.ts");
+  const scheduler = createRequestScheduler();
+  for (let index = 0; index < 4097; index += 1) scheduler.cancel(`cancel-${index}`);
+
+  assert.equal(
+    await scheduler.run({ deadline: Date.now() + 1000, cancellationId: "cancel-0" }, async () => "oldest-evicted"),
+    "oldest-evicted"
+  );
+  await assert.rejects(
+    () => scheduler.run({ deadline: Date.now() + 1000, cancellationId: "cancel-4096" }, async () => "newest-kept"),
+    (error) => {
+      assert.equal(error.code, "CANCELLED");
+      return true;
+    }
+  );
+
+  const inFlight = createRequestScheduler();
+  let releaseTask;
+  const running = inFlight.run(
+    { deadline: Date.now() + 1000, cancellationId: "cancel-during-task" },
+    async () => new Promise((resolve) => {
+      releaseTask = resolve;
+    })
+  );
+  inFlight.cancel("cancel-during-task");
+  releaseTask("completed");
+  await assert.rejects(
+    () => running,
+    (error) => {
+      assert.equal(error.code, "CANCELLED");
+      return true;
+    }
+  );
+});
+
+test("AC7 snapshot GC keeps active snapshot segment files after count-cap eviction", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  const vaultA = tempRoot();
+  const vaultB = tempRoot();
+  writeVaultFile(vaultA, "Alpha.md", "# Alpha\n\nproject alpha\n");
+  writeVaultFile(vaultB, "Beta.md", "# Beta\n\nproject beta\n");
+  const store = createDaemonSnapshotStore({
+    env,
+    analyzer: testAnalyzer(),
+    countCap: 1,
+    byteCap: 1024 * 1024
+  });
+
+  await store.loadVault(vaultA);
+  const pathsA = searchStoreCachePaths(vaultA, env);
+  const activeA = JSON.parse(fs.readFileSync(pathsA.activePointerPath, "utf8"));
+  const envelopeA = JSON.parse(fs.readFileSync(path.join(pathsA.snapshotsDir, activeA.snapshotId), "utf8"));
+  const segmentPathsA = envelopeA.manifest.partitions.map((partition) => path.join(pathsA.segmentsDir, partition.segmentHash));
+  assert.ok(segmentPathsA.length > 0);
+  for (const segmentPath of segmentPathsA) assert.equal(fs.existsSync(segmentPath), true);
+
+  const pinA = await store.pin(vaultA);
+  store.release(pinA);
+  await store.loadVault(vaultB);
+  const pinB = await store.pin(vaultB);
+  store.release(pinB);
+
+  for (const segmentPath of segmentPathsA) {
+    assert.equal(fs.existsSync(segmentPath), true, `active segment was collected: ${segmentPath}`);
+  }
+});
+
+// TODO: AC11 partial-frame idle-timeout coverage would require waiting for the
+// transport's hard-coded 30s socket idle timeout or adding a test-time timeout injection.
+// TODO: AC4 shutdown/removeOwner failure and AC12 owner cleanup on warmup failure
+// require daemon construction hooks that are not exposed to tests without editing src/.
 
 test("AC1 protocol method coverage includes Clear", async () => {
   const { SEARCH_DAEMON_METHODS, SEARCH_DAEMON_PROTOCOL_VERSION } = await futureImport("src/daemon/protocol.ts");

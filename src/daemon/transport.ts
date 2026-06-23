@@ -29,6 +29,8 @@ type PendingRequest = {
   reject(error: Error): void;
 };
 
+const RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000;
+
 export async function connectRpc(socketPath: string): Promise<RpcConnection> {
   const socket = await openSocket(socketPath);
   const decoder = new FrameDecoder();
@@ -99,36 +101,46 @@ export async function createRpcServer(options: RpcServerOptions): Promise<RpcSer
     activeRequestsBySocket.set(socket, new Set());
     const decoder = new FrameDecoder();
 
+    socket.setTimeout(RPC_SOCKET_IDLE_TIMEOUT_MS, () => {
+      if (decoder.bufferedBytes === 0) return;
+      writeBadRequestAndDestroy(socket, "RPC frame timed out before completion");
+    });
+
+    socket.on("error", () => {
+      socket.destroy();
+    });
+
     socket.on("data", (chunk) => {
+      const bufferedChunk = bufferChunk(chunk);
       let messages: unknown[];
       try {
-        messages = decoder.push(bufferChunk(chunk));
+        messages = decoder.push(bufferedChunk);
       } catch (error) {
-        socket.write(encodeFrame({
-          requestId: "invalid-frame",
-          ok: false,
-          error: rpcError("BAD_REQUEST", error instanceof Error ? error.message : String(error))
-        } satisfies SearchDaemonResponse));
-        socket.destroy();
+        writeBadRequestAndDestroy(socket, error instanceof Error ? error.message : String(error));
         return;
       }
 
       for (const message of messages) {
+        if (!isSearchDaemonRequest(message)) {
+          writeBadRequestAndDestroy(socket, "RPC request must be an object with string requestId and method");
+          return;
+        }
         const request = message as SearchDaemonRequest;
         activeRequestsBySocket.get(socket)?.add(request.requestId);
-        void options.handleRequest(request)
+        void Promise.resolve()
+          .then(() => options.handleRequest(request))
           .then((result) => {
             if (socket.destroyed) return;
-            socket.write(encodeFrame({
+            writeResponse(socket, {
               requestId: request.requestId,
               ok: true,
               result: result as SearchDaemonResultByMethod[SearchDaemonMethod]
-            } satisfies SearchDaemonResponse));
+            } satisfies SearchDaemonResponse);
           })
           .catch((error) => {
             if (socket.destroyed) return;
             const responseError = errorToRpcError(error);
-            socket.write(encodeFrame({ requestId: request.requestId, ok: false, error: responseError } satisfies SearchDaemonResponse));
+            writeResponse(socket, { requestId: request.requestId, ok: false, error: responseError } satisfies SearchDaemonResponse);
           })
           .finally(() => {
             activeRequestsBySocket.get(socket)?.delete(request.requestId);
@@ -163,6 +175,32 @@ export async function createRpcServer(options: RpcServerOptions): Promise<RpcSer
       });
     }
   };
+}
+
+function writeResponse(socket: net.Socket, response: SearchDaemonResponse, onComplete?: () => void): void {
+  if (socket.destroyed) {
+    onComplete?.();
+    return;
+  }
+  socket.write(encodeFrame(response), (error) => {
+    if (error) socket.destroy();
+    onComplete?.();
+  });
+}
+
+function writeBadRequestAndDestroy(socket: net.Socket, message: string): void {
+  writeResponse(socket, {
+    requestId: "invalid-frame",
+    ok: false,
+    error: rpcError("BAD_REQUEST", message)
+  } satisfies SearchDaemonResponse, () => socket.destroy());
+}
+
+function isSearchDaemonRequest(message: unknown): message is SearchDaemonRequest {
+  return message !== null &&
+    typeof message === "object" &&
+    typeof (message as { requestId?: unknown }).requestId === "string" &&
+    typeof (message as { method?: unknown }).method === "string";
 }
 
 function openSocket(socketPath: string): Promise<net.Socket> {

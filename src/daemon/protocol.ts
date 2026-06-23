@@ -180,6 +180,10 @@ export type SearchDaemonResponse =
 export class FrameDecoder {
   private buffer = Buffer.alloc(0);
 
+  get bufferedBytes(): number {
+    return this.buffer.length;
+  }
+
   push(chunk: Buffer | Uint8Array): unknown[] {
     this.buffer = Buffer.concat([this.buffer, Buffer.from(chunk)]);
     const messages: unknown[] = [];

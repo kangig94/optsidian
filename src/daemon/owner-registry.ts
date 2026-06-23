@@ -56,7 +56,7 @@ export class SearchDaemonOwnerError extends Error {
 
 const OWNER_FILE = "search-daemon.owner";
 const LOCK_DIR = "search-daemon.control.lock";
-const LOCK_STALE_MS = 10000;
+const LOCK_STALE_MS = 20_000;
 
 export function createOwnerRegistry(options: CreateOwnerRegistryOptions = {}): OwnerRegistry {
   const runtimeDir = options.runtimeDir ?? defaultSearchDaemonRuntimeDir(options.env);

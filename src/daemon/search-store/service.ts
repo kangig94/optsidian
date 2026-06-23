@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import { UsageError } from "../../errors.js";
 import { normalizeSearchParams } from "../../core/search/params.js";
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import type { SearchTextAnalysis } from "../../core/search/analysis/index.js";
+import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
 import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
 import type { SearchIndexMutationResult, SearchResult } from "../../core/types.js";
 import { resolveVaultPath } from "../../core/path.js";
@@ -11,6 +12,8 @@ import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import type { AnalyzerWorkerPool, SearchExecutionWorkerPool } from "../pools.js";
 import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./builder.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
+
+const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 
 export type DaemonRequestContext = {
   deadline: number;
@@ -121,7 +124,10 @@ export class DaemonSearchStoreService {
       fields: search.fields,
       searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH
     });
-    if (cached) return { analysis: cached, analyzerIdentity };
+    if (cached) {
+      assertQueryAnalysisTermCount(cached);
+      return { analysis: cached, analyzerIdentity };
+    }
 
     assertRemainingDeadline(context.deadline);
     const result = await this.latencyAnalyzer.analyzeQuery(rawQuery, {
@@ -129,6 +135,7 @@ export class DaemonSearchStoreService {
       cancellationId: context.cancellationId,
       vault
     });
+    assertQueryAnalysisTermCount(result.analysis);
     this.queryAnalysisCache.set({
       analyzerIdentity: result.analyzerIdentity,
       rawQuery,
@@ -142,6 +149,17 @@ export class DaemonSearchStoreService {
     const identity = this.latencyAnalyzer.analyzerIdentity;
     if (!identity) throw Object.assign(new Error("latency analyzer pool is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
     return identity;
+  }
+}
+
+function assertQueryAnalysisTermCount(analysis: SearchTextAnalysis): void {
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    const count = analysis.channels[channel].length;
+    if (count > MAX_SEARCH_QUERY_TERMS_PER_CHANNEL) {
+      throw new UsageError(
+        `query expands to too many ${channel} terms (${count}; max ${MAX_SEARCH_QUERY_TERMS_PER_CHANNEL})`
+      );
+    }
   }
 }
 

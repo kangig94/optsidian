@@ -4,8 +4,13 @@ import { assertOptionalPositiveInteger } from "../validation.js";
 import type { NormalizedSearchParams, PathFilter } from "./internal-types.js";
 import { SEARCH_PROPERTIES } from "./schema.js";
 
+export const MAX_SEARCH_QUERY_LENGTH = 4096;
+
 export function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {
   assertOptionalPositiveInteger(params.limit, "limit");
+  if (params.query !== undefined && params.query.length > MAX_SEARCH_QUERY_LENGTH) {
+    throw new UsageError(`query must be ${MAX_SEARCH_QUERY_LENGTH} characters or fewer`);
+  }
   const query = params.query?.trim();
   if (params.query !== undefined && !query) {
     throw new UsageError("query must not be empty");

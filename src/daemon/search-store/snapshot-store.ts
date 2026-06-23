@@ -86,6 +86,7 @@ type GcRoots = {
 const DEFAULT_COUNT_CAP = 8;
 const DEFAULT_BYTE_CAP = 128 * 1024 * 1024;
 const DEFAULT_RETENTION_COUNT = 8;
+const TMP_STALE_MS = 5 * 60 * 1000;
 
 export class DaemonSnapshotStore implements SnapshotStore {
   private readonly env: NodeJS.ProcessEnv;
@@ -478,16 +479,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
     for (const file of safeReadDir(paths.segmentsDir)) {
       if (!roots.segmentHashes.has(file)) fs.rmSync(path.join(paths.segmentsDir, file), { force: true });
     }
-    for (const file of safeReadDir(paths.tmpDir)) {
-      fs.rmSync(path.join(paths.tmpDir, file), { recursive: true, force: true });
-    }
+    sweepStaleTmpDir(paths.tmpDir);
   }
 
   private gcRoots(paths: SearchStoreCachePaths): GcRoots {
     const snapshotIds = new Set<string>();
     const segmentHashes = new Set<string>();
     const active = this.readActivePointer(paths);
-    if (active) snapshotIds.add(active.snapshotId);
+    if (active) {
+      snapshotIds.add(active.snapshotId);
+      const envelope = this.readSnapshotEnvelope(paths, active.snapshotId);
+      if (envelope) {
+        for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
+      }
+    }
     for (const [snapshotId, envelope] of this.inFlightPublishManifests) {
       snapshotIds.add(snapshotId);
       for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
@@ -508,7 +513,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
     this.ensureDirs(paths);
-    for (const file of safeReadDir(paths.tmpDir)) fs.rmSync(path.join(paths.tmpDir, file), { recursive: true, force: true });
+    sweepStaleTmpDir(paths.tmpDir);
     const active = this.readActivePointer(paths);
     if (active && !this.readSnapshotEnvelope(paths, active.snapshotId)) {
       fs.rmSync(paths.activePointerPath, { force: true });
@@ -638,6 +643,22 @@ function safeReadDir(dirPath: string): string[] {
     return fs.readdirSync(dirPath).sort(compareCodePoint);
   } catch {
     return [];
+  }
+}
+
+function sweepStaleTmpDir(dirPath: string, nowMs = Date.now()): void {
+  for (const file of safeReadDir(dirPath)) {
+    const filePath = path.join(dirPath, file);
+    if (!isStaleTmpPath(filePath, nowMs)) continue;
+    fs.rmSync(filePath, { recursive: true, force: true });
+  }
+}
+
+function isStaleTmpPath(filePath: string, nowMs: number): boolean {
+  try {
+    return nowMs - fs.statSync(filePath).mtimeMs >= TMP_STALE_MS;
+  } catch {
+    return false;
   }
 }
 

@@ -34,7 +34,10 @@ export type RunSearchDaemonOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
+let searchDaemonProcessErrorHandlersInstalled = false;
+
 export async function runSearchDaemon(options: RunSearchDaemonOptions = {}): Promise<void> {
+  installSearchDaemonProcessErrorHandlers();
   const argv = options.argv ?? process.argv.slice(2);
   const env = options.env ?? process.env;
   if (argv.includes("--print-info")) {
@@ -95,47 +98,56 @@ class SearchDaemon {
     const registry = createOwnerRegistry({ runtimeDir: options.env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR });
     fs.mkdirSync(registry.runtimeDir, { recursive: true, mode: 0o700 });
     removeOrphanSocket(owner.socketPath);
-    registry.writeOwner(owner);
-    const settings = readOptsidianSettings(process.cwd(), options.env);
-    const pools = await createDaemonPools(options.env, settings);
+    try {
+      registry.writeOwner(owner);
+      const settings = readOptsidianSettings(process.cwd(), options.env);
+      const pools = await createDaemonPools(options.env, settings);
 
-    let daemon: SearchDaemon | undefined;
-    const server = await createRpcServer({
-      socketPath: owner.socketPath,
-      handleRequest: (request) => {
-        if (!daemon) {
-          throw Object.assign(new Error("search daemon is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
+      let daemon: SearchDaemon | undefined;
+      const server = await createRpcServer({
+        socketPath: owner.socketPath,
+        handleRequest: (request) => {
+          if (!daemon) {
+            throw Object.assign(new Error("search daemon is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
+          }
+          return daemon.handleRequest(request);
+        },
+        onConnectionClosed: (requestIds) => {
+          if (!daemon) return;
+          for (const requestId of requestIds) {
+            daemon.scheduler.cancel(requestId);
+            daemon.pools.cancel(requestId);
+          }
         }
-        return daemon.handleRequest(request);
-      },
-      onConnectionClosed: (requestIds) => {
-        if (!daemon) return;
-        for (const requestId of requestIds) {
-          daemon.scheduler.cancel(requestId);
-          daemon.pools.cancel(requestId);
-        }
+      });
+      const throughputIdentity = pools.throughputAnalyzer.analyzerIdentity;
+      if (!throughputIdentity) throw new Error("throughput analyzer pool did not warm up");
+      const snapshotStore = createDaemonSnapshotStore({
+        env: options.env,
+        analyzerIdentity: throughputIdentity,
+        countCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT, settings.search?.memoryBudgetCount),
+        byteCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES, settings.search?.memoryBudgetBytes),
+        retentionCount: settingNumber(options.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT, settings.search?.snapshotRetentionCount),
+        snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
+          deadline: input.deadline ?? Date.now() + 30_000,
+          cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
+          vault: input.vaultRoot
+        })
+      });
+      const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
+        queryCacheSize: settingNumber(options.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE, settings.search?.queryCacheSize)
+      });
+      daemon = new SearchDaemon(registry, owner, server, searchStore, pools, daemonIdleMs(options.env, settings));
+      daemon.initialize();
+      return daemon;
+    } catch (error) {
+      try {
+        registry.removeOwner(owner);
+      } catch (cleanupError) {
+        logSearchDaemonProcessError("owner cleanup failed", cleanupError);
       }
-    });
-    const throughputIdentity = pools.throughputAnalyzer.analyzerIdentity;
-    if (!throughputIdentity) throw new Error("throughput analyzer pool did not warm up");
-    const snapshotStore = createDaemonSnapshotStore({
-      env: options.env,
-      analyzerIdentity: throughputIdentity,
-      countCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT, settings.search?.memoryBudgetCount),
-      byteCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES, settings.search?.memoryBudgetBytes),
-      retentionCount: settingNumber(options.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT, settings.search?.snapshotRetentionCount),
-      snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
-        deadline: input.deadline ?? Date.now() + 30_000,
-        cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
-        vault: input.vaultRoot
-      })
-    });
-    const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
-      queryCacheSize: settingNumber(options.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE, settings.search?.queryCacheSize)
-    });
-    daemon = new SearchDaemon(registry, owner, server, searchStore, pools, daemonIdleMs(options.env, settings));
-    daemon.initialize();
-    return daemon;
+      throw error;
+    }
   }
 
   waitForShutdown(): Promise<void> {
@@ -235,7 +247,7 @@ class SearchDaemon {
           });
         }
         setTimeout(() => {
-          void this.shutdown();
+          void this.shutdown().catch(() => {});
         }, 0).unref();
         return { ok: true, shuttingDown: true };
     }
@@ -273,10 +285,18 @@ class SearchDaemon {
     if (this.phase === "shutting-down") return;
     this.phase = "shutting-down";
     this.clearIdleTimer();
-    this.registry.removeOwner(this.owner);
-    await this.server.close();
-    await this.pools.close();
-    removeOrphanSocket(this.owner.socketPath);
+    try {
+      this.registry.removeOwner(this.owner);
+    } catch {}
+    try {
+      await this.server.close();
+    } catch {}
+    try {
+      await this.pools.close();
+    } catch {}
+    try {
+      removeOrphanSocket(this.owner.socketPath);
+    } catch {}
     this.resolveShutdown();
   }
 
@@ -284,7 +304,7 @@ class SearchDaemon {
     if (this.phase !== "ready" || this.idleMs <= 0) return;
     this.clearIdleTimer();
     this.idleTimer = setTimeout(() => {
-      void this.shutdown();
+      void this.shutdown().catch(() => {});
     }, this.idleMs);
     this.idleTimer.unref();
   }
@@ -333,6 +353,26 @@ function removeOrphanSocket(socketPath: string): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function installSearchDaemonProcessErrorHandlers(): void {
+  if (searchDaemonProcessErrorHandlersInstalled) return;
+  searchDaemonProcessErrorHandlersInstalled = true;
+  process.on("uncaughtException", (error) => {
+    logSearchDaemonProcessError("uncaughtException", error);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    logSearchDaemonProcessError("unhandledRejection", reason);
+    process.exit(1);
+  });
+}
+
+function logSearchDaemonProcessError(kind: string, error: unknown): void {
+  const message = error instanceof Error && error.stack ? error.stack : errorMessage(error);
+  try {
+    process.stderr.write(`[optsidian search daemon] ${kind}: ${message}\n`);
+  } catch {}
 }
 
 function snapshotIdFromResult(result: unknown): string | undefined {

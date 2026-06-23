@@ -42,6 +42,28 @@ async function core() {
   return import(path.join(repoRoot, "src/core/index.ts"));
 }
 
+test("AC6 search query and Hangul ngram analysis are length-bounded", async () => {
+  const { UsageError } = await import(path.join(repoRoot, "src/errors.ts"));
+  const { MAX_SEARCH_QUERY_LENGTH, normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { ngramSearchTerms } = await import(path.join(repoRoot, "src/core/search/analysis/korean.ts"));
+
+  const maxQuery = "a".repeat(MAX_SEARCH_QUERY_LENGTH);
+  assert.equal(normalizeSearchParams({ query: maxQuery }).query, maxQuery);
+
+  assert.throws(
+    () => normalizeSearchParams({ query: `${maxQuery}a` }),
+    (error) => error instanceof UsageError && /4096 characters or fewer/.test(error.message)
+  );
+
+  assert.deepEqual(ngramSearchTerms(["검색어"]), ["검색", "색어", "검색어"]);
+
+  let longHangulTerms;
+  assert.doesNotThrow(() => {
+    longHangulTerms = ngramSearchTerms(["가".repeat(130000)]);
+  });
+  assert.ok(longHangulTerms.length <= 8192);
+});
+
 
 test("markdown search parser extracts title aliases tags headings and body", async () => {
   const { parseMarkdownNote } = await import(path.join(repoRoot, "src/core/search/markdown.ts"));
