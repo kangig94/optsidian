@@ -1,8 +1,8 @@
 import { uniqueSearchTerms } from "./channels.js";
 
 const HANGUL_PATTERN = /\p{Script=Hangul}/u;
-const MIN_NGRAM = 2;
-const MAX_NGRAM = 3;
+export const MIN_NGRAM = 2;
+export const MAX_NGRAM = 3;
 
 export function ngramSearchTerms(terms: readonly string[]): string[] {
   const ngrams: string[] = [];

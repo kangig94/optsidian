@@ -1,8 +1,6 @@
 #!/usr/bin/env node
-import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RuntimeError, isCliError } from "./errors.js";
-import { maybePokeSearchIndexDaemonWarmForMcp } from "./core/search/warm-schedule.js";
 import { recordVaultAccess } from "./core/vault-access.js";
 import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
 import { createOptsidianMcpServer } from "./mcp/server.js";
@@ -21,9 +19,7 @@ async function main(): Promise<void> {
   }
 
   const resolveVaultRoot = createMcpVaultResolver(config);
-  const maybeWarmIndex = createMcpIndexWarmTrigger(config);
-  if (config.vaultPath) maybeWarmIndex();
-  const server = createOptsidianMcpServer({ resolveVaultRoot, onToolCall: maybeWarmIndex });
+  const server = createOptsidianMcpServer({ resolveVaultRoot });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -45,21 +41,6 @@ function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => 
 function rememberVaultAccess(vaultRoot: string): string {
   recordVaultAccess(vaultRoot);
   return vaultRoot;
-}
-
-function createMcpIndexWarmTrigger(config: ReturnType<typeof parseMcpArgs>): () => void {
-  const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
-  return () => {
-    try {
-      const vaultPath = config.vaultPath ? rememberVaultAccess(resolveVaultPathInput(config.vaultPath)) : undefined;
-      maybePokeSearchIndexDaemonWarmForMcp({
-        vaultPath,
-        cliBin
-      });
-    } catch {
-      // Index warmup is opportunistic; MCP startup and tool calls must remain foreground-stable.
-    }
-  };
 }
 
 main().catch((error: unknown) => {

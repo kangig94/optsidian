@@ -4,16 +4,15 @@ import path from "node:path";
 import { UsageError } from "../errors.js";
 
 export type SearchSettings = {
-  analyzer?: "intl" | "intl-daemon";
+  analyzer?: "intl" | "kiwi";
   extraLangs?: string[];
-  analyzerIdleMs?: number;
-  analyzerRequestTimeoutMs?: number;
-  analyzerLoadTimeoutMs?: number;
-  overlayMaxFiles?: number;
-  overlayMaxBytes?: number;
-  indexWarmIntervalMinutes?: number;
-  indexWarmAccessMaxAgeDays?: number;
-  indexWarmConcurrency?: number;
+  queryWorkers?: number;
+  indexWorkers?: number;
+  snapshotRetentionCount?: number;
+  queryCacheSize?: number;
+  memoryBudgetCount?: number;
+  memoryBudgetBytes?: number;
+  daemonIdleMs?: number;
 };
 
 export type OptsidianSettings = {
@@ -162,44 +161,26 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     settings.search = {};
     if (value.search.analyzer !== undefined) settings.search.analyzer = normalizeAnalyzer(value.search.analyzer);
     if (value.search.extraLangs !== undefined) settings.search.extraLangs = normalizeStringList(value.search.extraLangs, "search.extraLangs");
-    if (value.search.analyzerIdleMs !== undefined) {
-      settings.search.analyzerIdleMs = normalizePositiveInteger(value.search.analyzerIdleMs, "search.analyzerIdleMs");
+    if (value.search.queryWorkers !== undefined) {
+      settings.search.queryWorkers = normalizePositiveInteger(value.search.queryWorkers, "search.queryWorkers");
     }
-    if (value.search.analyzerRequestTimeoutMs !== undefined) {
-      settings.search.analyzerRequestTimeoutMs = normalizePositiveInteger(
-        value.search.analyzerRequestTimeoutMs,
-        "search.analyzerRequestTimeoutMs"
-      );
+    if (value.search.indexWorkers !== undefined) {
+      settings.search.indexWorkers = normalizePositiveInteger(value.search.indexWorkers, "search.indexWorkers");
     }
-    if (value.search.analyzerLoadTimeoutMs !== undefined) {
-      settings.search.analyzerLoadTimeoutMs = normalizePositiveInteger(
-        value.search.analyzerLoadTimeoutMs,
-        "search.analyzerLoadTimeoutMs"
-      );
+    if (value.search.snapshotRetentionCount !== undefined) {
+      settings.search.snapshotRetentionCount = normalizePositiveInteger(value.search.snapshotRetentionCount, "search.snapshotRetentionCount");
     }
-    if (value.search.overlayMaxFiles !== undefined) {
-      settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value.search.overlayMaxFiles, "search.overlayMaxFiles");
+    if (value.search.queryCacheSize !== undefined) {
+      settings.search.queryCacheSize = normalizeNonNegativeInteger(value.search.queryCacheSize, "search.queryCacheSize");
     }
-    if (value.search.overlayMaxBytes !== undefined) {
-      settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value.search.overlayMaxBytes, "search.overlayMaxBytes");
+    if (value.search.memoryBudgetCount !== undefined) {
+      settings.search.memoryBudgetCount = normalizePositiveInteger(value.search.memoryBudgetCount, "search.memoryBudgetCount");
     }
-    if (value.search.indexWarmIntervalMinutes !== undefined) {
-      settings.search.indexWarmIntervalMinutes = normalizeNonNegativeInteger(
-        value.search.indexWarmIntervalMinutes,
-        "search.indexWarmIntervalMinutes"
-      );
+    if (value.search.memoryBudgetBytes !== undefined) {
+      settings.search.memoryBudgetBytes = normalizePositiveInteger(value.search.memoryBudgetBytes, "search.memoryBudgetBytes");
     }
-    if (value.search.indexWarmAccessMaxAgeDays !== undefined) {
-      settings.search.indexWarmAccessMaxAgeDays = normalizePositiveInteger(
-        value.search.indexWarmAccessMaxAgeDays,
-        "search.indexWarmAccessMaxAgeDays"
-      );
-    }
-    if (value.search.indexWarmConcurrency !== undefined) {
-      settings.search.indexWarmConcurrency = normalizePositiveInteger(
-        value.search.indexWarmConcurrency,
-        "search.indexWarmConcurrency"
-      );
+    if (value.search.daemonIdleMs !== undefined) {
+      settings.search.daemonIdleMs = normalizeNonNegativeInteger(value.search.daemonIdleMs, "search.daemonIdleMs");
     }
   }
   return settings;
@@ -211,22 +192,20 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.analyzer;
     case "search.extraLangs":
       return settings.search?.extraLangs ?? [];
-    case "search.analyzerIdleMs":
-      return settings.search?.analyzerIdleMs;
-    case "search.analyzerRequestTimeoutMs":
-      return settings.search?.analyzerRequestTimeoutMs;
-    case "search.analyzerLoadTimeoutMs":
-      return settings.search?.analyzerLoadTimeoutMs;
-    case "search.overlayMaxFiles":
-      return settings.search?.overlayMaxFiles;
-    case "search.overlayMaxBytes":
-      return settings.search?.overlayMaxBytes;
-    case "search.indexWarmIntervalMinutes":
-      return settings.search?.indexWarmIntervalMinutes;
-    case "search.indexWarmAccessMaxAgeDays":
-      return settings.search?.indexWarmAccessMaxAgeDays;
-    case "search.indexWarmConcurrency":
-      return settings.search?.indexWarmConcurrency;
+    case "search.queryWorkers":
+      return settings.search?.queryWorkers;
+    case "search.indexWorkers":
+      return settings.search?.indexWorkers;
+    case "search.snapshotRetentionCount":
+      return settings.search?.snapshotRetentionCount;
+    case "search.queryCacheSize":
+      return settings.search?.queryCacheSize;
+    case "search.memoryBudgetCount":
+      return settings.search?.memoryBudgetCount;
+    case "search.memoryBudgetBytes":
+      return settings.search?.memoryBudgetBytes;
+    case "search.daemonIdleMs":
+      return settings.search?.daemonIdleMs;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -241,29 +220,26 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
     case "search.extraLangs":
       settings.search.extraLangs = normalizeStringList(value, key);
       return;
-    case "search.analyzerIdleMs":
-      settings.search.analyzerIdleMs = normalizePositiveInteger(value, key);
+    case "search.queryWorkers":
+      settings.search.queryWorkers = normalizePositiveInteger(value, key);
       return;
-    case "search.analyzerRequestTimeoutMs":
-      settings.search.analyzerRequestTimeoutMs = normalizePositiveInteger(value, key);
+    case "search.indexWorkers":
+      settings.search.indexWorkers = normalizePositiveInteger(value, key);
       return;
-    case "search.analyzerLoadTimeoutMs":
-      settings.search.analyzerLoadTimeoutMs = normalizePositiveInteger(value, key);
+    case "search.snapshotRetentionCount":
+      settings.search.snapshotRetentionCount = normalizePositiveInteger(value, key);
       return;
-    case "search.overlayMaxFiles":
-      settings.search.overlayMaxFiles = normalizeNonNegativeInteger(value, key);
+    case "search.queryCacheSize":
+      settings.search.queryCacheSize = normalizeNonNegativeInteger(value, key);
       return;
-    case "search.overlayMaxBytes":
-      settings.search.overlayMaxBytes = normalizeNonNegativeInteger(value, key);
+    case "search.memoryBudgetCount":
+      settings.search.memoryBudgetCount = normalizePositiveInteger(value, key);
       return;
-    case "search.indexWarmIntervalMinutes":
-      settings.search.indexWarmIntervalMinutes = normalizeNonNegativeInteger(value, key);
+    case "search.memoryBudgetBytes":
+      settings.search.memoryBudgetBytes = normalizePositiveInteger(value, key);
       return;
-    case "search.indexWarmAccessMaxAgeDays":
-      settings.search.indexWarmAccessMaxAgeDays = normalizePositiveInteger(value, key);
-      return;
-    case "search.indexWarmConcurrency":
-      settings.search.indexWarmConcurrency = normalizePositiveInteger(value, key);
+    case "search.daemonIdleMs":
+      settings.search.daemonIdleMs = normalizeNonNegativeInteger(value, key);
       return;
     default:
       throw new UsageError(knownSettingMessage());
@@ -278,40 +254,37 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
     case "search.extraLangs":
       if (settings.search) delete settings.search.extraLangs;
       return;
-    case "search.analyzerIdleMs":
-      if (settings.search) delete settings.search.analyzerIdleMs;
+    case "search.queryWorkers":
+      if (settings.search) delete settings.search.queryWorkers;
       return;
-    case "search.analyzerRequestTimeoutMs":
-      if (settings.search) delete settings.search.analyzerRequestTimeoutMs;
+    case "search.indexWorkers":
+      if (settings.search) delete settings.search.indexWorkers;
       return;
-    case "search.analyzerLoadTimeoutMs":
-      if (settings.search) delete settings.search.analyzerLoadTimeoutMs;
+    case "search.snapshotRetentionCount":
+      if (settings.search) delete settings.search.snapshotRetentionCount;
       return;
-    case "search.overlayMaxFiles":
-      if (settings.search) delete settings.search.overlayMaxFiles;
+    case "search.queryCacheSize":
+      if (settings.search) delete settings.search.queryCacheSize;
       return;
-    case "search.overlayMaxBytes":
-      if (settings.search) delete settings.search.overlayMaxBytes;
+    case "search.memoryBudgetCount":
+      if (settings.search) delete settings.search.memoryBudgetCount;
       return;
-    case "search.indexWarmIntervalMinutes":
-      if (settings.search) delete settings.search.indexWarmIntervalMinutes;
+    case "search.memoryBudgetBytes":
+      if (settings.search) delete settings.search.memoryBudgetBytes;
       return;
-    case "search.indexWarmAccessMaxAgeDays":
-      if (settings.search) delete settings.search.indexWarmAccessMaxAgeDays;
-      return;
-    case "search.indexWarmConcurrency":
-      if (settings.search) delete settings.search.indexWarmConcurrency;
+    case "search.daemonIdleMs":
+      if (settings.search) delete settings.search.daemonIdleMs;
       return;
     default:
       throw new UsageError(knownSettingMessage());
   }
 }
 
-function normalizeAnalyzer(value: unknown): "intl" | "intl-daemon" {
-  if (typeof value !== "string") throw new UsageError("search.analyzer must be intl or intl-daemon");
+function normalizeAnalyzer(value: unknown): "intl" | "kiwi" {
+  if (typeof value !== "string") throw new UsageError("search.analyzer must be intl or kiwi");
   const normalized = value.trim().toLowerCase();
-  if (normalized === "intl" || normalized === "intl-daemon") return normalized;
-  throw new UsageError("search.analyzer must be intl or intl-daemon");
+  if (normalized === "intl" || normalized === "kiwi") return normalized;
+  throw new UsageError("search.analyzer must be intl or kiwi");
 }
 
 function normalizeStringList(value: unknown, key: string): string[] {
@@ -349,7 +322,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.analyzerLoadTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

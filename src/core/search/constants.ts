@@ -1,29 +1,5 @@
 import type { SearchTokenChannel } from "./analysis/index.js";
-
-export const SEARCH_CACHE_VERSION = 1;
-export const SEARCH_INDEX_FILE = "search.orama";
-export const SEARCH_MANIFEST_FILE = "manifest.json";
-export const SEARCH_COMMIT_FILE = "commit.json";
-export const SEARCH_ANALYSIS_CACHE_FILE = "analysis-cache.json";
-export const SEARCH_RECONCILE_COMMAND = "__search-reconcile";
-export const SEARCH_RECONCILE_LOCK_DIR = "reconcile.lock";
-export const SEARCH_RECONCILE_STATUS_FILE = "reconcile-status.json";
-export const SEARCH_INDEX_WRITER_LOCK_DIR = "index-writer.lock";
-export const SEARCH_INDEX_STALE_TIER_WARNING = "fts_index_stale_tier";
-export const SEARCH_INDEX_STALE_MANIFEST_WARNING = "fts_index_stale_manifest";
-export const SEARCH_INDEX_BUILDING_WARNING = "fts_index_building";
-export const SEARCH_RECONCILE_LOCK_STALE_MS = 30 * 60 * 1000;
-export const SEARCH_RECONCILE_STATUS_SCHEMA_VERSION = 1;
-export const SEARCH_RECONCILE_ERROR_MAX_LENGTH = 2048;
-export const SEARCH_INDEX_WRITER_LOCK_STALE_MS = 30 * 60 * 1000;
-export const SEARCH_INDEX_WRITER_LOCK_WAIT_MS = 60 * 1000;
-export const SEARCH_INDEX_WRITER_LOCK_POLL_MS = 50;
-export const SEARCH_OVERLAY_MAX_FILES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES";
-export const SEARCH_OVERLAY_MAX_BYTES_ENV = "OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES";
-export const SEARCH_ANALYZER_LOAD_TIMEOUT_ENV = "OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS";
-export const SEARCH_OVERLAY_MAX_FILES_DEFAULT = 20;
-export const SEARCH_OVERLAY_MAX_BYTES_DEFAULT = 2 * 1024 * 1024;
-export const SEARCH_ANALYZER_LOAD_TIMEOUT_MS_DEFAULT = 5000;
+import { SEARCH_BOOST, SEARCH_FIELD_CHANNEL_BOOST } from "./schema.js";
 
 export const CANDIDATE_LIMIT_MIN = 50;
 export const CANDIDATE_LIMIT_MULTIPLIER = 10;
@@ -38,6 +14,10 @@ export const RANK_SIGNAL_WEIGHTS = {
   rarity: 0.04,
   proximity: 0.06
 } as const;
+export const RANK_SIGNAL_NORMALIZATION = "snapshot-corpus-max-v1";
+export const SEARCH_BM25_K1 = 1.2;
+export const SEARCH_BM25_B = 0.75;
+export const SEARCH_BM25_D = 0.5;
 export const SEARCH_TOKEN_CHANNEL_WEIGHT: Record<SearchTokenChannel, number> = {
   morph: 1,
   surface: 0.65,
@@ -72,3 +52,23 @@ export const COVERAGE_FIELD_WEIGHT: Record<CoverageField, number> = {
   headings: 2,
   path: 1
 };
+
+export const RANKING_CONSTANTS = {
+  RRF_K,
+  RRF_WEIGHTS,
+  RANK_SIGNAL_WEIGHTS,
+  RANK_SIGNAL_NORMALIZATION,
+  SEARCH_TOKEN_CHANNEL_WEIGHT,
+  COVERAGE_FIELD_WEIGHT,
+  EXACT_PRIORITY,
+  PHRASE_PRIORITY,
+  RANK_BUCKET,
+  SEARCH_BOOST,
+  SEARCH_FIELD_CHANNEL_BOOST,
+  SEARCH_BM25_K1,
+  SEARCH_BM25_B,
+  SEARCH_BM25_D,
+  SEARCH_FUZZY_WEIGHT_MULTIPLIER,
+  CANDIDATE_LIMIT_MIN,
+  CANDIDATE_LIMIT_MULTIPLIER
+} as const;

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMainThread, workerData } from "node:worker_threads";
 import { parseArgs } from "./cli/args.js";
 import { delegateToObsidian } from "./cli/delegate.js";
 import { UsageError, isCliError } from "./errors.js";
@@ -19,9 +20,8 @@ import { runConfig } from "./cli/commands/config.js";
 import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
-import { runSearchAnalyzerDaemon } from "./core/search/analyzer.js";
-import { runSearchIndexDaemon, searchIndexDaemonCommand } from "./core/search/warm-daemon.js";
-import { parseSearchReconcileReason, reconcileSearchIndex, searchReconcileCommand } from "./core/search/index.js";
+import { runSearchDaemon } from "./daemon/server.js";
+import { runSearchDaemonWorker } from "./daemon/worker-entry.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
 async function main(): Promise<void> {
@@ -37,18 +37,8 @@ async function main(): Promise<void> {
     process.stdout.write(`${OPTSIDIAN_VERSION}\n`);
     return;
   }
-  if (argv[0] === "__analyzer-daemon") {
-    await runSearchAnalyzerDaemon();
-    return;
-  }
-  if (argv[0] === searchIndexDaemonCommand()) {
-    await runSearchIndexDaemon();
-    return;
-  }
-  if (argv[0] === searchReconcileCommand()) {
-    const vaultRoot = argv[1];
-    if (!vaultRoot) throw new UsageError(`${searchReconcileCommand()} requires a vault path`);
-    await reconcileSearchIndex(vaultRoot, parseSearchReconcileReason(argv[2]));
+  if (argv[0] === "__search-daemon") {
+    await runSearchDaemon({ argv: argv.slice(1) });
     return;
   }
 
@@ -143,8 +133,16 @@ function rejectVaultPathForNative(args: ReturnType<typeof parseArgs>): void {
   }
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`Error: ${message}\n`);
-  process.exit(isCliError(error) ? error.exitCode : 1);
-});
+if (!isMainThread && (workerData as { optsidianSearchWorker?: boolean } | null)?.optsidianSearchWorker === true) {
+  runSearchDaemonWorker().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Search daemon worker error: ${message}\n`);
+    process.exit(1);
+  });
+} else {
+  main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Error: ${message}\n`);
+    process.exit(isCliError(error) ? error.exitCode : 1);
+  });
+}

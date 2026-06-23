@@ -12,7 +12,16 @@ import {
 import { metadataCoverage } from "./coverage.js";
 import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates } from "./identity.js";
 import { rankMap, rrfContribution } from "./rrf.js";
-import { candidateRankSignals, EMPTY_RANK_SIGNALS, type CandidateRankSignals } from "./signals.js";
+
+export type CandidateRankSignals = {
+  rarityScore: number;
+  proximityScore: number;
+};
+
+export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
+  rarityScore: 0,
+  proximityScore: 0
+};
 
 export function rerankCandidates(
   query: string,
@@ -21,7 +30,27 @@ export function rerankCandidates(
   fields?: SearchField[]
 ): RankedCandidate[] {
   const context = queryContext(query, queryTerms, firstQueryChannels(hits), fields);
-  const signals = candidateRankSignals(hits.map((hit) => hit.document), context);
+  return rerankCandidatesWithContext(query, hits, context);
+}
+
+export function rerankCandidatesWithSignals(
+  query: string,
+  queryTerms: string[],
+  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
+  fields: SearchField[] | undefined,
+  signals: Map<string, CandidateRankSignals>
+): RankedCandidate[] {
+  const context = queryContext(query, queryTerms, firstQueryChannels(hits), fields);
+  return rerankCandidatesWithContext(query, hits, context, signals);
+}
+
+function rerankCandidatesWithContext(
+  _query: string,
+  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
+  context: QueryContext,
+  signalOverride?: Map<string, CandidateRankSignals>
+): RankedCandidate[] {
+  const signals = signalOverride ?? new Map<string, CandidateRankSignals>();
   const candidates = hits.map((hit, index) =>
     rankedCandidate(hit.document, index + 1, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
   );

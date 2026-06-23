@@ -86,13 +86,14 @@ export type SearchAnalyzerDebug = {
 };
 
 export type SearchMatchDebug = {
-  source: "persisted" | "overlay";
+  source: "persisted";
   queryTerms: string[];
   queryChannels?: Record<string, string[]>;
   matchedChannels?: string[];
   channelScores?: Record<string, number>;
   analyzer: SearchAnalyzerDebug;
-  oramaScore?: number;
+  candidateScore?: number;
+  retrievalScore?: number;
   rerankScore?: number;
   baseRank?: number;
   bucket?: "exact" | "phrase" | "coverage" | "base";
@@ -102,6 +103,8 @@ export type SearchMatchDebug = {
   coverageFieldScore?: number;
   rarityScore?: number;
   proximityScore?: number;
+  snippetSource?: "snapshot-field-text";
+  snapshotId?: string;
 };
 
 export type SearchMatch = {
@@ -120,13 +123,14 @@ export type SearchDebugInfo = {
     channels?: Record<string, string[]>;
   };
   projection: {
-    source: "persisted" | "overlay" | "mixed" | "none";
+    source: "persisted" | "none";
     tokenizerTier: "intl" | "kiwi";
     documents: number;
     files: number;
   };
   analyzer: SearchAnalyzerDebug;
   candidates: number;
+  snapshotId?: string;
   reranker?: "rrf-metadata-v2";
 };
 
@@ -136,31 +140,6 @@ export type SearchResult = {
   matches: SearchMatch[];
   debug?: SearchDebugInfo;
   warnings?: string[];
-};
-
-export type SearchReconcileReason = "stale-tier" | "stale-manifest" | "incompatible" | "terminal-analyzer-failure" | "manual";
-
-export type SearchIndexReconcileStatus = {
-  active: true;
-  stale: boolean;
-  reason?: SearchReconcileReason;
-  startedAt?: string;
-  pid?: number;
-};
-
-export type SearchIndexReconcileRunStatus = {
-  state: "running" | "success" | "failure";
-  reason: SearchReconcileReason;
-  startedAt: string;
-  finishedAt?: string;
-  durationMs?: number;
-  error?: string;
-};
-
-export type SearchIndexReconcileSnapshot = {
-  lastRun?: SearchIndexReconcileRunStatus;
-  lastSuccess?: SearchIndexReconcileRunStatus;
-  lastFailure?: SearchIndexReconcileRunStatus;
 };
 
 export type SearchIndexProjectionStatus = {
@@ -215,8 +194,6 @@ export type SearchIndexStatusResult = {
   projections: SearchIndexProjectionStatus[];
   warmAccess: SearchIndexWarmAccessStatus;
   warmSchedule: SearchIndexWarmScheduleStatus;
-  reconcile?: SearchIndexReconcileStatus;
-  reconcileStatus?: SearchIndexReconcileSnapshot;
 };
 
 export type SearchIndexWarmVaultResult = {

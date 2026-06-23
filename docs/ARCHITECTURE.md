@@ -3,8 +3,8 @@
 `optsidian` is an LLM-optimized wrapper over the native Obsidian CLI. It ships two binaries —
 `optsidian` (CLI) and `optsidian-mcp` (an MCP server) — that sit on a single shell-independent
 core. The CLI and MCP adapters translate their respective transports into raw-string calls into
-`src/core/*`, which returns structured results. Search (Orama full-text + Kiwi Korean
-morphology) is the largest subsystem and runs behind two background daemons.
+`src/core/*`, which returns structured results. Search is served through one search daemon using a
+snapshot-resident positional engine plus Kiwi Korean morphology worker pools.
 
 This document anchors the layer graph, the dependency rules, and the per-directory modification
 policy. It describes architectural roles and decisions — not source contents. For developer
@@ -15,7 +15,8 @@ native-first command policy, see [`native-first-policy.md`](native-first-policy.
 
 ```
 L3 adapters   CLI (src/cli.ts, src/cli/*)        MCP (src/mcp.ts, src/mcp/*)
-                     \      both depend down only       /
+              Search daemon peer (src/daemon/*)
+                     \      all depend down only        /
 L2 core              CORE (src/core/*): read edit write apply-patch frontmatter
                      copy mkdir grep + search/* + kiwi/*   (raw-string in / structured out)
 L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / version.ts
@@ -25,7 +26,7 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 
 | Layer | Modules | Role |
 |-------|---------|------|
-| L3 — adapters | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*` | Translate a transport (argv / MCP stdio) into core calls; render structured results back. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
+| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, indexing, worker pools, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
 | L2 — core | `src/core/*` including `search/*` and `kiwi/*` | Shell-independent command layer shared by both adapters: raw-string in, structured out. Editing, frontmatter, search/indexing, Korean analysis. |
 | L1 — platform | `src/native/*`, `src/net/github.ts`, `src/errors.ts`, `src/version.ts` | OS- and service-facing primitives: native Obsidian invocation + GUI launch, GitHub HTTP, error/exit-code types, version. `src/update/installer.ts` composes net + native for self-update. |
 
@@ -48,8 +49,9 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 | Directory | Modification rule |
 |-----------|-------------------|
 | `src/core/*` | Pure and shared. No `process.*` I/O, no native delegation. New logic lives here so both adapters get it; adapters stay thin. |
-| `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects index contents requires bumping `SEARCH_CACHE_VERSION` (see [Search](#search)). Persisted index, in-memory overlay, and live analysis must stay consistent. |
+| `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects snapshot contents requires bumping the relevant search identity/schema version (see [Search](#search)). Snapshot indexing, query analysis, positional retrieval, and ranking must stay consistent. |
 | `src/core/kiwi/*` | Standalone. Must not import `search/*`. |
+| `src/daemon/*` | L3 search-daemon adapter. Owns socket transport, snapshot-store MVCC/GC, worker pools, vault registry, and scheduler. Bump the RPC protocol version on breaking wire changes. No upward dependency on `src/cli/*` or `src/mcp/*`. |
 | `src/cli/policy.ts` | The native-first policy table. Classify every new command (delegate / optimize / extend) and keep the table, its regression test, and the docs in sync. |
 | `src/mcp/tools.ts` | MCP tool registration. zod input schemas and the `destructiveHint` / `openWorldHint` annotations must match real behavior. |
 | `src/native/*`, `src/net/*`, `src/update/*` | Platform layer. No upward dependency on the adapters; no core dependency on these beyond the documented composition in `update/installer.ts`. |
@@ -82,26 +84,18 @@ Registered in `src/mcp/tools.ts`; the canonical list is `MCP_TOOL_NAMES` in `src
 | `edit` | → `editVaultFile`. |
 | `apply_patch` | → `applyVaultPatch`. |
 
-> **Discrepancy to reconcile (recorded, not resolved here).** Three sources disagree about the MCP
-> surface:
-> - (a) the prose docs (`README.md`, `docs/usage.md`, `docs/native-first-policy.md`) list **4**
->   tools and promise "MCP does not expose a native passthrough tool in V1";
-> - (b) the code's own `MCP_TOOL_NAMES` and the `command_map` tool advertise **5** tools at runtime,
->   including `command_run`;
-> - (c) `command_run` *is* the native passthrough that (a) says does not exist.
->
-> This document records the code reality. Whether the docs are stale or `command_run` is unintended
-> is a product decision left to the maintainer; the prose docs are deliberately not edited.
+`command_run` is part of the V1 MCP contract because it is the MCP-to-CLI bridge for CLI-only and
+native-delegated Optsidian commands. Keep this list synchronized with `MCP_TOOL_NAMES`.
 
-## Daemons & Lifecycle State
+## Daemon & Lifecycle State
 
-There are exactly **two** background daemons. Reconcile work runs under mkdir-based locks — it is
-not a third daemon.
+There is exactly **one** search daemon process. It is started by the shared daemon client, owns a
+nonce-authenticated socket, serves multiple vaults, and shuts down by idle policy unless configured
+otherwise.
 
-| Daemon | Hidden verb | Module | Transport & lifecycle |
-|--------|-------------|--------|-----------------------|
-| Analyzer | `__analyzer-daemon` | `src/core/search/analyzer.ts` | Detached `node <bin> __analyzer-daemon`; Unix domain socket `…/optsidian/analyzer-<protoVer>-<identity>.sock` (Windows: named pipe); newline-delimited JSON `tokenizeBatch`; idle-shutdown after 5 min. Reuses the loaded Kiwi WASM across CLI invocations. |
-| Index / warm | `__index-daemon` | `src/core/search/warm-daemon.ts` | Separate daemon and socket `index-<protoVer>-<identity>.sock`; methods `warmRecent` / `warmVault` / `status` / `shutdown`; incrementally warms vaults accessed in the last 7 days. |
+| Process | Hidden verb | Module | Transport & lifecycle |
+|---------|-------------|--------|-----------------------|
+| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; Unix domain socket under the runtime search-daemon directory; MessagePack RPC methods `Search`, `Explain`, `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, and `Shutdown`. The daemon owns snapshot MVCC, worker pools, query caches, and loaded vault state. |
 
 **Install / update lifecycle.** `scripts/install.sh` installs a release and writes the manifest
 `~/.cache/optsidian/install.json`. `optsidian update` (`src/update/installer.ts`) fetches a release,
@@ -109,19 +103,23 @@ verifies its SHA256 and version, installs atomically, and refreshes the MCP regi
 
 ## Search
 
-The search subsystem (`src/core/search/*`, ~5,800 LOC) is the most complex part of the codebase.
+The search subsystem spans `src/core/search/*` and `src/daemon/search-store/*`.
 
-- **Index identity has one cache version.** `SEARCH_CACHE_VERSION` covers the persisted Orama index,
-  manifest identity, and analysis-cache payload. During unreleased development, collapse multiple
-  incompatible edits into one bump instead of incrementing per commit. Runtime-only ranking changes
-  do not require an index/cache version bump; `index warm` can force a rebuild when needed.
-- **Three retrieval paths must agree.** A persisted on-disk index, an in-memory overlay for small
-  recent diffs, and live analysis all feed results; the read-time planner selects among them and
-  they must stay consistent.
-- **Locks, not transactions.** `reconcile.lock` and `index-writer.lock` are mkdir-based exclusive
-  directories; persistence writes an atomic index + manifest pair bound by a digest commit.
-- **Korean.** Hangul runs route to Kiwi, which is loaded as WASM behind a single-instance lease
-  manager (`src/core/kiwi/*`) and downloaded as a SHA256-pinned model artifact on first use.
+- **Snapshot identity is content-addressed.** The active snapshot id is the hash of the canonical
+  snapshot manifest. The identity tuple includes schema, field-set, partition, analyzer, settings,
+  builder, ranking-feature, and retriever identity.
+- **MVCC, not read-time planning.** Search pins one immutable snapshot for each request. Index jobs
+  build and publish new snapshots atomically, and active requests keep their pinned snapshot until
+  release.
+- **One lexical retrieval primitive.** V1 retrieval is positional postings over analyzer channels.
+  Phrase, coverage, proximity, rarity, exact identity, snippets, and debug signals are sourced from
+  snapshot-resident postings and feature payloads.
+- **Worker pools.** Query analyzer workers serve latency-sensitive query tokenization; index analyzer
+  workers serve snapshot builds. Search execution runs in a dedicated pool with request deadlines and
+  cancellation.
+- **Korean.** Hangul routes to Kiwi when enabled, with the model downloaded as a SHA256-pinned
+  artifact on first use. Parallelism comes from isolated workers, not concurrent calls into one
+  analyzer object.
 
 ## Host-API Dependency Map
 
@@ -129,7 +127,6 @@ The search subsystem (`src/core/search/*`, ~5,800 LOC) is the most complex part 
 |----------|----------|
 | Native Obsidian CLI (`obsidian`) | Delegated commands and vault discovery. |
 | `obsidian://` URI (`src/native/gui.ts`) | Launching / focusing the Obsidian GUI. |
-| Orama (`@orama/orama`) | The full-text index engine. |
 | Kiwi (`kiwi-nlp`) | Korean morphological analysis (WASM). |
 | GitHub releases API (`src/net/github.ts`) | Fetching the Kiwi model artifact and self-update releases. |
 

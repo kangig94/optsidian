@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -9,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 const cli = path.resolve("dist/optsidian");
+const SNAPSHOT_ID_PATTERN = "[a-f0-9]{64}";
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-"));
@@ -206,6 +206,10 @@ function gitHead(cwd) {
   return runGit(["rev-parse", "HEAD"], cwd);
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function serveReleaseAsset(res, assets, name) {
   if (assets[name] === undefined) {
     res.writeHead(404);
@@ -400,11 +404,21 @@ function setup() {
     OPTSIDIAN_OBSIDIAN_BIN: fake,
     FAKE_VAULT: vault,
     FAKE_OBSIDIAN_LOG: log,
-    OPTSIDIAN_INDEX_DAEMON: "0",
     XDG_CONFIG_HOME: path.join(dir, "config"),
-    XDG_CACHE_HOME: path.join(dir, "cache")
+    XDG_CACHE_HOME: path.join(dir, "cache"),
+    XDG_RUNTIME_DIR: path.join(dir, "runtime"),
+    OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
   };
   return { dir, vault, env, log };
+}
+
+function isolatedSearchDaemonEnv(env) {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-search-daemon-"));
+  return {
+    ...env,
+    XDG_RUNTIME_DIR: path.join(runtimeDir, "xdg"),
+    OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir
+  };
 }
 
 test("native-sufficient commands delegate unchanged", () => {
@@ -1189,19 +1203,23 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
   assert.equal(payload.matches[0].title, "Alpha");
   assert.deepEqual(payload.matches[0].tags.sort(), ["alpha", "project"]);
-  assert.deepEqual(Object.keys(payload).sort(), ["command", "matches", "ok"]);
+  assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
+  assert.deepEqual(Object.keys(payload).sort(), ["command", "matches", "ok", "snapshotId"]);
   assert.deepEqual(Object.keys(payload.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
   result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const debugPayload = JSON.parse(result.stdout);
-  assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok"]);
+  assert.match(debugPayload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
+  assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
   assert.deepEqual(debugPayload.debug.query.terms, ["project", "alpha"]);
   assert.equal(debugPayload.debug.reranker, "rrf-metadata-v2");
   assert.equal(debugPayload.matches[0].debug.bucket, "exact");
   assert.deepEqual(debugPayload.matches[0].debug.queryTerms, ["project", "alpha"]);
-  assert.equal(typeof debugPayload.matches[0].debug.oramaScore, "number");
+  assert.equal(typeof debugPayload.matches[0].debug.candidateScore, "number");
+  assert.equal(debugPayload.matches[0].debug.snapshotId, debugPayload.snapshotId);
+  assert.equal(debugPayload.matches[0].debug.snippetSource, "snapshot-field-text");
 
   result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
@@ -1218,7 +1236,8 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.equal(result.status, 0, result.stderr);
   const tagOnly = JSON.parse(result.stdout);
   assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
-  assert.deepEqual(Object.keys(tagOnly).sort(), ["command", "matches", "ok"]);
+  assert.match(tagOnly.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
+  assert.deepEqual(Object.keys(tagOnly).sort(), ["command", "matches", "ok", "snapshotId"]);
 
   result = run(["search", "tag=project", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
@@ -1228,112 +1247,24 @@ test("search ranks notes and index commands manage cache", async () => {
 
   result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n/m);
-  assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
-  assert.match(result.stdout, /^MCP warm throttle: inactive \(interval: 30m, last attempt: none\)\.\n$/m);
+  assert.match(result.stdout, /^Search daemon ready\.\nPhase: ready\.\nRequests: \d+, failures: 0, active: \d+\.\nVaults:\n/m);
+  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(vault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
 
   result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const statusPayload = JSON.parse(result.stdout);
+  assert.equal(statusPayload.ok, true);
   assert.equal(statusPayload.ready, true);
-  assert.equal(statusPayload.staleTier, undefined);
-  assert.equal(statusPayload.warmAccess.recent, true);
-  assert.equal(statusPayload.warmAccess.maxAgeDays, 7);
-  assert.equal(typeof statusPayload.warmAccess.lastAccessAt, "string");
-  assert.equal(statusPayload.warmSchedule.intervalMinutes, 30);
-  assert.equal(statusPayload.warmSchedule.throttled, false);
-  assert.deepEqual(statusPayload.projections.map((projection) => ({
-    key: projection.key,
-    tier: projection.tier,
-    roles: projection.roles,
-    state: projection.state,
-    compatible: projection.compatible,
-    documents: projection.documents,
-    files: projection.files
-  })), [
-    {
-      key: "intl",
-      tier: "intl",
-      roles: ["active", "baseline", "cached"],
-      state: "ready",
-      compatible: true,
-      documents: 2,
-      files: 2
-    }
-  ]);
+  assert.equal(statusPayload.phase, "ready");
+  assert.equal(statusPayload.owner.nonce, statusPayload.nonce);
+  assert.ok(statusPayload.metrics.requests >= 1);
+  const vaultStatus = statusPayload.vaults.find((entry) => entry.vault === fs.realpathSync(vault));
+  assert.equal(vaultStatus.state, "ready");
+  assert.match(vaultStatus.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
 
-  const { cachePaths } = await import(path.resolve("src/core/search/index.ts"));
-  const statusPaths = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => cachePaths(vault));
-  const lockDir = path.join(statusPaths.cacheDir, "reconcile.lock");
-  fs.mkdirSync(lockDir, { recursive: true });
-  fs.writeFileSync(path.join(lockDir, "owner.json"), '{"pid":98765,"startedAt":"2026-06-21T00:00:00.000Z","reason":"stale-tier"}\n');
-  try {
-    result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 2, files: 2\n/m);
-    assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
-    assert.match(result.stdout, /^MCP warm throttle: inactive \(interval: 30m, last attempt: none\)\.\n/m);
-    assert.match(result.stdout, /^Reconcile running \(reason: stale-tier, pid: 98765, started: 2026-06-21T00:00:00\.000Z\)\.\n$/m);
-
-    result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout).reconcile, {
-      active: true,
-      stale: false,
-      reason: "stale-tier",
-      startedAt: "2026-06-21T00:00:00.000Z",
-      pid: 98765
-    });
-  } finally {
-    fs.rmSync(lockDir, { recursive: true, force: true });
-  }
-
-  fs.writeFileSync(
-    path.join(statusPaths.cacheDir, "reconcile-status.json"),
-    JSON.stringify({
-      schemaVersion: 1,
-      lastRun: {
-        state: "failure",
-        reason: "manual",
-        startedAt: "2026-06-21T00:00:00.000Z",
-        finishedAt: "2026-06-21T00:00:01.000Z",
-        durationMs: 1000,
-        error: "simulated failure"
-      },
-      lastSuccess: {
-        state: "success",
-        reason: "stale-tier",
-        startedAt: "2026-06-20T00:00:00.000Z",
-        finishedAt: "2026-06-20T00:00:01.000Z",
-        durationMs: 1000
-      },
-      lastFailure: {
-        state: "failure",
-        reason: "manual",
-        startedAt: "2026-06-21T00:00:00.000Z",
-        finishedAt: "2026-06-21T00:00:01.000Z",
-        durationMs: 1000,
-        error: "simulated failure"
-      }
-    }) + "\n"
-  );
-  result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  result = run(["index", "rebuild"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(
-    result.stdout,
-    /^Last reconcile: failure \(reason: manual, finished: 2026-06-21T00:00:01\.000Z, duration: 1000ms, error: simulated failure\)\.\n$/m
-  );
-
-  result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).reconcileStatus.lastRun, {
-    state: "failure",
-    reason: "manual",
-    startedAt: "2026-06-21T00:00:00.000Z",
-    finishedAt: "2026-06-21T00:00:01.000Z",
-    durationMs: 1000,
-    error: "simulated failure"
-  });
+  assert.equal(result.stdout, "Index rebuilt.\n");
 
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
@@ -1379,8 +1310,9 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
 
   result = run(["index", "status", "vault-path=" + secondVault], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Index ready\.\nProjections:\n- intl \[active, baseline, cached\]: ready, compatible, documents: 1, files: 1\n/m);
-  assert.match(result.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
+  assert.match(result.stdout, /^Search daemon ready\.\nPhase: ready\.\nRequests: \d+, failures: 0, active: \d+\.\nVaults:\n/m);
+  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(vault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
+  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(secondVault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
 
   const overrideRegistry = path.join(dir, "override-obsidian.json");
   fs.writeFileSync(
@@ -1398,249 +1330,6 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
   assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
 });
 
-test("search wakes the index daemon to warm recently accessed vaults", async () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const { __searchIndexDaemonSocketPathForTests } = await import(path.resolve("src/core/search/warm-daemon.ts"));
-  const { dir, vault, env } = setup();
-  const secondVault = path.join(dir, "second-vault");
-  const thirdVault = path.join(dir, "third-vault");
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  const runtime = path.join(dir, "runtime");
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.mkdirSync(path.join(secondVault, "Notes"), { recursive: true });
-  fs.mkdirSync(path.join(thirdVault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "alpha.md"), "# Alpha\n\nindex daemon alpha\n");
-  fs.writeFileSync(path.join(secondVault, "Notes", "beta.md"), "# Beta\n\nindex daemon beta\n");
-  fs.writeFileSync(path.join(thirdVault, "Notes", "gamma.md"), "# Gamma\n\nindex daemon gamma\n");
-
-  const registryDir = path.join(env.XDG_CONFIG_HOME, "obsidian");
-  fs.mkdirSync(registryDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(registryDir, "obsidian.json"),
-    JSON.stringify({
-      vaults: {
-        first: { path: vault, open: true },
-        second: { path: secondVault, open: false },
-        third: { path: thirdVault, open: false }
-      }
-    })
-  );
-
-  const searchEnv = {
-    ...env,
-    OPTSIDIAN_INDEX_DAEMON: "1",
-    OPTSIDIAN_INDEX_DAEMON_BIN: cli,
-    OPTSIDIAN_INDEX_DAEMON_IDLE_MS: "50",
-    OPTSIDIAN_INDEX_DAEMON_POLL_MS: "0",
-    XDG_CACHE_HOME: cache,
-    XDG_RUNTIME_DIR: runtime
-  };
-  const readSecond = run(["read", "vault-path=" + secondVault, "path=Notes/beta.md", "format=json"], { env: searchEnv });
-  assert.equal(readSecond.status, 0, readSecond.stderr);
-
-  const result = run(["search", "query=alpha", "format=json"], { env: searchEnv });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/alpha.md"]);
-
-  const deadline = Date.now() + 3000;
-  let ready = false;
-  while (Date.now() < deadline && !ready) {
-    const status = run(["index", "status", "vault-path=" + secondVault], { env: searchEnv });
-    assert.equal(status.status, 0, status.stderr);
-    ready = status.stdout.startsWith("Index ready.\n");
-    if (!ready) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  assert.equal(ready, true);
-
-  const socketPath = __searchIndexDaemonSocketPathForTests({ ...process.env, ...searchEnv });
-  const idleDeadline = Date.now() + 2000;
-  while (Date.now() < idleDeadline && fs.existsSync(socketPath)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  assert.equal(fs.existsSync(socketPath), false);
-
-  const thirdStatus = run(["index", "status", "vault-path=" + thirdVault], { env: searchEnv });
-  assert.equal(thirdStatus.status, 0, thirdStatus.stderr);
-  assert.match(thirdStatus.stdout, /^Index missing\.\nProjections:\n- intl \[active, baseline\]: missing\n/m);
-  assert.match(thirdStatus.stdout, /^Background warm target: yes \(max age: 7d, last access: .+, expires: .+\)\.\n/m);
-});
-
-test("search can use the analyzer daemon and the daemon exits after idle", async () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search/analyzer.ts"));
-  const { dir, vault, env } = setup();
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  const runtime = path.join(dir, "runtime");
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "search-ja.md"), "# メモ\n\n検索方式を改善する。\n");
-  const searchEnv = {
-    ...env,
-    XDG_CACHE_HOME: cache,
-    XDG_RUNTIME_DIR: runtime,
-    OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
-    OPTSIDIAN_ANALYZER_IDLE_MS: "50",
-    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
-  };
-
-  const result = run(["search", "query=検索", "format=json"], {
-    env: searchEnv
-  });
-  assert.equal(result.status, 0, result.stderr);
-  const payload = JSON.parse(result.stdout);
-  assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
-
-  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && fs.existsSync(socketPath)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  assert.equal(fs.existsSync(socketPath), false);
-});
-
-test("search falls back when Kiwi analyzer daemon load exceeds the foreground timeout", async () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const { __analyzerDaemonSocketPathForTests, resolveSearchAnalyzer, tokenizeRoutedText } = await import(
-    path.resolve("src/core/search/analyzer.ts")
-  );
-  const { searchVaultWithAnalyzer } = await import(path.resolve("src/core/search/index.ts"));
-  const { dir, vault, env } = setup();
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  const runtime = path.join(dir, "runtime");
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 방식을 개선한다.\n");
-
-  const searchEnv = {
-    ...env,
-    XDG_CACHE_HOME: cache,
-    XDG_RUNTIME_DIR: runtime,
-    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko",
-    OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS: "1",
-    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
-  };
-
-  const previousCache = process.env.XDG_CACHE_HOME;
-  try {
-    process.env.XDG_CACHE_HOME = cache;
-    const identity = resolveSearchAnalyzer(searchEnv, {}).identity;
-    const indexAnalyzer = {
-      identity,
-      tokenize: async (text) => tokenizeRoutedText(text, ["ko"]),
-      tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, ["ko"]))
-    };
-    await searchVaultWithAnalyzer(vault, { query: "한국어", limit: 1 }, indexAnalyzer, () => {});
-  } finally {
-    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = previousCache;
-  }
-
-  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
-  fs.rmSync(socketPath, { force: true });
-  const sockets = new Set();
-  const hangingServer = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
-  });
-
-  await new Promise((resolve, reject) => {
-    hangingServer.once("error", reject);
-    hangingServer.listen(socketPath, () => {
-      hangingServer.off("error", reject);
-      resolve();
-    });
-  });
-
-  try {
-    const startedAt = Date.now();
-    const result = await runAsync(["search", "한국어", "format=json"], { env: searchEnv, timeoutMs: 5000 });
-    const elapsedMs = Date.now() - startedAt;
-    assert.equal(result.status, 0, result.stderr);
-    assert.ok(elapsedMs < 3000, `expected timeout fallback under 3000ms, got ${elapsedMs}ms`);
-    const payload = JSON.parse(result.stdout);
-    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ko.md"]);
-    assert.deepEqual(payload.warnings, ["fts_index_stale_tier"]);
-  } finally {
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => hangingServer.close(resolve));
-    fs.rmSync(socketPath, { force: true });
-  }
-});
-
-test("search retires a mismatched analyzer daemon before retrying", async () => {
-  if (process.platform === "win32") {
-    return;
-  }
-  const { __analyzerDaemonSocketPathForTests } = await import(path.resolve("src/core/search/analyzer.ts"));
-  const { dir, vault, env } = setup();
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  const runtime = path.join(dir, "runtime");
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "search-ja.md"), "# メモ\n\n検索方式を改善する。\n");
-  const searchEnv = {
-    ...env,
-    XDG_CACHE_HOME: cache,
-    XDG_RUNTIME_DIR: runtime,
-    OPTSIDIAN_SEARCH_ANALYZER: "intl-daemon",
-    OPTSIDIAN_ANALYZER_IDLE_MS: "50",
-    OPTSIDIAN_ANALYZER_DAEMON_BIN: cli
-  };
-  const socketPath = __analyzerDaemonSocketPathForTests({ ...process.env, ...searchEnv });
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
-  fs.rmSync(socketPath, { force: true });
-
-  let staleRequests = 0;
-  const staleServer = net.createServer((socket) => {
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      staleRequests += 1;
-      const request = JSON.parse(buffer.slice(0, newline));
-      socket.end(
-        `${JSON.stringify({
-          id: request.id,
-          result: {
-            analyzer: { name: "router", version: "stale", runtime: "node-intl", node: "0" },
-            tokens: request.params.texts.map(() => [])
-          }
-        })}\n`
-      );
-    });
-  });
-
-  await new Promise((resolve, reject) => {
-    staleServer.once("error", reject);
-    staleServer.listen(socketPath, () => {
-      staleServer.off("error", reject);
-      resolve();
-    });
-  });
-
-  try {
-    const result = await runAsync(["search", "query=検索", "format=json"], { env: searchEnv });
-    assert.equal(result.status, 0, result.stderr);
-    const payload = JSON.parse(result.stdout);
-    assert.deepEqual(payload.matches.map((match) => match.path), ["Notes/search-ja.md"]);
-    assert.equal(staleRequests, 1);
-
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline && fs.existsSync(socketPath)) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
-    assert.equal(fs.existsSync(socketPath), false);
-  } finally {
-    await new Promise((resolve) => staleServer.close(resolve));
-    fs.rmSync(socketPath, { force: true });
-  }
-});
 
 test("config command writes global settings and reads project-local overrides", async () => {
   const project = tempRoot();
@@ -1654,58 +1343,30 @@ test("config command writes global settings and reads project-local overrides", 
   const globalSettings = path.join(env.XDG_CONFIG_HOME, "optsidian", "settings.json");
   assert.equal(result.stdout.trim(), globalSettings);
 
-  result = run(["config", "set", "search.extraLangs=ko", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  const setPayload = JSON.parse(result.stdout);
-  assert.equal(setPayload.path, globalSettings);
-  assert.deepEqual(setPayload.config.search.extraLangs, ["ko"]);
+  const setAndGet = (key, value, expectedValue, expectedLine) => {
+    result = run(["config", "set", `${key}=${value}`, "format=json"], { cwd: project, env });
+    assert.equal(result.status, 0, result.stderr);
+    const parts = key.split(".");
+    let cursor = JSON.parse(result.stdout).config;
+    for (const part of parts) cursor = cursor[part];
+    assert.deepEqual(cursor, expectedValue);
+
+    result = run(["config", "get", key], { cwd: project, env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), expectedLine);
+  };
+
+  setAndGet("search.extraLangs", "ko", ["ko"], 'search.extraLangs: ["ko"]');
   assert.equal(fs.existsSync(path.join(project, ".optsidian", "settings.json")), false);
+  setAndGet("search.queryWorkers", "2", 2, "search.queryWorkers: 2");
+  setAndGet("search.indexWorkers", "2", 2, "search.indexWorkers: 2");
+  setAndGet("search.snapshotRetentionCount", "3", 3, "search.snapshotRetentionCount: 3");
+  setAndGet("search.queryCacheSize", "32", 32, "search.queryCacheSize: 32");
+  setAndGet("search.memoryBudgetCount", "4", 4, "search.memoryBudgetCount: 4");
+  setAndGet("search.memoryBudgetBytes", "1048576", 1048576, "search.memoryBudgetBytes: 1048576");
+  setAndGet("search.daemonIdleMs", "0", 0, "search.daemonIdleMs: 0");
 
-  result = run(["config", "get", "search.extraLangs"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), 'search.extraLangs: ["ko"]');
-
-  result = run(["config", "set", "search.analyzerLoadTimeoutMs=5000", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).config.search.analyzerLoadTimeoutMs, 5000);
-
-  result = run(["config", "get", "search.analyzerLoadTimeoutMs"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.analyzerLoadTimeoutMs: 5000");
-
-  result = run(["config", "set", "search.overlayMaxFiles=0", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).config.search.overlayMaxFiles, 0);
-
-  result = run(["config", "get", "search.overlayMaxFiles"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.overlayMaxFiles: 0");
-
-  result = run(["config", "set", "search.indexWarmIntervalMinutes=30", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).config.search.indexWarmIntervalMinutes, 30);
-
-  result = run(["config", "get", "search.indexWarmIntervalMinutes"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.indexWarmIntervalMinutes: 30");
-
-  result = run(["config", "set", "search.indexWarmAccessMaxAgeDays=5", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).config.search.indexWarmAccessMaxAgeDays, 5);
-
-  result = run(["config", "get", "search.indexWarmAccessMaxAgeDays"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.indexWarmAccessMaxAgeDays: 5");
-
-  result = run(["config", "set", "search.indexWarmConcurrency=2", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).config.search.indexWarmConcurrency, 2);
-
-  result = run(["config", "get", "search.indexWarmConcurrency"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.indexWarmConcurrency: 2");
-
-  const searchEnv = { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_INDEX_DAEMON: "0" };
+  const searchEnv = isolatedSearchDaemonEnv({ ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault });
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
     env: searchEnv
@@ -1713,96 +1374,61 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
 
-  fs.writeFileSync(path.join(vault, "Notes", "search-new.md"), "# 신규\n\n신규 검색 설정.\n");
-  result = run(["search", "query=신규", "format=json"], {
-    cwd: project,
-    env: { ...searchEnv, OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES: "20" }
+  const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
+  const snapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
+    const paths = searchStoreCachePaths(vault);
+    const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+    return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-new.md"]);
-
-  const { cachePaths } = await import(path.resolve("src/core/search/index.ts"));
-  const manifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
-    JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"))
-  );
-  assert.deepEqual(manifest.declaredAnalyzers, ["ko"]);
-  assert.deepEqual(manifest.activeAnalyzers, []);
-  assert.equal(manifest.tokenizerTier, "intl");
-  assert.deepEqual(manifest.analyzer.declaredAnalyzers, ["ko"]);
-  assert.deepEqual(manifest.analyzer.activeAnalyzers, []);
+  assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, ["ko"]);
+  assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.activeAnalyzers, ["ko"]);
 
   result = run(["search", "query=검색", "format=json"], {
     cwd: project,
-    env: { ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }
+    env: isolatedSearchDaemonEnv({ ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" })
   });
   assert.equal(result.status, 0, result.stderr);
-  const envOverrideManifest = await withProcessEnv({ XDG_CACHE_HOME: cache }, () =>
-    JSON.parse(fs.readFileSync(cachePaths(vault).manifestPath, "utf8"))
-  );
-  assert.deepEqual(envOverrideManifest.declaredAnalyzers, []);
-  assert.deepEqual(envOverrideManifest.analyzer.declaredAnalyzers, []);
-
-  result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, {
-    search: {
-      analyzerLoadTimeoutMs: 5000,
-      overlayMaxFiles: 0,
-      indexWarmIntervalMinutes: 30,
-      indexWarmAccessMaxAgeDays: 5,
-      indexWarmConcurrency: 2
-    }
+  const envOverrideSnapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
+    const paths = searchStoreCachePaths(vault);
+    const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+    return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
   });
+  assert.deepEqual(envOverrideSnapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, []);
 
-  result = run(["config", "unset", "search.indexWarmAccessMaxAgeDays", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, {
-    search: {
-      analyzerLoadTimeoutMs: 5000,
-      overlayMaxFiles: 0,
-      indexWarmIntervalMinutes: 30,
-      indexWarmConcurrency: 2
-    }
-  });
-
-  result = run(["config", "unset", "search.indexWarmConcurrency", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, {
-    search: {
-      analyzerLoadTimeoutMs: 5000,
-      overlayMaxFiles: 0,
-      indexWarmIntervalMinutes: 30
-    }
-  });
-
-  result = run(["config", "unset", "search.indexWarmIntervalMinutes", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, { search: { analyzerLoadTimeoutMs: 5000, overlayMaxFiles: 0 } });
-
-  result = run(["config", "unset", "search.analyzerLoadTimeoutMs", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, { search: { overlayMaxFiles: 0 } });
-
-  result = run(["config", "unset", "search.overlayMaxFiles", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, {});
+  const expectedAfterUnsets = [
+    ["search.extraLangs", { queryWorkers: 2, indexWorkers: 2, snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.queryWorkers", { indexWorkers: 2, snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.indexWorkers", { snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.snapshotRetentionCount", { queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.queryCacheSize", { memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.memoryBudgetCount", { memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
+    ["search.memoryBudgetBytes", { daemonIdleMs: 0 }],
+    ["search.daemonIdleMs", undefined]
+  ];
+  for (const [key, remaining] of expectedAfterUnsets) {
+    result = run(["config", "unset", key, "format=json"], { cwd: project, env });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(result.stdout).config;
+    if (remaining) assert.deepEqual(config, { search: remaining });
+    else assert.deepEqual(config, {});
+  }
 
   const localSettings = path.join(project, ".optsidian", "settings.json");
   fs.mkdirSync(path.dirname(localSettings), { recursive: true });
-  fs.writeFileSync(localSettings, '{\n  "search": {\n    "analyzer": "intl-daemon",\n    "extraLangs": ["ko"]\n  }\n}\n');
+  fs.writeFileSync(localSettings, '{\n  "search": {\n    "analyzer": "kiwi",\n    "extraLangs": ["ko"]\n  }\n}\n');
 
   result = run(["config", "get", "search.analyzer"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.analyzer: intl-daemon");
+  assert.equal(result.stdout.trim(), "search.analyzer: kiwi");
 
   result = run(["config", "set", "search.analyzer=intl", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout).config.search.analyzer, "intl");
-  assert.match(fs.readFileSync(localSettings, "utf8"), /"intl-daemon"/);
+  assert.match(fs.readFileSync(localSettings, "utf8"), /"kiwi"/);
 
   result = run(["config", "get", "search.analyzer"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.analyzer: intl-daemon");
+  assert.equal(result.stdout.trim(), "search.analyzer: kiwi");
 });
 
 test("search requires query or tag and validates fields", () => {

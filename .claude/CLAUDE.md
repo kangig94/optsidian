@@ -3,8 +3,9 @@
 `optsidian` is an LLM-optimized wrapper over the native Obsidian CLI with Codex-style editing tools.
 It ships two binaries — `optsidian` (CLI) and `optsidian-mcp` (an MCP server) — that sit on a single
 shell-independent core (`src/core/*`). The CLI and MCP adapters translate their transports into core
-calls; the core returns structured results. Full-text search (Orama) with Korean morphology (Kiwi)
-runs behind two background daemons. TypeScript (strict, ESM), Node ≥ 20.
+calls; the core returns structured results. Full-text search uses a purpose-built positional index
+with Korean morphology (Kiwi), served by one background `search-daemon`. TypeScript (strict, ESM),
+Node ≥ 20.
 
 **Critical Requirements**:
 - Never corrupt or let a write escape the user's vault — writes are atomic (temp+rename) and every path resolves through `resolveVaultPath`.
@@ -13,7 +14,7 @@ runs behind two background daemons. TypeScript (strict, ESM), Node ≥ 20.
 - Version index identity (`SEARCH_SCHEMA_VERSION` / analyzer identity) on any change that affects search index contents.
 
 **Key Documentation**:
-- `docs/ARCHITECTURE.md` - layer graph, dependency rules, modification policy, command + MCP surface, two-daemon topology
+- `docs/ARCHITECTURE.md` - layer graph, dependency rules, modification policy, command + MCP surface, single-daemon topology
 - `docs/development.md` - developer workflow and the implicit architectural invariants
 - `docs/native-first-policy.md` - the delegate/optimize/extend command policy
 - `docs/usage.md` - CLI and MCP usage reference

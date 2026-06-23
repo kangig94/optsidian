@@ -362,6 +362,29 @@ test("package-release script creates the expected release asset contract", () =>
   const checksums = fs.readFileSync(checksumsAsset, "utf8");
   assert.match(checksums, new RegExp(`  optsidian-${tag}$`, "m"));
   assert.match(checksums, new RegExp(`  optsidian-mcp-${tag}$`, "m"));
+  assert.deepEqual(result.stdout.trim().split("\n").map((item) => path.basename(item)), [
+    `optsidian-${tag}`,
+    `optsidian-mcp-${tag}`,
+    `checksums-${tag}.txt`
+  ]);
+  assert.deepEqual(fs.readdirSync(outDir).sort(), [
+    `checksums-${tag}.txt`,
+    `optsidian-${tag}`,
+    `optsidian-mcp-${tag}`
+  ].sort());
+});
+
+test("optsidian bundle exposes hidden search-daemon dispatch without a third public bin", () => {
+  const result = spawnSync(cli, ["__search-daemon", "--print-info"], {
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const info = JSON.parse(result.stdout);
+  assert.equal(info.protocolVersion, 1);
+  assert.equal(info.settingsSchemaVersion, 1);
+  assert.match(info.socketPath, /optsidian-search-daemon-v1-/);
+  const packageJson = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
+  assert.deepEqual(Object.keys(packageJson.bin).sort(), ["optsidian", "optsidian-mcp"]);
 });
 
 test("update check without managed install reports latest release and guidance", async () => {

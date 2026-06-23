@@ -5,11 +5,11 @@ import type {
   MutationResult,
   ReadResult,
   SearchIndexMutationResult,
-  SearchIndexReconcileRunStatus,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
   SearchResult
 } from "../core/types.js";
+import type { StatusResult } from "../daemon/protocol.js";
 
 export type OutputFormat = "text" | "json";
 
@@ -87,11 +87,30 @@ export function renderFrontmatterRead(result: FrontmatterReadResult, format: Out
 }
 
 export function renderIndexResult(
-  result: SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult,
+  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult,
   format: OutputFormat = "text"
 ): string {
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
+  }
+  if (isDaemonStatusResult(result)) {
+    const lines = [result.ready ? "Search daemon ready." : "Search daemon not ready."];
+    lines.push(`Phase: ${result.phase}.`);
+    lines.push(`Requests: ${result.metrics.requests}, failures: ${result.metrics.failures}, active: ${result.metrics.activeRequests}.`);
+    if (result.vaults.length === 0) {
+      lines.push("Vaults: none.");
+      return `${lines.join("\n")}\n`;
+    }
+    lines.push("Vaults:");
+    for (const vault of result.vaults) {
+      const details = [
+        vault.snapshotId ? `snapshot: ${vault.snapshotId}` : "",
+        vault.updatedAt ? `updated: ${vault.updatedAt}` : "",
+        vault.error ? `error: ${vault.error}` : ""
+      ].filter(Boolean);
+      lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
+    }
+    return `${lines.join("\n")}\n`;
   }
   if (result.action === "status") {
     const lines = [result.ready ? (result.staleTier ? "Index ready (stale analyzer tier)." : "Index ready.") : "Index missing."];
@@ -104,19 +123,6 @@ export function renderIndexResult(
     lines.push(renderAnalyzerStatus(result.analyzer));
     lines.push(renderWarmAccess(result.warmAccess));
     lines.push(renderWarmSchedule(result.warmSchedule));
-    if (result.reconcile) {
-      const details = [
-        result.reconcile.reason ? `reason: ${result.reconcile.reason}` : "",
-        result.reconcile.pid !== undefined ? `pid: ${result.reconcile.pid}` : "",
-        result.reconcile.startedAt ? `started: ${result.reconcile.startedAt}` : ""
-      ].filter(Boolean);
-      const state = result.reconcile.stale ? "stale lock" : "running";
-      lines.push(`Reconcile ${state}${details.length > 0 ? ` (${details.join(", ")})` : ""}.`);
-    }
-    const lastRun = result.reconcileStatus?.lastRun;
-    if (lastRun && lastRun.state !== "running") {
-      lines.push(`Last reconcile: ${renderReconcileRun(lastRun)}.`);
-    }
     return `${lines.join("\n")}\n`;
   }
   if (result.action === "rebuild") {
@@ -137,6 +143,10 @@ export function renderIndexResult(
     return `${lines.join("\n")}\n`;
   }
   return "Index cleared.\n";
+}
+
+function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult): result is StatusResult {
+  return "phase" in result && "metrics" in result && "vaults" in result;
 }
 
 function renderAnalyzerStatus(analyzer: SearchIndexStatusResult["analyzer"]): string {
@@ -179,16 +189,6 @@ function renderProjectionState(projection: SearchIndexStatusResult["projections"
     projection.files !== undefined ? `files: ${projection.files}` : ""
   ].filter(Boolean);
   return details.join(", ");
-}
-
-function renderReconcileRun(run: SearchIndexReconcileRunStatus): string {
-  const details = [
-    `reason: ${run.reason}`,
-    run.finishedAt ? `finished: ${run.finishedAt}` : "",
-    run.durationMs !== undefined ? `duration: ${run.durationMs}ms` : "",
-    run.error ? `error: ${run.error}` : ""
-  ].filter(Boolean);
-  return `${run.state}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 }
 
 export function renderMutation(result: MutationResult, format: OutputFormat = "text"): string {

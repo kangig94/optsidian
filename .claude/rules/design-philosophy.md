@@ -16,7 +16,7 @@
 
 **Vault safety above all**: Never corrupt or let a write escape the user's vault. All writes are atomic (temp file + rename); all paths resolve through `resolveVaultPath`.
 
-**Deterministic search identity**: Anything that changes index contents — the analyzer, the token channels, the indexed fields, the ranking — is versioned so stale indexes are detectable. The persisted index, the in-memory overlay, and live analysis must agree.
+**Deterministic search identity**: Anything that changes index contents — the analyzer, the token channels, the indexed fields, the ranking — is versioned so stale indexes are detectable. Snapshot identity covers every index-affecting input; a stale snapshot is detectable by its id.
 
 ## Source Tree Policy
 
@@ -25,8 +25,9 @@
 | `src/cli.ts`, `src/cli/*` | L3 adapter | argv dispatch, arg parsing, rendering, native-first policy, delegation | Adapters stay thin (parse + render); logic belongs in core. Keep `policy.ts` + its test + docs in sync. |
 | `src/mcp.ts`, `src/mcp/*` | L3 adapter | MCP stdio server, tool registration, result shaping | zod schemas and `destructiveHint`/`openWorldHint` must match real behavior. |
 | `src/core/*` | L2 core | shared command layer (read, edit, write, apply-patch, frontmatter, copy, mkdir, grep) | Pure and shared. No process I/O, no native delegation. |
-| `src/core/search/*` | L2 core | Orama index, retrieval, RRF ranking, the two daemons, locks/persistence | Index-affecting changes bump `SEARCH_SCHEMA_VERSION` / analyzer identity. |
+| `src/core/search/*` | L2 core | positional inverted index, retrieval, RRF ranking, analysis channels, schema | Index-affecting changes bump the relevant snapshot identity/schema version. |
 | `src/core/kiwi/*` | L2 core | Korean morphological analysis (WASM), model artifact, lease manager | Must not import `search/*`. |
+| `src/daemon/*` | L3 adapter | socket transport, snapshot store MVCC/GC, worker pools, vault registry, scheduler | Own daemon lifecycle and RPC contracts; no upward dependency on CLI or MCP. |
 | `src/native/*` | L1 platform | native Obsidian invocation, GUI launch, vault discovery | No upward import of L3. |
 | `src/net/github.ts`, `src/update/*` | L1 platform | GitHub HTTP, self-update | Preserve the redirect auth-stripping invariant in `net/github.ts`. |
 
@@ -37,7 +38,7 @@ Key rules:
 
 ## Module Structure
 
-Dependency direction is strict: the CLI and MCP adapters import from core; core never imports the adapters. See `docs/ARCHITECTURE.md` for the current layer graph and the two-daemon search topology.
+Dependency direction is strict: the CLI and MCP adapters import from core; core never imports the adapters. See `docs/ARCHITECTURE.md` for the current layer graph and the single-daemon search topology.
 
 ## Agent System Philosophy
 

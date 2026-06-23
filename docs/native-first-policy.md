@@ -23,7 +23,9 @@ V1 treats these command families as native-sufficient:
 
 These commands are delegated exactly unless explicitly moved into the optimized set later.
 
-MCP does not expose a native passthrough tool in V1. Native-first delegation is a CLI behavior; MCP stays intentionally small and exposes only shell-safe mutation tools plus a routing helper.
+MCP exposes five tools: `command_map`, `command_run`, `write`, `edit`, and `apply_patch`.
+`command_run` is the native/CLI passthrough bridge for MCP clients; the mutation tools remain
+shell-safe structured shortcuts for common vault writes.
 
 ## Optimized Native Names
 

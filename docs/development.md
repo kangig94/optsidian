@@ -11,16 +11,19 @@ Kiwi runtime code lives under `src/core/kiwi/*` as Korean text-analysis infrastr
 `search` is an Optsidian-extended command. Keep the public core surface at `src/core/search/index.ts`; split internals under `src/core/search/*` by pipeline concern, not by caller.
 
 - `analysis/*` owns query/document token analysis, Korean analyzer behavior, and channel construction.
-- `retrieval/*` owns Orama lookups, candidate limits, and per-channel result merging.
+- `retrieval/*` owns positional candidate retrieval, channel weights, candidate limits, and per-channel result merging.
 - `ranking/*` owns exact identity ranking, phrase ranking, coverage ranking, RRF, and final scoring.
-- `planner.ts` owns read-time plan selection across target persisted index, compatible baseline index, empty building response, and full-build fallback.
-- Analyzer routing, Markdown parsing, warm daemon, warm schedule state, cache paths, documents, manifests, locks, persistence, overlays, projections, warmup, reconcile, snippets, debug, and status each stay in their matching top-level search module.
+- `segments/*` owns canonical snapshot bytes and snapshot-resident field text.
+- `src/daemon/search-store/*` owns snapshot publication, MVCC pinning, retention, active pointers, and daemon cache paths.
+- `src/daemon/pools.ts` and `src/daemon/*worker*` own analyzer/search-execution worker pools. Query and index analyzer parallelism must go through those pools.
 
 Layout-only skeleton files are allowed only while an active search migration is in progress. A functional search change should populate the matching module and avoid adding new behavior to `index.ts` unless it is preserving the public entrypoint, re-exporting public helpers, or coordinating modules.
 
 If a new search concern does not fit the existing modules, update these layout rules before adding the module. Avoid catch-all utility modules; name the module after the pipeline responsibility it owns.
 
-Analyzer and token semantics are part of search index identity. If a change alters token fields, analyzer fallback, channel construction, ranking identity, or persisted query behavior, update the relevant schema/cache/identity version and keep persisted index, overlay index, and live query analysis on the same semantics.
+Analyzer and token semantics are part of search snapshot identity. If a change alters token fields, analyzer fallback, channel construction, ranking identity, or persisted query behavior, update the relevant schema/cache/identity version and keep snapshot indexing, query analysis, positional retrieval, and ranking on the same semantics.
+
+Do not add new direct in-process search paths. CLI and MCP search/index commands must use daemon RPC. Do not reintroduce separate analyzer or warm daemons, read-time plan selection, snapshot-bypassing overlays, mkdir search locks, or query-time file rereads for snippets/signals.
 
 Korean search changes should model token channels explicitly, for example surface, morph, stem or lemma, and ngram. Retrieve per channel, fuse with explicit weights, and expose enough debug detail to explain which channel matched; avoid one-off string trimming inside ranking code.
 

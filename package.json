@@ -14,6 +14,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-bundle.mjs",
+    "search:eval": "node --import tsx scripts/search-eval.mjs",
     "package:release": "node scripts/package-release.mjs",
     "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
   },
@@ -28,8 +29,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@orama/orama": "^3.1.18",
     "kiwi-nlp": "^0.23.0",
+    "msgpackr": "^2.0.4",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   }

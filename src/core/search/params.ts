@@ -1,6 +1,4 @@
-import fs from "node:fs";
 import { UsageError } from "../../errors.js";
-import { resolveVaultPath } from "../path.js";
 import type { SearchField, SearchParams } from "../types.js";
 import { assertOptionalPositiveInteger } from "../validation.js";
 import type { NormalizedSearchParams, PathFilter } from "./internal-types.js";
@@ -28,12 +26,6 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
     limit: params.limit ?? 10,
     debug: params.debug === true
   };
-}
-
-export function resolvePathFilter(vaultRoot: string, input: string): PathFilter {
-  const resolved = resolveVaultPath(vaultRoot, input, { mustExist: true });
-  const stat = fs.statSync(resolved.abs);
-  return { rel: resolved.rel === "." ? "" : resolved.rel, directory: stat.isDirectory() };
 }
 
 export function matchesPathFilter(relPath: string, filter: PathFilter): boolean {

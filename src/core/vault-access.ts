@@ -25,7 +25,7 @@ type VaultAccessOptions = {
 
 const VAULT_ACCESS_SCHEMA_VERSION = 1;
 const VAULT_ACCESS_FILE = "vault-access.json";
-const VAULT_ACCESS_MAX_AGE_DAYS_ENV = "OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS";
+const VAULT_ACCESS_MAX_AGE_DAYS_ENV = "OPTSIDIAN_SEARCH_VAULT_ACCESS_MAX_AGE_DAYS";
 const DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS = 7;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const VAULT_ACCESS_MAX_ENTRIES = 200;
@@ -141,7 +141,7 @@ function settingsForAccess(options: VaultAccessOptions, env: NodeJS.ProcessEnv):
 function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
   return parsePositiveInteger(
     env[VAULT_ACCESS_MAX_AGE_DAYS_ENV],
-    settings.search?.indexWarmAccessMaxAgeDays ?? DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS,
+    DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS,
     VAULT_ACCESS_MAX_AGE_DAYS_ENV
   );
 }

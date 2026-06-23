@@ -1,7 +1,7 @@
-import type { ChannelHit, OramaProjectionCandidate } from "./candidates.js";
+import type { ChannelHit, SearchProjectionCandidate } from "./candidates.js";
 
-export function mergeChannelHits(hits: readonly ChannelHit[], queryTerms: string[]): OramaProjectionCandidate[] {
-  const byPath = new Map<string, OramaProjectionCandidate>();
+export function mergeChannelHits(hits: readonly ChannelHit[], queryTerms: string[]): SearchProjectionCandidate[] {
+  const byPath = new Map<string, SearchProjectionCandidate>();
   for (const hit of hits) {
     const existing = byPath.get(hit.document.path);
     if (!existing) {

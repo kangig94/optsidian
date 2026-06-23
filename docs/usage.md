@@ -153,7 +153,7 @@ optsidian search "project alpha" format=json debug=true
 
 Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence; `keywords` / `keyword` frontmatter values are indexed through the alias search surface. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Add `debug=true` with `format=json` to include analyzer tokens, matched token channels, and ranking diagnostics. Search indexes three token channels per field: morph analyzer tokens, normalized surface tokens, and Korean 2/3-gram tokens. Surface tokens preserve the compact form and also expand common path/title compounds such as `HumanoidMotionTracking`, `DDPMScheduler`, and `Sim2Real` into searchable parts. Candidate retrieval runs per channel and fuses channel ranks with explicit weights before metadata reranking. The reranker prioritizes exact note identity, phrase matches, metadata coverage, candidate-local term rarity, and term proximity; if strict retrieval finds no candidates, it can run a narrow Latin fuzzy retry for 5+ character alphanumeric terms with edit distance 1. Korean queries can still find attached forms such as a query for `검색` matching `검색하면서`, and unspaced/spaced variants such as `한국어검색` and `한국어 검색` can meet through the ngram channel. With Kiwi enabled, compact Korean query compounds also reuse the morph split as an identity phrase candidate, so `정책학습` can receive the same phrase ranking signals as `정책 학습`. The default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
 
-The search index is cached outside the vault and rebuilt automatically as needed. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; tokenizer projections live under `indexes/<tier-key>/` with `search.orama`, `manifest.json`, `commit.json`, and `analysis-cache.json`. Index writes are protected by a per-vault writer lock, atomic file replacement, and a digest-bound commit sidecar so foreground search only serves a completed persisted pair while another process is rebuilding. The manifest records schema, Node/ICU, tokenizer tier, and analyzer identity, so changing analyzer settings rebuilds the index. During analyzer tier upgrades, a valid Intl-tier index can be served immediately while a background reconcile rebuilds the target tier. When a persisted index is stale but only a small number of files changed, foreground search builds an in-memory Intl overlay so added/changed files can still match while background indexing catches up; tune this with `search.overlayMaxFiles`/`search.overlayMaxBytes` or the overriding `OPTSIDIAN_SEARCH_OVERLAY_MAX_FILES`/`OPTSIDIAN_SEARCH_OVERLAY_MAX_BYTES` env vars. `index status` reports cache readiness, analyzer runtime state, tier projection status, stale-tier, reconcile-lock, recent-access warm eligibility, MCP warm throttle, and last reconcile result diagnostics when present. CLI `search` wakes a background index daemon that incrementally warms vaults Optsidian accessed in the last 7 days and exits after 5 minutes idle; access is recorded by realpath under `$XDG_CACHE_HOME/optsidian/vault-access.json`. Set `OPTSIDIAN_INDEX_DAEMON=0` to disable it, `OPTSIDIAN_INDEX_DAEMON_IDLE_MS=<ms>` to change idle shutdown, `OPTSIDIAN_INDEX_DAEMON_POLL_MS=<ms>` to change the follow-up warm interval, `OPTSIDIAN_INDEX_WARM_ACCESS_MAX_AGE_DAYS=<days>` to change recent-access retention, or `OPTSIDIAN_INDEX_WARM_CONCURRENCY=<n>` to change background warm concurrency. MCP startup and tool calls also wake a one-shot index warm at most once every 30 minutes, recorded in `$XDG_CACHE_HOME/optsidian/index-warm-schedule.json`; tune this with `search.indexWarmIntervalMinutes` or the overriding `OPTSIDIAN_INDEX_WARM_INTERVAL_MINUTES`:
+The search daemon stores immutable positional snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with a durable active pointer. Each snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, and line snippet data. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query. Candidate retrieval uses positional postings only; phrase, proximity, rarity, and coverage signals come from snapshot-resident postings and feature payloads. CLI and MCP searches are daemon RPC calls only: if the daemon cannot start or become ready, search fails clearly instead of falling back to in-process indexing. `index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index warm`, and `index clear` are daemon RPC mutations.
 
 ```bash
 optsidian index status
@@ -162,21 +162,22 @@ optsidian index warm
 optsidian index clear
 ```
 
-`index warm` prepares search indexes for discovered vaults, using incremental updates when a compatible cache already exists. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
+`index warm` loads or refreshes daemon snapshots for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
-Set `OPTSIDIAN_SEARCH_ANALYZER=intl-daemon` to route the same Intl analyzer through Optsidian's analyzer daemon. The daemon exits after 5 minutes idle by default; override with `OPTSIDIAN_ANALYZER_IDLE_MS=<ms>`. Analyzer requests time out after 60 seconds by default; override with `OPTSIDIAN_ANALYZER_REQUEST_TIMEOUT_MS=<ms>`. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables the Kiwi Korean target tier. While the Kiwi model or target projection is missing or rebuilding, foreground search serves the Intl baseline and warns `fts_index_stale_tier`; once a compatible Kiwi projection is ready, foreground search asks the analyzer daemon to load Kiwi and waits up to 5 seconds before falling back. Change that load wait with `search.analyzerLoadTimeoutMs` or `OPTSIDIAN_ANALYZER_LOAD_TIMEOUT_MS=<ms>`. Background warm/reconcile/rebuild lazily downloads the ~88 MB model into `$XDG_CACHE_HOME/optsidian/kiwi/`. Kiwi tokenization runs in the analyzer daemon, so CLI searches reuse a loaded analyzer until the daemon exits after 5 minutes idle.
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools. The Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. `search.analyzer=intl|kiwi` selects the analyzer policy, `search.queryWorkers` and `search.indexWorkers` size the latency and indexing analyzer pools, and request timeouts are controlled at the daemon RPC/request layer.
 
 Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
 
 ```bash
-optsidian config set search.analyzer=intl-daemon
+optsidian config set search.analyzer=intl
 optsidian config set search.extraLangs=ko
-optsidian config set search.analyzerLoadTimeoutMs=5000
-optsidian config set search.overlayMaxFiles=20
-optsidian config set search.overlayMaxBytes=2097152
-optsidian config set search.indexWarmIntervalMinutes=30
-optsidian config set search.indexWarmAccessMaxAgeDays=7
-optsidian config set search.indexWarmConcurrency=2
+optsidian config set search.queryWorkers=2
+optsidian config set search.indexWorkers=2
+optsidian config set search.snapshotRetentionCount=8
+optsidian config set search.queryCacheSize=512
+optsidian config set search.memoryBudgetCount=8
+optsidian config set search.memoryBudgetBytes=268435456
+optsidian config set search.daemonIdleMs=300000
 optsidian config get search.extraLangs
 optsidian config unset search.extraLangs
 ```
@@ -335,13 +336,13 @@ Native delegated commands keep their original output formats.
 
 ## MCP Usage
 
-`optsidian-mcp` exposes a small mutation-oriented tool surface over stdio for MCP clients:
+`optsidian-mcp` exposes a small CLI-routing and mutation tool surface over stdio for MCP clients:
 
 ```text
-command_map, write, edit, apply_patch
+command_map, command_run, write, edit, apply_patch
 ```
 
-MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings.
+MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings. `command_run` is the MCP-to-CLI bridge for CLI-only and native-delegated Optsidian commands.
 
 Call `command_map` first when work goes beyond the MCP mutation tools. It returns the CLI-only split, the available MCP tools, the current native delegated command list, and an explicit preference rule: prefer Optsidian for Obsidian vault work and use Optsidian CLI commands for CLI-only and native passthrough operations. It then points detailed syntax back to:
 

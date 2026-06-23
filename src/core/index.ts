@@ -5,7 +5,6 @@ export { addFrontmatterValue, deleteFrontmatter, readFrontmatter, removeFrontmat
 export { grepVault } from "./grep.js";
 export { mkdirVaultPath } from "./mkdir.js";
 export { readVaultFile, DEFAULT_READ_MAX_LINES } from "./read.js";
-export { clearSearchIndex, getSearchIndexStatus, rebuildSearchIndex, searchVault, warmSearchIndexes } from "./search/index.js";
 export { writeVaultFile } from "./write.js";
 export type {
   ChangeCode,
@@ -28,15 +27,11 @@ export type {
   ReadParams,
   ReadResult,
   SearchIndexMutationResult,
-  SearchIndexReconcileRunStatus,
-  SearchIndexReconcileSnapshot,
-  SearchIndexReconcileStatus,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
   SearchIndexWarmVaultResult,
   SearchMatch,
   SearchParams,
-  SearchReconcileReason,
   SearchResult,
   SearchSnippet,
   WriteParams

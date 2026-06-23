@@ -1,7 +1,7 @@
 import type { SearchDocument } from "../markdown.js";
 import type { SearchTokenChannel } from "../analysis/index.js";
 
-export type OramaProjectionCandidate = {
+export type SearchProjectionCandidate = {
   document: SearchDocument;
   score: number;
   queryTerms: string[];

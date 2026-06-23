@@ -15,14 +15,13 @@ import { UsageError } from "../../errors.js";
 const SETTING_KEYS = new Set([
   "search.analyzer",
   "search.extraLangs",
-  "search.analyzerIdleMs",
-  "search.analyzerRequestTimeoutMs",
-  "search.analyzerLoadTimeoutMs",
-  "search.overlayMaxFiles",
-  "search.overlayMaxBytes",
-  "search.indexWarmIntervalMinutes",
-  "search.indexWarmAccessMaxAgeDays",
-  "search.indexWarmConcurrency"
+  "search.queryWorkers",
+  "search.indexWorkers",
+  "search.snapshotRetentionCount",
+  "search.queryCacheSize",
+  "search.memoryBudgetCount",
+  "search.memoryBudgetBytes",
+  "search.daemonIdleMs"
 ]);
 
 export function runConfig(args: ParsedArgs): void {
@@ -86,7 +85,7 @@ function parseSettingValue(key: string, value: string): unknown {
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
     throw new UsageError(
-      "config key must be one of: search.analyzer, search.extraLangs, search.analyzerIdleMs, search.analyzerRequestTimeoutMs, search.analyzerLoadTimeoutMs, search.overlayMaxFiles, search.overlayMaxBytes, search.indexWarmIntervalMinutes, search.indexWarmAccessMaxAgeDays, search.indexWarmConcurrency"
+      "config key must be one of: search.analyzer, search.extraLangs, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs"
     );
   }
 }

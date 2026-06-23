@@ -1,3 +1,4 @@
+import { threadId } from "node:worker_threads";
 import {
   inspectKiwiModelArtifact,
   inspectKiwiWasmArtifact,
@@ -334,12 +335,17 @@ function errorMessage(error: unknown): string {
 }
 
 let singleton: KiwiAnalyzerManager | null = null;
+let singletonThreadId = threadId;
 
 export function getKiwiAnalyzerManager(): KiwiAnalyzerManager {
-  singleton ??= new KiwiAnalyzerManager();
+  if (!singleton || singletonThreadId !== threadId) {
+    singleton = new KiwiAnalyzerManager();
+    singletonThreadId = threadId;
+  }
   return singleton;
 }
 
 export function __setKiwiAnalyzerManagerForTests(manager: KiwiAnalyzerManager | null): void {
   singleton = manager;
+  singletonThreadId = threadId;
 }
