@@ -191,8 +191,14 @@ class SearchDaemon {
     if (!isSearchDaemonMethod(request.method)) {
       throw Object.assign(new Error("unknown search daemon method"), { code: "BAD_REQUEST" });
     }
+    if (!Number.isFinite(request.deadline)) {
+      throw Object.assign(new Error("request deadline must be a finite number"), { code: "BAD_REQUEST" });
+    }
     if (Date.now() >= request.deadline) {
       throw Object.assign(new Error("request deadline expired before admission"), { code: "DEADLINE_EXCEEDED" });
+    }
+    if (request.payload === null || typeof request.payload !== "object" || Array.isArray(request.payload)) {
+      throw Object.assign(new Error("request payload must be an object"), { code: "BAD_REQUEST" });
     }
     if (request.method !== "Status" && request.nonce !== this.owner.nonce) {
       throw Object.assign(new Error("search daemon nonce authentication failed"), { code: "SEARCH_DAEMON_AUTH_FAILED" });

@@ -395,6 +395,42 @@ test("AC3 transport converts synchronous handler throws into RPC errors without 
   }
 });
 
+test("AC11 transport closes unused idle sockets and incomplete frames without killing the server", async () => {
+  const { createRpcServer } = await futureImport("src/daemon/transport.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const root = tempRoot();
+  const socketPath = path.join(root, "rpc.sock");
+  const server = await createRpcServer({
+    socketPath,
+    socketIdleTimeoutMs: 25,
+    handleRequest: async () => ({ alive: true })
+  });
+
+  try {
+    const idle = await connectRawSocket(socketPath);
+    await waitForSocketClose(idle, 500);
+    const aliveAfterIdle = await requestRawRpc(socketPath, encodeFrame, statusRequest("after-idle-close"));
+    assert.equal(aliveAfterIdle.ok, true);
+    assert.equal(aliveAfterIdle.result.alive, true);
+
+    const partial = await connectRawSocket(socketPath);
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(64, 0);
+    partial.write(Buffer.concat([header, Buffer.from([0x80])]));
+    const response = await readRawRpcFrame(partial, 500);
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "BAD_REQUEST");
+    assert.match(response.error.message, /timed out/i);
+    await waitForSocketClose(partial, 500);
+
+    const aliveAfterPartial = await requestRawRpc(socketPath, encodeFrame, statusRequest("after-partial-close"));
+    assert.equal(aliveAfterPartial.ok, true);
+    assert.equal(aliveAfterPartial.result.alive, true);
+  } finally {
+    await server.close();
+  }
+});
+
 test("AC11 transport rejects oversized declared frames and keeps serving", async () => {
   const { createRpcServer } = await futureImport("src/daemon/transport.ts");
   const { SEARCH_DAEMON_MAX_FRAME_BYTES, encodeFrame } = await futureImport("src/daemon/protocol.ts");
@@ -506,6 +542,69 @@ test("search store service rejects excessive analyzed query terms per channel", 
     }
   );
   assert.deepEqual(released, ["pin-a"]);
+});
+
+test("AC3 daemon rejects malformed deadlines and payload shapes without dying", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry } = await futureImport("src/daemon/owner-registry.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const runtimeDir = tempRoot();
+  const env = { ...process.env, OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir };
+  const registry = createOwnerRegistry({ runtimeDir, env });
+  const client = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    env,
+    readyTimeoutMs: 5000
+  });
+
+  await client.status();
+  const owner = registry.readOwner();
+  assert.ok(owner);
+
+  try {
+    const malformed = [
+      {
+        label: "deadline-string",
+        request: { protocolVersion: 1, requestId: "deadline-string", method: "Status", deadline: "nope", payload: {} }
+      },
+      {
+        label: "deadline-infinity",
+        request: { protocolVersion: 1, requestId: "deadline-infinity", method: "Status", deadline: Infinity, payload: {} }
+      },
+      {
+        label: "payload-null",
+        request: { protocolVersion: 1, requestId: "payload-null", method: "Status", deadline: Date.now() + 1000, payload: null }
+      },
+      {
+        label: "payload-array",
+        request: { protocolVersion: 1, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
+      },
+      {
+        label: "search-primitive-payload",
+        request: {
+          protocolVersion: 1,
+          requestId: "search-primitive-payload",
+          method: "Search",
+          nonce: owner.nonce,
+          deadline: Date.now() + 1000,
+          payload: 1
+        }
+      }
+    ];
+
+    for (const { label, request } of malformed) {
+      const rejected = await requestRawRpc(owner.socketPath, encodeFrame, request);
+      assert.equal(rejected.ok, false, label);
+      assert.equal(rejected.error.code, "BAD_REQUEST", label);
+
+      const alive = await requestRawRpc(owner.socketPath, encodeFrame, statusRequest(`alive-${label}`));
+      assert.equal(alive.ok, true, label);
+      assert.equal(alive.result.ready, true, label);
+    }
+  } finally {
+    await client.shutdown({ deadlineMs: 1000 }).catch(() => {});
+  }
 });
 
 test("AC10 owner registry treats a 20 second control lock age as the stale boundary", async () => {
@@ -628,8 +727,6 @@ test("AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
   }
 });
 
-// TODO: AC11 partial-frame idle-timeout coverage would require waiting for the
-// transport's hard-coded 30s socket idle timeout or adding a test-time timeout injection.
 // TODO: AC4 shutdown/removeOwner failure and AC12 owner cleanup on warmup failure
 // require daemon construction hooks that are not exposed to tests without editing src/.
 

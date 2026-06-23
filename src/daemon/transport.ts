@@ -20,8 +20,9 @@ export type RpcServer = {
 
 export type RpcServerOptions = {
   socketPath: string;
-  handleRequest(request: SearchDaemonRequest): Promise<unknown>;
+  handleRequest(request: SearchDaemonRequest): unknown | Promise<unknown>;
   onConnectionClosed?(requestIds: readonly string[]): void;
+  socketIdleTimeoutMs?: number;
 };
 
 type PendingRequest = {
@@ -96,13 +97,17 @@ export async function connectRpc(socketPath: string): Promise<RpcConnection> {
 export async function createRpcServer(options: RpcServerOptions): Promise<RpcServer> {
   const sockets = new Set<net.Socket>();
   const activeRequestsBySocket = new Map<net.Socket, Set<string>>();
+  const socketIdleTimeoutMs = options.socketIdleTimeoutMs ?? RPC_SOCKET_IDLE_TIMEOUT_MS;
   const server = net.createServer((socket) => {
     sockets.add(socket);
     activeRequestsBySocket.set(socket, new Set());
     const decoder = new FrameDecoder();
 
-    socket.setTimeout(RPC_SOCKET_IDLE_TIMEOUT_MS, () => {
-      if (decoder.bufferedBytes === 0) return;
+    socket.setTimeout(socketIdleTimeoutMs, () => {
+      if (decoder.bufferedBytes === 0) {
+        if ((activeRequestsBySocket.get(socket)?.size ?? 0) === 0) socket.destroy();
+        return;
+      }
       writeBadRequestAndDestroy(socket, "RPC frame timed out before completion");
     });
 
