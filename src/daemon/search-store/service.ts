@@ -40,20 +40,31 @@ export class DaemonSearchStoreService {
     this.queryAnalysisCache = new QueryAnalysisCache(options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? 512);
   }
 
-  loadVault(vault: string, context: DaemonRequestContext) {
-    return this.store.loadVault(vault, snapshotContext(context));
+  async loadVault(vault: string, context: DaemonRequestContext) {
+    const result = await this.store.loadVault(vault, snapshotContext(context));
+    const failed = result.vaults.find((candidate) => candidate.status === "failed");
+    if (!failed && "snapshotId" in result && result.snapshotId) {
+      await this.preloadSnapshot(vault, result.snapshotId, context);
+    }
+    return result;
   }
 
-  rebuild(vault: string, context: DaemonRequestContext): Promise<SnapshotMutationResult> {
-    return this.store.rebuild(vault, snapshotContext(context));
+  async rebuild(vault: string, context: DaemonRequestContext): Promise<SnapshotMutationResult> {
+    const result = await this.store.rebuild(vault, snapshotContext(context));
+    if (result.snapshotId) await this.preloadSnapshot(vault, result.snapshotId, context);
+    return result;
   }
 
-  refresh(vault: string, context: DaemonRequestContext) {
-    return this.store.refresh(vault, snapshotContext(context));
+  async refresh(vault: string, context: DaemonRequestContext) {
+    const result = await this.store.refresh(vault, snapshotContext(context));
+    if (result.snapshotId) await this.preloadSnapshot(vault, result.snapshotId, context);
+    return result;
   }
 
-  compact(vault: string, context: DaemonRequestContext) {
-    return this.store.compact(vault, snapshotContext(context));
+  async compact(vault: string, context: DaemonRequestContext) {
+    const result = await this.store.compact(vault, snapshotContext(context));
+    if (result.snapshotId) await this.preloadSnapshot(vault, result.snapshotId, context);
+    return result;
   }
 
   clear(vault: string): Promise<SearchIndexMutationResult> {
@@ -110,6 +121,32 @@ export class DaemonSearchStoreService {
     return {
       queryAnalysisCache: this.queryAnalysisCache.stats()
     };
+  }
+
+  private async preloadSnapshot(vault: string, snapshotId: string, context: DaemonRequestContext): Promise<void> {
+    assertRemainingDeadline(context.deadline);
+    const pin = await this.store.pin(vault, snapshotId, snapshotContext(context));
+    try {
+      const snapshot = this.store.snapshotHandleForPin(pin);
+      context.progress?.({
+        phase: "preloading",
+        completed: 0,
+        message: "warming search workers"
+      });
+      const warmed = await this.searchExecution.preloadSnapshot(snapshot, {
+        deadline: context.deadline,
+        cancellationId: context.cancellationId,
+        vault
+      });
+      context.progress?.({
+        phase: "preloading",
+        total: warmed.length,
+        completed: warmed.length,
+        message: "search workers warm"
+      });
+    } finally {
+      this.store.release(pin);
+    }
   }
 
   private async queryAnalysis(

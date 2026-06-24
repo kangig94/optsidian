@@ -554,9 +554,99 @@ parentPort.on("message", (message) => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
     assert.equal(warmups.length, 1);
+    const stats = pool.stats();
+    assert.equal(stats.restarts, 0);
+    assert.equal(stats.slots[0].lastMemory.heapUsed, 1);
   } finally {
     await pool.close();
   }
+});
+
+test("worker pool optional rss guard restarts only after configured strikes", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "rss-guard.mjs");
+  const warmupLog = path.join(root, "warmups.log");
+  fs.writeFileSync(warmupLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const warmupLog = ${JSON.stringify(warmupLog)};
+const memory = { rss: 1000, heapTotal: 2, heapUsed: 1, external: 0, arrayBuffers: 0 };
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(warmupLog, "warmup\\n");
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memory, memoryRss: memory.rss });
+    return;
+  }
+  parentPort.postMessage({ id: message.id, ok: true, result: { ok: true }, memory, memoryRss: memory.rss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "rss-guard",
+    kind: "search",
+    size: 1,
+    workerScript,
+    heapGuardBytes: 10,
+    rssGuardBytes: 10,
+    rssGuardStrikes: 1,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    await pool.run({ type: "search" }, {
+      deadline: Date.now() + 1000,
+      cancellationId: "rss-guard"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.ok(warmups.length >= 2);
+    assert.equal(pool.stats().lastRestartReason, "rss guard exceeded (1000 > 10)");
+  } finally {
+    await pool.close();
+  }
+});
+
+test("search store loadVault preloads the active snapshot into search workers", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const calls = [];
+  const pin = { snapshotId: "snap-a", pinToken: "pin-a" };
+  const fakeStore = {
+    loadVault: async () => ({ ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" }),
+    pin: async (inputVault, snapshotId) => {
+      calls.push(["pin", inputVault, snapshotId]);
+      return pin;
+    },
+    snapshotHandleForPin: (inputPin) => {
+      calls.push(["handle", inputPin.pinToken]);
+      return { snapshotId: "snap-a", pinToken: inputPin.pinToken, documents: sharedHandle(Buffer.from("[]")), segments: [] };
+    },
+    release: (inputPin) => calls.push(["release", inputPin.pinToken])
+  };
+  const fakeSearchExecution = {
+    preloadSnapshot: async (snapshot, options) => {
+      calls.push(["preload", snapshot.snapshotId, options.vault]);
+      return [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }];
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+
+  const result = await service.loadVault(vault, {
+    deadline: Date.now() + 1000,
+    cancellationId: "preload",
+    requestId: "preload"
+  });
+
+  assert.equal(result.snapshotId, "snap-a");
+  assert.deepEqual(calls, [
+    ["pin", vault, "snap-a"],
+    ["handle", "pin-a"],
+    ["preload", "snap-a", vault],
+    ["release", "pin-a"]
+  ]);
 });
 
 test("search store service rejects excessive analyzed query terms per channel", async () => {
@@ -823,6 +913,9 @@ test("lifecycle deadlines scale with vault markdown count", async () => {
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
         }
+        if (request.method === "Search") {
+          return { ok: true, command: "search", matches: [], snapshotId: "snap-a" };
+        }
         throw new Error(`unexpected method ${request.method}`);
       },
       close: async () => {}
@@ -836,6 +929,11 @@ test("lifecycle deadlines scale with vault markdown count", async () => {
   const expected = vaultLifecycleDeadlineMs(2);
   assert.ok(loadRequest.deadline >= before + expected - 100);
   assert.ok(loadRequest.deadline <= Date.now() + expected + 1000);
+
+  await client.search({ vault, query: "alpha", limit: 1 });
+  const searchRequest = requests.find((request) => request.method === "Search");
+  assert.ok(searchRequest);
+  assert.ok(searchRequest.deadline >= before + expected - 100);
 });
 
 test("snapshot build reports deterministic progress counts", async () => {
@@ -900,6 +998,39 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
   };
   const second = executeSearchJob({ ...job, snapshot: corruptedSameSnapshot });
   assert.deepEqual(second.matches.map((match) => match.path), ["Alpha.md"]);
+});
+
+test("search execution preload materializes snapshot cache before search", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { preloadSearchExecutionSnapshot, searchExecutionCacheStats } = await futureImport("src/daemon/search-execution.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-a",
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  const warmed = preloadSearchExecutionSnapshot(snapshot);
+  assert.equal(warmed.snapshotId, built.snapshotId);
+  assert.equal(searchExecutionCacheStats().snapshotIds.includes(built.snapshotId), true);
+
+  const second = preloadSearchExecutionSnapshot({
+    ...snapshot,
+    pinToken: "pin-b",
+    documents: sharedHandle(Buffer.from("{not-json")),
+    segments: []
+  });
+  assert.equal(second.cacheHit, true);
 });
 
 test("AC1 shared search-daemon client starts daemon, waits ready, and has no direct fallback", async () => {

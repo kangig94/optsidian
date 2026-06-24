@@ -2,7 +2,13 @@ import type { SearchTextAnalysis } from "../core/search/analysis/index.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import type { BuiltSnapshot } from "./search-store/types.js";
 import { DaemonWorkerPool, logicalCpuWorkerBudget, workerCountFromEnv, type WorkerPoolRunOptions } from "./worker-pool.js";
-import type { SearchExecutionJob, SearchExecutionResult } from "./search-execution.js";
+import type {
+  SearchExecutionCacheStats,
+  SearchExecutionJob,
+  SearchExecutionPreloadResult,
+  SearchExecutionResult,
+  SearchExecutionSnapshotHandle
+} from "./search-execution.js";
 import type { SearchResult } from "../core/types.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
 
@@ -23,7 +29,7 @@ export type DaemonPools = {
   warmup(): Promise<void>;
   cancel(cancellationId: string): void;
   close(): Promise<void>;
-  stats(): unknown;
+  stats(options: WorkerPoolRunOptions): Promise<unknown>;
 };
 
 export class AnalyzerWorkerPool {
@@ -104,6 +110,14 @@ export class SearchExecutionWorkerPool {
     return this.pool.run<SearchExecutionResult>({ type: "search", payload: job }, options);
   }
 
+  preloadSnapshot(snapshot: SearchExecutionSnapshotHandle, options: WorkerPoolRunOptions): Promise<SearchExecutionPreloadResult[]> {
+    return this.pool.runOnAll<SearchExecutionPreloadResult>({ type: "preloadSnapshot", payload: snapshot }, options);
+  }
+
+  cacheStats(options: WorkerPoolRunOptions): Promise<SearchExecutionCacheStats[]> {
+    return this.pool.runOnAll<SearchExecutionCacheStats>({ type: "searchExecutionStats" }, options);
+  }
+
   async warmup(): Promise<void> {
     await this.pool.warmup();
   }
@@ -173,11 +187,22 @@ export async function createDaemonPools(
         searchExecution.close()
       ]);
     },
-    stats() {
+    async stats(options) {
+      let searchExecutionCache: unknown;
+      try {
+        searchExecutionCache = await searchExecution.cacheStats(options);
+      } catch (error) {
+        searchExecutionCache = {
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
       return {
         latencyAnalyzer: latencyAnalyzer.stats(),
         throughputAnalyzer: throughputAnalyzer.stats(),
-        searchExecution: searchExecution.stats()
+        searchExecution: {
+          ...searchExecution.stats(),
+          cache: searchExecutionCache
+        }
       };
     }
   };

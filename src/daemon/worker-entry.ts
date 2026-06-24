@@ -4,7 +4,13 @@ import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } f
 import { readOptsidianSettings } from "../core/settings.js";
 import type { SearchIndexProgressUpdate } from "./protocol.js";
 import { buildCanonicalSearchSnapshot } from "./search-store/builder.js";
-import { executeSearchJob, type SearchExecutionJob } from "./search-execution.js";
+import {
+  executeSearchJob,
+  preloadSearchExecutionSnapshot,
+  searchExecutionCacheStats,
+  type SearchExecutionJob,
+  type SearchExecutionSnapshotHandle
+} from "./search-execution.js";
 
 type WorkerEnvelope = {
   id: number;
@@ -100,8 +106,10 @@ async function dispatch(
     return { ready: true };
   }
   if (context.kind === "search") {
-    if (type !== "search") throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: "BAD_REQUEST" });
-    return executeSearchJob(payload as SearchExecutionJob);
+    if (type === "search") return executeSearchJob(payload as SearchExecutionJob);
+    if (type === "preloadSnapshot") return preloadSearchExecutionSnapshot(payload as SearchExecutionSnapshotHandle);
+    if (type === "searchExecutionStats") return searchExecutionCacheStats();
+    throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: "BAD_REQUEST" });
   }
   if (context.kind !== "analyzer") {
     throw Object.assign(new Error(`unsupported worker kind: ${String(context.kind)}`), { code: "BAD_REQUEST" });

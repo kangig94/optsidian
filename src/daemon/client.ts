@@ -16,6 +16,7 @@ import type {
 import {
   deadlineFromNow,
   SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS,
+  SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   vaultLifecycleDeadlineMs,
   type SearchDaemonResultByMethod
@@ -286,6 +287,10 @@ function requestDeadlineMs(
   options: ClientRequestOptions
 ): number | undefined {
   if (options.deadlineMs !== undefined) return options.deadlineMs;
+  if ((method === "Search" || method === "Explain") && "vault" in payload && typeof payload.vault === "string") {
+    const fileCount = countVaultMarkdownFiles(payload.vault);
+    if (fileCount !== undefined) return Math.max(vaultLifecycleDeadlineMs(fileCount), SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS);
+  }
   if (isVaultLifecycleMethod(method) && "vault" in payload && typeof payload.vault === "string") {
     const fileCount = countVaultMarkdownFiles(payload.vault);
     if (fileCount !== undefined) return vaultLifecycleDeadlineMs(fileCount);

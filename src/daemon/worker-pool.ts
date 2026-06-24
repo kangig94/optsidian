@@ -28,6 +28,9 @@ export type WorkerPoolOptions = {
   maxQueueSize?: number;
   maxCrashRetries?: number;
   memoryLimitBytes?: number;
+  heapGuardBytes?: number;
+  rssGuardBytes?: number;
+  rssGuardStrikes?: number;
   microbatchSize?: number;
 };
 
@@ -76,6 +79,7 @@ type QueueItem<T> = {
   resolve(value: T): void;
   reject(error: Error): void;
   crashAttempts: number;
+  targetSlotId?: number;
   timer?: NodeJS.Timeout;
 };
 
@@ -92,6 +96,11 @@ type WorkerSlot = {
   ready: Promise<void>;
   warmupResult: unknown;
   restartAttempts: number;
+  completedJobs: number;
+  rssGuardStrikes: number;
+  lastMemory?: WorkerMemoryUsage;
+  lastRestartReason?: string;
+  lastRestartAt?: string;
 };
 
 type RestartPlan = {
@@ -102,7 +111,8 @@ type RestartPlan = {
 const DEFAULT_MAX_QUEUE_SIZE = 1024;
 const DEFAULT_MAX_CRASH_RETRIES = 2;
 const DEFAULT_MICROBATCH_SIZE = 64;
-const DEFAULT_WORKER_MEMORY_BYTES = 512 * 1024 * 1024;
+const DEFAULT_WORKER_HEAP_GUARD_BYTES = 512 * 1024 * 1024;
+const DEFAULT_RSS_GUARD_STRIKES = 3;
 const MAX_CANCELLED_IDS = 4096;
 const MAX_SLOT_RESTART_ATTEMPTS = 3;
 const SLOT_RESTART_BACKOFF_BASE_MS = 100;
@@ -117,17 +127,30 @@ export class DaemonWorkerPool {
   private nextSlotId = 1;
   private lastVault: string | undefined;
   private closed = false;
+  private restartCount = 0;
+  private lastRestartReason: string | undefined;
+  private lastRestartAt: string | undefined;
 
   constructor(options: WorkerPoolOptions) {
     const size = Math.max(1, Math.floor(options.size));
+    const env = options.env ?? process.env;
+    const heapGuardBytes =
+      options.heapGuardBytes ??
+      options.memoryLimitBytes ??
+      envBytes(env, "OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB") ??
+      envBytes(env, "OPTSIDIAN_SEARCH_WORKER_MEMORY_MB") ??
+      DEFAULT_WORKER_HEAP_GUARD_BYTES;
     this.options = {
-      env: process.env,
+      env,
       workerScript: defaultWorkerScript(),
       maxQueueSize: DEFAULT_MAX_QUEUE_SIZE,
       maxCrashRetries: DEFAULT_MAX_CRASH_RETRIES,
-      memoryLimitBytes: envBytes(options.env ?? process.env, "OPTSIDIAN_SEARCH_WORKER_MEMORY_MB") ?? DEFAULT_WORKER_MEMORY_BYTES,
       microbatchSize: DEFAULT_MICROBATCH_SIZE,
       ...options,
+      memoryLimitBytes: heapGuardBytes,
+      heapGuardBytes,
+      rssGuardBytes: options.rssGuardBytes ?? envBytes(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB") ?? 0,
+      rssGuardStrikes: options.rssGuardStrikes ?? envNumber(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES") ?? DEFAULT_RSS_GUARD_STRIKES,
       size
     };
     for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(0));
@@ -159,11 +182,19 @@ export class DaemonWorkerPool {
       if (!item || item.options.cancellationId !== cancellationId) continue;
       this.rejectItem(item, "CANCELLED", "worker job was cancelled during execution");
       slot.busy = undefined;
-      this.restartSlot(slot);
+      this.restartSlot(slot, undefined, undefined, "cancelled");
     }
   }
 
   run<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions): Promise<T> {
+    return this.enqueue(request, options);
+  }
+
+  runOnAll<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions): Promise<T[]> {
+    return Promise.all(this.slots.map((slot) => this.enqueue<T>(request, options, slot.id)));
+  }
+
+  private enqueue<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, targetSlotId?: number): Promise<T> {
     if (this.closed) return Promise.reject(poolError("INTERNAL", `${this.options.name} pool is closed`));
     if (Date.now() >= options.deadline) {
       return Promise.reject(poolError("DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before admission`));
@@ -182,7 +213,8 @@ export class DaemonWorkerPool {
         options,
         resolve,
         reject,
-        crashAttempts: 0
+        crashAttempts: 0,
+        targetSlotId
       };
       this.armDeadline(item);
       this.queue.push(item as QueueItem<unknown>);
@@ -207,7 +239,25 @@ export class DaemonWorkerPool {
       queued: this.queue.length,
       active: this.slots.filter((slot) => slot.busy).length,
       microbatchSize: this.options.microbatchSize,
-      memoryLimitBytes: this.options.memoryLimitBytes
+      memoryLimitBytes: this.options.memoryLimitBytes,
+      heapGuardBytes: this.options.heapGuardBytes,
+      rssGuardBytes: this.options.rssGuardBytes || undefined,
+      rssGuardStrikes: this.options.rssGuardBytes > 0 ? this.options.rssGuardStrikes : undefined,
+      restarts: this.restartCount,
+      lastRestartReason: this.lastRestartReason,
+      lastRestartAt: this.lastRestartAt,
+      processMemory: process.memoryUsage(),
+      slots: this.slots.map((slot) => ({
+        id: slot.id,
+        busy: slot.busy !== undefined,
+        restarting: slot.restarting,
+        restartAttempts: slot.restartAttempts,
+        completedJobs: slot.completedJobs,
+        rssGuardStrikes: slot.rssGuardStrikes,
+        lastMemory: slot.lastMemory,
+        lastRestartReason: slot.lastRestartReason,
+        lastRestartAt: slot.lastRestartAt
+      }))
     };
   }
 
@@ -237,7 +287,9 @@ export class DaemonWorkerPool {
       restarting: false,
       ready,
       warmupResult: undefined,
-      restartAttempts
+      restartAttempts,
+      completedJobs: 0,
+      rssGuardStrikes: 0
     };
     const readyCallbacks: ReadyCallbacks = { resolveReady, rejectReady };
     worker.on("message", (message: unknown) => this.handleMessage(slot, message as WorkerReply, readyCallbacks));
@@ -254,7 +306,15 @@ export class DaemonWorkerPool {
     return slot;
   }
 
+  private recordMemory(slot: WorkerSlot, message: WorkerReply): void {
+    slot.lastMemory = message.memory ?? {
+      rss: message.memoryRss,
+      heapUsed: message.memoryRss
+    };
+  }
+
   private handleMessage(slot: WorkerSlot, message: WorkerReply, readyCallbacks: ReadyCallbacks): void {
+    this.recordMemory(slot, message);
     if ("progress" in message) {
       const item = slot.busy;
       if (item && item.id === message.id) item.options.onProgress?.(message.progress);
@@ -278,8 +338,10 @@ export class DaemonWorkerPool {
     slot.restartAttempts = 0;
     this.clearDeadline(item);
     if (message.ok) {
+      slot.completedJobs += 1;
       item.resolve(message.result);
-      if (workerRestartMemoryBytes(message) > this.options.memoryLimitBytes) this.restartSlot(slot);
+      const restartReason = memoryRestartReason(message, slot, this.options);
+      if (restartReason) this.restartSlot(slot, undefined, undefined, restartReason);
     } else {
       item.reject(poolError(message.error.code ?? "INTERNAL", message.error.message));
     }
@@ -299,10 +361,10 @@ export class DaemonWorkerPool {
         item.reject(poolError("INTERNAL", `${this.options.name} worker crash retry budget exhausted: ${error.message}`));
       }
     }
-    this.restartSlot(slot, error, readyCallbacks);
+    this.restartSlot(slot, error, readyCallbacks, error.message);
   }
 
-  private restartSlot(slot: WorkerSlot, error?: Error, readyCallbacks?: ReadyCallbacks): void {
+  private restartSlot(slot: WorkerSlot, error?: Error, readyCallbacks?: ReadyCallbacks, reason?: string): void {
     const restartError = error ?? poolError("INTERNAL", `${this.options.name} worker restart failed`);
     if (this.closed) {
       readyCallbacks?.rejectReady(restartError);
@@ -311,6 +373,13 @@ export class DaemonWorkerPool {
     if (slot.restarting) return;
     const plan = this.restartPlan(slot);
     slot.restarting = true;
+    const restartReason = reason ?? error?.message ?? "restart";
+    const restartedAt = new Date().toISOString();
+    slot.lastRestartReason = restartReason;
+    slot.lastRestartAt = restartedAt;
+    this.restartCount += 1;
+    this.lastRestartReason = restartReason;
+    this.lastRestartAt = restartedAt;
     if (!plan) {
       void slot.worker.terminate().catch(() => 0).finally(() => {
         const index = this.slots.indexOf(slot);
@@ -343,7 +412,7 @@ export class DaemonWorkerPool {
     if (this.closed) return;
     for (const slot of this.slots) {
       if (slot.busy || slot.restarting) continue;
-      const item = this.dequeueRunnable();
+      const item = this.dequeueRunnable(slot);
       if (!item) return;
       if (Date.now() >= item.options.deadline) {
         this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before execution`);
@@ -358,19 +427,28 @@ export class DaemonWorkerPool {
     }
   }
 
-  private dequeueRunnable(): QueueItem<unknown> | undefined {
+  private dequeueRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
     if (this.queue.length === 0) return undefined;
-    const vaults = [...new Set(this.queue.map((item) => item.options.vault ?? ""))];
+    const targetIndex = this.queue.findIndex((item) => item.targetSlotId === slot.id);
+    if (targetIndex >= 0) {
+      const [item] = this.queue.splice(targetIndex, 1);
+      return item;
+    }
+    const runnable = this.queue.filter((item) => item.targetSlotId === undefined);
+    const vaults = [...new Set(runnable.map((item) => item.options.vault ?? ""))];
     const start = this.lastVault === undefined ? 0 : Math.max(0, vaults.indexOf(this.lastVault) + 1);
     const orderedVaults = [...vaults.slice(start), ...vaults.slice(0, start)];
     for (const vault of orderedVaults) {
-      const index = this.queue.findIndex((item) => (item.options.vault ?? "") === vault);
+      const index = this.queue.findIndex((item) => item.targetSlotId === undefined && (item.options.vault ?? "") === vault);
       if (index < 0) continue;
       const [item] = this.queue.splice(index, 1);
       this.lastVault = vault;
       return item;
     }
-    return this.queue.shift();
+    const genericIndex = this.queue.findIndex((item) => item.targetSlotId === undefined);
+    if (genericIndex < 0) return undefined;
+    const [item] = this.queue.splice(genericIndex, 1);
+    return item;
   }
 
   private idleSlot(): WorkerSlot | undefined {
@@ -386,7 +464,7 @@ export class DaemonWorkerPool {
       for (const slot of this.slots) {
         if (slot.busy !== item) continue;
         slot.busy = undefined;
-        this.restartSlot(slot, poolError("DEADLINE_EXCEEDED", `${this.options.name} deadline expired`));
+        this.restartSlot(slot, poolError("DEADLINE_EXCEEDED", `${this.options.name} deadline expired`), undefined, "deadline");
       }
       this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} deadline expired`);
     }, Math.max(1, remaining));
@@ -457,11 +535,29 @@ function envBytes(env: NodeJS.ProcessEnv, key: string): number | undefined {
   return Math.max(1, Number(raw)) * 1024 * 1024;
 }
 
-function workerRestartMemoryBytes(message: WorkerReply): number {
-  // RSS/external/arrayBuffer usage includes process-wide native state and shared
-  // snapshot buffers. Those are expected for warm daemon workers, so the restart
-  // guard tracks worker-owned JS heap growth.
-  return message.memory?.heapUsed ?? message.memoryRss;
+function envNumber(env: NodeJS.ProcessEnv, key: string): number | undefined {
+  const raw = env[key]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  return Math.max(1, Number(raw));
+}
+
+function memoryRestartReason(
+  message: WorkerReply,
+  slot: WorkerSlot,
+  options: Required<WorkerPoolOptions>
+): string | undefined {
+  const heapUsed = message.memory?.heapUsed ?? message.memoryRss;
+  if (heapUsed > options.heapGuardBytes) {
+    return `heap guard exceeded (${heapUsed} > ${options.heapGuardBytes})`;
+  }
+  const rss = message.memory?.rss ?? message.memoryRss;
+  if (options.rssGuardBytes <= 0 || rss <= options.rssGuardBytes) {
+    slot.rssGuardStrikes = 0;
+    return undefined;
+  }
+  slot.rssGuardStrikes += 1;
+  if (slot.rssGuardStrikes < options.rssGuardStrikes) return undefined;
+  return `rss guard exceeded (${rss} > ${options.rssGuardBytes})`;
 }
 
 function restartBackoffMs(attempts: number): number {

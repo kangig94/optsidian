@@ -104,7 +104,7 @@ export type SearchDaemonPhase = "starting" | "ready" | "shutting-down";
 
 export type VaultState = "unloaded" | "loading" | "ready" | "updating";
 
-export type SearchIndexProgressPhase = "scanning" | "parsing" | "segmenting" | "publishing";
+export type SearchIndexProgressPhase = "scanning" | "parsing" | "segmenting" | "publishing" | "preloading";
 
 export type SearchIndexProgressUpdate = {
   phase: SearchIndexProgressPhase;

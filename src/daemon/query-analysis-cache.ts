@@ -20,16 +20,26 @@ type CacheEntry = {
 export class QueryAnalysisCache {
   private readonly maxEntries: number;
   private readonly entries = new Map<string, CacheEntry>();
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
 
   constructor(maxEntries = 512) {
     this.maxEntries = Math.max(0, maxEntries);
   }
 
   get(input: QueryAnalysisCacheKeyInput): SearchTextAnalysis | undefined {
-    if (this.maxEntries === 0) return undefined;
+    if (this.maxEntries === 0) {
+      this.misses += 1;
+      return undefined;
+    }
     const key = queryAnalysisCacheKey(input);
     const entry = this.entries.get(key);
-    if (!entry) return undefined;
+    if (!entry) {
+      this.misses += 1;
+      return undefined;
+    }
+    this.hits += 1;
     entry.lastAccess = Date.now();
     return cloneAnalysis(entry.analysis);
   }
@@ -44,7 +54,10 @@ export class QueryAnalysisCache {
   stats() {
     return {
       entries: this.entries.size,
-      maxEntries: this.maxEntries
+      maxEntries: this.maxEntries,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions
     };
   }
 
@@ -53,6 +66,7 @@ export class QueryAnalysisCache {
       const coldest = [...this.entries.values()].sort((left, right) => left.lastAccess - right.lastAccess)[0];
       if (!coldest) return;
       this.entries.delete(coldest.key);
+      this.evictions += 1;
     }
   }
 }

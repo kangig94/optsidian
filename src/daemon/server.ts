@@ -210,13 +210,15 @@ class SearchDaemon {
   private async dispatch(request: SearchDaemonRequest): Promise<unknown> {
     switch (request.method) {
       case "Status":
-        return this.status();
+        return this.status(request);
       case "Search": {
+        await this.ensureVaultReadyForSearch(request);
         const result = await this.searchStore.search(request.payload, this.requestContext(request));
         this.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
         return result;
       }
       case "Explain": {
+        await this.ensureVaultReadyForSearch(request);
         const result = await this.searchStore.explain(request.payload, this.requestContext(request));
         this.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
         return result;
@@ -286,7 +288,23 @@ class SearchDaemon {
     }
   }
 
-  private status() {
+  private async ensureVaultReadyForSearch(request: SearchDaemonRequest): Promise<void> {
+    if (request.method !== "Search" && request.method !== "Explain") return;
+    if (request.payload.snapshotId) return;
+    const current = this.vaults.get(request.payload.vault);
+    if (current.state === "ready" && current.snapshotId) return;
+    const progress = this.progressReporter(request.payload.vault, "loading");
+    this.vaults.transition(request.payload.vault, "loading");
+    const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress));
+    const failed = result.vaults.find((vault) => vault.status === "failed");
+    if (failed) {
+      this.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+      throw Object.assign(new Error(failed.error ?? "vault warmup failed before search"), { code: "SEARCH_DAEMON_NOT_READY" });
+    }
+    this.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
+  }
+
+  private async status(request: SearchDaemonRequest) {
     return {
       ok: true,
       ready: this.phase === "ready",
@@ -295,7 +313,7 @@ class SearchDaemon {
       protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
               owner: this.owner satisfies OwnerStatus,
       metrics: this.metrics.snapshot(),
-      pools: this.pools.stats(),
+      pools: await this.pools.stats(this.requestContext(request)),
       searchStore: this.searchStore.stats(),
       vaults: this.vaults.list()
     };

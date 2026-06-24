@@ -61,13 +61,35 @@ export type SearchExecutionJob = {
   explain?: boolean;
 };
 
+export type SearchExecutionCacheStats = {
+  entries: number;
+  limit: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  preloads: number;
+  snapshotIds: string[];
+};
+
+export type SearchExecutionPreloadResult = {
+  snapshotId: string;
+  cacheHit: boolean;
+  cache: SearchExecutionCacheStats;
+};
+
 type SearchExecutionState = {
   snapshot: SearchSnapshot;
   documents: Map<string, PersistedDocumentRecord>;
 };
 
-const SEARCH_EXECUTION_STATE_CACHE_LIMIT = 2;
+const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt("OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
 const searchExecutionStateCache = new Map<string, SearchExecutionState>();
+const searchExecutionStateCacheCounters = {
+  hits: 0,
+  misses: 0,
+  evictions: 0,
+  preloads: 0
+};
 const textDecoder = new TextDecoder();
 
 type PositionalHit = {
@@ -86,29 +108,54 @@ type MutablePositionalPostings = Map<string, Array<{ docId: number; fieldId: num
 export type SearchExecutionResult = SearchResult & { snapshotId: string; explainTrace?: ExplainTrace };
 
 export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult {
-  const state = cachedStateFromHandle(job.snapshot);
+  const state = cachedStateFromHandle(job.snapshot).state;
   const result = job.search.query && job.analysis
     ? querySearch(job.search, job.pathFilter, state.snapshot, state.documents, job.analysis, job.analyzerIdentity, job.explain === true)
     : metadataSearch(job.search, job.pathFilter, state.documents, state.snapshot.snapshotId, job.analyzerIdentity);
   return { ...result, snapshotId: state.snapshot.snapshotId };
 }
 
-function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
+export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
+  const result = cachedStateFromHandle(handle);
+  searchExecutionStateCacheCounters.preloads += 1;
+  return {
+    snapshotId: result.state.snapshot.snapshotId,
+    cacheHit: result.cacheHit,
+    cache: searchExecutionCacheStats()
+  };
+}
+
+export function searchExecutionCacheStats(): SearchExecutionCacheStats {
+  return {
+    entries: searchExecutionStateCache.size,
+    limit: SEARCH_EXECUTION_STATE_CACHE_LIMIT,
+    hits: searchExecutionStateCacheCounters.hits,
+    misses: searchExecutionStateCacheCounters.misses,
+    evictions: searchExecutionStateCacheCounters.evictions,
+    preloads: searchExecutionStateCacheCounters.preloads,
+    snapshotIds: [...searchExecutionStateCache.keys()]
+  };
+}
+
+function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: SearchExecutionState; cacheHit: boolean } {
   const cacheKey = handle.snapshotId;
   const cached = searchExecutionStateCache.get(cacheKey);
   if (cached) {
+    searchExecutionStateCacheCounters.hits += 1;
     searchExecutionStateCache.delete(cacheKey);
     searchExecutionStateCache.set(cacheKey, cached);
-    return cached;
+    return { state: cached, cacheHit: true };
   }
+  searchExecutionStateCacheCounters.misses += 1;
   const state = stateFromHandle(handle);
   searchExecutionStateCache.set(cacheKey, state);
   while (searchExecutionStateCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
     const oldest = searchExecutionStateCache.keys().next().value;
     if (!oldest) break;
     searchExecutionStateCache.delete(oldest);
+    searchExecutionStateCacheCounters.evictions += 1;
   }
-  return state;
+  return { state, cacheHit: false };
 }
 
 function querySearch(
@@ -223,6 +270,12 @@ function stateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecution
 
 function sharedBytes(handle: SharedBytesHandle): Uint8Array {
   return new Uint8Array(handle.buffer, handle.byteOffset, handle.byteLength);
+}
+
+function envPositiveInt(key: string): number | undefined {
+  const raw = process.env[key]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  return Math.max(1, Number(raw));
 }
 
 function hitFromCandidate(
