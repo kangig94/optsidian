@@ -148,8 +148,9 @@ Korean and English documents compete in the same result set. The per-fixture eva
 useful for isolating whether a change helps or hurts one language family.
 
 `search:eval` runs in warm mode by default: it executes one unmeasured search before scoring so the
-daemon can load the vault and pin a snapshot. Use `--no-warmup` only when explicitly measuring
-cold-start behavior.
+daemon can load the vault and pin a snapshot. A cold `Search` only blocks on one search-execution
+worker preloading the snapshot; additional search workers hydrate the snapshot on demand. Use
+`--no-warmup` only when explicitly measuring cold-start behavior.
 
 Index lifecycle requests use a work-sized deadline rather than a fixed 30 second budget. When the
 client sends `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, or a cold `Search` / `Explain`
@@ -177,40 +178,41 @@ using that run as a search-quality baseline.
 ## Baseline
 
 Current baseline is measured through daemon RPC with `--concurrency=1` in warm scoring mode.
-The 2026-06-24 run uses the daemon warmup/preload path and pinned positional snapshots.
+The 2026-06-24 run uses lazy daemon startup, one-worker cold search preload, and pinned positional
+snapshots.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 98/100 | 0.730 | 0.840 | 0.890 | 0.980 | 0.798 | 81.2ms | 81.3ms | 96.0ms |
-| English100 | 87/100 | 0.630 | 0.760 | 0.800 | 0.870 | 0.705 | 91.4ms | 91.0ms | 104.5ms |
-| Mixed200 | 184/200 | 0.680 | 0.800 | 0.845 | 0.920 | 0.750 | 89.0ms | 88.7ms | 106.0ms |
+| KLUE100 | 98/100 | 0.730 | 0.840 | 0.890 | 0.980 | 0.798 | 76.2ms | 75.1ms | 90.3ms |
+| English100 | 87/100 | 0.630 | 0.760 | 0.800 | 0.870 | 0.705 | 89.7ms | 89.0ms | 103.5ms |
+| Mixed200 | 184/200 | 0.680 | 0.800 | 0.845 | 0.920 | 0.750 | 87.1ms | 86.7ms | 110.2ms |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.730 recall@3=0.840 recall@5=0.890 recall@10=0.980 mrr@10=0.798 avg=81.2ms p50=81.3ms p95=96.0ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=80.7ms p50=81.3ms p95=91.5ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=85.3ms p50=82.8ms p95=102.2ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=89.1ms p50=85.9ms p95=99.8ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=73.7ms p50=72.9ms p95=86.3ms
+score: n=100 top1=0.730 recall@3=0.840 recall@5=0.890 recall@10=0.980 mrr@10=0.798 avg=76.2ms p50=75.1ms p95=90.3ms
+score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=75.7ms p50=77.6ms p95=83.8ms
+score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=77.7ms p50=75.1ms p95=90.1ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=82.6ms p50=81.0ms p95=93.3ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=71.4ms p50=70.7ms p95=80.5ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=91.4ms p50=91.0ms p95=104.5ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=91.4ms p50=91.0ms p95=104.5ms
+score: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=89.7ms p50=89.0ms p95=103.5ms
+score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=89.7ms p50=89.0ms p95=103.5ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.680 recall@3=0.800 recall@5=0.845 recall@10=0.920 mrr@10=0.750 avg=89.0ms p50=88.7ms p95=106.0ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=84.3ms p50=84.8ms p95=93.9ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.703 avg=93.8ms p50=92.1ms p95=113.1ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=85.5ms p50=81.1ms p95=103.5ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=91.6ms p50=90.5ms p95=104.4ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=78.0ms p50=77.3ms p95=91.0ms
+score: n=200 top1=0.680 recall@3=0.800 recall@5=0.845 recall@10=0.920 mrr@10=0.750 avg=87.1ms p50=86.7ms p95=110.2ms
+score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=83.2ms p50=82.1ms p95=98.4ms
+score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.703 avg=93.0ms p50=91.9ms p95=114.7ms
+score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=82.8ms p50=80.1ms p95=96.9ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=86.5ms p50=86.4ms p95=99.5ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=74.9ms p50=74.5ms p95=88.1ms
 ```
 
 ## Worker Pools
@@ -219,6 +221,23 @@ Worker pool size is controlled by `search.queryWorkers`, `search.indexWorkers`, 
 environment overrides such as `OPTSIDIAN_SEARCH_QUERY_WORKERS` and
 `OPTSIDIAN_SEARCH_INDEX_WORKERS`. Search-execution worker sizing is daemon-managed unless overridden
 for stress tests with `OPTSIDIAN_SEARCH_EXECUTION_WORKERS`.
+
+Daemon startup is lazy. The daemon becomes ready after one search-execution worker is ready; latency
+analyzer workers warm on the first query analysis request, and throughput analyzer workers warm only
+for snapshot build/rebuild work. This keeps a status-only cold daemon light and avoids loading the
+Kiwi model twice for search-only use.
+
+Cold `Search` / `Explain` requests load the active snapshot and block on one search-execution worker
+preloading that snapshot before running the query. Explicit lifecycle warmup commands such as
+`index warm`, `index rebuild`, `refresh`, and `compact` still preload all search-execution workers
+for the active snapshot.
+
+Current cold-start reference measurements:
+
+| Scenario | Latency | RSS After Ready |
+| --- | ---: | ---: |
+| `index status` from no daemon | 0.22s | 246MB |
+| first `search` from no daemon | 2.86s | 1.55GB |
 
 The deterministic quality baseline is the `--concurrency=1` Mixed200 score above. Higher
 concurrency runs are load tests for queueing, cancellation, deadline handling, and tail latency, not
