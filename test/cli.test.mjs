@@ -5,13 +5,20 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
 
 const cli = path.resolve("dist/optsidian");
 const SNAPSHOT_ID_PATTERN = "[a-f0-9]{64}";
+const searchDaemonCleanupEnvs = new Map();
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-"));
+}
+
+function trackSearchDaemonEnv(env) {
+  const runtimeDir = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR;
+  if (runtimeDir) searchDaemonCleanupEnvs.set(runtimeDir, env);
+  return env;
 }
 
 function makeFakeObsidian(dir, vaultRoot) {
@@ -400,7 +407,7 @@ function setup() {
   fs.mkdirSync(vault, { recursive: true });
   const log = path.join(dir, "obsidian.log");
   const fake = makeFakeObsidian(dir, vault);
-  const env = {
+  const env = trackSearchDaemonEnv({
     OPTSIDIAN_OBSIDIAN_BIN: fake,
     FAKE_VAULT: vault,
     FAKE_OBSIDIAN_LOG: log,
@@ -408,18 +415,58 @@ function setup() {
     XDG_CACHE_HOME: path.join(dir, "cache"),
     XDG_RUNTIME_DIR: path.join(dir, "runtime"),
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
-  };
+  });
   return { dir, vault, env, log };
 }
 
 function isolatedSearchDaemonEnv(env) {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-search-daemon-"));
-  return {
+  return trackSearchDaemonEnv({
     ...env,
     XDG_RUNTIME_DIR: path.join(runtimeDir, "xdg"),
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir
-  };
+  });
 }
+
+async function shutdownSearchDaemonEnv(env) {
+  const runtimeDir = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR;
+  if (!runtimeDir) return;
+  try {
+    const mergedEnv = { ...process.env, ...env };
+    const { createOwnerRegistry } = await import(path.resolve("src/daemon/owner-registry.ts"));
+    const registry = createOwnerRegistry({ runtimeDir, env: mergedEnv });
+    const owner = registry.readOwner();
+    if (!owner) return;
+
+    try {
+      const { createSearchDaemonClient } = await import(path.resolve("src/daemon/client.ts"));
+      const client = createSearchDaemonClient({
+        runtimeDir,
+        binaryPath: cli,
+        env: mergedEnv,
+        readyTimeoutMs: 5000
+      });
+      await client.shutdown({ deadlineMs: 5000 });
+    } catch {
+      if (Number.isInteger(owner.pid) && owner.pid > 0) {
+        try {
+          process.kill(owner.pid, "SIGTERM");
+        } catch {}
+      }
+      try {
+        registry.removeOwner(owner);
+      } catch {}
+    }
+  } finally {
+    searchDaemonCleanupEnvs.delete(runtimeDir);
+  }
+}
+
+after(async () => {
+  for (const env of Array.from(searchDaemonCleanupEnvs.values()).reverse()) {
+    await shutdownSearchDaemonEnv(env);
+  }
+});
 
 test("native-sufficient commands delegate unchanged", () => {
   const { env, log } = setup();
@@ -1367,33 +1414,48 @@ test("config command writes global settings and reads project-local overrides", 
   setAndGet("search.daemonIdleMs", "0", 0, "search.daemonIdleMs: 0");
 
   const searchEnv = isolatedSearchDaemonEnv({ ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault });
-  result = run(["search", "query=검색", "format=json"], {
-    cwd: project,
-    env: searchEnv
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
+  try {
+    result = run(["search", "query=검색", "format=json"], {
+      cwd: project,
+      env: searchEnv
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
 
-  const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
-  const snapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
-    const paths = searchStoreCachePaths(vault);
-    const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
-    return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
-  });
-  assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, ["ko"]);
-  assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.activeAnalyzers, ["ko"]);
+    const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
+    const snapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
+      const paths = searchStoreCachePaths(vault);
+      const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+      return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
+    });
+    assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, ["ko"]);
+    assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.activeAnalyzers, ["ko"]);
+  } finally {
+    await shutdownSearchDaemonEnv(searchEnv);
+  }
 
-  result = run(["search", "query=검색", "format=json"], {
-    cwd: project,
-    env: isolatedSearchDaemonEnv({ ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" })
+  const envOverrideSearchEnv = isolatedSearchDaemonEnv({
+    ...env,
+    XDG_CACHE_HOME: cache,
+    OPTSIDIAN_VAULT_PATH: vault,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: ""
   });
-  assert.equal(result.status, 0, result.stderr);
-  const envOverrideSnapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
-    const paths = searchStoreCachePaths(vault);
-    const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
-    return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
-  });
-  assert.deepEqual(envOverrideSnapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, []);
+  try {
+    result = run(["search", "query=검색", "format=json"], {
+      cwd: project,
+      env: envOverrideSearchEnv
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
+    const envOverrideSnapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
+      const paths = searchStoreCachePaths(vault);
+      const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+      return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
+    });
+    assert.deepEqual(envOverrideSnapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, []);
+  } finally {
+    await shutdownSearchDaemonEnv(envOverrideSearchEnv);
+  }
 
   const expectedAfterUnsets = [
     ["search.extraLangs", { queryWorkers: 2, indexWorkers: 2, snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
