@@ -17,6 +17,7 @@ import {
   deadlineFromNow,
   SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
+  vaultLifecycleDeadlineMs,
   type SearchDaemonResultByMethod
 } from "./protocol.js";
 import { connectRpc, type RpcConnection } from "./transport.js";
@@ -40,6 +41,7 @@ import type {
   SearchIndexWarmResult,
   SearchResult
 } from "../core/types.js";
+import { vaultRealpath, walkFiles } from "../core/path.js";
 
 export type SearchDaemonClient = {
   search(request: SearchClientRequest): Promise<SearchResult & { snapshotId?: string }>;
@@ -270,12 +272,42 @@ function makeRpcRequest(
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
     requestId: crypto.randomUUID(),
     method,
-    deadline: deadlineFromNow(method, options.deadlineMs),
+    deadline: deadlineFromNow(method, requestDeadlineMs(method, payload, options)),
     ...(options.cancellationId ? { cancellationId: options.cancellationId } : {}),
     ...(options.traceId ? { traceId: options.traceId } : {}),
     nonce: owner.nonce,
     payload
   } as SearchDaemonRequest;
+}
+
+function requestDeadlineMs(
+  method: SearchDaemonMethod,
+  payload: SearchDaemonRequest["payload"],
+  options: ClientRequestOptions
+): number | undefined {
+  if (options.deadlineMs !== undefined) return options.deadlineMs;
+  if (isVaultLifecycleMethod(method) && "vault" in payload && typeof payload.vault === "string") {
+    const fileCount = countVaultMarkdownFiles(payload.vault);
+    if (fileCount !== undefined) return vaultLifecycleDeadlineMs(fileCount);
+  }
+  return undefined;
+}
+
+function isVaultLifecycleMethod(method: SearchDaemonMethod): boolean {
+  return method === "LoadVault" ||
+    method === "Rebuild" ||
+    method === "Refresh" ||
+    method === "Compact" ||
+    method === "Clear";
+}
+
+function countVaultMarkdownFiles(vault: string): number | undefined {
+  try {
+    const root = vaultRealpath(vault);
+    return walkFiles(root, root, { includeHidden: false, all: false }).length;
+  } catch {
+    return undefined;
+  }
 }
 
 function spawnDefaultDaemon(

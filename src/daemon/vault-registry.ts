@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { VaultState } from "./protocol.js";
+import type { SearchIndexProgress, VaultState } from "./protocol.js";
 
 export type VaultRecord = {
   vault: string;
@@ -8,6 +8,7 @@ export type VaultRecord = {
   snapshotId?: string;
   updatedAt?: string;
   error?: string;
+  progress?: SearchIndexProgress;
 };
 
 export class VaultRegistry {
@@ -34,6 +35,9 @@ export class VaultRegistry {
       state,
       updatedAt: new Date().toISOString()
     };
+    if (patch.progress === undefined && (state === "ready" || state === "unloaded")) {
+      delete next.progress;
+    }
     this.vaults.set(current.vault, next);
     return next;
   }

@@ -151,6 +151,23 @@ useful for isolating whether a change helps or hurts one language family.
 daemon can load the vault and pin a snapshot. Use `--no-warmup` only when explicitly measuring
 cold-start behavior.
 
+Index lifecycle requests use a work-sized deadline rather than a fixed 30 second budget. When the
+client sends `LoadVault`, `Rebuild`, `Refresh`, `Compact`, or `Clear` without an explicit
+`deadlineMs`, it counts visible Markdown notes in the vault and uses:
+
+```text
+deadline = 30 seconds + 750 milliseconds * markdown_note_count
+```
+
+Warm search latency targets still apply to searches against an already loaded snapshot. The longer
+lifecycle deadline exists so large vault load/build work can finish instead of failing at a fixed
+timeout.
+
+The daemon reports lifecycle progress through `index status` and daemon `Status` JSON. Interactive
+`index warm`, `index rebuild`, and `search:eval` warmup render a single stderr progress line showing
+the current phase, completed count, total count when known, and current file. This progress output is
+TTY-only and does not change stdout JSON/text results.
+
 Use `--concurrency=<n>` to run benchmark queries through concurrent workers. This is required when
 measuring daemon queueing behavior because sequential evaluation does not stress the worker pools.
 Treat `--concurrency=1` as the quality-scoring mode. Higher search concurrency is a load test for

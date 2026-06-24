@@ -2,6 +2,7 @@ import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { analyzeSearchQuery } from "../core/search/analysis/index.js";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from "../core/search/analyzer.js";
 import { readOptsidianSettings } from "../core/settings.js";
+import type { SearchIndexProgressUpdate } from "./protocol.js";
 import { buildCanonicalSearchSnapshot } from "./search-store/builder.js";
 import { executeSearchJob, type SearchExecutionJob } from "./search-execution.js";
 
@@ -35,12 +36,18 @@ export async function runSearchDaemonWorker(): Promise<void> {
 
 async function handleMessage(message: WorkerEnvelope, context: WorkerContext, env: NodeJS.ProcessEnv): Promise<void> {
   try {
-    const result = await dispatch(message.request.type, message.request.payload, context, env);
+    const result = await dispatch(message.request.type, message.request.payload, context, env, (progress) => {
+      parentPort?.postMessage({
+        id: message.id,
+        progress,
+        memoryRss: workerLocalMemoryBytes()
+      });
+    });
     parentPort?.postMessage({
       id: message.id,
       ok: true,
       result,
-      memoryRss: process.memoryUsage().rss
+      memoryRss: workerLocalMemoryBytes()
     });
   } catch (error) {
     parentPort?.postMessage({
@@ -50,12 +57,23 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
         code: (error as { code?: unknown } | undefined)?.code,
         message: error instanceof Error ? error.message : String(error)
       },
-      memoryRss: process.memoryUsage().rss
+      memoryRss: workerLocalMemoryBytes()
     });
   }
 }
 
-async function dispatch(type: string, payload: unknown, context: WorkerContext, env: NodeJS.ProcessEnv): Promise<unknown> {
+function workerLocalMemoryBytes(): number {
+  const memory = process.memoryUsage();
+  return memory.heapUsed + memory.external + memory.arrayBuffers;
+}
+
+async function dispatch(
+  type: string,
+  payload: unknown,
+  context: WorkerContext,
+  env: NodeJS.ProcessEnv,
+  progress: (progress: SearchIndexProgressUpdate) => void
+): Promise<unknown> {
   if (type === "warmup") {
     if (context.kind === "analyzer") {
       const activeAnalyzer = analyzerForWorker(env);
@@ -97,7 +115,8 @@ async function dispatch(type: string, payload: unknown, context: WorkerContext, 
       buildCanonicalSearchSnapshot({
         vaultRoot: input.vaultRoot,
         analyzer: leased,
-        partitionBits: input.partitionBits
+        partitionBits: input.partitionBits,
+        progress
       }), undefined, { wait: true, installIfMissing: true });
   }
   throw Object.assign(new Error(`unsupported analyzer worker job: ${type}`), { code: "BAD_REQUEST" });

@@ -106,6 +106,7 @@ export function renderIndexResult(
       const details = [
         vault.snapshotId ? `snapshot: ${vault.snapshotId}` : "",
         vault.updatedAt ? `updated: ${vault.updatedAt}` : "",
+        vault.progress ? `progress: ${renderIndexProgress(vault.progress)}` : "",
         vault.error ? `error: ${vault.error}` : ""
       ].filter(Boolean);
       lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
@@ -147,6 +148,11 @@ export function renderIndexResult(
 
 function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult): result is StatusResult {
   return "phase" in result && "metrics" in result && "vaults" in result;
+}
+
+function renderIndexProgress(progress: NonNullable<StatusResult["vaults"][number]["progress"]>): string {
+  const counts = progress.total === undefined ? String(progress.completed ?? 0) : `${progress.completed ?? 0}/${progress.total}`;
+  return `${progress.phase} ${counts}${progress.current ? ` ${progress.current}` : ""}`;
 }
 
 function renderAnalyzerStatus(analyzer: SearchIndexStatusResult["analyzer"]): string {

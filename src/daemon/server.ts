@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import {
-  deadlineFromNow,
   isSearchDaemonMethod,
+  SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type OwnerStatus,
+  type SearchIndexProgressUpdate,
   type SearchDaemonPhase,
   type SearchDaemonRequest
 } from "./protocol.js";
@@ -129,9 +130,10 @@ class SearchDaemon {
         byteCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES, settings.search?.memoryBudgetBytes),
         retentionCount: settingNumber(options.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT, settings.search?.snapshotRetentionCount),
         snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
-          deadline: input.deadline ?? Date.now() + 30_000,
+          deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
           cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
-          vault: input.vaultRoot
+          vault: input.vaultRoot,
+          onProgress: input.progress
         })
       });
       const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
@@ -219,22 +221,29 @@ class SearchDaemon {
         this.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
         return result;
       }
-      case "LoadVault":
+      case "LoadVault": {
+        const progress = this.progressReporter(request.payload.vault, "loading");
         this.vaults.transition(request.payload.vault, "loading");
         try {
-          const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request));
+          const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress));
+          const failed = result.vaults.find((vault) => vault.status === "failed");
+          if (failed) {
+            this.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+            return result;
+          }
           this.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
           return result;
         } catch (error) {
           this.vaults.transition(request.payload.vault, "unloaded", { error: errorMessage(error) });
           throw error;
         }
+      }
       case "Rebuild":
-        return this.updating(request.payload.vault, () => this.searchStore.rebuild(request.payload.vault, this.requestContext(request)));
+        return this.updating(request.payload.vault, (progress) => this.searchStore.rebuild(request.payload.vault, this.requestContext(request, progress)));
       case "Refresh":
-        return this.updating(request.payload.vault, () => this.searchStore.refresh(request.payload.vault, this.requestContext(request)));
+        return this.updating(request.payload.vault, (progress) => this.searchStore.refresh(request.payload.vault, this.requestContext(request, progress)));
       case "Compact":
-        return this.updating(request.payload.vault, () => this.searchStore.compact(request.payload.vault, this.requestContext(request)));
+        return this.updating(request.payload.vault, (progress) => this.searchStore.compact(request.payload.vault, this.requestContext(request, progress)));
       case "Clear": {
         this.vaults.transition(request.payload.vault, "updating");
         try {
@@ -259,10 +268,15 @@ class SearchDaemon {
     }
   }
 
-  private async updating<T>(vault: string, fn: () => Promise<T>, snapshotId?: string): Promise<T> {
+  private async updating<T>(
+    vault: string,
+    fn: (progress: (progress: SearchIndexProgressUpdate) => void) => Promise<T>,
+    snapshotId?: string
+  ): Promise<T> {
+    const progress = this.progressReporter(vault, "updating");
     this.vaults.transition(vault, "updating");
     try {
-      const result = await fn();
+      const result = await fn(progress);
       const resultSnapshotId = snapshotId ?? snapshotIdFromResult(result);
       this.vaults.transition(vault, "ready", resultSnapshotId ? { snapshotId: resultSnapshotId } : {});
       return result;
@@ -321,11 +335,25 @@ class SearchDaemon {
     this.idleTimer = undefined;
   }
 
-  private requestContext(request: SearchDaemonRequest) {
+  private requestContext(request: SearchDaemonRequest, progress?: (progress: SearchIndexProgressUpdate) => void) {
     return {
       deadline: request.deadline,
       cancellationId: request.cancellationId ?? request.requestId,
-      requestId: request.requestId
+      requestId: request.requestId,
+      progress
+    };
+  }
+
+  private progressReporter(vault: string, state: "loading" | "updating"): (progress: SearchIndexProgressUpdate) => void {
+    const startedAt = new Date().toISOString();
+    return (progress) => {
+      this.vaults.transition(vault, state, {
+        progress: {
+          ...progress,
+          startedAt,
+          updatedAt: new Date().toISOString()
+        }
+      });
     };
   }
 }

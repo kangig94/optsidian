@@ -84,6 +84,16 @@ function asBytes(value) {
   return Buffer.from(JSON.stringify(value));
 }
 
+function sharedHandle(bytes) {
+  const buffer = new SharedArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return {
+    buffer,
+    byteOffset: 0,
+    byteLength: bytes.byteLength
+  };
+}
+
 function msgpackPayloadFrame(payload) {
   const frame = Buffer.allocUnsafe(4 + payload.length);
   frame.writeUInt32BE(payload.length, 0);
@@ -739,6 +749,107 @@ test("AC1 protocol method coverage includes Clear", async () => {
   assert.equal(SEARCH_DAEMON_METHODS.includes("Clear"), true);
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
   assert.ok(SEARCH_DAEMON_PROTOCOL_VERSION > 0);
+});
+
+test("lifecycle deadlines scale with vault markdown count", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { vaultLifecycleDeadlineMs } = await futureImport("src/daemon/protocol.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n");
+  writeVaultFile(vault, "nested/Beta.md", "# Beta\n");
+  fs.writeFileSync(path.join(vault, "ignored.txt"), "ignored");
+
+  const requests = [];
+  const client = createSearchDaemonClient({
+    runtimeDir: tempRoot(),
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    spawnDaemon: async () => ({ pid: 2100 }),
+    connect: async () => ({
+      request: async (request) => {
+        requests.push(request);
+        if (request.method === "Status") {
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, vaults: [] };
+        }
+        if (request.method === "LoadVault") {
+          return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
+        }
+        throw new Error(`unexpected method ${request.method}`);
+      },
+      close: async () => {}
+    })
+  });
+
+  const before = Date.now();
+  await client.loadVault({ vault });
+  const loadRequest = requests.find((request) => request.method === "LoadVault");
+  assert.ok(loadRequest);
+  const expected = vaultLifecycleDeadlineMs(2);
+  assert.ok(loadRequest.deadline >= before + expected - 100);
+  assert.ok(loadRequest.deadline <= Date.now() + expected + 1000);
+});
+
+test("snapshot build reports deterministic progress counts", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
+  writeVaultFile(vault, "Beta.md", "# Beta\n\nproject beta\n");
+  const progress = [];
+
+  await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer: testAnalyzer(),
+    partitionBits: 1,
+    progress: (update) => progress.push(update)
+  });
+
+  assert.equal(progress[0].phase, "scanning");
+  const parsing = progress.filter((update) => update.phase === "parsing");
+  assert.equal(parsing.at(-1).total, 2);
+  assert.equal(parsing.at(-1).completed, 2);
+  const segmenting = progress.filter((update) => update.phase === "segmenting");
+  assert.ok(segmenting.length > 0);
+  assert.equal(segmenting.at(-1).completed, segmenting.at(-1).total);
+});
+
+test("search execution state cache is scoped by immutable snapshot id, not request pin token", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { executeSearchJob } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "---\ntags: [alpha]\n---\n# Alpha\n\nproject alpha\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-a",
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  const job = {
+    vault,
+    search: normalizeSearchParams({ tags: ["alpha"], limit: 10 }),
+    analyzerIdentity: analyzer.identity,
+    snapshot
+  };
+
+  const first = executeSearchJob(job);
+  assert.deepEqual(first.matches.map((match) => match.path), ["Alpha.md"]);
+
+  const corruptedSameSnapshot = {
+    ...snapshot,
+    pinToken: "pin-b",
+    documents: sharedHandle(Buffer.from("{not-json")),
+    segments: []
+  };
+  const second = executeSearchJob({ ...job, snapshot: corruptedSameSnapshot });
+  assert.deepEqual(second.matches.map((match) => match.path), ["Alpha.md"]);
 });
 
 test("AC1 shared search-daemon client starts daemon, waits ready, and has no direct fallback", async () => {

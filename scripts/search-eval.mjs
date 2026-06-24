@@ -63,7 +63,7 @@ let failed = 0;
 const timings = [];
 const overallMetrics = createMetrics();
 const taskMetrics = new Map();
-const runSearch = await searchRunner(mode, cliPath, vaultRoot);
+const runSearch = await searchRunner(mode, cliPath, vaultRoot, options);
 
 if (!options.noWarmup && spec.queries.length > 0) {
   await runSearch({ ...spec.queries[0], limit: 1 });
@@ -158,6 +158,8 @@ function parseOptions(argv) {
       parsed.concurrency = parsePositiveInt(arg.slice("--concurrency=".length), "concurrency");
     } else if (arg === "--no-warmup") {
       parsed.noWarmup = true;
+    } else if (arg === "--no-progress") {
+      parsed.noProgress = true;
     } else if (!parsed.vault) {
       parsed.vault = path.resolve(arg);
     } else {
@@ -190,14 +192,16 @@ function parsePositiveInt(raw, name) {
   return parsed;
 }
 
-async function searchRunner(mode, cliPath, vaultRoot) {
+async function searchRunner(mode, cliPath, vaultRoot, options) {
   if (mode === "e2e") return (queryCase) => runE2eSearch(cliPath, vaultRoot, queryCase);
   try {
     const { createSearchDaemonClient } = await import("../src/daemon/client.ts");
     const client = createSearchDaemonClient({
       binaryPath: cliPath
     });
-    let pinnedSnapshotId = await loadPinnedSnapshotId(client, vaultRoot);
+    let pinnedSnapshotId = await loadPinnedSnapshotId(client, vaultRoot, {
+      progress: shouldRenderProgress(options)
+    });
     return async (queryCase) => {
       try {
         const payload = await client.search({
@@ -212,7 +216,7 @@ async function searchRunner(mode, cliPath, vaultRoot) {
       }
     };
   } catch (error) {
-    usage(`Core mode requires loading src/daemon/client.ts: ${error.message}`);
+    usage(`Core mode failed to prepare the search daemon: ${error.message}`);
   }
 }
 
@@ -464,12 +468,80 @@ function ratioNumber(value) {
   return value.toFixed(3);
 }
 
-async function loadPinnedSnapshotId(client, vaultRoot) {
-  await client.loadVault({ vault: vaultRoot });
+async function loadPinnedSnapshotId(client, vaultRoot, options = {}) {
+  await withWarmupProgress(client, vaultRoot, options, () => client.loadVault({ vault: vaultRoot }));
   const status = await client.status();
   const resolvedVault = path.resolve(vaultRoot);
   const vault = status.vaults.find((candidate) => path.resolve(candidate.vault) === resolvedVault);
-  return vault?.snapshotId;
+  if (!vault?.snapshotId) {
+    const error = vault?.error ? `: ${vault.error}` : "";
+    throw new Error(`warm LoadVault did not produce a snapshot${error}`);
+  }
+  return vault.snapshotId;
+}
+
+async function withWarmupProgress(client, vaultRoot, options, run) {
+  if (!options.progress) return run();
+
+  let lastLength = 0;
+  let polling = false;
+  const write = (line) => {
+    const padded = line.padEnd(lastLength);
+    lastLength = Math.max(lastLength, line.length);
+    process.stderr.write(`\r${padded}`);
+  };
+  const clear = () => {
+    if (lastLength > 0) process.stderr.write(`\r${" ".repeat(lastLength)}\r`);
+  };
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      write(renderWarmupProgress(await client.status({ deadlineMs: 1000 }), vaultRoot));
+    } catch {
+      write(`warmup loading ${path.basename(path.resolve(vaultRoot))}`);
+    } finally {
+      polling = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void poll();
+  }, 500);
+  timer.unref();
+  void poll();
+  try {
+    return await run();
+  } finally {
+    clearInterval(timer);
+    clear();
+  }
+}
+
+function shouldRenderProgress(options) {
+  return options.noProgress !== true && process.stderr.isTTY === true;
+}
+
+function renderWarmupProgress(status, vaultRoot) {
+  const resolvedVault = path.resolve(vaultRoot);
+  const vault = status.vaults.find((candidate) => path.resolve(candidate.vault) === resolvedVault);
+  if (!vault?.progress) return `warmup ${vault?.state ?? "loading"} ${path.basename(resolvedVault)}`;
+  const progress = vault.progress;
+  const completed = progress.completed ?? 0;
+  const total = progress.total;
+  const ratio = total && total > 0 ? Math.max(0, Math.min(1, completed / total)) : 0;
+  const filled = total === undefined ? 0 : Math.round(ratio * 20);
+  const bar = `[${"#".repeat(filled)}${".".repeat(20 - filled)}]`;
+  const percent = total && total > 0 ? `${Math.floor(ratio * 100).toString().padStart(3)}%` : " --%";
+  const counts = total === undefined ? String(completed) : `${completed}/${total}`;
+  const current = progress.current ? ` ${truncateMiddle(progress.current, 36)}` : "";
+  const message = progress.message ? ` ${progress.message}` : "";
+  return `warmup ${progress.phase} ${bar} ${percent} ${counts} ${path.basename(resolvedVault)}${current}${message}`;
+}
+
+function truncateMiddle(value, maxLength) {
+  if (value.length <= maxLength) return value;
+  const keep = Math.max(1, Math.floor((maxLength - 3) / 2));
+  return `${value.slice(0, keep)}...${value.slice(value.length - keep)}`;
 }
 
 function coreSearchParams(queryCase) {
@@ -621,7 +693,7 @@ function percentile(sortedValues, percent) {
 
 function usage(message, code = 2) {
   if (message) console.error(message);
-  console.error("Usage: npm run search:eval -- <vault-path> [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--quiet] [--score-only] [--concurrency=<n>] [--no-warmup]");
+  console.error("Usage: npm run search:eval -- <vault-path> [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--quiet] [--score-only] [--concurrency=<n>] [--no-warmup] [--no-progress]");
   console.error("       npm run search:eval -- --print-search-daemon-slo-fixture");
   process.exit(code);
 }

@@ -24,9 +24,11 @@ export const SEARCH_DAEMON_METHODS = [
 export const SEARCH_DAEMON_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS = 15000;
 export const SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS = 1000;
-export const SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 2000;
+export const SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 3000;
 export const SEARCH_DAEMON_DEFAULT_EXPLAIN_DEADLINE_MS = 5000;
-export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = 30000;
+export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS = 30_000;
+export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS = 750;
+export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS;
 
 export type SearchDaemonMethod = (typeof SEARCH_DAEMON_METHODS)[number];
 
@@ -102,6 +104,21 @@ export type SearchDaemonPhase = "starting" | "ready" | "shutting-down";
 
 export type VaultState = "unloaded" | "loading" | "ready" | "updating";
 
+export type SearchIndexProgressPhase = "scanning" | "parsing" | "segmenting" | "publishing";
+
+export type SearchIndexProgressUpdate = {
+  phase: SearchIndexProgressPhase;
+  total?: number;
+  completed?: number;
+  current?: string;
+  message?: string;
+};
+
+export type SearchIndexProgress = SearchIndexProgressUpdate & {
+  startedAt: string;
+  updatedAt: string;
+};
+
 export type StatusResult = {
   ok: true;
   ready: boolean;
@@ -123,6 +140,7 @@ export type StatusResult = {
     snapshotId?: string;
     updatedAt?: string;
     error?: string;
+    progress?: SearchIndexProgress;
   }>;
 };
 
@@ -217,6 +235,12 @@ export function methodDefaultDeadlineMs(method: SearchDaemonMethod): number {
   if (method === "Explain") return SEARCH_DAEMON_DEFAULT_EXPLAIN_DEADLINE_MS;
   if (method === "Status") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
+}
+
+export function vaultLifecycleDeadlineMs(fileCount: number): number {
+  const safeCount = Number.isFinite(fileCount) ? Math.max(0, Math.floor(fileCount)) : 0;
+  return SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS +
+    safeCount * SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS;
 }
 
 export function deadlineFromNow(method: SearchDaemonMethod, deadlineMs?: number, now = Date.now()): number {

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import type { SearchIndexProgressUpdate } from "./protocol.js";
 
 export type DaemonWorkerKind = "analyzer" | "search";
 
@@ -15,6 +16,7 @@ export type WorkerPoolRunOptions = {
   deadline: number;
   cancellationId: string;
   vault?: string;
+  onProgress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
 export type WorkerPoolOptions = {
@@ -48,6 +50,11 @@ type WorkerReply =
         code?: string;
         message: string;
       };
+      memoryRss: number;
+    }
+  | {
+      id: number;
+      progress: SearchIndexProgressUpdate;
       memoryRss: number;
     };
 
@@ -237,6 +244,12 @@ export class DaemonWorkerPool {
   }
 
   private handleMessage(slot: WorkerSlot, message: WorkerReply, readyCallbacks: ReadyCallbacks): void {
+    if ("progress" in message) {
+      const item = slot.busy;
+      if (item && item.id === message.id) item.options.onProgress?.(message.progress);
+      return;
+    }
+
     if (message.id === 0) {
       if (message.ok) {
         slot.warmupResult = message.result;

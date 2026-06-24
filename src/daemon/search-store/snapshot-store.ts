@@ -12,6 +12,7 @@ import type { PinnedSnapshot, SnapshotManifestView, SnapshotStore, SnapshotView 
 import { recordVaultAccess, recentVaultAccessRoots } from "../../core/vault-access.js";
 import { vaultRelative, walkFiles } from "../../core/path.js";
 import { readOptsidianSettings } from "../../core/settings.js";
+import type { SearchIndexProgressUpdate } from "../protocol.js";
 import { buildCanonicalSearchSnapshot, DEFAULT_PARTITION_BITS, snapshotIdentityTuple, snapshotIdentityTupleForAnalyzerIdentity } from "./builder.js";
 import { searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
 import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "../search-execution.js";
@@ -36,7 +37,7 @@ export type DaemonSnapshotStoreOptions = {
   retentionCount?: number;
   analyzer?: SearchAnalyzer;
   analyzerIdentity?: SearchAnalyzerIdentity;
-  snapshotBuilder?: (input: { vaultRoot: string; partitionBits: number; deadline?: number; cancellationId?: string }) => Promise<BuiltSnapshot>;
+  snapshotBuilder?: (input: SnapshotBuilderInput) => Promise<BuiltSnapshot>;
   partitionBits?: number;
   durableRenameSegment?: DurableRename;
   durableRenameManifest?: DurableRename;
@@ -61,6 +62,15 @@ export type SnapshotMutationResult = {
 export type SnapshotRequestContext = {
   deadline?: number;
   cancellationId?: string;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
+};
+
+type SnapshotBuilderInput = {
+  vaultRoot: string;
+  partitionBits: number;
+  deadline?: number;
+  cancellationId?: string;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
 type LoadedSnapshot = {
@@ -96,7 +106,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly partitionBits: number;
   private readonly analyzer: SearchAnalyzer | undefined;
   private readonly analyzerIdentity: SearchAnalyzerIdentity;
-  private readonly snapshotBuilder: ((input: { vaultRoot: string; partitionBits: number; deadline?: number; cancellationId?: string }) => Promise<BuiltSnapshot>) | undefined;
+  private readonly snapshotBuilder: ((input: SnapshotBuilderInput) => Promise<BuiltSnapshot>) | undefined;
   private readonly renameSegment: DurableRename;
   private readonly renameManifest: DurableRename;
   private readonly renameActive: DurableRename;
@@ -299,22 +309,37 @@ export class DaemonSnapshotStore implements SnapshotStore {
           vaultRoot: paths.vaultRoot,
           partitionBits: this.partitionBits,
           deadline: context.deadline,
-          cancellationId: context.cancellationId
+          cancellationId: context.cancellationId,
+          progress: context.progress
         })
-      : await this.buildSnapshotInProcess(paths.vaultRoot);
+      : await this.buildSnapshotInProcess(paths.vaultRoot, context.progress);
+    context.progress?.({
+      phase: "publishing",
+      total: built.segments.length,
+      completed: 0
+    });
     await this.publishBuiltSnapshot(paths, built);
+    context.progress?.({
+      phase: "publishing",
+      total: built.segments.length,
+      completed: built.segments.length
+    });
     this.activeByVault.set(paths.vaultStateHash, built.snapshotId);
     this.enforceBudget();
     return built.snapshotId;
   }
 
-  private async buildSnapshotInProcess(vaultRoot: string): Promise<BuiltSnapshot> {
+  private async buildSnapshotInProcess(
+    vaultRoot: string,
+    progress?: (progress: SearchIndexProgressUpdate) => void
+  ): Promise<BuiltSnapshot> {
     if (!this.analyzer) throw new Error("snapshot builder is not configured");
     return withSearchAnalyzerLease(this.analyzer, (leasedAnalyzer) =>
       buildCanonicalSearchSnapshot({
         vaultRoot,
         analyzer: leasedAnalyzer,
-        partitionBits: this.partitionBits
+        partitionBits: this.partitionBits,
+        progress
       })
     );
   }

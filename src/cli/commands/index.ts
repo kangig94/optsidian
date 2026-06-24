@@ -5,6 +5,7 @@ import { createSearchDaemonClient, type SearchDaemonClient } from "../../daemon/
 import { discoverObsidianVaultRoots, resolveVaultPathInput } from "../../native/obsidian.js";
 import { UsageError } from "../../errors.js";
 import type { SearchIndexWarmResult, SearchIndexWarmVaultResult } from "../../core/types.js";
+import type { StatusResult } from "../../daemon/protocol.js";
 import { hasVaultPathArg, resolveVaultRoot, vaultArg } from "../vault.js";
 
 export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<void> {
@@ -17,11 +18,16 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
       return;
     case "rebuild":
       if (!vaultRoot) throw new UsageError("index rebuild requires a vault");
-      process.stdout.write(renderIndexResult(await client.rebuild({ vault: vaultRoot }), format));
+      process.stdout.write(renderIndexResult(await withVaultProgress(
+        client,
+        vaultRoot,
+        () => client.rebuild({ vault: vaultRoot }),
+        { enabled: shouldRenderProgress(format) }
+      ), format));
       return;
     case "warm": {
       const discovery = indexWarmVaultRoots(args);
-      process.stdout.write(renderIndexResult(await loadDiscoveredVaults(client, discovery), format));
+      process.stdout.write(renderIndexResult(await loadDiscoveredVaults(client, discovery, { enabled: shouldRenderProgress(format) }), format));
       return;
     }
     case "clear":
@@ -35,14 +41,20 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
 
 async function loadDiscoveredVaults(
   client: SearchDaemonClient,
-  discovery: { vaultRoots: string[]; warnings: string[] }
+  discovery: { vaultRoots: string[]; warnings: string[] },
+  progress: { enabled: boolean }
 ): Promise<SearchIndexWarmResult> {
   const vaults: SearchIndexWarmVaultResult[] = [];
   const warnings = [...discovery.warnings];
 
   for (const vaultRoot of discovery.vaultRoots) {
     try {
-      const result = await client.loadVault({ vault: vaultRoot });
+      const result = await withVaultProgress(
+        client,
+        vaultRoot,
+        () => client.loadVault({ vault: vaultRoot }),
+        progress
+      );
       vaults.push(...result.vaults);
       if (result.warnings) warnings.push(...result.warnings);
     } catch (error) {
@@ -61,6 +73,86 @@ async function loadDiscoveredVaults(
     vaults,
     ...(warnings.length > 0 ? { warnings } : {})
   };
+}
+
+async function withVaultProgress<T>(
+  client: SearchDaemonClient,
+  vaultRoot: string,
+  run: () => Promise<T>,
+  options: { enabled: boolean }
+): Promise<T> {
+  if (!options.enabled) return run();
+
+  let lastLength = 0;
+  let polling = false;
+  const write = (line: string) => {
+    const padded = line.padEnd(lastLength);
+    lastLength = Math.max(lastLength, line.length);
+    process.stderr.write(`\r${padded}`);
+  };
+  const clear = () => {
+    if (lastLength > 0) process.stderr.write(`\r${" ".repeat(lastLength)}\r`);
+  };
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      write(renderVaultProgress(await client.status({ deadlineMs: 1000 }), vaultRoot));
+    } catch {
+      write(`index loading ${vaultLabel(vaultRoot)}`);
+    } finally {
+      polling = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void poll();
+  }, 500);
+  timer.unref();
+  void poll();
+  try {
+    return await run();
+  } finally {
+    clearInterval(timer);
+    clear();
+  }
+}
+
+function shouldRenderProgress(format: "text" | "json"): boolean {
+  return format === "text" && process.stderr.isTTY === true;
+}
+
+function renderVaultProgress(status: StatusResult, vaultRoot: string): string {
+  const resolved = path.resolve(vaultRoot);
+  const vault = status.vaults.find((candidate) => path.resolve(candidate.vault) === resolved);
+  if (!vault?.progress) return `index ${vault?.state ?? "loading"} ${vaultLabel(vaultRoot)}`;
+  const progress = vault.progress;
+  const completed = progress.completed ?? 0;
+  const total = progress.total;
+  const ratio = total && total > 0 ? Math.max(0, Math.min(1, completed / total)) : 0;
+  const percent = total && total > 0 ? `${Math.floor(ratio * 100).toString().padStart(3)}%` : " --%";
+  const counts = total === undefined ? String(completed) : `${completed}/${total}`;
+  const current = progress.current ? ` ${truncateMiddle(progress.current, 36)}` : "";
+  const message = progress.message ? ` ${progress.message}` : "";
+  return `index ${progress.phase} ${progressBar(ratio, total !== undefined)} ${percent} ${counts} ${vaultLabel(vaultRoot)}${current}${message}`;
+}
+
+function progressBar(ratio: number, knownTotal: boolean): string {
+  const width = 20;
+  if (!knownTotal) return `[${".".repeat(width)}]`;
+  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
+  return `[${"#".repeat(filled)}${".".repeat(width - filled)}]`;
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const keep = Math.max(1, Math.floor((maxLength - 3) / 2));
+  return `${value.slice(0, keep)}...${value.slice(value.length - keep)}`;
+}
+
+function vaultLabel(vaultRoot: string): string {
+  const resolved = path.resolve(vaultRoot);
+  return path.basename(resolved) || resolved;
 }
 
 function indexWarmVaultRoots(args: ParsedArgs): { vaultRoots: string[]; warnings: string[] } {

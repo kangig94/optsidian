@@ -25,6 +25,7 @@ import { decodeUtf8 } from "../../core/text.js";
 import type { SearchField, SearchSnippet } from "../../core/types.js";
 import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/index.js";
 import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
+import type { SearchIndexProgressUpdate } from "../protocol.js";
 import {
   SNAPSHOT_PERSISTENCE_VERSION,
   type BuiltSegment,
@@ -54,6 +55,7 @@ type BuildInput = {
   vaultRoot: string;
   analyzer: SearchAnalyzer;
   partitionBits?: number;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
 type ParsedBuildDocument = {
@@ -71,7 +73,8 @@ type ParsedBuildDocument = {
 export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<BuiltSnapshot> {
   const partitionBits = input.partitionBits ?? DEFAULT_PARTITION_BITS;
   const identityTuple = snapshotIdentityTuple(input.analyzer, partitionBits);
-  const documents = await parseVaultDocuments(input.vaultRoot, input.analyzer, partitionBits);
+  input.progress?.({ phase: "scanning", completed: 0 });
+  const documents = await parseVaultDocuments(input.vaultRoot, input.analyzer, partitionBits, input.progress);
   const partitions = new Map<number, ParsedBuildDocument[]>();
   for (const document of documents) {
     const partition = partitions.get(document.partitionId) ?? [];
@@ -79,9 +82,18 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
     partitions.set(document.partitionId, partition);
   }
 
-  const builtSegments = [...partitions.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([partitionId, partitionDocuments]) => buildSegment(partitionId, partitionDocuments));
+  const partitionEntries = [...partitions.entries()].sort(([left], [right]) => left - right);
+  const builtSegments: BuiltSegment[] = [];
+  input.progress?.({ phase: "segmenting", total: partitionEntries.length, completed: 0 });
+  for (const [index, [partitionId, partitionDocuments]] of partitionEntries.entries()) {
+    builtSegments.push(buildSegment(partitionId, partitionDocuments));
+    input.progress?.({
+      phase: "segmenting",
+      total: partitionEntries.length,
+      completed: index + 1,
+      current: String(partitionId)
+    });
+  }
   const liveRecords = documents.map((document) => ({
     documentId: document.documentId,
     path: document.path,
@@ -160,17 +172,39 @@ export function snapshotIdentityTupleForAnalyzerIdentity(
   };
 }
 
-async function parseVaultDocuments(vaultRoot: string, analyzer: SearchAnalyzer, partitionBits: number): Promise<ParsedBuildDocument[]> {
+async function parseVaultDocuments(
+  vaultRoot: string,
+  analyzer: SearchAnalyzer,
+  partitionBits: number,
+  progress?: (progress: SearchIndexProgressUpdate) => void
+): Promise<ParsedBuildDocument[]> {
   const root = vaultRealpath(vaultRoot);
   const files = walkFiles(root, root, { includeHidden: false, all: false })
     .map((abs) => vaultRelative(root, abs))
     .sort((left, right) => compareUtf8(left, right));
+  progress?.({ phase: "parsing", total: files.length, completed: 0 });
   const documents: ParsedBuildDocument[] = [];
-  for (const rel of files) {
+  const interval = progressInterval(files.length);
+  for (const [index, rel] of files.entries()) {
     const parsed = await parseBuildDocument(root, rel, analyzer, partitionBits);
     if (parsed) documents.push(parsed);
+    const completed = index + 1;
+    if (completed === files.length || completed % interval === 0) {
+      progress?.({
+        phase: "parsing",
+        total: files.length,
+        completed,
+        current: rel,
+        message: `${documents.length} indexed`
+      });
+    }
   }
   return documents.sort((left, right) => compareUtf8(left.documentId, right.documentId));
+}
+
+function progressInterval(total: number): number {
+  if (total <= 200) return 1;
+  return Math.max(1, Math.floor(total / 100));
 }
 
 async function parseBuildDocument(

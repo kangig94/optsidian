@@ -6,7 +6,7 @@ import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/searc
 import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
 import type { SearchIndexMutationResult, SearchResult } from "../../core/types.js";
 import { resolveVaultPath } from "../../core/path.js";
-import type { ExplainRequestPayload, ExplainResult, SearchRequestPayload } from "../protocol.js";
+import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import type { AnalyzerWorkerPool, SearchExecutionWorkerPool } from "../pools.js";
@@ -19,6 +19,7 @@ export type DaemonRequestContext = {
   deadline: number;
   cancellationId: string;
   requestId: string;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
 export class DaemonSearchStoreService {
@@ -166,7 +167,8 @@ function assertQueryAnalysisTermCount(analysis: SearchTextAnalysis): void {
 function snapshotContext(context: DaemonRequestContext): SnapshotRequestContext {
   return {
     deadline: context.deadline,
-    cancellationId: context.cancellationId
+    cancellationId: context.cancellationId,
+    progress: context.progress
   };
 }
 

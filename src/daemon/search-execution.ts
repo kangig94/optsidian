@@ -94,7 +94,7 @@ export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult
 }
 
 function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
-  const cacheKey = `${handle.snapshotId}:${handle.pinToken}`;
+  const cacheKey = handle.snapshotId;
   const cached = searchExecutionStateCache.get(cacheKey);
   if (cached) {
     searchExecutionStateCache.delete(cacheKey);
