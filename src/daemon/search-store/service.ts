@@ -9,11 +9,15 @@ import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
-import type { AnalyzerWorkerPool, SearchExecutionWorkerPool } from "../pools.js";
+import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./builder.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
+
+export type LoadVaultOptions = {
+  preload?: SearchExecutionPreloadOptions;
+};
 
 export type DaemonRequestContext = {
   deadline: number;
@@ -40,11 +44,11 @@ export class DaemonSearchStoreService {
     this.queryAnalysisCache = new QueryAnalysisCache(options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? 512);
   }
 
-  async loadVault(vault: string, context: DaemonRequestContext) {
+  async loadVault(vault: string, context: DaemonRequestContext, options: LoadVaultOptions = {}) {
     const result = await this.store.loadVault(vault, snapshotContext(context));
     const failed = result.vaults.find((candidate) => candidate.status === "failed");
     if (!failed && "snapshotId" in result && result.snapshotId) {
-      await this.preloadSnapshot(vault, result.snapshotId, context);
+      await this.preloadSnapshot(vault, result.snapshotId, context, options.preload);
     }
     return result;
   }
@@ -123,7 +127,12 @@ export class DaemonSearchStoreService {
     };
   }
 
-  private async preloadSnapshot(vault: string, snapshotId: string, context: DaemonRequestContext): Promise<void> {
+  private async preloadSnapshot(
+    vault: string,
+    snapshotId: string,
+    context: DaemonRequestContext,
+    options: SearchExecutionPreloadOptions = {}
+  ): Promise<void> {
     assertRemainingDeadline(context.deadline);
     const pin = await this.store.pin(vault, snapshotId, snapshotContext(context));
     try {
@@ -133,11 +142,15 @@ export class DaemonSearchStoreService {
         completed: 0,
         message: "warming search workers"
       });
-      const warmed = await this.searchExecution.preloadSnapshot(snapshot, {
-        deadline: context.deadline,
-        cancellationId: context.cancellationId,
-        vault
-      });
+      const warmed = await this.searchExecution.preloadSnapshot(
+        snapshot,
+        {
+          deadline: context.deadline,
+          cancellationId: context.cancellationId,
+          vault
+        },
+        options
+      );
       context.progress?.({
         phase: "preloading",
         total: warmed.length,
@@ -184,9 +197,7 @@ export class DaemonSearchStoreService {
   }
 
   private requireAnalyzerIdentity(): SearchAnalyzerIdentity {
-    const identity = this.latencyAnalyzer.analyzerIdentity;
-    if (!identity) throw Object.assign(new Error("latency analyzer pool is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
-    return identity;
+    return this.latencyAnalyzer.analyzerIdentity ?? this.store.searchAnalyzerIdentity();
   }
 }
 

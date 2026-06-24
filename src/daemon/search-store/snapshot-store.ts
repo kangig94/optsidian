@@ -145,6 +145,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.renameActive = options.durableRenameActivePointer ?? durableRename;
   }
 
+  searchAnalyzerIdentity(): SearchAnalyzerIdentity {
+    return this.analyzerIdentity;
+  }
+
   async loadVault(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<LoadVaultResult> {
     try {
       const snapshotId = await this.ensureActiveSnapshot(vaultRoot, context);

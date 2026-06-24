@@ -121,11 +121,8 @@ class SearchDaemon {
           }
         }
       });
-      const throughputIdentity = pools.throughputAnalyzer.analyzerIdentity;
-      if (!throughputIdentity) throw new Error("throughput analyzer pool did not warm up");
       const snapshotStore = createDaemonSnapshotStore({
         env: options.env,
-        analyzerIdentity: throughputIdentity,
         countCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT, settings.search?.memoryBudgetCount),
         byteCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES, settings.search?.memoryBudgetBytes),
         retentionCount: settingNumber(options.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT, settings.search?.snapshotRetentionCount),
@@ -295,7 +292,9 @@ class SearchDaemon {
     if (current.state === "ready" && current.snapshotId) return;
     const progress = this.progressReporter(request.payload.vault, "loading");
     this.vaults.transition(request.payload.vault, "loading");
-    const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress));
+    const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress), {
+      preload: { minimumWorkers: 1 }
+    });
     const failed = result.vaults.find((vault) => vault.status === "failed");
     if (failed) {
       this.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });

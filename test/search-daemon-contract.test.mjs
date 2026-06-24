@@ -509,6 +509,123 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("worker pool can serve jobs after the first worker is ready", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "partial-ready.mjs");
+  const firstMarker = path.join(root, "first-worker.marker");
+  const jobLog = path.join(root, "jobs.log");
+  fs.writeFileSync(jobLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const firstMarker = ${JSON.stringify(firstMarker)};
+const jobLog = ${JSON.stringify(jobLog)};
+let index = 1;
+try {
+  fs.writeFileSync(firstMarker, "1", { flag: "wx" });
+  index = 0;
+} catch {
+  index = 1;
+}
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    const reply = () => parentPort.postMessage({
+      id: 0,
+      ok: true,
+      result: { workerIndex: index },
+      memoryRss: process.memoryUsage().rss
+    });
+    if (index === 0) reply();
+    else setTimeout(reply, 1500);
+    return;
+  }
+  fs.appendFileSync(jobLog, String(index) + "\\n");
+  parentPort.postMessage({
+    id: message.id,
+    ok: true,
+    result: { workerIndex: index },
+    memoryRss: process.memoryUsage().rss
+  });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "partial-ready",
+    kind: "search",
+    size: 2,
+    workerScript,
+    env: { ...process.env }
+  });
+  try {
+    const started = Date.now();
+    const warmed = await pool.warmup(1);
+    assert.ok(Date.now() - started < 1000);
+    assert.deepEqual(warmed, [{ workerIndex: 0 }]);
+    assert.equal(pool.stats().ready, 1);
+
+    const result = await pool.run({ type: "search" }, {
+      deadline: Date.now() + 1000,
+      cancellationId: "partial-ready"
+    });
+    assert.deepEqual(result, { workerIndex: 0 });
+    assert.equal(fs.readFileSync(jobLog, "utf8").trim(), "0");
+
+    await pool.warmup();
+    assert.equal(pool.stats().ready, 2);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("worker pool can defer warmup until first job", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "lazy-warmup.mjs");
+  const logPath = path.join(root, "events.log");
+  fs.writeFileSync(logPath, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const logPath = ${JSON.stringify(logPath)};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(logPath, "warmup\\n");
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  fs.appendFileSync(logPath, "job\\n");
+  parentPort.postMessage({ id: message.id, ok: true, result: { ok: true }, memoryRss: process.memoryUsage().rss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "lazy-warmup",
+    kind: "analyzer",
+    size: 1,
+    workerScript,
+    autoWarmup: false,
+    env: { ...process.env }
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(fs.readFileSync(logPath, "utf8"), "");
+    assert.equal(pool.stats().ready, 0);
+    assert.equal(pool.stats().slots[0].warmupStarted, false);
+
+    await pool.run({ type: "analyzeQuery" }, {
+      deadline: Date.now() + 1000,
+      cancellationId: "lazy-warmup"
+    });
+    assert.equal(fs.readFileSync(logPath, "utf8"), "warmup\njob\n");
+    assert.equal(pool.stats().ready, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
 test("worker pool memory restart guard ignores shared/native memory when heap is below limit", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
@@ -627,8 +744,8 @@ test("search store loadVault preloads the active snapshot into search workers", 
     release: (inputPin) => calls.push(["release", inputPin.pinToken])
   };
   const fakeSearchExecution = {
-    preloadSnapshot: async (snapshot, options) => {
-      calls.push(["preload", snapshot.snapshotId, options.vault]);
+    preloadSnapshot: async (snapshot, options, preloadOptions) => {
+      calls.push(["preload", snapshot.snapshotId, options.vault, preloadOptions]);
       return [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }];
     }
   };
@@ -638,13 +755,15 @@ test("search store loadVault preloads the active snapshot into search workers", 
     deadline: Date.now() + 1000,
     cancellationId: "preload",
     requestId: "preload"
+  }, {
+    preload: { minimumWorkers: 1, backgroundRemaining: true }
   });
 
   assert.equal(result.snapshotId, "snap-a");
   assert.deepEqual(calls, [
     ["pin", vault, "snap-a"],
     ["handle", "pin-a"],
-    ["preload", "snap-a", vault],
+    ["preload", "snap-a", vault, { minimumWorkers: 1, backgroundRemaining: true }],
     ["release", "pin-a"]
   ]);
 });

@@ -32,6 +32,7 @@ export type WorkerPoolOptions = {
   rssGuardBytes?: number;
   rssGuardStrikes?: number;
   microbatchSize?: number;
+  autoWarmup?: boolean;
 };
 
 type WorkerEnvelope = {
@@ -94,6 +95,8 @@ type WorkerSlot = {
   busy: QueueItem<unknown> | undefined;
   restarting: boolean;
   ready: Promise<void>;
+  readyState: boolean;
+  warmupStarted: boolean;
   warmupResult: unknown;
   restartAttempts: number;
   completedJobs: number;
@@ -130,6 +133,7 @@ export class DaemonWorkerPool {
   private restartCount = 0;
   private lastRestartReason: string | undefined;
   private lastRestartAt: string | undefined;
+  private lastReadyError: Error | undefined;
 
   constructor(options: WorkerPoolOptions) {
     const size = Math.max(1, Math.floor(options.size));
@@ -146,6 +150,7 @@ export class DaemonWorkerPool {
       maxQueueSize: DEFAULT_MAX_QUEUE_SIZE,
       maxCrashRetries: DEFAULT_MAX_CRASH_RETRIES,
       microbatchSize: DEFAULT_MICROBATCH_SIZE,
+      autoWarmup: true,
       ...options,
       memoryLimitBytes: heapGuardBytes,
       heapGuardBytes,
@@ -164,9 +169,23 @@ export class DaemonWorkerPool {
     return this.options.microbatchSize;
   }
 
-  async warmup<T = unknown>(): Promise<T[]> {
-    await Promise.all(this.slots.map((slot) => slot.ready));
-    return this.slots.map((slot) => slot.warmupResult as T);
+  async warmup<T = unknown>(minimumReady = this.slots.length): Promise<T[]> {
+    const target = Math.max(1, Math.min(this.slots.length, Math.floor(minimumReady)));
+    for (const slot of this.slots) this.startWarmup(slot);
+    while (!this.closed) {
+      const ready = this.readySlots();
+      if (ready.length >= target) return ready.map((slot) => slot.warmupResult as T);
+      const pending = this.slots
+        .filter((slot) => !slot.readyState && !slot.restarting)
+        .map((slot) => slot.ready.catch(() => undefined));
+      if (pending.length === 0) {
+        if (this.slots.length < target) throw this.lastReadyError ?? poolError("INTERNAL", `${this.options.name} pool has no warmable workers`);
+        await delay(10);
+      } else {
+        await Promise.race(pending);
+      }
+    }
+    throw poolError("INTERNAL", `${this.options.name} pool is closed`);
   }
 
   cancel(cancellationId: string): void {
@@ -191,7 +210,19 @@ export class DaemonWorkerPool {
   }
 
   runOnAll<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions): Promise<T[]> {
-    return Promise.all(this.slots.map((slot) => this.enqueue<T>(request, options, slot.id)));
+    return this.runOnSlots(request, options, this.slotIds());
+  }
+
+  runOnSlots<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, slotIds: readonly number[]): Promise<T[]> {
+    return Promise.all(slotIds.map((slotId) => this.enqueue<T>(request, options, slotId)));
+  }
+
+  slotIds(): number[] {
+    return this.slots.map((slot) => slot.id);
+  }
+
+  readySlotIds(): number[] {
+    return this.readySlots().map((slot) => slot.id);
   }
 
   private enqueue<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, targetSlotId?: number): Promise<T> {
@@ -204,6 +235,13 @@ export class DaemonWorkerPool {
     }
     if (this.queue.length >= this.options.maxQueueSize && this.idleSlot() === undefined) {
       return Promise.reject(poolError("BACKPRESSURE", `${this.options.name} queue is full`));
+    }
+    if (targetSlotId !== undefined) {
+      const target = this.slots.find((slot) => slot.id === targetSlotId);
+      if (!target) return Promise.reject(poolError("INTERNAL", `${this.options.name} target worker is no longer available`));
+      this.startWarmup(target);
+    } else {
+      for (const slot of this.slots) this.startWarmup(slot);
     }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -238,6 +276,7 @@ export class DaemonWorkerPool {
       workers: this.slots.length,
       queued: this.queue.length,
       active: this.slots.filter((slot) => slot.busy).length,
+      ready: this.readySlots().length,
       microbatchSize: this.options.microbatchSize,
       memoryLimitBytes: this.options.memoryLimitBytes,
       heapGuardBytes: this.options.heapGuardBytes,
@@ -249,6 +288,8 @@ export class DaemonWorkerPool {
       processMemory: process.memoryUsage(),
       slots: this.slots.map((slot) => ({
         id: slot.id,
+        ready: slot.readyState,
+        warmupStarted: slot.warmupStarted,
         busy: slot.busy !== undefined,
         restarting: slot.restarting,
         restartAttempts: slot.restartAttempts,
@@ -286,6 +327,8 @@ export class DaemonWorkerPool {
       busy: undefined,
       restarting: false,
       ready,
+      readyState: false,
+      warmupStarted: false,
       warmupResult: undefined,
       restartAttempts,
       completedJobs: 0,
@@ -302,8 +345,14 @@ export class DaemonWorkerPool {
       const error = poolError("INTERNAL", `${this.options.name} worker exited with code ${code}`);
       this.handleWorkerFailure(slot, error, readyCallbacks);
     });
-    worker.postMessage({ id: 0, request: { type: "warmup" } } satisfies WorkerEnvelope);
+    if (this.options.autoWarmup) this.startWarmup(slot);
     return slot;
+  }
+
+  private startWarmup(slot: WorkerSlot): void {
+    if (slot.warmupStarted || slot.readyState || slot.restarting) return;
+    slot.warmupStarted = true;
+    slot.worker.postMessage({ id: 0, request: { type: "warmup" } } satisfies WorkerEnvelope);
   }
 
   private recordMemory(slot: WorkerSlot, message: WorkerReply): void {
@@ -324,6 +373,7 @@ export class DaemonWorkerPool {
     if (message.id === 0) {
       if (message.ok) {
         slot.warmupResult = message.result;
+        slot.readyState = true;
         readyCallbacks.resolveReady();
         this.drain();
       } else {
@@ -349,6 +399,7 @@ export class DaemonWorkerPool {
   }
 
   private handleWorkerFailure(slot: WorkerSlot, error: Error, readyCallbacks?: ReadyCallbacks): void {
+    if (!slot.readyState) this.lastReadyError = error;
     const item = slot.busy;
     slot.busy = undefined;
     if (item) {
@@ -411,7 +462,7 @@ export class DaemonWorkerPool {
   private drain(): void {
     if (this.closed) return;
     for (const slot of this.slots) {
-      if (slot.busy || slot.restarting) continue;
+      if (!slot.readyState || slot.busy || slot.restarting) continue;
       const item = this.dequeueRunnable(slot);
       if (!item) return;
       if (Date.now() >= item.options.deadline) {
@@ -452,7 +503,11 @@ export class DaemonWorkerPool {
   }
 
   private idleSlot(): WorkerSlot | undefined {
-    return this.slots.find((slot) => !slot.busy && !slot.restarting);
+    return this.slots.find((slot) => slot.readyState && !slot.busy && !slot.restarting);
+  }
+
+  private readySlots(): WorkerSlot[] {
+    return this.slots.filter((slot) => slot.readyState && !slot.restarting);
   }
 
   private armDeadline(item: QueueItem<unknown>): void {
@@ -562,6 +617,13 @@ function memoryRestartReason(
 
 function restartBackoffMs(attempts: number): number {
   return Math.min(SLOT_RESTART_BACKOFF_CAP_MS, SLOT_RESTART_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
 }
 
 function poolError(code: string, message: string): Error {

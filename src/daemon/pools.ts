@@ -32,6 +32,11 @@ export type DaemonPools = {
   stats(options: WorkerPoolRunOptions): Promise<unknown>;
 };
 
+export type SearchExecutionPreloadOptions = {
+  minimumWorkers?: number;
+  backgroundRemaining?: boolean;
+};
+
 export class AnalyzerWorkerPool {
   private analyzerIdentityValue: SearchAnalyzerIdentity | undefined;
   private readonly pool: DaemonWorkerPool;
@@ -44,8 +49,8 @@ export class AnalyzerWorkerPool {
     return this.analyzerIdentityValue;
   }
 
-  async warmup(): Promise<void> {
-    const warmed = await this.pool.warmup<{ analyzerIdentity?: SearchAnalyzerIdentity }>();
+  async warmup(minimumReady?: number): Promise<void> {
+    const warmed = await this.pool.warmup<{ analyzerIdentity?: SearchAnalyzerIdentity }>(minimumReady);
     const identity = warmed.find((result) => result.analyzerIdentity)?.analyzerIdentity;
     if (identity) this.analyzerIdentityValue = identity;
   }
@@ -110,16 +115,45 @@ export class SearchExecutionWorkerPool {
     return this.pool.run<SearchExecutionResult>({ type: "search", payload: job }, options);
   }
 
-  preloadSnapshot(snapshot: SearchExecutionSnapshotHandle, options: WorkerPoolRunOptions): Promise<SearchExecutionPreloadResult[]> {
-    return this.pool.runOnAll<SearchExecutionPreloadResult>({ type: "preloadSnapshot", payload: snapshot }, options);
+  async preloadSnapshot(
+    snapshot: SearchExecutionSnapshotHandle,
+    options: WorkerPoolRunOptions,
+    preloadOptions: SearchExecutionPreloadOptions = {}
+  ): Promise<SearchExecutionPreloadResult[]> {
+    const allSlotIds = this.pool.slotIds();
+    const minimumWorkers = Math.max(
+      1,
+      Math.min(allSlotIds.length, Math.floor(preloadOptions.minimumWorkers ?? allSlotIds.length))
+    );
+    await this.pool.warmup(minimumWorkers);
+    const blockingSlotIds = this.pool.readySlotIds().slice(0, minimumWorkers);
+    const warmed = await this.pool.runOnSlots<SearchExecutionPreloadResult>(
+      { type: "preloadSnapshot", payload: snapshot },
+      options,
+      blockingSlotIds
+    );
+    if (preloadOptions.backgroundRemaining) {
+      const blocking = new Set(blockingSlotIds);
+      const backgroundSlotIds = this.pool.slotIds().filter((slotId) => !blocking.has(slotId));
+      if (backgroundSlotIds.length > 0) {
+        void this.pool.runOnSlots<SearchExecutionPreloadResult>(
+          { type: "preloadSnapshot", payload: snapshot },
+          options,
+          backgroundSlotIds
+        ).catch(() => undefined);
+      }
+    }
+    return warmed;
   }
 
   cacheStats(options: WorkerPoolRunOptions): Promise<SearchExecutionCacheStats[]> {
-    return this.pool.runOnAll<SearchExecutionCacheStats>({ type: "searchExecutionStats" }, options);
+    const readySlotIds = this.pool.readySlotIds();
+    if (readySlotIds.length === 0) return Promise.resolve([]);
+    return this.pool.runOnSlots<SearchExecutionCacheStats>({ type: "searchExecutionStats" }, options, readySlotIds);
   }
 
-  async warmup(): Promise<void> {
-    await this.pool.warmup();
+  async warmup(minimumReady?: number): Promise<void> {
+    await this.pool.warmup(minimumReady);
   }
 
   cancel(cancellationId: string): void {
@@ -155,7 +189,8 @@ export async function createDaemonPools(
     kind: "analyzer",
     size: indexWorkers,
     env,
-    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH", 128)
+    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH", 128),
+    autoWarmup: false
   }));
   const searchExecution = new SearchExecutionWorkerPool(new DaemonWorkerPool({
     name: "search-execution",
@@ -169,11 +204,7 @@ export async function createDaemonPools(
     throughputAnalyzer,
     searchExecution,
     async warmup() {
-      await Promise.all([
-        latencyAnalyzer.warmup(),
-        throughputAnalyzer.warmup(),
-        searchExecution.warmup()
-      ]);
+      await searchExecution.warmup(1);
     },
     cancel(cancellationId) {
       latencyAnalyzer.cancel(cancellationId);
