@@ -626,6 +626,26 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("daemon pools defer latency analyzer warmup until query analysis", async () => {
+  const { createDaemonPools } = await futureImport("src/daemon/pools.ts");
+  const pools = await createDaemonPools({
+    ...process.env,
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1"
+  }, {});
+  try {
+    const stats = await pools.stats({
+      deadline: Date.now() + 1000,
+      cancellationId: "lazy-latency-stats"
+    });
+    assert.equal(stats.latencyAnalyzer.ready, 0);
+    assert.equal(stats.searchExecution.ready, 1);
+  } finally {
+    await pools.close();
+  }
+});
+
 test("worker pool memory restart guard ignores shared/native memory when heap is below limit", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
@@ -768,6 +788,80 @@ test("search store loadVault preloads the active snapshot into search workers", 
   ]);
 });
 
+test("search store loadVault can skip search worker preload", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const calls = [];
+  const fakeStore = {
+    loadVault: async () => ({ ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" }),
+    pin: async () => {
+      calls.push("pin");
+      return { snapshotId: "snap-a", pinToken: "pin-a" };
+    },
+    snapshotHandleForPin: () => {
+      calls.push("handle");
+      return { snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] };
+    },
+    release: () => calls.push("release")
+  };
+  const fakeSearchExecution = {
+    preloadSnapshot: async () => {
+      throw new Error("preload should be skipped");
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+
+  const result = await service.loadVault(vault, {
+    deadline: Date.now() + 1000,
+    cancellationId: "preload-skip",
+    requestId: "preload-skip"
+  }, {
+    preload: false
+  });
+
+  assert.equal(result.snapshotId, "snap-a");
+  assert.deepEqual(calls, []);
+});
+
+test("search store loadVault can warm the query analyzer alongside preload", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const calls = [];
+  const pin = { snapshotId: "snap-a", pinToken: "pin-a" };
+  const fakeStore = {
+    loadVault: async () => ({ ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" }),
+    pin: async () => pin,
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    release: () => {}
+  };
+  const fakeAnalyzer = {
+    warmup: async (minimumReady) => {
+      calls.push(["analyzer", minimumReady]);
+    }
+  };
+  const fakeSearchExecution = {
+    preloadSnapshot: async (snapshot, options, preloadOptions) => {
+      calls.push(["preload", snapshot.snapshotId, options.vault, preloadOptions]);
+      return [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }];
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 1 });
+
+  await service.loadVault(vault, {
+    deadline: Date.now() + 1000,
+    cancellationId: "preload-query-warmup",
+    requestId: "preload-query-warmup"
+  }, {
+    preload: { minimumWorkers: 1 },
+    warmupQueryAnalyzer: true
+  });
+
+  assert.deepEqual(calls.sort(), [
+    ["analyzer", 1],
+    ["preload", "snap-a", vault, { minimumWorkers: 1 }]
+  ].sort());
+});
+
 test("search store service rejects excessive analyzed query terms per channel", async () => {
   const { UsageError } = await futureImport("src/errors.ts");
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
@@ -793,6 +887,7 @@ test("search store service rejects excessive analyzed query terms per channel", 
     })
   };
   const fakeSearchExecution = {
+    preloadSnapshot: async () => [],
     search: async () => {
       throw new Error("search execution should not run after analysis cap failure");
     }
@@ -1010,6 +1105,37 @@ test("AC1 protocol method coverage includes Clear", async () => {
   assert.ok(SEARCH_DAEMON_PROTOCOL_VERSION > 0);
 });
 
+test("search daemon preloads execution snapshots only for query searches", async () => {
+  const { searchRequestNeedsExecutionPreload } = await futureImport("src/daemon/server.ts");
+  const base = {
+    protocolVersion: 1,
+    requestId: "preload-policy",
+    deadline: Date.now() + 1000,
+    nonce: "nonce"
+  };
+
+  assert.equal(searchRequestNeedsExecutionPreload({
+    ...base,
+    method: "Search",
+    payload: { vault: tempRoot(), query: "needle", limit: 1 }
+  }), true);
+  assert.equal(searchRequestNeedsExecutionPreload({
+    ...base,
+    method: "Search",
+    payload: { vault: tempRoot(), tags: ["alpha"], limit: 1 }
+  }), false);
+  assert.equal(searchRequestNeedsExecutionPreload({
+    ...base,
+    method: "Explain",
+    payload: { vault: tempRoot(), query: "needle", limit: 1 }
+  }), true);
+  assert.equal(searchRequestNeedsExecutionPreload({
+    ...base,
+    method: "Status",
+    payload: {}
+  }), false);
+});
+
 test("lifecycle deadlines scale with vault markdown count", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const { vaultLifecycleDeadlineMs } = await futureImport("src/daemon/protocol.ts");
@@ -1117,6 +1243,35 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
   };
   const second = executeSearchJob({ ...job, snapshot: corruptedSameSnapshot });
   assert.deepEqual(second.matches.map((match) => match.path), ["Alpha.md"]);
+});
+
+test("metadata-only search does not hydrate positional segments", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { executeSearchJob } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "MetadataOnly.md", "---\ntags: [metadata-only]\n---\n# Metadata Only\n\nmetadata-only sentinel unique\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-a",
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    segments: [{ segmentId: "broken", bytes: sharedHandle(Buffer.from("not-a-canonical-segment")) }]
+  };
+
+  const result = executeSearchJob({
+    vault,
+    search: normalizeSearchParams({ tags: ["metadata-only"], limit: 10 }),
+    analyzerIdentity: analyzer.identity,
+    snapshot
+  });
+
+  assert.deepEqual(result.matches.map((match) => match.path), ["MetadataOnly.md"]);
 });
 
 test("search execution preload materializes snapshot cache before search", async () => {

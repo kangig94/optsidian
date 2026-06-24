@@ -182,7 +182,8 @@ export async function createDaemonPools(
     kind: "analyzer",
     size: queryWorkers,
     env,
-    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH", 16)
+    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH", 16),
+    autoWarmup: false
   }));
   const throughputAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
     name: "throughput-analyzer",

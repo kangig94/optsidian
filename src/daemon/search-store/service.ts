@@ -9,6 +9,7 @@ import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
+import type { SearchExecutionSnapshotHandle } from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./builder.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
@@ -16,7 +17,8 @@ import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestC
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 
 export type LoadVaultOptions = {
-  preload?: SearchExecutionPreloadOptions;
+  preload?: SearchExecutionPreloadOptions | false;
+  warmupQueryAnalyzer?: boolean;
 };
 
 export type DaemonRequestContext = {
@@ -45,11 +47,21 @@ export class DaemonSearchStoreService {
   }
 
   async loadVault(vault: string, context: DaemonRequestContext, options: LoadVaultOptions = {}) {
+    const queryAnalyzerWarmup = options.warmupQueryAnalyzer
+      ? this.latencyAnalyzer.warmup(1)
+      : undefined;
     const result = await this.store.loadVault(vault, snapshotContext(context));
     const failed = result.vaults.find((candidate) => candidate.status === "failed");
-    if (!failed && "snapshotId" in result && result.snapshotId) {
-      await this.preloadSnapshot(vault, result.snapshotId, context, options.preload);
+    if (failed) {
+      await queryAnalyzerWarmup?.catch(() => undefined);
+      return result;
     }
+    const warmups: Array<Promise<unknown>> = [];
+    if (!failed && "snapshotId" in result && result.snapshotId && options.preload !== false) {
+      warmups.push(this.preloadSnapshot(vault, result.snapshotId, context, options.preload));
+    }
+    if (queryAnalyzerWarmup) warmups.push(queryAnalyzerWarmup);
+    await Promise.all(warmups);
     return result;
   }
 
@@ -137,29 +149,38 @@ export class DaemonSearchStoreService {
     const pin = await this.store.pin(vault, snapshotId, snapshotContext(context));
     try {
       const snapshot = this.store.snapshotHandleForPin(pin);
-      context.progress?.({
-        phase: "preloading",
-        completed: 0,
-        message: "warming search workers"
-      });
-      const warmed = await this.searchExecution.preloadSnapshot(
-        snapshot,
-        {
-          deadline: context.deadline,
-          cancellationId: context.cancellationId,
-          vault
-        },
-        options
-      );
-      context.progress?.({
-        phase: "preloading",
-        total: warmed.length,
-        completed: warmed.length,
-        message: "search workers warm"
-      });
+      await this.preloadSnapshotHandle(vault, snapshot, context, options);
     } finally {
       this.store.release(pin);
     }
+  }
+
+  private async preloadSnapshotHandle(
+    vault: string,
+    snapshot: SearchExecutionSnapshotHandle,
+    context: DaemonRequestContext,
+    options: SearchExecutionPreloadOptions = {}
+  ): Promise<void> {
+    context.progress?.({
+      phase: "preloading",
+      completed: 0,
+      message: "warming search workers"
+    });
+    const warmed = await this.searchExecution.preloadSnapshot(
+      snapshot,
+      {
+        deadline: context.deadline,
+        cancellationId: context.cancellationId,
+        vault
+      },
+      options
+    );
+    context.progress?.({
+      phase: "preloading",
+      total: warmed.length,
+      completed: warmed.length,
+      message: "search workers warm"
+    });
   }
 
   private async queryAnalysis(

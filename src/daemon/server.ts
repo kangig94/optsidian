@@ -292,8 +292,10 @@ class SearchDaemon {
     if (current.state === "ready" && current.snapshotId) return;
     const progress = this.progressReporter(request.payload.vault, "loading");
     this.vaults.transition(request.payload.vault, "loading");
+    const needsExecutionPreload = searchRequestNeedsExecutionPreload(request);
     const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress), {
-      preload: { minimumWorkers: 1 }
+      preload: needsExecutionPreload ? { minimumWorkers: 1 } : false,
+      warmupQueryAnalyzer: needsExecutionPreload
     });
     const failed = result.vaults.find((vault) => vault.status === "failed");
     if (failed) {
@@ -373,6 +375,11 @@ class SearchDaemon {
       });
     };
   }
+}
+
+export function searchRequestNeedsExecutionPreload(request: SearchDaemonRequest): boolean {
+  if (request.method !== "Search" && request.method !== "Explain") return false;
+  return typeof request.payload.query === "string" && request.payload.query.trim().length > 0;
 }
 
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {

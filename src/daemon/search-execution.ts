@@ -82,8 +82,14 @@ type SearchExecutionState = {
   documents: Map<string, PersistedDocumentRecord>;
 };
 
+type MetadataExecutionState = {
+  snapshotId: string;
+  documents: Map<string, PersistedDocumentRecord>;
+};
+
 const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt("OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
 const searchExecutionStateCache = new Map<string, SearchExecutionState>();
+const searchExecutionMetadataCache = new Map<string, MetadataExecutionState>();
 const searchExecutionStateCacheCounters = {
   hits: 0,
   misses: 0,
@@ -108,10 +114,13 @@ type MutablePositionalPostings = Map<string, Array<{ docId: number; fieldId: num
 export type SearchExecutionResult = SearchResult & { snapshotId: string; explainTrace?: ExplainTrace };
 
 export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult {
+  if (!job.search.query || !job.analysis) {
+    const metadataState = cachedMetadataStateFromHandle(job.snapshot).state;
+    const result = metadataSearch(job.search, job.pathFilter, metadataState.documents, metadataState.snapshotId, job.analyzerIdentity);
+    return { ...result, snapshotId: metadataState.snapshotId };
+  }
   const state = cachedStateFromHandle(job.snapshot).state;
-  const result = job.search.query && job.analysis
-    ? querySearch(job.search, job.pathFilter, state.snapshot, state.documents, job.analysis, job.analyzerIdentity, job.explain === true)
-    : metadataSearch(job.search, job.pathFilter, state.documents, state.snapshot.snapshotId, job.analyzerIdentity);
+  const result = querySearch(job.search, job.pathFilter, state.snapshot, state.documents, job.analysis, job.analyzerIdentity, job.explain === true);
   return { ...result, snapshotId: state.snapshot.snapshotId };
 }
 
@@ -154,6 +163,24 @@ function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: 
     if (!oldest) break;
     searchExecutionStateCache.delete(oldest);
     searchExecutionStateCacheCounters.evictions += 1;
+  }
+  return { state, cacheHit: false };
+}
+
+function cachedMetadataStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: MetadataExecutionState; cacheHit: boolean } {
+  const cacheKey = handle.snapshotId;
+  const cached = searchExecutionMetadataCache.get(cacheKey);
+  if (cached) {
+    searchExecutionMetadataCache.delete(cacheKey);
+    searchExecutionMetadataCache.set(cacheKey, cached);
+    return { state: cached, cacheHit: true };
+  }
+  const state = metadataStateFromHandle(handle);
+  searchExecutionMetadataCache.set(cacheKey, state);
+  while (searchExecutionMetadataCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
+    const oldest = searchExecutionMetadataCache.keys().next().value;
+    if (!oldest) break;
+    searchExecutionMetadataCache.delete(oldest);
   }
   return { state, cacheHit: false };
 }
@@ -252,20 +279,32 @@ function metadataSearch(
 }
 
 function stateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
-  const records = JSON.parse(textDecoder.decode(sharedBytes(handle.documents))) as PersistedDocumentRecord[];
-  const documents = new Map(records.map((document) => [document.documentId, document]));
-  const snapshot = buildSearchSnapshotFromSegments({
-    snapshotId: handle.snapshotId,
-    documents: new Map(records.map((document) => [document.documentId, {
+  const metadataState = cachedMetadataStateFromHandle(handle).state;
+  const documents = metadataState.documents;
+  const documentMetadata = new Map<string, { documentId: string; tags: readonly string[] }>();
+  for (const document of documents.values()) {
+    documentMetadata.set(document.documentId, {
       documentId: document.documentId,
       tags: document.searchDocument.tags
-    }])),
+    });
+  }
+  const snapshot = buildSearchSnapshotFromSegments({
+    snapshotId: handle.snapshotId,
+    documents: documentMetadata,
     segments: handle.segments.map((segment) => ({
       segmentId: segment.segmentId,
       bytes: sharedBytes(segment.bytes)
     }))
   });
   return { snapshot, documents };
+}
+
+function metadataStateFromHandle(handle: SearchExecutionSnapshotHandle): MetadataExecutionState {
+  const records = JSON.parse(textDecoder.decode(sharedBytes(handle.documents))) as PersistedDocumentRecord[];
+  return {
+    snapshotId: handle.snapshotId,
+    documents: new Map(records.map((document) => [document.documentId, document]))
+  };
 }
 
 function sharedBytes(handle: SharedBytesHandle): Uint8Array {
