@@ -63,6 +63,7 @@ const LATIN_SCRIPT_PATTERN = /\p{Script=Latin}/u;
 const COMBINING_MARK_PATTERN = /\p{Mark}/u;
 const COMBINING_MARKS_PATTERN = /\p{Mark}/gu;
 const ASCII_ALPHA_PATTERN = /^[a-z]+$/;
+const HANGUL_SCRIPT_PATTERN = /\p{Script=Hangul}/u;
 
 export class SearchAnalyzerTerminalLoadError extends Error {
   readonly cause: unknown;
@@ -153,6 +154,28 @@ export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): Se
     node: identity.node,
     ...(identity.icu ? { icu: identity.icu } : {})
   });
+}
+
+export function createInlineQueryAnalyzer(identity: SearchAnalyzerIdentity, rawQuery: string): SearchAnalyzer | undefined {
+  const served = createServedSearchAnalyzer(identity);
+  if (served) return served;
+  const name = identity.name.trim().toLowerCase();
+  if (name !== "router" && name !== "intl") return undefined;
+  if (searchTextNeedsBlockingAnalyzer(rawQuery, identity)) return undefined;
+  return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(",")), {
+    node: identity.node,
+    ...(identity.icu ? { icu: identity.icu } : {})
+  });
+}
+
+export function searchTextNeedsBlockingAnalyzer(text: string, identity: SearchAnalyzerIdentity): boolean {
+  const activeAnalyzers = normalizeAnalyzerNames(identity.activeAnalyzers ?? []);
+  if (!activeAnalyzers.includes("ko")) return false;
+  return searchTextContainsHangul(text);
+}
+
+export function searchTextContainsHangul(text: string): boolean {
+  return HANGUL_SCRIPT_PATTERN.test(text);
 }
 
 export async function withSearchAnalyzerLease<T>(

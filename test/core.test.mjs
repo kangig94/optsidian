@@ -101,8 +101,10 @@ test("search surface analyzer expands compound path title and acronym terms", as
 test("intl search analyzer segments CJK text for lexical search", async () => {
   const {
     analyzerIdentityKey,
+    createInlineQueryAnalyzer,
     parseDeclaredSearchAnalyzers,
     resolveSearchAnalyzer,
+    searchTextNeedsBlockingAnalyzer,
     tokenizeIntlText,
     tokenizeRoutedText
   } = await import(path.join(repoRoot, "src/core/search/analyzer.ts"));
@@ -118,6 +120,10 @@ test("intl search analyzer segments CJK text for lexical search", async () => {
   assert.deepEqual(analyzer.identity.declaredAnalyzers, ["ko"]);
   assert.deepEqual(analyzer.identity.activeAnalyzers, ["ko"]);
   assert.match(analyzer.identity.model ?? "", /^kiwi-nlp:/);
+  assert.equal(searchTextNeedsBlockingAnalyzer("scifact evidence", analyzer.identity), false);
+  assert.equal(searchTextNeedsBlockingAnalyzer("한국어 검색", analyzer.identity), true);
+  assert.ok(createInlineQueryAnalyzer(analyzer.identity, "scifact evidence"));
+  assert.equal(createInlineQueryAnalyzer(analyzer.identity, "한국어 검색"), undefined);
   assert.ok((await analyzer.tokenize("한국어 검색")).includes("한국어"));
   const envOverSettings = resolveSearchAnalyzer({ OPTSIDIAN_SEARCH_EXTRA_LANGS: "" }, { search: { extraLangs: ["ko"] } }, runtime);
   assert.deepEqual(envOverSettings.identity.declaredAnalyzers, []);

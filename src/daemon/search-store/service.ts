@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import { UsageError } from "../../errors.js";
 import { normalizeSearchParams } from "../../core/search/params.js";
-import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
+import { createInlineQueryAnalyzer, type SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
+import { analyzeSearchQuery, SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
 import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
 import type { SearchIndexMutationResult, SearchResult } from "../../core/types.js";
 import { resolveVaultPath } from "../../core/path.js";
@@ -189,7 +189,9 @@ export class DaemonSearchStoreService {
     vault: string,
     context: DaemonRequestContext
   ): Promise<{ analysis: SearchTextAnalysis; analyzerIdentity: SearchAnalyzerIdentity }> {
-    const analyzerIdentity = this.requireAnalyzerIdentity();
+    const baseAnalyzerIdentity = this.requireAnalyzerIdentity();
+    const inlineAnalyzer = createInlineQueryAnalyzer(baseAnalyzerIdentity, rawQuery);
+    const analyzerIdentity = inlineAnalyzer?.identity ?? baseAnalyzerIdentity;
     const cached = this.queryAnalysisCache.get({
       analyzerIdentity,
       rawQuery,
@@ -202,6 +204,17 @@ export class DaemonSearchStoreService {
     }
 
     assertRemainingDeadline(context.deadline);
+    if (inlineAnalyzer) {
+      const analysis = await analyzeSearchQuery(rawQuery, inlineAnalyzer);
+      assertQueryAnalysisTermCount(analysis);
+      this.queryAnalysisCache.set({
+        analyzerIdentity,
+        rawQuery,
+        fields: search.fields,
+        searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH
+      }, analysis);
+      return { analysis, analyzerIdentity };
+    }
     const result = await this.latencyAnalyzer.analyzeQuery(rawQuery, {
       deadline: context.deadline,
       cancellationId: context.cancellationId,

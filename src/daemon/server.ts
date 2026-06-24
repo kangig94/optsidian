@@ -29,6 +29,7 @@ import { createDaemonSnapshotStore, DaemonSearchStoreService } from "./search-st
 import { createDaemonPools, type DaemonPools } from "./pools.js";
 import { VaultRegistry } from "./vault-registry.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
+import { searchTextContainsHangul } from "../core/search/analyzer.js";
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -295,7 +296,7 @@ class SearchDaemon {
     const needsExecutionPreload = searchRequestNeedsExecutionPreload(request);
     const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress), {
       preload: needsExecutionPreload ? { minimumWorkers: 1 } : false,
-      warmupQueryAnalyzer: needsExecutionPreload
+      warmupQueryAnalyzer: searchRequestNeedsQueryAnalyzerWarmup(request)
     });
     const failed = result.vaults.find((vault) => vault.status === "failed");
     if (failed) {
@@ -380,6 +381,12 @@ class SearchDaemon {
 export function searchRequestNeedsExecutionPreload(request: SearchDaemonRequest): boolean {
   if (request.method !== "Search" && request.method !== "Explain") return false;
   return typeof request.payload.query === "string" && request.payload.query.trim().length > 0;
+}
+
+export function searchRequestNeedsQueryAnalyzerWarmup(request: SearchDaemonRequest): boolean {
+  if (request.method !== "Search" && request.method !== "Explain") return false;
+  const query = typeof request.payload.query === "string" ? request.payload.query.trim() : "";
+  return query.length > 0 && searchTextContainsHangul(query);
 }
 
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {

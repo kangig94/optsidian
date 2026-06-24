@@ -862,6 +862,108 @@ test("search store loadVault can warm the query analyzer alongside preload", asy
   ].sort());
 });
 
+test("search store service analyzes non-Hangul queries inline without warming Kiwi", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const analyzerIdentity = {
+    name: "router",
+    version: "test",
+    runtime: "node-intl",
+    node: "test",
+    icu: "test",
+    model: "kiwi-nlp:test",
+    declaredAnalyzers: ["ko"],
+    activeAnalyzers: ["ko"]
+  };
+  const fakeStore = {
+    pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    release: () => {},
+    searchAnalyzerIdentity: () => analyzerIdentity
+  };
+  let analyzerCalls = 0;
+  const fakeAnalyzer = {
+    analyzeQuery: async () => {
+      analyzerCalls += 1;
+      throw new Error("Kiwi analyzer should not be used for non-Hangul query");
+    }
+  };
+  let capturedJob;
+  const fakeSearchExecution = {
+    search: async (job) => {
+      capturedJob = job;
+      return { ok: true, command: "search", matches: [], snapshotId: job.snapshot.snapshotId };
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
+
+  await service.search(
+    { vault, query: "scifact evidence running studies", limit: 1 },
+    { deadline: Date.now() + 1000, cancellationId: "inline-query", requestId: "inline-query" }
+  );
+
+  assert.equal(analyzerCalls, 0);
+  assert.equal(capturedJob.analyzerIdentity.name, "router");
+  assert.deepEqual(capturedJob.analyzerIdentity.declaredAnalyzers, ["ko"]);
+  assert.deepEqual(capturedJob.analyzerIdentity.activeAnalyzers, []);
+  assert.equal(capturedJob.analyzerIdentity.model, undefined);
+  assert.equal(capturedJob.analysis.raw, "scifact evidence running studies");
+  assert.ok(capturedJob.analysis.primaryTerms.includes("scifact"));
+});
+
+test("search store service keeps Hangul query analysis on the analyzer worker", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const analyzerIdentity = {
+    name: "router",
+    version: "test",
+    runtime: "node-intl",
+    node: "test",
+    icu: "test",
+    model: "kiwi-nlp:test",
+    declaredAnalyzers: ["ko"],
+    activeAnalyzers: ["ko"]
+  };
+  const fakeStore = {
+    pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    release: () => {},
+    searchAnalyzerIdentity: () => analyzerIdentity
+  };
+  let analyzerCalls = 0;
+  const fakeAnalyzer = {
+    analyzeQuery: async (raw) => {
+      analyzerCalls += 1;
+      return {
+        analyzerIdentity,
+        analysis: {
+          raw,
+          primaryChannel: "morph",
+          primaryTerms: ["한국어"],
+          channels: { morph: ["한국어"], surface: ["한국어"], ngram: [] }
+        }
+      };
+    }
+  };
+  let capturedJob;
+  const fakeSearchExecution = {
+    search: async (job) => {
+      capturedJob = job;
+      return { ok: true, command: "search", matches: [], snapshotId: job.snapshot.snapshotId };
+    }
+  };
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
+
+  await service.search(
+    { vault, query: "한국어 검색", limit: 1 },
+    { deadline: Date.now() + 1000, cancellationId: "hangul-query", requestId: "hangul-query" }
+  );
+
+  assert.equal(analyzerCalls, 1);
+  assert.deepEqual(capturedJob.analyzerIdentity.activeAnalyzers, ["ko"]);
+  assert.deepEqual(capturedJob.analysis.primaryTerms, ["한국어"]);
+});
+
 test("search store service rejects excessive analyzed query terms per channel", async () => {
   const { UsageError } = await futureImport("src/errors.ts");
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
@@ -1106,7 +1208,10 @@ test("AC1 protocol method coverage includes Clear", async () => {
 });
 
 test("search daemon preloads execution snapshots only for query searches", async () => {
-  const { searchRequestNeedsExecutionPreload } = await futureImport("src/daemon/server.ts");
+  const {
+    searchRequestNeedsExecutionPreload,
+    searchRequestNeedsQueryAnalyzerWarmup
+  } = await futureImport("src/daemon/server.ts");
   const base = {
     protocolVersion: 1,
     requestId: "preload-policy",
@@ -1118,6 +1223,16 @@ test("search daemon preloads execution snapshots only for query searches", async
     ...base,
     method: "Search",
     payload: { vault: tempRoot(), query: "needle", limit: 1 }
+  }), true);
+  assert.equal(searchRequestNeedsQueryAnalyzerWarmup({
+    ...base,
+    method: "Search",
+    payload: { vault: tempRoot(), query: "needle", limit: 1 }
+  }), false);
+  assert.equal(searchRequestNeedsQueryAnalyzerWarmup({
+    ...base,
+    method: "Search",
+    payload: { vault: tempRoot(), query: "한국어 검색", limit: 1 }
   }), true);
   assert.equal(searchRequestNeedsExecutionPreload({
     ...base,
