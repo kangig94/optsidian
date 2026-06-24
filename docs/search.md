@@ -152,16 +152,16 @@ daemon can load the vault and pin a snapshot. Use `--no-warmup` only when explic
 cold-start behavior.
 
 Index lifecycle requests use a work-sized deadline rather than a fixed 30 second budget. When the
-client sends `LoadVault`, `Rebuild`, `Refresh`, `Compact`, or `Clear` without an explicit
-`deadlineMs`, it counts visible Markdown notes in the vault and uses:
+client sends `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, or a cold `Search` / `Explain`
+without an explicit `deadlineMs`, it counts visible Markdown notes in the vault and uses:
 
 ```text
 deadline = 30 seconds + 750 milliseconds * markdown_note_count
 ```
 
 Warm search latency targets still apply to searches against an already loaded snapshot. The longer
-lifecycle deadline exists so large vault load/build work can finish instead of failing at a fixed
-timeout.
+lifecycle deadline exists so large vault load/build/preload work can finish instead of failing at a
+fixed timeout.
 
 The daemon reports lifecycle progress through `index status` and daemon `Status` JSON. Interactive
 `index warm`, `index rebuild`, and `search:eval` warmup render a single stderr progress line showing
@@ -176,32 +176,41 @@ using that run as a search-quality baseline.
 
 ## Baseline
 
-Current KLUE100 baseline through daemon RPC on a pinned positional snapshot:
+Current baseline is measured through daemon RPC with `--concurrency=1` in warm scoring mode.
+The 2026-06-24 run uses the daemon warmup/preload path and pinned positional snapshots.
+
+| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| KLUE100 | 98/100 | 0.730 | 0.840 | 0.890 | 0.980 | 0.798 | 81.2ms | 81.3ms | 96.0ms |
+| English100 | 87/100 | 0.630 | 0.760 | 0.800 | 0.870 | 0.705 | 91.4ms | 91.0ms | 104.5ms |
+| Mixed200 | 184/200 | 0.680 | 0.800 | 0.845 | 0.920 | 0.750 | 89.0ms | 88.7ms | 106.0ms |
+
+KLUE100:
 
 ```text
-score: n=100 top1=0.730 recall@3=0.840 recall@5=0.890 recall@10=0.980 mrr@10=0.798 avg=1857.2ms p50=1851.5ms p95=1951.2ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=1870.4ms p50=1868.9ms p95=1986.3ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=1864.0ms p50=1862.6ms p95=1948.2ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=1860.8ms p50=1851.7ms p95=1916.8ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=1837.0ms p50=1834.3ms p95=1920.0ms
+score: n=100 top1=0.730 recall@3=0.840 recall@5=0.890 recall@10=0.980 mrr@10=0.798 avg=81.2ms p50=81.3ms p95=96.0ms
+score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=80.7ms p50=81.3ms p95=91.5ms
+score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=85.3ms p50=82.8ms p95=102.2ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=89.1ms p50=85.9ms p95=99.8ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=73.7ms p50=72.9ms p95=86.3ms
 ```
 
-Current English100 baseline through daemon RPC on a pinned positional snapshot:
+English100:
 
 ```text
-score: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=1839.8ms p50=1827.5ms p95=1928.5ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=1839.8ms p50=1827.5ms p95=1928.5ms
+score: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=91.4ms p50=91.0ms p95=104.5ms
+score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=91.4ms p50=91.0ms p95=104.5ms
 ```
 
-Current Mixed200 baseline through daemon RPC on a pinned positional snapshot:
+Mixed200:
 
 ```text
-score: n=200 top1=0.680 recall@3=0.800 recall@5=0.845 recall@10=0.920 mrr@10=0.750 avg=1739.6ms p50=1732.1ms p95=1821.3ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=1734.5ms p50=1725.6ms p95=1843.2ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.703 avg=1742.3ms p50=1732.1ms p95=1853.2ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=1735.7ms p50=1732.1ms p95=1802.8ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=1753.2ms p50=1753.4ms p95=1812.3ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=1729.2ms p50=1727.4ms p95=1814.8ms
+score: n=200 top1=0.680 recall@3=0.800 recall@5=0.845 recall@10=0.920 mrr@10=0.750 avg=89.0ms p50=88.7ms p95=106.0ms
+score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=84.3ms p50=84.8ms p95=93.9ms
+score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.703 avg=93.8ms p50=92.1ms p95=113.1ms
+score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=85.5ms p50=81.1ms p95=103.5ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=91.6ms p50=90.5ms p95=104.4ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=78.0ms p50=77.3ms p95=91.0ms
 ```
 
 ## Worker Pools
