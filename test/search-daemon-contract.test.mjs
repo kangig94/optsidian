@@ -509,6 +509,56 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("worker pool memory restart guard ignores shared/native memory when heap is below limit", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "memory-guard.mjs");
+  const warmupLog = path.join(root, "warmups.log");
+  fs.writeFileSync(warmupLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const warmupLog = ${JSON.stringify(warmupLog)};
+const memory = {
+  rss: 1024 * 1024 * 1024,
+  heapTotal: 2,
+  heapUsed: 1,
+  external: 1024 * 1024 * 1024,
+  arrayBuffers: 1024 * 1024 * 1024
+};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(warmupLog, "warmup\\n");
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memory, memoryRss: memory.rss });
+    return;
+  }
+  parentPort.postMessage({ id: message.id, ok: true, result: { ok: true }, memory, memoryRss: memory.rss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "memory-guard",
+    kind: "search",
+    size: 1,
+    workerScript,
+    memoryLimitBytes: 10,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    await pool.run({ type: "search" }, {
+      deadline: Date.now() + 1000,
+      cancellationId: "memory-guard"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(warmups.length, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
 test("search store service rejects excessive analyzed query terms per channel", async () => {
   const { UsageError } = await futureImport("src/errors.ts");
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");

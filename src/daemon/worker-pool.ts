@@ -41,6 +41,7 @@ type WorkerReply =
       id: number;
       ok: true;
       result: unknown;
+      memory?: WorkerMemoryUsage;
       memoryRss: number;
     }
   | {
@@ -50,13 +51,23 @@ type WorkerReply =
         code?: string;
         message: string;
       };
+      memory?: WorkerMemoryUsage;
       memoryRss: number;
     }
   | {
       id: number;
       progress: SearchIndexProgressUpdate;
+      memory?: WorkerMemoryUsage;
       memoryRss: number;
     };
+
+type WorkerMemoryUsage = {
+  rss?: number;
+  heapTotal?: number;
+  heapUsed: number;
+  external?: number;
+  arrayBuffers?: number;
+};
 
 type QueueItem<T> = {
   id: number;
@@ -268,7 +279,7 @@ export class DaemonWorkerPool {
     this.clearDeadline(item);
     if (message.ok) {
       item.resolve(message.result);
-      if (message.memoryRss > this.options.memoryLimitBytes) this.restartSlot(slot);
+      if (workerRestartMemoryBytes(message) > this.options.memoryLimitBytes) this.restartSlot(slot);
     } else {
       item.reject(poolError(message.error.code ?? "INTERNAL", message.error.message));
     }
@@ -444,6 +455,13 @@ function envBytes(env: NodeJS.ProcessEnv, key: string): number | undefined {
   const raw = env[key]?.trim();
   if (!raw || !/^\d+$/.test(raw)) return undefined;
   return Math.max(1, Number(raw)) * 1024 * 1024;
+}
+
+function workerRestartMemoryBytes(message: WorkerReply): number {
+  // RSS/external/arrayBuffer usage includes process-wide native state and shared
+  // snapshot buffers. Those are expected for warm daemon workers, so the restart
+  // guard tracks worker-owned JS heap growth.
+  return message.memory?.heapUsed ?? message.memoryRss;
 }
 
 function restartBackoffMs(attempts: number): number {

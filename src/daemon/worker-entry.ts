@@ -37,19 +37,24 @@ export async function runSearchDaemonWorker(): Promise<void> {
 async function handleMessage(message: WorkerEnvelope, context: WorkerContext, env: NodeJS.ProcessEnv): Promise<void> {
   try {
     const result = await dispatch(message.request.type, message.request.payload, context, env, (progress) => {
+      const memory = workerLocalMemoryUsage();
       parentPort?.postMessage({
         id: message.id,
         progress,
-        memoryRss: workerLocalMemoryBytes()
+        memory,
+        memoryRss: memory.rss
       });
     });
+    const memory = workerLocalMemoryUsage();
     parentPort?.postMessage({
       id: message.id,
       ok: true,
       result,
-      memoryRss: workerLocalMemoryBytes()
+      memory,
+      memoryRss: memory.rss
     });
   } catch (error) {
+    const memory = workerLocalMemoryUsage();
     parentPort?.postMessage({
       id: message.id,
       ok: false,
@@ -57,14 +62,21 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
         code: (error as { code?: unknown } | undefined)?.code,
         message: error instanceof Error ? error.message : String(error)
       },
-      memoryRss: workerLocalMemoryBytes()
+      memory,
+      memoryRss: memory.rss
     });
   }
 }
 
-function workerLocalMemoryBytes(): number {
+function workerLocalMemoryUsage(): NodeJS.MemoryUsage {
   const memory = process.memoryUsage();
-  return memory.heapUsed + memory.external + memory.arrayBuffers;
+  return {
+    rss: memory.rss,
+    heapTotal: memory.heapTotal,
+    heapUsed: memory.heapUsed,
+    external: memory.external,
+    arrayBuffers: memory.arrayBuffers
+  };
 }
 
 async function dispatch(
