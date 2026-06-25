@@ -215,7 +215,7 @@ function querySearch(
     );
   const rerankCandidateSet = candidateSetForHits(candidateSet, hits);
   const featurePayloads = engine.featureStore.featuresFor(retrievalQuery, rerankCandidateSet) as readonly CandidateFeaturePayload[];
-  const signals = rankSignalsFromFeatures(featurePayloads);
+  const signals = rankSignalsFromFeatures(featurePayloads, analysis);
   const rankedAll = rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals);
   const ranked = rankedAll.slice(0, search.limit);
   const hitByPath = new Map(hits.map((hit) => [hit.document.path, hit]));
@@ -579,17 +579,53 @@ function bestFeatureProximity(feature: CandidateFeaturePayload): number {
   return best;
 }
 
-function rankSignalsFromFeatures(features: readonly CandidateFeaturePayload[]): Map<string, CandidateRankSignals> {
+function rankSignalsFromFeatures(
+  features: readonly CandidateFeaturePayload[],
+  analysis: SearchTextAnalysis
+): Map<string, CandidateRankSignals> {
   const signals = new Map<string, CandidateRankSignals>();
+  const useBodyScore = shouldUseBodyRankSignal(analysis);
+  const rawBodyScores = new Map<string, number>();
+  let maxBodyScore = 0;
+  if (useBodyScore) {
+    for (const feature of features) {
+      const path = feature.candidate.path;
+      if (!path) continue;
+      const bodyScore = featureBodyScore(feature);
+      rawBodyScores.set(path, bodyScore);
+      if (bodyScore > maxBodyScore) maxBodyScore = bodyScore;
+    }
+  }
   for (const feature of features) {
     const path = feature.candidate.path;
     if (!path) continue;
     signals.set(path, {
       rarityScore: feature.rarity.score,
-      proximityScore: bestFeatureProximity(feature)
+      proximityScore: bestFeatureProximity(feature),
+      bodyScore: maxBodyScore > 0 ? (rawBodyScores.get(path) ?? 0) / maxBodyScore : 0
     });
   }
   return signals;
+}
+
+function shouldUseBodyRankSignal(analysis: SearchTextAnalysis): boolean {
+  if (/[\uac00-\ud7af]/u.test(analysis.raw)) return false;
+  let asciiTerms = 0;
+  for (const term of analysis.channels.surface) {
+    if (!/[a-z]/i.test(term)) continue;
+    asciiTerms += 1;
+    if (asciiTerms >= 4) return true;
+  }
+  return false;
+}
+
+function featureBodyScore(feature: CandidateFeaturePayload): number {
+  let score = 0;
+  for (const term of feature.bm25) {
+    if (term.field !== "body") continue;
+    score += term.score * SEARCH_TOKEN_CHANNEL_WEIGHT[term.channel];
+  }
+  return score;
 }
 
 function candidateSetForHits(candidateSet: CandidateSet, hits: readonly PositionalHit[]): CandidateSet {
@@ -634,7 +670,8 @@ function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
     coverageTerms: candidate.coverageTerms,
     coverageFieldScore: candidate.coverageFieldScore,
     rarityScore: candidate.rarityScore,
-    proximityScore: candidate.proximityScore
+    proximityScore: candidate.proximityScore,
+    bodyScore: candidate.bodyScore
   }));
 }
 
@@ -812,6 +849,7 @@ function matchDebug(input: {
     coverageFieldScore: input.rank.coverageFieldScore,
     rarityScore: input.rank.rarityScore,
     proximityScore: input.rank.proximityScore,
+    bodyScore: input.rank.bodyScore,
     snippetSource: input.snippetSource,
     snapshotId: input.snapshotId
   };

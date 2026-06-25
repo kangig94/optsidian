@@ -338,6 +338,35 @@ test("reranker keeps English polarity terms eligible for metadata coverage", asy
   assert.notEqual(rankBucketName(ranked[0].bucket), "base");
 });
 
+test("reranker uses body signal to break comparable metadata coverage ties", async () => {
+  const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const weakBody = searchDocument({
+    path: "SciFact/weak-body.md",
+    titleTokens: "aspirin"
+  });
+  const strongBody = searchDocument({
+    path: "SciFact/strong-body.md",
+    titleTokens: "aspirin"
+  });
+
+  const ranked = rerankCandidatesWithSignals(
+    "Aspirin inhibits the production of PGE2.",
+    ["aspirin", "inhibit", "product", "pge2"],
+    [
+      { document: weakBody, score: 10 },
+      { document: strongBody, score: 9 }
+    ],
+    undefined,
+    new Map([
+      ["SciFact/weak-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0 }],
+      ["SciFact/strong-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 1 }]
+    ])
+  );
+
+  assert.equal(ranked[0].path, "SciFact/strong-body.md");
+  assert.equal(ranked[0].bodyScore, 1);
+});
+
 test("intl search analyzer segments CJK text for lexical search", async () => {
   const {
     analyzerIdentityKey,

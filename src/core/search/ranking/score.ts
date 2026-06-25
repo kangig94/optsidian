@@ -16,11 +16,13 @@ import { rankMap, rrfContribution } from "./rrf.js";
 export type CandidateRankSignals = {
   rarityScore: number;
   proximityScore: number;
+  bodyScore: number;
 };
 
 export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
   rarityScore: 0,
-  proximityScore: 0
+  proximityScore: 0,
+  bodyScore: 0
 };
 
 export function rerankCandidates(
@@ -131,7 +133,8 @@ function rankedCandidate(
     coverageTerms: coverage.terms,
     coverageFieldScore: coverage.fieldScore,
     rarityScore: signals.rarityScore,
-    proximityScore: signals.proximityScore
+    proximityScore: signals.proximityScore,
+    bodyScore: signals.bodyScore ?? 0
   };
 }
 
@@ -196,6 +199,7 @@ function rerankScore(
   }
   score += candidate.rarityScore * RANK_SIGNAL_WEIGHTS.rarity;
   score += candidate.proximityScore * RANK_SIGNAL_WEIGHTS.proximity;
+  score += candidate.bodyScore * RANK_SIGNAL_WEIGHTS.body;
   return score;
 }
 
@@ -209,6 +213,7 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
   if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
@@ -218,6 +223,7 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
 function compareCoverageRank(left: RankedCandidate, right: RankedCandidate): number {
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;

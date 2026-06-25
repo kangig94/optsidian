@@ -249,41 +249,43 @@ The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm 
 search:eval:spec`, lazy daemon startup, one-worker cold search preload, pinned positional
 snapshots, and the metadata coverage threshold that keeps weak ngram-only metadata matches in the
 base bucket. It also excludes weak English function words from metadata coverage scoring while
-retaining polarity terms such as `not`. Body ngram budgets are dynamic by note length, and Hangul
-ngram retrieval falls back to morph/surface retrieval only when the ngram candidate set is empty.
+retaining polarity terms such as `not`. Long Latin query ranking includes a normalized body BM25
+signal so body evidence can break otherwise metadata-heavy SciFact ties. Body ngram budgets are
+dynamic by note length, and Hangul ngram retrieval falls back to morph/surface retrieval only when
+the ngram candidate set is empty.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 55.7ms | 53.8ms | 74.0ms |
-| English100 | 90/100 | 0.710 | 0.820 | 0.840 | 0.900 | 0.774 | 62.6ms | 60.7ms | 80.4ms |
-| Mixed200 | 188/200 | 0.815 | 0.900 | 0.920 | 0.940 | 0.862 | 56.8ms | 55.3ms | 75.6ms |
+| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 52.9ms | 52.4ms | 67.6ms |
+| English100 | 92/100 | 0.720 | 0.820 | 0.850 | 0.920 | 0.782 | 72.4ms | 71.3ms | 89.9ms |
+| Mixed200 | 192/200 | 0.820 | 0.900 | 0.925 | 0.960 | 0.867 | 60.4ms | 59.7ms | 79.7ms |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=55.7ms p50=53.8ms p95=74.0ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=53.6ms p50=52.3ms p95=72.1ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=58.2ms p50=56.8ms p95=70.7ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=58.4ms p50=56.7ms p95=74.0ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=54.5ms p50=53.8ms p95=78.2ms
+score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=52.9ms p50=52.4ms p95=67.6ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=54.0ms p50=52.7ms p95=66.4ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=55.4ms p50=53.4ms p95=70.8ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=57.5ms p50=55.1ms p95=69.7ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=46.9ms p50=44.0ms p95=60.0ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.900 mrr@10=0.774 avg=62.6ms p50=60.7ms p95=80.4ms
-score.scifact: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.900 mrr@10=0.774 avg=62.6ms p50=60.7ms p95=80.4ms
+score: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.782 avg=72.4ms p50=71.3ms p95=89.9ms
+score.scifact: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.782 avg=72.4ms p50=71.3ms p95=89.9ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.815 recall@3=0.900 recall@5=0.920 recall@10=0.940 mrr@10=0.862 avg=56.8ms p50=55.3ms p95=75.6ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=51.4ms p50=50.7ms p95=68.2ms
-score.scifact: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.880 mrr@10=0.772 avg=62.4ms p50=59.5ms p95=78.7ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=53.1ms p50=50.3ms p95=70.5ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=57.0ms p50=53.5ms p95=74.9ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=45.5ms p50=42.7ms p95=59.0ms
+score: n=200 top1=0.820 recall@3=0.900 recall@5=0.925 recall@10=0.960 mrr@10=0.867 avg=60.4ms p50=59.7ms p95=79.7ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=56.6ms p50=56.9ms p95=70.6ms
+score.scifact: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.781 avg=64.8ms p50=64.4ms p95=82.2ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=60.1ms p50=56.2ms p95=72.5ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=59.6ms p50=57.3ms p95=68.6ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.3ms p50=47.3ms p95=66.8ms
 ```
 
 ## Worker Pools

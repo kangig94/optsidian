@@ -66,8 +66,9 @@ function assertOkSpawn(result, label) {
 test("search:eval offline explain trace replay validates mutations deterministically", async () => {
   const dir = tempRoot();
   const vault = tempRoot();
+  const query = "alpha project target beta";
   writeVaultFile(vault, "Alpha Project.md", "# Alpha Project\n\nalpha project target\n");
-  writeVaultFile(vault, "Beta Project.md", "# Beta Project\n\nalpha project beta body\n");
+  writeVaultFile(vault, "Beta Project.md", "# Beta Project\n\nalpha project target beta beta\n");
   writeVaultFile(vault, "Gamma.md", "# Gamma\n\nunrelated\n");
   const analyzer = testAnalyzer();
   const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
@@ -89,8 +90,8 @@ test("search:eval offline explain trace replay validates mutations deterministic
   };
   const explained = executeSearchJob({
     vault,
-    search: normalizeSearchParams({ query: "alpha project", limit: 5, debug: true }),
-    analysis: testQueryAnalysis("alpha project"),
+    search: normalizeSearchParams({ query, limit: 5, debug: true }),
+    analysis: testQueryAnalysis(query),
     analyzerIdentity: analyzer.identity,
     snapshot,
     explain: true
@@ -99,7 +100,7 @@ test("search:eval offline explain trace replay validates mutations deterministic
   assert.equal(explained.ok, true);
   assert.ok(explained.explainTrace);
   assert.ok(explained.explainTrace.inputs.candidateSet.candidates.length > 0);
-  assert.deepEqual(explained.explainTrace.inputs.queryAnalysis, testQueryAnalysis("alpha project"));
+  assert.deepEqual(explained.explainTrace.inputs.queryAnalysis, testQueryAnalysis(query));
 
   const trace = explained.explainTrace;
   const tracePath = path.join(dir, "trace.json");
@@ -133,6 +134,7 @@ test("search:eval offline explain trace replay validates mutations deterministic
   assert.equal(replayAgain.stdout, replay.stdout);
   const replayed = JSON.parse(replay.stdout);
   assert.equal(replayed.outputHash, trace.expectedOutputHash);
+  assert.ok(replayed.rankedOutput.some((candidate) => candidate.bodyScore > 0));
 
   const mutations = [
     ["rankingAlgorithmId", "different-ranker"],

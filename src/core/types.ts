@@ -101,6 +101,7 @@ export type SearchMatchDebug = {
   coverageFieldScore?: number;
   rarityScore?: number;
   proximityScore?: number;
+  bodyScore?: number;
   snippetSource?: "snapshot-field-text";
   snapshotId?: string;
 };

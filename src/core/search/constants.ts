@@ -12,7 +12,8 @@ export const RRF_WEIGHTS = {
 } as const;
 export const RANK_SIGNAL_WEIGHTS = {
   rarity: 0.04,
-  proximity: 0.06
+  proximity: 0.06,
+  body: 0.08
 } as const;
 export const RANK_SIGNAL_NORMALIZATION = "snapshot-corpus-max-v1";
 export const SEARCH_BM25_K1 = 1.2;

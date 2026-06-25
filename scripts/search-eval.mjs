@@ -681,6 +681,7 @@ function validateOfflineExplainTrace(trace) {
 function replayOfflineExplainTrace(trace) {
   const config = normalizeRankingConfig(trace.rankingConfig);
   const featuresByCandidate = featurePayloadMap(trace.inputs.featurePayloads);
+  const bodyScoresByCandidate = normalizedBodyScores(trace.inputs.featurePayloads, trace.inputs.queryAnalysis, config);
   const candidates = trace.inputs.candidateSet.candidates.map((candidate, index) => {
     const feature = featuresByCandidate.get(candidate.candidateId) ?? featuresByCandidate.get(candidate.documentId);
     const exactPriority = priorityNumber(feature.identity?.exactPriority);
@@ -689,6 +690,7 @@ function replayOfflineExplainTrace(trace) {
     const coverageFieldScore = numberOrZero(feature.coverage?.fieldScore);
     const rarityScore = numberOrZero(feature.rarity?.score);
     const proximityScore = bestFeatureProximity(feature);
+    const bodyScore = bodyScoresByCandidate.get(candidate.candidateId) ?? bodyScoresByCandidate.get(candidate.documentId) ?? 0;
     return {
       path: candidate.path ?? feature.candidate?.path ?? candidate.documentId,
       bucket: rankBucket(exactPriority, phrasePriority, coverageTerms, config),
@@ -699,7 +701,9 @@ function replayOfflineExplainTrace(trace) {
       coverageTerms,
       coverageFieldScore,
       rarityScore,
-      proximityScore
+      proximityScore,
+      bodyScore,
+      includeBodyScore: config.includeBodyScore
     };
   });
   const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === 0), compareIdentityRank);
@@ -715,12 +719,60 @@ function replayOfflineExplainTrace(trace) {
 }
 
 function normalizeRankingConfig(config) {
+  const signalWeights = config.signalWeights ?? {};
+  const constants = config.constants ?? {};
+  const includeBodyScore = Object.prototype.hasOwnProperty.call(signalWeights, "body");
   return {
     rrfK: config.rrfK,
     weights: config.weights,
-    signalWeights: config.signalWeights,
-    coverageBucketMinTerms: config.constants?.COVERAGE_BUCKET_MIN_TERMS ?? null
+    signalWeights: {
+      rarity: numberOrZero(signalWeights.rarity),
+      proximity: numberOrZero(signalWeights.proximity),
+      body: includeBodyScore ? numberOrZero(signalWeights.body) : 0
+    },
+    includeBodyScore,
+    tokenChannelWeights: constants.SEARCH_TOKEN_CHANNEL_WEIGHT ?? { morph: 1, surface: 0.65, ngram: 0.3 },
+    coverageBucketMinTerms: constants.COVERAGE_BUCKET_MIN_TERMS ?? null
   };
+}
+
+function normalizedBodyScores(features, queryAnalysis, config) {
+  const scores = new Map();
+  if (!config.includeBodyScore || !shouldUseBodyRankSignal(queryAnalysis)) return scores;
+  const rawScores = [];
+  let maxBodyScore = 0;
+  for (const feature of features) {
+    const keys = [feature?.candidate?.candidateId, feature?.candidate?.documentId].filter(Boolean);
+    if (keys.length === 0) continue;
+    const bodyScore = featureBodyScore(feature, config);
+    rawScores.push({ keys, bodyScore });
+    if (bodyScore > maxBodyScore) maxBodyScore = bodyScore;
+  }
+  if (maxBodyScore <= 0) return scores;
+  for (const entry of rawScores) {
+    for (const key of entry.keys) scores.set(key, entry.bodyScore / maxBodyScore);
+  }
+  return scores;
+}
+
+function shouldUseBodyRankSignal(queryAnalysis) {
+  if (/[\uac00-\ud7af]/u.test(queryAnalysis.raw ?? "")) return false;
+  let asciiTerms = 0;
+  for (const term of queryAnalysis.channels?.surface ?? []) {
+    if (!/[a-z]/i.test(term)) continue;
+    asciiTerms += 1;
+    if (asciiTerms >= 4) return true;
+  }
+  return false;
+}
+
+function featureBodyScore(feature, config) {
+  let score = 0;
+  for (const term of feature?.bm25 ?? []) {
+    if (term.field !== "body") continue;
+    score += numberOrZero(term.score) * numberOrZero(config.tokenChannelWeights[term.channel]);
+  }
+  return score;
 }
 
 function featurePayloadMap(features) {
@@ -760,6 +812,7 @@ function rerankScore(candidate, identityRanks, phraseRanks, coverageRanks, confi
   }
   score += candidate.rarityScore * config.signalWeights.rarity;
   score += candidate.proximityScore * config.signalWeights.proximity;
+  score += candidate.bodyScore * config.signalWeights.body;
   return score;
 }
 
@@ -783,6 +836,7 @@ function comparePhraseRank(left, right) {
   if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
@@ -792,6 +846,7 @@ function comparePhraseRank(left, right) {
 function compareCoverageRank(left, right) {
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
+  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
@@ -799,7 +854,7 @@ function compareCoverageRank(left, right) {
 }
 
 function rankedOutputCandidate(candidate) {
-  return {
+  const output = {
     path: candidate.path,
     bucket: rankBucketName(candidate.bucket),
     score: candidate.score,
@@ -809,8 +864,10 @@ function rankedOutputCandidate(candidate) {
     coverageTerms: candidate.coverageTerms,
     coverageFieldScore: candidate.coverageFieldScore,
     rarityScore: candidate.rarityScore,
-    proximityScore: candidate.proximityScore
+    proximityScore: candidate.proximityScore,
+    ...(candidate.includeBodyScore ? { bodyScore: candidate.bodyScore } : {})
   };
+  return output;
 }
 
 function rankBucketName(bucket) {

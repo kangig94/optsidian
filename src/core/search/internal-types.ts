@@ -28,6 +28,7 @@ export type RankedCandidate = {
   coverageFieldScore: number;
   rarityScore: number;
   proximityScore: number;
+  bodyScore: number;
 };
 
 export type QueryContext = {
