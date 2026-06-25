@@ -39,25 +39,27 @@ jobs:
       - name: Package release assets
         run: npm run package:release
 
-      - name: Publish or refresh GitHub release
+      - name: Verify curated GitHub release exists
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" \
-              "release/optsidian-${GITHUB_REF_NAME}" \
-              "release/optsidian-mcp-${GITHUB_REF_NAME}" \
-              "release/checksums-${GITHUB_REF_NAME}.txt" \
-              --clobber
-            gh release edit "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --latest
-          else
-            gh release create "${GITHUB_REF_NAME}" \
-              "release/optsidian-${GITHUB_REF_NAME}" \
-              "release/optsidian-mcp-${GITHUB_REF_NAME}" \
-              "release/checksums-${GITHUB_REF_NAME}.txt" \
-              --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
-              --verify-tag
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            {
+              echo "Missing GitHub Release ${GITHUB_REF_NAME}."
+              echo "Create it manually with release notes written from docs/CHANGELOG.md, then rerun this workflow."
+            } >&2
+            exit 1
           fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "release/optsidian-${GITHUB_REF_NAME}" \
+            "release/optsidian-mcp-${GITHUB_REF_NAME}" \
+            "release/checksums-${GITHUB_REF_NAME}.txt" \
+            --clobber
+          gh release edit "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --latest
