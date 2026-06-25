@@ -194,6 +194,16 @@ Treat `--concurrency=1` as the quality-scoring mode. Higher search concurrency i
 queueing and tail latency; if recall changes there, investigate shared daemon/cache behavior before
 using that run as a search-quality baseline.
 
+Use `--repeat=<n>` when comparing latency changes. It reuses the same warm pinned snapshot, runs the
+same spec repeatedly, prints every run, and ends with a median repeat summary. Prefer the median over
+a single run when deciding whether a speed or memory change is real.
+
+Use `--failure-report=<path>` when analyzing ranking misses. The report records each failed query,
+expected path, rank within the scored limit, top matches, per-task scores, and a follow-up inspection
+search. The inspection search defaults to `--failure-inspect-limit=50` and does not change scoring
+metrics or the reported run time. This is the primary input for deciding whether a miss is a
+candidate-limit, lexical-recall, or reranking problem.
+
 ## Baseline
 
 Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
