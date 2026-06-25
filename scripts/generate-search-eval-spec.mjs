@@ -12,6 +12,8 @@ if (!vaultRoot) usage("Missing vault path. Pass it as the first argument or set 
 
 const resolvedVault = path.resolve(vaultRoot);
 const outputDir = args.outDir ? path.resolve(args.outDir) : path.join(resolvedVault, "SearchEval");
+const KLUE_TASK_ORDER = ["ynat", "sts", "mrc", "wos"];
+const MIXED_SMOKE60_COUNTS = { ynat: 9, sts: 6, mrc: 9, wos: 6, scifact: 30 };
 const markdownFiles = listMarkdownFiles(resolvedVault);
 const notes = markdownFiles.map((file) => readNote(resolvedVault, file));
 const klueQueries300 = buildKlueQueries(notes);
@@ -20,6 +22,7 @@ const klueQueries100 = subsetKlueQueries(klueQueries300);
 const scifactQueries100 = sampleEven(scifactQueries300, 100);
 const mixed200 = mixedQueries(klueQueries100, scifactQueries100);
 const mixed600 = mixedQueries(klueQueries300, scifactQueries300);
+const mixed600Smoke60 = mixedSmokeQueries(klueQueries300, scifactQueries300);
 
 fs.mkdirSync(outputDir, { recursive: true });
 writeSpec(path.join(outputDir, "klue100.queries.json"), klueQueries100);
@@ -28,6 +31,7 @@ writeSpec(path.join(outputDir, "english100.queries.json"), scifactQueries100);
 writeSpec(path.join(outputDir, "english300.queries.json"), scifactQueries300);
 writeSpec(path.join(outputDir, "mixed200.queries.json"), mixed200);
 writeSpec(path.join(outputDir, "mixed600.queries.json"), mixed600);
+writeSpec(path.join(outputDir, "mixed600.smoke60.queries.json"), mixed600Smoke60);
 writeSpec(path.join(outputDir, "queries.json"), mixed600);
 
 console.log(`wrote ${path.join(outputDir, "klue100.queries.json")} (${klueQueries100.length} queries)`);
@@ -36,6 +40,7 @@ console.log(`wrote ${path.join(outputDir, "english100.queries.json")} (${scifact
 console.log(`wrote ${path.join(outputDir, "english300.queries.json")} (${scifactQueries300.length} queries)`);
 console.log(`wrote ${path.join(outputDir, "mixed200.queries.json")} (${mixed200.length} queries)`);
 console.log(`wrote ${path.join(outputDir, "mixed600.queries.json")} (${mixed600.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "mixed600.smoke60.queries.json")} (${mixed600Smoke60.length} queries)`);
 console.log(`wrote ${path.join(outputDir, "queries.json")} (${mixed600.length} queries)`);
 
 function parseArgs(argv) {
@@ -99,9 +104,8 @@ function buildKlueQueries(notes) {
     if (!byTask.has(task)) byTask.set(task, []);
     byTask.get(task).push(note);
   }
-  const taskOrder = ["ynat", "sts", "mrc", "wos"];
   const queries = [];
-  for (const task of taskOrder) {
+  for (const task of KLUE_TASK_ORDER) {
     const taskNotes = (byTask.get(task) ?? []).sort((left, right) => comparePath(left.path, right.path));
     for (const note of taskNotes) {
       queries.push({
@@ -246,7 +250,7 @@ function writeSpec(filePath, queries) {
 function subsetKlueQueries(queries) {
   const counts = { ynat: 30, sts: 20, mrc: 30, wos: 20 };
   const output = [];
-  for (const task of ["ynat", "sts", "mrc", "wos"]) {
+  for (const task of KLUE_TASK_ORDER) {
     output.push(...sampleEven(queries.filter((query) => query.task === task), counts[task]));
   }
   assertCount("KLUE100", output, 100);
@@ -258,6 +262,17 @@ function mixedQueries(klueQueries, scifactQueries) {
     ...klueQueries.map(({ path: _path, ...query }) => query),
     ...scifactQueries.map(({ path: _path, ...query }) => query)
   ];
+}
+
+function mixedSmokeQueries(klueQueries, scifactQueries) {
+  const scopedQueries = [];
+  for (const task of KLUE_TASK_ORDER) {
+    scopedQueries.push(...sampleEven(klueQueries.filter((query) => query.task === task), MIXED_SMOKE60_COUNTS[task]));
+  }
+  scopedQueries.push(...sampleEven(scifactQueries.filter((query) => query.task === "scifact"), MIXED_SMOKE60_COUNTS.scifact));
+  const output = scopedQueries.map(({ path: _path, ...query }) => query);
+  assertCount("Mixed600 smoke60", output, 60);
+  return output;
 }
 
 function sampleEven(rows, count) {

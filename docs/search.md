@@ -160,6 +160,8 @@ This writes:
 - `SearchEval/english300.queries.json`: English300 queries with `path=English`
 - `SearchEval/mixed200.queries.json`: KLUE100 + English100 without path scoping
 - `SearchEval/mixed600.queries.json`: KLUE300 + English300 without path scoping
+- `SearchEval/mixed600.smoke60.queries.json`: representative 60-query Mixed600 subset without
+  path scoping, for fast smoke/proxy runs
 - `SearchEval/queries.json`: the same Mixed600 spec, for the default `search:eval` path
 
 KLUE query text is reconstructed from the generated Markdown notes. SciFact
@@ -205,12 +207,16 @@ benchmark is `quality`, which scores queries from a query spec:
 - `English300`: run the SciFact query spec with `path` scoped to `English`.
 - `Mixed600`: concatenate the KLUE300 and English300 query specs, remove the `path` filter from
   every query, and evaluate against the shared generated vault.
+- `Mixed600 smoke60`: fixed 60-query subset of Mixed600 for quick smoke/proxy checks. It
+  keeps the same task proportions as Mixed600: 9 YNAT, 6 STS, 9 MRC, 6 WOS, and 30 SciFact queries.
 - `KLUE100`, `English100`, and `Mixed200`: smaller deterministic subsets of the 300/600 specs for
   quicker local checks.
 
 The mixed evaluation is the primary regression target for multilingual search behavior because
 Korean and English documents compete in the same result set. The per-fixture evaluations remain
-useful for isolating whether a change helps or hurts one language family.
+useful for isolating whether a change helps or hurts one language family. Use Mixed600 smoke60 for
+inner-loop checks, then confirm with the full Mixed600 run before treating a change as a quality or
+throughput baseline.
 
 `search:eval` runs in warm mode by default: it executes one unmeasured search before scoring so the
 daemon can load the vault and pin a snapshot. A cold `Search` only blocks on one search-execution
@@ -304,14 +310,19 @@ The latest full failure reports have no lexical-missing failures. Mixed600 has
 64 misses: 55 SciFact, 3 STS, and 6 WOS. Of those, 52 are rerank misses and 12
 are candidate-limit misses.
 
-Full-spec wall-clock times from the same sequential run:
+Wall-clock reference times:
 
 | Spec | Total | QPS |
 | --- | ---: | ---: |
 | KLUE300 | 42.1s | 7.118 |
 | English300 | 46.1s | 6.512 |
 | Mixed600 | 88.5s | 6.780 |
+| Mixed600 smoke60 | 8.9s | 6.756 |
 | KLUE300 + English300 + Mixed600 | 176.7s | - |
+
+The Mixed600 smoke60 reference run scored 55/60 with
+`top1=0.750 recall@10=0.917 mrr@10=0.801`. Treat it as a quick regression
+signal, not as the authoritative quality baseline.
 
 KLUE100:
 

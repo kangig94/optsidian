@@ -18,6 +18,7 @@ const outputDir = args.outDir ? path.resolve(args.outDir) : path.join(resolvedVa
 
 const KLUE_FULL_COUNTS = { ynat: 90, sts: 60, mrc: 90, wos: 60 };
 const KLUE_SUBSET_COUNTS = { ynat: 30, sts: 20, mrc: 30, wos: 20 };
+const MIXED_SMOKE60_COUNTS = { ynat: 9, sts: 6, mrc: 9, wos: 6, scifact: 30 };
 const TASK_ORDER = ["ynat", "sts", "mrc", "wos"];
 
 if (args.clean) {
@@ -34,6 +35,7 @@ const klueQueries100 = subsetKlueQueries(klueQueries300, KLUE_SUBSET_COUNTS);
 const englishQueries100 = sampleEven(englishQueries300, 100);
 const mixed200 = mixedQueries(klueQueries100, englishQueries100);
 const mixed600 = mixedQueries(klueQueries300, englishQueries300);
+const mixed600Smoke60 = mixedSmokeQueries(klueQueries300, englishQueries300);
 
 writeSpec(path.join(outputDir, "klue100.queries.json"), klueQueries100);
 writeSpec(path.join(outputDir, "klue300.queries.json"), klueQueries300);
@@ -41,12 +43,14 @@ writeSpec(path.join(outputDir, "english100.queries.json"), englishQueries100);
 writeSpec(path.join(outputDir, "english300.queries.json"), englishQueries300);
 writeSpec(path.join(outputDir, "mixed200.queries.json"), mixed200);
 writeSpec(path.join(outputDir, "mixed600.queries.json"), mixed600);
+writeSpec(path.join(outputDir, "mixed600.smoke60.queries.json"), mixed600Smoke60);
 writeSpec(path.join(outputDir, "queries.json"), mixed600);
 writeScifactQuerySnapshot(path.join(outputDir, "scifact-test-queries.jsonl"), scifactQueriesById);
 
 console.log(`wrote KLUE notes and specs: ${klueQueries300.length} full, ${klueQueries100.length} subset`);
 console.log(`wrote English/SciFact notes and specs: ${englishQueries300.length} full, ${englishQueries100.length} subset`);
 console.log(`wrote ${path.join(outputDir, "mixed600.queries.json")} (${mixed600.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "mixed600.smoke60.queries.json")} (${mixed600Smoke60.length} queries)`);
 console.log(`wrote ${path.join(outputDir, "mixed200.queries.json")} (${mixed200.length} queries)`);
 
 function writeKlueNotesAndQueries() {
@@ -354,6 +358,17 @@ function mixedQueries(klueQueries, englishQueries) {
     ...klueQueries.map(({ path: _path, ...query }) => query),
     ...englishQueries.map(({ path: _path, ...query }) => query)
   ];
+}
+
+function mixedSmokeQueries(klueQueries, englishQueries) {
+  const scopedQueries = [];
+  for (const task of TASK_ORDER) {
+    scopedQueries.push(...sampleEven(klueQueries.filter((query) => query.task === task), MIXED_SMOKE60_COUNTS[task]));
+  }
+  scopedQueries.push(...sampleEven(englishQueries.filter((query) => query.task === "scifact"), MIXED_SMOKE60_COUNTS.scifact));
+  const output = scopedQueries.map(({ path: _path, ...query }) => query);
+  assertCount("Mixed600 smoke60", output, 60);
+  return output;
 }
 
 function sampleEven(rows, count) {

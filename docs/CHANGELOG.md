@@ -7,6 +7,7 @@
 - Add a `search:eval:spec` generator that rebuilds 100/300 and 200/600 query specs from the benchmark vault.
 - Document that Optsidian's `SearchEval/queries.json` is generated locally, not provided by upstream KLUE or BEIR sources.
 - Refresh search benchmark baselines against the regenerated 300/600 query specs.
+- Add a fixed Mixed600 smoke60 query spec for fast representative search smoke/proxy runs.
 - Add repeat-run summaries and JSON failure reports to `search:eval` for search tuning.
 - Add schema v2 failure classifications to `search:eval --failure-report`, including report/run summaries by failure kind and task.
 - Improve ranking by keeping weak ngram-only metadata coverage in the base bucket, ignoring weak English function words for metadata coverage, and using a gated body evidence signal for long Latin queries; the current expanded baseline is documented in `docs/search.md`.
