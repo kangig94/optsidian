@@ -377,7 +377,7 @@ export class DaemonWorkerPool {
         readyCallbacks.resolveReady();
         this.drain();
       } else {
-        this.handleWorkerFailure(slot, poolError(message.error.code ?? "INTERNAL", message.error.message), readyCallbacks);
+        this.handleWarmupFailure(slot, poolError(message.error.code ?? "INTERNAL", message.error.message), readyCallbacks);
       }
       return;
     }
@@ -395,6 +395,18 @@ export class DaemonWorkerPool {
     } else {
       item.reject(poolError(message.error.code ?? "INTERNAL", message.error.message));
     }
+    this.drain();
+  }
+
+  private handleWarmupFailure(slot: WorkerSlot, error: Error, readyCallbacks: ReadyCallbacks): void {
+    this.lastReadyError = error;
+    if (!slot.restarting) {
+      slot.restarting = true;
+      const index = this.slots.indexOf(slot);
+      if (index >= 0) this.slots.splice(index, 1);
+      void slot.worker.terminate().catch(() => 0);
+    }
+    readyCallbacks.rejectReady(error);
     this.drain();
   }
 

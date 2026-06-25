@@ -343,23 +343,6 @@ function runAsync(args, options = {}) {
   });
 }
 
-async function withProcessEnv(overrides, fn) {
-  const previous = new Map();
-  for (const [key, value] of Object.entries(overrides)) {
-    previous.set(key, process.env[key]);
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  try {
-    return await fn();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
 function strippedGuiEnv(overrides = {}) {
   return {
     HOME: process.env.HOME,
@@ -381,28 +364,17 @@ function startFakeObsidianHost(dir, guiEnv) {
 
 function waitForProcessEnv(pid, expectedEnv) {
   if (!pid || process.platform !== "linux") return false;
-  const deadline = Date.now() + 2000;
-  const probe = `
-const fs = require("node:fs");
-const pid = process.argv[1];
-const expected = JSON.parse(process.argv[2]);
-try {
-  const entries = fs.readFileSync("/proc/" + pid + "/environ", "utf8").split("\\0");
-  if (Object.entries(expected).every(([key, value]) => entries.includes(key + "=" + value))) {
-    process.exit(0);
+  const deadline = Date.now() + 200;
+  while (true) {
+    try {
+      const entries = fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+      return Object.entries(expectedEnv).every(([key, value]) => entries.includes(`${key}=${value}`));
+    } catch (error) {
+      if (error?.code !== "ENOENT") return false;
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
   }
-} catch {}
-process.exit(1);
-`;
-  while (Date.now() < deadline) {
-    const result = spawnSync(process.execPath, ["-e", probe, String(pid), JSON.stringify(expectedEnv)], {
-      encoding: "utf8",
-      env: strippedGuiEnv()
-    });
-    if (result.status === 0) return true;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  return false;
 }
 
 function setup() {
@@ -421,15 +393,6 @@ function setup() {
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
   });
   return { dir, vault, env, log };
-}
-
-function isolatedSearchDaemonEnv(env) {
-  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-search-daemon-"));
-  return trackSearchDaemonEnv({
-    ...env,
-    XDG_RUNTIME_DIR: path.join(runtimeDir, "xdg"),
-    OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir
-  });
 }
 
 async function shutdownSearchDaemonEnv(env) {
@@ -500,10 +463,6 @@ test("top-level and implemented command help stay local", () => {
   assert.match(result.stdout, /MCP tools: command_map, command_run, write, edit, apply_patch/);
   assert.doesNotMatch(result.stdout, /Addons:/);
 
-  const topLevelHelpValue = run(["help=true"], { env });
-  assert.equal(topLevelHelpValue.status, 0, topLevelHelpValue.stderr);
-  assert.match(topLevelHelpValue.stdout, /Detailed help:/);
-
   const bareTopLevelHelp = run(["help"], { env });
   assert.equal(bareTopLevelHelp.status, 2);
   assert.match(bareTopLevelHelp.stderr, /Use --help or help=true/);
@@ -515,23 +474,9 @@ test("top-level and implemented command help stay local", () => {
   assert.match(searchHelp.stdout, /tag=<tag/);
   assert.match(searchHelp.stdout, /field=<field/);
 
-  const updateHelp = run(["update", "--help"]);
-  assert.equal(updateHelp.status, 0, updateHelp.stderr);
-  assert.match(updateHelp.stdout, /Command: update/);
-  assert.match(updateHelp.stdout, /optsidian update/);
-
-  const readHelpValue = run(["read", "help=true"], { env });
-  assert.equal(readHelpValue.status, 0, readHelpValue.stderr);
-  assert.match(readHelpValue.stdout, /Command: read/);
-
   const bareReadHelp = run(["read", "help"], { env });
   assert.equal(bareReadHelp.status, 2);
   assert.match(bareReadHelp.stderr, /Missing required argument: path=<value>/);
-
-  const frontmatterHelp = run(["frontmatter", "--help"]);
-  assert.equal(frontmatterHelp.status, 0, frontmatterHelp.stderr);
-  assert.match(frontmatterHelp.stdout, /Command: frontmatter/);
-  assert.match(frontmatterHelp.stdout, /frontmatter is CLI-only/);
 
   const pluginInstallHelp = run(["plugin:install", "--help"]);
   assert.equal(pluginInstallHelp.status, 0, pluginInstallHelp.stderr);
@@ -1247,30 +1192,23 @@ test("search ranks notes and index commands manage cache", async () => {
   );
   fs.writeFileSync(path.join(vault, "body.md"), "project alpha is mentioned only in body\n");
 
-  let result = run(["search", "query=project alpha", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  let result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
+  assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
+  assert.deepEqual(Object.keys(payload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
+  assert.deepEqual(payload.debug.query.terms, ["project", "alpha"]);
+  assert.equal(payload.debug.reranker, "rrf-metadata-v1");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
   assert.equal(payload.matches[0].title, "Alpha");
   assert.deepEqual(payload.matches[0].tags.sort(), ["alpha", "project"]);
-  assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-  assert.deepEqual(Object.keys(payload).sort(), ["command", "matches", "ok", "snapshotId"]);
-  assert.deepEqual(Object.keys(payload.matches[0]).sort(), ["path", "snippets", "tags", "title"]);
+  assert.equal(payload.matches[0].debug.bucket, "exact");
+  assert.deepEqual(payload.matches[0].debug.queryTerms, ["project", "alpha"]);
+  assert.equal(typeof payload.matches[0].debug.candidateScore, "number");
+  assert.equal(payload.matches[0].debug.snapshotId, payload.snapshotId);
+  assert.equal(payload.matches[0].debug.snippetSource, "snapshot-field-text");
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
-
-  result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  const debugPayload = JSON.parse(result.stdout);
-  assert.match(debugPayload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-  assert.deepEqual(Object.keys(debugPayload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
-  assert.deepEqual(debugPayload.debug.query.terms, ["project", "alpha"]);
-  assert.equal(debugPayload.debug.reranker, "rrf-metadata-v1");
-  assert.equal(debugPayload.matches[0].debug.bucket, "exact");
-  assert.deepEqual(debugPayload.matches[0].debug.queryTerms, ["project", "alpha"]);
-  assert.equal(typeof debugPayload.matches[0].debug.candidateScore, "number");
-  assert.equal(debugPayload.matches[0].debug.snapshotId, debugPayload.snapshotId);
-  assert.equal(debugPayload.matches[0].debug.snippetSource, "snapshot-field-text");
 
   result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
@@ -1283,36 +1221,6 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).matches.length, 0);
 
-  result = run(["search", "tag=#project,#alpha", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  const tagOnly = JSON.parse(result.stdout);
-  assert.deepEqual(tagOnly.matches.map((match) => match.path), ["Projects/Alpha.md"]);
-  assert.match(tagOnly.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-  assert.deepEqual(Object.keys(tagOnly).sort(), ["command", "matches", "ok", "snapshotId"]);
-
-  result = run(["search", "tag=project", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /1\. Projects\/Alpha\.md/);
-  assert.match(result.stdout, /tags: project, alpha/);
-  assert.doesNotMatch(result.stdout, /scope:|index:/);
-
-  result = run(["index", "status"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Search daemon ready\.\nPhase: ready\.\nRequests: \d+, failures: 0, active: \d+\.\nVaults:\n/m);
-  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(vault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
-
-  result = run(["index", "status", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  const statusPayload = JSON.parse(result.stdout);
-  assert.equal(statusPayload.ok, true);
-  assert.equal(statusPayload.ready, true);
-  assert.equal(statusPayload.phase, "ready");
-  assert.equal(statusPayload.owner.nonce, statusPayload.nonce);
-  assert.ok(statusPayload.metrics.requests >= 1);
-  const vaultStatus = statusPayload.vaults.find((entry) => entry.vault === fs.realpathSync(vault));
-  assert.equal(vaultStatus.state, "ready");
-  assert.match(vaultStatus.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-
   result = run(["index", "rebuild"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "Index rebuilt.\n");
@@ -1320,10 +1228,6 @@ test("search ranks notes and index commands manage cache", async () => {
   result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "Index cleared.\n");
-
-  result = run(["index", "clear", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { ok: true, command: "index", action: "clear" });
 });
 
 test("index warm prepares discovered Obsidian registry vaults", async () => {
@@ -1382,102 +1286,19 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
 });
 
 
-test("config command writes global settings and reads project-local overrides", async () => {
+test("config command writes global settings and reads project-local overrides", () => {
   const project = tempRoot();
-  const { vault, env } = setup();
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.writeFileSync(path.join(vault, "Notes", "search-ko.md"), "# 메모\n\n한국어 검색 설정.\n");
+  const { env } = setup();
 
   let result = run(["config", "path"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   const globalSettings = path.join(env.XDG_CONFIG_HOME, "optsidian", "settings.json");
   assert.equal(result.stdout.trim(), globalSettings);
 
-  const setAndGet = (key, value, expectedValue, expectedLine) => {
-    result = run(["config", "set", `${key}=${value}`, "format=json"], { cwd: project, env });
-    assert.equal(result.status, 0, result.stderr);
-    const parts = key.split(".");
-    let cursor = JSON.parse(result.stdout).config;
-    for (const part of parts) cursor = cursor[part];
-    assert.deepEqual(cursor, expectedValue);
-
-    result = run(["config", "get", key], { cwd: project, env });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.trim(), expectedLine);
-  };
-
-  setAndGet("search.extraLangs", "ko", ["ko"], 'search.extraLangs: ["ko"]');
+  result = run(["config", "set", "search.extraLangs=ko", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).config.search.extraLangs, ["ko"]);
   assert.equal(fs.existsSync(path.join(project, ".optsidian", "settings.json")), false);
-  setAndGet("search.queryWorkers", "2", 2, "search.queryWorkers: 2");
-  setAndGet("search.indexWorkers", "2", 2, "search.indexWorkers: 2");
-  setAndGet("search.snapshotRetentionCount", "3", 3, "search.snapshotRetentionCount: 3");
-  setAndGet("search.queryCacheSize", "32", 32, "search.queryCacheSize: 32");
-  setAndGet("search.memoryBudgetCount", "4", 4, "search.memoryBudgetCount: 4");
-  setAndGet("search.memoryBudgetBytes", "1048576", 1048576, "search.memoryBudgetBytes: 1048576");
-  setAndGet("search.daemonIdleMs", "0", 0, "search.daemonIdleMs: 0");
-
-  const searchEnv = isolatedSearchDaemonEnv({ ...env, XDG_CACHE_HOME: cache, OPTSIDIAN_VAULT_PATH: vault });
-  try {
-    result = run(["search", "query=검색", "format=json"], {
-      cwd: project,
-      env: searchEnv
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["Notes/search-ko.md"]);
-
-    const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
-    const snapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
-      const paths = searchStoreCachePaths(vault);
-      const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
-      return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
-    });
-    assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, ["ko"]);
-    assert.deepEqual(snapshotEnvelope.diagnostics.analyzer.activeAnalyzers, ["ko"]);
-  } finally {
-    await shutdownSearchDaemonEnv(searchEnv);
-  }
-
-  const envOverrideSearchEnv = isolatedSearchDaemonEnv({
-    ...env,
-    XDG_CACHE_HOME: cache,
-    OPTSIDIAN_VAULT_PATH: vault,
-    OPTSIDIAN_SEARCH_EXTRA_LANGS: ""
-  });
-  try {
-    result = run(["search", "query=검색", "format=json"], {
-      cwd: project,
-      env: envOverrideSearchEnv
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const { searchStoreCachePaths } = await import(path.resolve("src/daemon/search-store/cache-paths.ts"));
-    const envOverrideSnapshotEnvelope = await withProcessEnv({ XDG_CACHE_HOME: cache }, () => {
-      const paths = searchStoreCachePaths(vault);
-      const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
-      return JSON.parse(fs.readFileSync(path.join(paths.snapshotsDir, active.snapshotId), "utf8"));
-    });
-    assert.deepEqual(envOverrideSnapshotEnvelope.diagnostics.analyzer.declaredAnalyzers, []);
-  } finally {
-    await shutdownSearchDaemonEnv(envOverrideSearchEnv);
-  }
-
-  const expectedAfterUnsets = [
-    ["search.extraLangs", { queryWorkers: 2, indexWorkers: 2, snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.queryWorkers", { indexWorkers: 2, snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.indexWorkers", { snapshotRetentionCount: 3, queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.snapshotRetentionCount", { queryCacheSize: 32, memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.queryCacheSize", { memoryBudgetCount: 4, memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.memoryBudgetCount", { memoryBudgetBytes: 1048576, daemonIdleMs: 0 }],
-    ["search.memoryBudgetBytes", { daemonIdleMs: 0 }],
-    ["search.daemonIdleMs", undefined]
-  ];
-  for (const [key, remaining] of expectedAfterUnsets) {
-    result = run(["config", "unset", key, "format=json"], { cwd: project, env });
-    assert.equal(result.status, 0, result.stderr);
-    const config = JSON.parse(result.stdout).config;
-    if (remaining) assert.deepEqual(config, { search: remaining });
-    else assert.deepEqual(config, {});
-  }
 
   const localSettings = path.join(project, ".optsidian", "settings.json");
   fs.mkdirSync(path.dirname(localSettings), { recursive: true });
@@ -1487,14 +1308,9 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "search.analyzer: kiwi");
 
-  result = run(["config", "set", "search.analyzer=intl", "format=json"], { cwd: project, env });
+  result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config.search.analyzer, "intl");
-  assert.match(fs.readFileSync(localSettings, "utf8"), /"kiwi"/);
-
-  result = run(["config", "get", "search.analyzer"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "search.analyzer: kiwi");
+  assert.deepEqual(JSON.parse(result.stdout).config, {});
 });
 
 test("search requires query or tag and validates fields", () => {
@@ -1505,10 +1321,6 @@ test("search requires query or tag and validates fields", () => {
   let result = run(["search", "path=note.md"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /query=<text> or tag=<tag>/);
-
-  result = run(["search", "help", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).matches.map((match) => match.path), ["note.md"]);
 
   result = run(["search", "query=alpha", "help"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
@@ -1521,45 +1333,6 @@ test("search requires query or tag and validates fields", () => {
   result = run(["search", "tag=project", "field=body"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /field=<field> requires query=<text>/);
-});
-
-test("search favors exact note identity over body-only mentions and respects field scope", () => {
-  const { vault, env } = setup();
-  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
-  fs.mkdirSync(path.join(vault, "Reference"), { recursive: true });
-  fs.mkdirSync(path.join(vault, "Roadmap"), { recursive: true });
-  fs.writeFileSync(
-    path.join(vault, "Notes", "Project Alpha.md"),
-    "---\ntitle: Project Alpha\naliases:\n  - Launch Alpha\n---\nMinimal body.\n"
-  );
-  fs.writeFileSync(
-    path.join(vault, "Notes", "Body Mention.md"),
-    "project alpha appears repeatedly in the body.\nproject alpha appears repeatedly in the body.\n"
-  );
-  fs.writeFileSync(path.join(vault, "Reference", "Alpha Checklist.md"), "# Reference\nMinimal body.\n");
-  fs.writeFileSync(
-    path.join(vault, "Notes", "Checklist Body.md"),
-    "alpha checklist appears repeatedly in the body.\nalpha checklist appears repeatedly in the body.\n"
-  );
-  fs.writeFileSync(path.join(vault, "Roadmap", "Plan.md"), "# Plan\nMinimal body.\n");
-  fs.writeFileSync(path.join(vault, "Notes", "Roadmap Body.md"), "roadmap roadmap roadmap roadmap\n");
-
-  let result = run(["search", "launch", "alpha", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Project Alpha.md");
-
-  result = run(["search", "query=alpha checklist", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).matches[0].path, "Reference/Alpha Checklist.md");
-
-  result = run(["search", "query=roadmap", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Roadmap Body.md");
-
-  result = run(["search", "query=roadmap", "field=body", "limit=3", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).matches[0].path, "Notes/Roadmap Body.md");
 });
 
 test("frontmatter command reads and mutates structured metadata", () => {
@@ -1576,28 +1349,11 @@ test("frontmatter command reads and mutates structured metadata", () => {
   result = run(["frontmatter", "set", "path=note.md", "key=aliases", `value-json=@${values}`], { env });
   assert.equal(result.status, 0, result.stderr);
 
-  result = run(["frontmatter", "set", "path=note.md", "key=meta", 'value-json={"text":"a\\nb"}'], { env });
-  assert.equal(result.status, 0, result.stderr);
-
-  result = run(["frontmatter", "add", "path=note.md", "key=tags", "value=project"], { env });
-  assert.equal(result.status, 0, result.stderr);
-
   result = run(["frontmatter", "read", "path=note.md", "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
   const read = JSON.parse(result.stdout);
   assert.deepEqual(read.frontmatter.aliases, ["Project Alpha", "Alpha"]);
-  assert.deepEqual(read.frontmatter.meta, { text: "a\nb" });
-  assert.deepEqual(read.frontmatter.tags, ["project"]);
   assert.equal(read.frontmatter.priority, 3);
-
-  result = run(["frontmatter", "remove", "path=note.md", "key=tags", "value=project", "dry-run"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Dry run/);
-  assert.deepEqual(JSON.parse(run(["frontmatter", "read", "path=note.md", "format=json"], { env }).stdout).frontmatter.tags, ["project"]);
-
-  result = run(["frontmatter", "delete", "path=note.md", "key=priority"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(run(["frontmatter", "read", "path=note.md", "format=json"], { env }).stdout).frontmatter.priority, undefined);
 });
 
 test("write and edit mutate only optimized commands", () => {

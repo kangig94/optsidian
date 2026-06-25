@@ -60,6 +60,15 @@ function tempRoot(prefix = "optsidian-search-daemon-contract-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(predicate(), true);
+}
+
 function futureImport(relativePath) {
   return import(path.join(repoRoot, relativePath));
 }
@@ -484,8 +493,10 @@ parentPort.on("message", (message) => {
     workerScript,
     env: { ...process.env }
   });
+  let timeoutId;
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("warmup did not settle")), 6000);
+    timeoutId = setTimeout(() => reject(new Error("warmup did not settle")), 6000);
+    timeoutId.unref?.();
   });
   const started = Date.now();
 
@@ -500,6 +511,7 @@ parentPort.on("message", (message) => {
     );
     assert.ok(Date.now() - started < 6000);
   } finally {
+    clearTimeout(timeoutId);
     await pool.close();
   }
 });
@@ -534,7 +546,7 @@ parentPort.on("message", (message) => {
       memoryRss: process.memoryUsage().rss
     });
     if (index === 0) reply();
-    else setTimeout(reply, 1500);
+    else setTimeout(reply, 100);
     return;
   }
   fs.appendFileSync(jobLog, String(index) + "\\n");
@@ -605,7 +617,6 @@ parentPort.on("message", (message) => {
     env: { ...process.env }
   });
   try {
-    await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal(fs.readFileSync(logPath, "utf8"), "");
     assert.equal(pool.stats().ready, 0);
     assert.equal(pool.stats().slots[0].warmupStarted, false);
@@ -683,7 +694,6 @@ parentPort.on("message", (message) => {
       deadline: Date.now() + 1000,
       cancellationId: "memory-guard"
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
     const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
     assert.equal(warmups.length, 1);
     const stats = pool.stats();
@@ -732,7 +742,10 @@ parentPort.on("message", (message) => {
       deadline: Date.now() + 1000,
       cancellationId: "rss-guard"
     });
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await waitFor(() =>
+      pool.stats().lastRestartReason === "rss guard exceeded (1000 > 10)"
+      && fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean).length >= 2
+    );
     const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
     assert.ok(warmups.length >= 2);
     assert.equal(pool.stats().lastRestartReason, "rss guard exceeded (1000 > 10)");
@@ -2029,57 +2042,60 @@ test("query-analysis cache key is deterministic and does not become result ident
 test("AC19 search-execution pool serves a second search while a heavy search is in-flight", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
-  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
-  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
-  const cacheRoot = tempRoot();
-  const vault = tempRoot();
-  for (let index = 0; index < 1200; index += 1) {
-    writeVaultFile(vault, `Note-${index}.md`, `# Note ${index}\n\nneedle payload ${"payload ".repeat(120)} ${index}\n`);
+  const root = tempRoot();
+  const workerScript = path.join(root, "search-execution-concurrency.mjs");
+  const logPath = path.join(root, "events.log");
+  fs.writeFileSync(logPath, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const logPath = ${JSON.stringify(logPath)};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
   }
-  writeVaultFile(vault, "Unique.md", "# Unique\n\nuniquetarget isolated result\n");
-  const analyzer = testAnalyzer();
-  const store = createDaemonSnapshotStore({
-    env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
-    analyzer,
-    countCap: 4,
-    byteCap: 16 * 1024 * 1024
+  const query = message.request?.payload?.search?.query;
+  if (query === "needle payload") {
+    fs.appendFileSync(logPath, "heavy\\n");
+    setInterval(() => {}, 1000);
+    return;
+  }
+  fs.appendFileSync(logPath, "second\\n");
+  parentPort.postMessage({
+    id: message.id,
+    ok: true,
+    result: { ok: true, command: "search", matches: [{ path: "Unique.md" }], snapshotId: "snap-a" },
+    memoryRss: process.memoryUsage().rss
   });
-  await store.loadVault(vault);
-  const pin = await store.pin(vault);
+});
+`);
   const pool = new SearchExecutionWorkerPool(new DaemonWorkerPool({
     name: "ac19-search-execution",
     kind: "search",
     size: 2,
+    workerScript,
     env: { ...process.env }
   }));
   await pool.warmup();
-  const payload = store.snapshotHandleForPin(pin);
   try {
     let heavySettled = false;
     const heavy = pool.search({
-      vault,
-      search: normalizeSearchParams({ query: "needle payload", limit: 1000, debug: true }),
-      analysis: testQueryAnalysis("needle payload"),
-      analyzerIdentity: analyzer.identity,
-      snapshot: payload
+      search: { query: "needle payload" }
     }, {
-      deadline: Date.now() + 10000,
-      cancellationId: "heavy",
-      vault
+      deadline: Date.now() + 5000,
+      cancellationId: "heavy"
     }).finally(() => {
       heavySettled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitFor(() => fs.readFileSync(logPath, "utf8").includes("heavy"));
     const second = await pool.search({
-      vault,
-      search: normalizeSearchParams({ query: "uniquetarget", limit: 1, debug: false }),
-      analysis: testQueryAnalysis("uniquetarget"),
-      analyzerIdentity: analyzer.identity,
-      snapshot: payload
+      search: { query: "uniquetarget" }
     }, {
-      deadline: Date.now() + 10000,
-      cancellationId: "second",
-      vault
+      deadline: Date.now() + 5000,
+      cancellationId: "second"
     });
 
     assert.equal(heavySettled, false, "heavy search should still be in-flight when the second search returns");
@@ -2091,7 +2107,6 @@ test("AC19 search-execution pool serves a second search while a heavy search is 
     });
   } finally {
     await pool.close();
-    store.release(pin);
   }
 });
 

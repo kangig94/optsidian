@@ -91,28 +91,17 @@ function startFakeObsidianHost(dir, guiEnv) {
 
 function waitForProcessEnv(pid, expectedEnv) {
   if (!pid || process.platform !== "linux") return false;
-  const deadline = Date.now() + 2000;
-  const probe = `
-const fs = require("node:fs");
-const pid = process.argv[1];
-const expected = JSON.parse(process.argv[2]);
-try {
-  const entries = fs.readFileSync("/proc/" + pid + "/environ", "utf8").split("\\0");
-  if (Object.entries(expected).every(([key, value]) => entries.includes(key + "=" + value))) {
-    process.exit(0);
+  const deadline = Date.now() + 200;
+  while (true) {
+    try {
+      const entries = fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+      return Object.entries(expectedEnv).every(([key, value]) => entries.includes(`${key}=${value}`));
+    } catch (error) {
+      if (error?.code !== "ENOENT") return false;
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
   }
-} catch {}
-process.exit(1);
-`;
-  while (Date.now() < deadline) {
-    const result = spawnSync(process.execPath, ["-e", probe, String(pid), JSON.stringify(expectedEnv)], {
-      encoding: "utf8",
-      env: strippedGuiEnv()
-    });
-    if (result.status === 0) return true;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  return false;
 }
 
 function makeFakeObsidian(dir, vaultRoot) {

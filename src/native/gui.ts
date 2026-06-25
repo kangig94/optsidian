@@ -24,6 +24,8 @@ export type OpenObsidianGuiOptions = {
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const WAIT_INTERVAL_MS = 250;
+const FAST_WAIT_INTERVAL_MS = 50;
+const FAST_WAIT_WINDOW_MS = 1_000;
 
 export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Promise<OpenObsidianGuiResult> {
   const env = buildGuiLaunchEnv(options.env ?? process.env);
@@ -119,6 +121,7 @@ async function waitForNativeVaultReady(options: {
   timeoutMs: number;
 }): Promise<string> {
   const deadline = Date.now() + options.timeoutMs;
+  const startedAt = Date.now();
   const expected = options.expectedVaultPath ? realpathForCompare(options.expectedVaultPath) : undefined;
   let lastReason = "native vault resolution has not succeeded yet";
 
@@ -132,7 +135,7 @@ async function waitForNativeVaultReady(options: {
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error);
     }
-    await sleep(WAIT_INTERVAL_MS);
+    await sleep(Date.now() - startedAt < FAST_WAIT_WINDOW_MS ? FAST_WAIT_INTERVAL_MS : WAIT_INTERVAL_MS);
   }
 
   throw new RuntimeError(`Timed out waiting for Obsidian GUI native vault resolution. Last status: ${lastReason}`);

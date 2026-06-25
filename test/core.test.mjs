@@ -73,6 +73,85 @@ async function core() {
   return import(path.join(repoRoot, "src/core/index.ts"));
 }
 
+test("settings helpers normalize supported config keys and apply local overrides", async () => {
+  const {
+    configPathResult,
+    getConfigValue,
+    readOptsidianSettings,
+    setConfigValue,
+    unsetConfigValue
+  } = await import(path.join(repoRoot, "src/core/settings.ts"));
+  const project = tempVault();
+  const env = { XDG_CONFIG_HOME: path.join(project, "config") };
+  const globalSettings = path.join(env.XDG_CONFIG_HOME, "optsidian", "settings.json");
+
+  assert.equal(configPathResult(project, env).path, globalSettings);
+
+  const cases = [
+    ["search.analyzer", "kiwi", "kiwi"],
+    ["search.extraLangs", "ko, KO", ["ko"]],
+    ["search.queryWorkers", "2", 2],
+    ["search.indexWorkers", "2", 2],
+    ["search.snapshotRetentionCount", "3", 3],
+    ["search.queryCacheSize", "0", 0],
+    ["search.memoryBudgetCount", "4", 4],
+    ["search.memoryBudgetBytes", "1048576", 1048576],
+    ["search.daemonIdleMs", "0", 0]
+  ];
+
+  for (const [key, raw, expected] of cases) {
+    const result = setConfigValue(project, key, raw, env);
+    assert.equal(result.path, globalSettings);
+    assert.deepEqual(result.value, expected);
+    assert.deepEqual(getConfigValue(project, key, env).value, expected);
+  }
+
+  const expectedGlobalSearch = {
+    analyzer: "kiwi",
+    extraLangs: ["ko"],
+    queryWorkers: 2,
+    indexWorkers: 2,
+    snapshotRetentionCount: 3,
+    queryCacheSize: 0,
+    memoryBudgetCount: 4,
+    memoryBudgetBytes: 1048576,
+    daemonIdleMs: 0
+  };
+  assert.deepEqual(readOptsidianSettings(project, env), { search: expectedGlobalSearch });
+
+  const localSettings = path.join(project, ".optsidian", "settings.json");
+  fs.mkdirSync(path.dirname(localSettings), { recursive: true });
+  fs.writeFileSync(localSettings, '{\n  "search": {\n    "analyzer": "intl",\n    "queryWorkers": 5\n  }\n}\n');
+
+  assert.deepEqual(readOptsidianSettings(project, env).search, {
+    analyzer: "intl",
+    extraLangs: ["ko"],
+    queryWorkers: 5,
+    indexWorkers: 2,
+    snapshotRetentionCount: 3,
+    queryCacheSize: 0,
+    memoryBudgetCount: 4,
+    memoryBudgetBytes: 1048576,
+    daemonIdleMs: 0
+  });
+  assert.equal(getConfigValue(project, "search.analyzer", env).value, "intl");
+
+  const localSettingsBefore = fs.readFileSync(localSettings, "utf8");
+  const updatedGlobal = setConfigValue(project, "search.analyzer", "intl", env);
+  assert.equal(updatedGlobal.config.search.analyzer, "intl");
+  assert.equal(fs.readFileSync(localSettings, "utf8"), localSettingsBefore);
+  assert.equal(getConfigValue(project, "search.analyzer", env).value, "intl");
+
+  const remainingGlobalSearch = { ...expectedGlobalSearch, analyzer: "intl" };
+  for (const key of cases.map(([settingKey]) => settingKey)) {
+    const result = unsetConfigValue(project, key, env);
+    delete remainingGlobalSearch[key.slice("search.".length)];
+    if (Object.keys(remainingGlobalSearch).length > 0) {
+      assert.deepEqual(result.config, { search: { ...remainingGlobalSearch } });
+    } else assert.deepEqual(result.config, {});
+  }
+});
+
 test("AC6 search query and Hangul ngram analysis are length-bounded", async () => {
   const { UsageError } = await import(path.join(repoRoot, "src/errors.ts"));
   const { MAX_SEARCH_QUERY_LENGTH, normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
