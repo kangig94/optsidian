@@ -164,6 +164,9 @@ test("AC6 search query and Hangul ngram analysis are length-bounded", async () =
     () => normalizeSearchParams({ query: `${maxQuery}a` }),
     (error) => error instanceof UsageError && /4096 characters or fewer/.test(error.message)
   );
+  assert.throws(() => normalizeSearchParams({ path: "note.md" }), /query=<text> or tag=<tag>/);
+  assert.throws(() => normalizeSearchParams({ query: "alpha", fields: ["unknown"] }), /field must be one of/);
+  assert.throws(() => normalizeSearchParams({ tags: ["project"], fields: ["body"] }), /field=<field> requires query=<text>/);
 
   assert.deepEqual(ngramSearchTerms(["검색어"]), ["검색", "색어", "검색어"]);
 

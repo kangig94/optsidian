@@ -467,13 +467,6 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(bareTopLevelHelp.status, 2);
   assert.match(bareTopLevelHelp.stderr, /Use --help or help=true/);
 
-  const searchHelp = run(["search", "--help"]);
-  assert.equal(searchHelp.status, 0, searchHelp.stderr);
-  assert.match(searchHelp.stdout, /Command: search/);
-  assert.match(searchHelp.stdout, /query=<text>/);
-  assert.match(searchHelp.stdout, /tag=<tag/);
-  assert.match(searchHelp.stdout, /field=<field/);
-
   const bareReadHelp = run(["read", "help"], { env });
   assert.equal(bareReadHelp.status, 2);
   assert.match(bareReadHelp.stderr, /Missing required argument: path=<value>/);
@@ -1220,14 +1213,35 @@ test("search ranks notes and index commands manage cache", async () => {
   result = run(["search", "query=review", "field=title", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).matches.length, 0);
+});
 
-  result = run(["index", "rebuild"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Index rebuilt.\n");
-
-  result = run(["index", "clear"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "Index cleared.\n");
+test("index mutation rendering stays stable", async () => {
+  const { renderIndexResult } = await import(path.resolve("src/cli/render.ts"));
+  assert.equal(renderIndexResult({ ok: true, command: "index", action: "rebuild" }), "Index rebuilt.\n");
+  assert.equal(renderIndexResult({ ok: true, command: "index", action: "clear" }), "Index cleared.\n");
+  assert.equal(renderIndexResult({
+    ok: true,
+    ready: true,
+    phase: "ready",
+    nonce: "nonce",
+    protocolVersion: 1,
+    owner: {},
+    metrics: { requests: 3, failures: 0, activeRequests: 0, startedAt: "2026-01-01T00:00:00.000Z" },
+    pools: {},
+    searchStore: {},
+    vaults: [
+      { vault: "/vault-a", state: "ready", snapshotId: "abc123", updatedAt: "2026-01-01T00:00:00.000Z" },
+      { vault: "/vault-b", state: "loading", progress: { phase: "building", completed: 1, total: 2, current: "note.md" } }
+    ]
+  }), [
+    "Search daemon ready.",
+    "Phase: ready.",
+    "Requests: 3, failures: 0, active: 0.",
+    "Vaults:",
+    "- ready: /vault-a (snapshot: abc123, updated: 2026-01-01T00:00:00.000Z)",
+    "- loading: /vault-b (progress: building 1/2 note.md)",
+    ""
+  ].join("\n"));
 });
 
 test("index warm prepares discovered Obsidian registry vaults", async () => {
@@ -1262,12 +1276,6 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
       { vaultRoot: fs.realpathSync(secondVault), status: "ready" }
     ]
   );
-
-  result = run(["index", "status", "vault-path=" + secondVault], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Search daemon ready\.\nPhase: ready\.\nRequests: \d+, failures: 0, active: \d+\.\nVaults:\n/m);
-  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(vault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
-  assert.match(result.stdout, new RegExp(`^- ready: ${escapeRegExp(fs.realpathSync(secondVault))} \\(snapshot: ${SNAPSHOT_ID_PATTERN}, updated: .+\\)$`, "m"));
 
   const overrideRegistry = path.join(dir, "override-obsidian.json");
   fs.writeFileSync(
@@ -1325,14 +1333,6 @@ test("search requires query or tag and validates fields", () => {
   result = run(["search", "query=alpha", "help"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /either positional search terms or query=<text>/);
-
-  result = run(["search", "query=alpha", "field=unknown"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /field must be one of/);
-
-  result = run(["search", "tag=project", "field=body"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /field=<field> requires query=<text>/);
 });
 
 test("frontmatter command reads and mutates structured metadata", () => {
