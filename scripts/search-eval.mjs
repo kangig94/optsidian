@@ -30,6 +30,7 @@ const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
     determinism: "Deadline and cancellation change success vs error only; never ordering, partial results, or repin."
   }
 });
+const INDEX_BENCHMARK_ACTIONS = new Set(["load", "rebuild", "clear", "clear-load", "clear-rebuild"]);
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -42,53 +43,15 @@ if (options.offlineExplainTrace) {
   runOfflineExplainTrace(options);
   process.exit(0);
 }
-const mode = options.mode ?? "core";
-const concurrency = options.concurrency ?? 1;
-const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
-
-if (!vaultRoot) {
-  usage("Missing vault path. Pass it as the first argument or set OPTSIDIAN_VAULT_PATH.");
+const benchmark = options.benchmark ?? (options.indexActions ? "index" : "quality");
+if (benchmark === "index") {
+  const report = await runIndexBenchmark(options);
+  if (options.format === "json") console.log(JSON.stringify(report, null, 2));
+  process.exitCode = report.actions.every((action) => action.ok) ? 0 : 1;
+} else {
+  const runs = await runQualityBenchmark(options);
+  process.exitCode = options.scoreOnly || runs.every((run) => run.failed === 0) ? 0 : 1;
 }
-
-const specPath = options.spec ?? path.join(vaultRoot, "SearchEval", "queries.json");
-const cliPath = options.cli ?? path.join(repoRoot, "dist", "optsidian");
-
-if (!fs.existsSync(specPath)) usage(`Query spec not found: ${specPath}`);
-if (mode === "e2e" && !fs.existsSync(cliPath)) usage(`Optsidian CLI not found: ${cliPath}. Run npm run build first.`);
-
-const spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
-if (!Array.isArray(spec.queries)) usage(`Query spec must contain a queries array: ${specPath}`);
-const repeat = options.repeat ?? 1;
-const runSearch = await searchRunner(mode, cliPath, vaultRoot, options);
-
-if (!options.noWarmup && spec.queries.length > 0) {
-  await runSearch({ ...spec.queries[0], limit: 1 });
-}
-
-const runs = [];
-for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
-  const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
-  runs.push(run);
-  printRunSummary(run, { mode, concurrency, repeat, runIndex });
-}
-
-if (repeat > 1) {
-  printRepeatSummary(runs, { mode, concurrency });
-}
-
-if (options.failureReport) {
-  writeFailureReport(options.failureReport, createFailureReport({
-    mode,
-    concurrency,
-    repeat,
-    specPath,
-    vaultRoot,
-    inspectLimit: options.failureInspectLimit ?? 50,
-    runs
-  }));
-}
-
-process.exitCode = options.scoreOnly || runs.every((run) => run.failed === 0) ? 0 : 1;
 
 function parseOptions(argv) {
   const parsed = {};
@@ -111,6 +74,17 @@ function parseOptions(argv) {
       if (parsed.mode !== "core" && parsed.mode !== "e2e") {
         usage("mode must be one of: core, e2e");
       }
+    } else if (arg.startsWith("--benchmark=")) {
+      parsed.benchmark = parseBenchmark(arg.slice("--benchmark=".length));
+    } else if (arg.startsWith("--bench=")) {
+      parsed.benchmark = parseBenchmark(arg.slice("--bench=".length));
+    } else if (arg.startsWith("--index-actions=")) {
+      parsed.indexActions = parseIndexActions(arg.slice("--index-actions=".length));
+    } else if (arg.startsWith("--index-action=")) {
+      parsed.indexActions ??= [];
+      parsed.indexActions.push(...parseIndexActions(arg.slice("--index-action=".length)));
+    } else if (arg.startsWith("--deadline-ms=")) {
+      parsed.deadlineMs = parsePositiveInt(arg.slice("--deadline-ms=".length), "deadline-ms");
     } else if (arg.startsWith("--suite=")) {
       parsed.suites ??= [];
       parsed.suites.push(parseSuite(arg.slice("--suite=".length)));
@@ -152,6 +126,388 @@ function parseOptions(argv) {
     }
   }
   return parsed;
+}
+
+async function runQualityBenchmark(options) {
+  const mode = options.mode ?? "core";
+  const concurrency = options.concurrency ?? 1;
+  const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
+
+  if (!vaultRoot) {
+    usage("Missing vault path. Pass it as the first argument or set OPTSIDIAN_VAULT_PATH.");
+  }
+
+  const specPath = options.spec ?? path.join(vaultRoot, "SearchEval", "queries.json");
+  const cliPath = options.cli ?? path.join(repoRoot, "dist", "optsidian");
+
+  if (!fs.existsSync(specPath)) usage(`Query spec not found: ${specPath}`);
+  if (mode === "e2e" && !fs.existsSync(cliPath)) usage(`Optsidian CLI not found: ${cliPath}. Run npm run build first.`);
+
+  const spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
+  if (!Array.isArray(spec.queries)) usage(`Query spec must contain a queries array: ${specPath}`);
+  const repeat = options.repeat ?? 1;
+  const runSearch = await searchRunner(mode, cliPath, vaultRoot, options);
+
+  if (!options.noWarmup && spec.queries.length > 0) {
+    await runSearch({ ...spec.queries[0], limit: 1 });
+  }
+
+  const runs = [];
+  for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
+    const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
+    runs.push(run);
+    printRunSummary(run, { mode, concurrency, repeat, runIndex });
+  }
+
+  if (repeat > 1) {
+    printRepeatSummary(runs, { mode, concurrency });
+  }
+
+  if (options.failureReport) {
+    writeFailureReport(options.failureReport, createFailureReport({
+      mode,
+      concurrency,
+      repeat,
+      specPath,
+      vaultRoot,
+      inspectLimit: options.failureInspectLimit ?? 50,
+      runs
+    }));
+  }
+
+  return runs;
+}
+
+async function runIndexBenchmark(options) {
+  const mode = options.mode ?? "core";
+  if (mode !== "core") usage("--benchmark=index supports --mode=core only");
+  if (options.failureReport) usage("--failure-report is only supported by --benchmark=quality");
+  if (options.scoreOnly) usage("--score-only is only supported by --benchmark=quality");
+  if (options.format && options.format !== "json" && options.format !== "text") usage("--benchmark=index supports --format=json or --format=text");
+  const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
+  if (!vaultRoot) {
+    usage("Missing vault path. Pass it as the first argument or set OPTSIDIAN_VAULT_PATH.");
+  }
+  const cliPath = options.cli ?? path.join(repoRoot, "dist", "optsidian");
+  const repeat = options.repeat ?? 1;
+  const actions = options.indexActions?.length ? options.indexActions : ["clear-load", "rebuild", "load"];
+  const { createSearchDaemonClient } = await import("../src/daemon/client.ts");
+  const { searchStoreCachePaths } = await import("../src/daemon/search-store/cache-paths.ts");
+  const client = createSearchDaemonClient({ binaryPath: cliPath });
+  const vault = markdownVaultStats(vaultRoot);
+  const cachePaths = safeCachePaths(searchStoreCachePaths, vault.root);
+  const cacheBefore = cachePaths ? directoryStats(cachePaths.rootDir) : undefined;
+  const daemonReady = await timedPhase("daemon-ready", () => client.status({ deadlineMs: options.deadlineMs ?? 15000 }));
+  const benchmarkActions = [];
+
+  for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
+    for (const action of actions) {
+      const result = await runIndexAction(client, vault.root, action, {
+        deadlineMs: options.deadlineMs,
+        cacheRoot: cachePaths?.rootDir
+      });
+      const enriched = { runIndex, ...result };
+      benchmarkActions.push(enriched);
+      if (!options.quiet && options.format !== "json") {
+        printIndexAction(enriched, { repeat, vault });
+      }
+    }
+  }
+
+  const finalStatus = await client.status({ deadlineMs: options.deadlineMs ?? 15000 }).catch((error) => ({
+    error: error instanceof Error ? error.message : String(error)
+  }));
+  const report = {
+    schemaVersion: 1,
+    benchmark: "index",
+    generatedAt: new Date().toISOString(),
+    mode,
+    repeat,
+    actionsRequested: actions,
+    vault,
+    cache: {
+      rootDir: cachePaths?.rootDir,
+      before: cacheBefore,
+      after: cachePaths ? directoryStats(cachePaths.rootDir) : undefined
+    },
+    daemonReady: {
+      ok: daemonReady.ok,
+      elapsedMs: daemonReady.elapsedMs,
+      ...(daemonReady.ok ? { memory: statusMemorySummary(daemonReady.value) } : { error: daemonReady.error })
+    },
+    actions: benchmarkActions,
+    finalStatus: compactStatus(finalStatus, vault.root)
+  };
+  if (!options.quiet && options.format !== "json") printIndexSummary(report);
+  return report;
+}
+
+async function runIndexAction(client, vaultRoot, action, options) {
+  const phases = [];
+  const request = { vault: vaultRoot, ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}) };
+  const started = performance.now();
+  let payload;
+  try {
+    if (action === "load") {
+      payload = await recordPhase(phases, "load", () => client.loadVault(request));
+    } else if (action === "rebuild") {
+      payload = await recordPhase(phases, "rebuild", () => client.rebuild(request));
+    } else if (action === "clear") {
+      payload = await recordPhase(phases, "clear", () => client.clear(request));
+    } else if (action === "clear-load") {
+      await recordPhase(phases, "clear", () => client.clear(request));
+      payload = await recordPhase(phases, "load", () => client.loadVault(request));
+    } else if (action === "clear-rebuild") {
+      await recordPhase(phases, "clear", () => client.clear(request));
+      payload = await recordPhase(phases, "rebuild", () => client.rebuild(request));
+    } else {
+      usage(`Unknown index action: ${action}`);
+    }
+    const elapsedMs = roundMs(performance.now() - started);
+    const status = await client.status({ deadlineMs: options.deadlineMs ?? 15000 }).catch((error) => ({
+      error: error instanceof Error ? error.message : String(error)
+    }));
+    return {
+      action,
+      ok: true,
+      elapsedMs,
+      phases,
+      snapshotId: payloadSnapshotId(payload) ?? vaultStatus(status, vaultRoot)?.snapshotId,
+      vault: vaultStatus(status, vaultRoot),
+      cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
+      memory: statusMemorySummary(status),
+      searchStore: status.searchStore
+    };
+  } catch (error) {
+    return {
+      action,
+      ok: false,
+      elapsedMs: roundMs(performance.now() - started),
+      phases,
+      error: error instanceof Error ? error.message : String(error),
+      cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined
+    };
+  }
+}
+
+async function recordPhase(phases, name, run) {
+  const phase = await timedPhase(name, run);
+  phases.push(phase.ok
+    ? { name, ok: true, elapsedMs: phase.elapsedMs, snapshotId: payloadSnapshotId(phase.value) }
+    : { name, ok: false, elapsedMs: phase.elapsedMs, error: phase.error });
+  if (!phase.ok) throw new Error(phase.error);
+  return phase.value;
+}
+
+async function timedPhase(name, run) {
+  const started = performance.now();
+  try {
+    const value = await run();
+    return {
+      name,
+      ok: true,
+      elapsedMs: roundMs(performance.now() - started),
+      value
+    };
+  } catch (error) {
+    return {
+      name,
+      ok: false,
+      elapsedMs: roundMs(performance.now() - started),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function parseBenchmark(raw) {
+  if (raw === "search") return "quality";
+  if (raw === "quality" || raw === "index") return raw;
+  usage("benchmark must be one of: quality, search, index");
+}
+
+function parseIndexActions(raw) {
+  const actions = raw.split(",").map((action) => action.trim()).filter(Boolean);
+  if (actions.length === 0) usage("index-actions must include at least one action");
+  for (const action of actions) {
+    if (!INDEX_BENCHMARK_ACTIONS.has(action)) {
+      usage(`index action must be one of: ${[...INDEX_BENCHMARK_ACTIONS].join(", ")}`);
+    }
+  }
+  return actions;
+}
+
+function markdownVaultStats(vaultRoot) {
+  const root = fs.realpathSync(vaultRoot);
+  const files = visibleMarkdownFiles(root);
+  let byteCount = 0;
+  for (const file of files) byteCount += fs.statSync(file).size;
+  return {
+    root,
+    fileCount: files.length,
+    byteCount,
+    mib: mibNumber(byteCount)
+  };
+}
+
+function visibleMarkdownFiles(root, start = root) {
+  const output = [];
+  for (const entry of safeReadDir(start)) {
+    if (entry.name.startsWith(".")) continue;
+    const abs = path.join(start, entry.name);
+    if (entry.isDirectory()) {
+      output.push(...visibleMarkdownFiles(root, abs));
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (path.extname(entry.name).toLowerCase() !== ".md") continue;
+    output.push(abs);
+  }
+  return output;
+}
+
+function safeReadDir(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+  } catch {
+    return [];
+  }
+}
+
+function safeCachePaths(searchStoreCachePaths, vaultRoot) {
+  try {
+    return searchStoreCachePaths(vaultRoot);
+  } catch {
+    return undefined;
+  }
+}
+
+function directoryStats(root) {
+  const stats = { exists: fs.existsSync(root), files: 0, byteCount: 0, mib: 0 };
+  if (!stats.exists) return stats;
+  const visit = (dir) => {
+    for (const entry of safeReadDir(dir)) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(abs);
+      } else if (entry.isFile()) {
+        stats.files += 1;
+        stats.byteCount += fs.statSync(abs).size;
+      }
+    }
+  };
+  visit(root);
+  stats.mib = mibNumber(stats.byteCount);
+  return stats;
+}
+
+function payloadSnapshotId(payload) {
+  if (!payload || typeof payload !== "object") return undefined;
+  return typeof payload.snapshotId === "string" ? payload.snapshotId : undefined;
+}
+
+function vaultStatus(status, vaultRoot) {
+  if (!status || status.error || !Array.isArray(status.vaults)) return undefined;
+  const resolved = path.resolve(vaultRoot);
+  return status.vaults.find((candidate) => path.resolve(candidate.vault) === resolved);
+}
+
+function statusMemorySummary(status) {
+  if (!status || status.error || !status.pools) return undefined;
+  const pools = [
+    status.pools.latencyAnalyzer,
+    status.pools.throughputAnalyzer,
+    status.pools.searchExecution
+  ].filter(Boolean);
+  const daemonRssValues = pools
+    .map((pool) => pool.processMemory?.rss)
+    .filter((value) => Number.isFinite(value));
+  let workerRssObservedMaxBytes = 0;
+  let workerHeapUsedBytes = 0;
+  let completedJobs = 0;
+  for (const pool of pools) {
+    for (const slot of pool.slots ?? []) {
+      const rss = slot.lastMemory?.rss;
+      const heapUsed = slot.lastMemory?.heapUsed;
+      if (Number.isFinite(rss)) workerRssObservedMaxBytes = Math.max(workerRssObservedMaxBytes, rss);
+      if (Number.isFinite(heapUsed)) workerHeapUsedBytes += heapUsed;
+      if (Number.isFinite(slot.completedJobs)) completedJobs += slot.completedJobs;
+    }
+  }
+  return {
+    daemonRssBytes: daemonRssValues.length > 0 ? Math.max(...daemonRssValues) : undefined,
+    workerRssObservedMaxBytes,
+    workerHeapUsedBytes,
+    completedJobs
+  };
+}
+
+function compactStatus(status, vaultRoot) {
+  if (!status || status.error) return status;
+  return {
+    ready: status.ready,
+    phase: status.phase,
+    metrics: status.metrics,
+    vault: vaultStatus(status, vaultRoot),
+    memory: statusMemorySummary(status),
+    searchStore: status.searchStore
+  };
+}
+
+function printIndexAction(result, context) {
+  const status = result.ok ? "ok" : "fail";
+  const snapshot = shortId(result.snapshotId ?? result.vault?.snapshotId);
+  const cache = result.cache ? formatBytes(result.cache.byteCount) : "n/a";
+  const rss = result.memory?.daemonRssBytes ? formatBytes(result.memory.daemonRssBytes) : "n/a";
+  const phases = result.phases.map((phase) => `${phase.name}=${phase.elapsedMs.toFixed(1)}ms`).join(",");
+  console.log([
+    "index:",
+    `run=${result.runIndex}/${context.repeat}`,
+    `action=${result.action}`,
+    status,
+    `elapsed=${result.elapsedMs.toFixed(1)}ms`,
+    `files=${context.vault.fileCount}`,
+    `md=${formatBytes(context.vault.byteCount)}`,
+    `cache=${cache}`,
+    `rss=${rss}`,
+    `snapshot=${snapshot || "none"}`,
+    `phases=${phases || "none"}`
+  ].join(" "));
+  if (!result.ok) console.log(`       error: ${result.error}`);
+}
+
+function printIndexSummary(report) {
+  const daemon = report.daemonReady.ok
+    ? `daemonReady=${report.daemonReady.elapsedMs.toFixed(1)}ms`
+    : `daemonReady=failed:${report.daemonReady.error}`;
+  console.log(`index.summary: benchmark=index repeat=${report.repeat} ${daemon} vaultFiles=${report.vault.fileCount} vaultBytes=${formatBytes(report.vault.byteCount)}`);
+  for (const action of report.actionsRequested) {
+    const runs = report.actions.filter((candidate) => candidate.action === action);
+    const ok = runs.filter((run) => run.ok);
+    const sorted = ok.map((run) => run.elapsedMs).sort((left, right) => left - right);
+    console.log([
+      "index.summary:",
+      `action=${action}`,
+      `ok=${ok.length}/${runs.length}`,
+      `median=${median(sorted).toFixed(1)}ms`,
+      `avg=${average(sorted).toFixed(1)}ms`,
+      `p95=${percentile(sorted, 95).toFixed(1)}ms`
+    ].join(" "));
+  }
+}
+
+function shortId(value) {
+  return typeof value === "string" && value.length > 12 ? value.slice(0, 12) : value;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "n/a";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)}MiB`;
+}
+
+function mibNumber(bytes) {
+  return Number((bytes / (1024 * 1024)).toFixed(3));
 }
 
 async function runEvaluation(queryCases, concurrency, runSearch, options, runIndex) {
@@ -934,7 +1290,8 @@ function roundMs(value) {
 
 function usage(message, code = 2) {
   if (message) console.error(message);
-  console.error("Usage: npm run search:eval -- <vault-path> [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--quiet] [--score-only] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
+  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--quiet] [--score-only] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
+  console.error("       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]");
   console.error("       npm run search:eval -- --print-search-daemon-slo-fixture");
   process.exit(code);
 }

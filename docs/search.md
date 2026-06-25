@@ -159,14 +159,15 @@ The search daemon owns the hot search path:
   512Ki chars for snippet scoring. Raw line snippets remain available for fallback display.
 - Keep long-document build stress coverage out of the default test path. `npm test` covers budget
   selection and normal snapshot contracts; run `npm run test:slow` before changing long-body
-  sampling, snippet sampling, or index-build timeout policy.
+  sampling, snippet sampling, `search:eval` benchmark modes, or index-build timeout policy.
 
 `N` in load sweeps means daemon worker count. Quality baselines use `--concurrency=1` against a
 warm pinned snapshot.
 
 ## Evaluation Modes
 
-Use the same evaluation script for both per-fixture and mixed-vault scoring:
+Use the same evaluation script for both search-quality and index-lifecycle benchmarks. The default
+benchmark is `quality`, which scores queries from a query spec:
 
 - `KLUE100`: run the KLUE query spec with `path` scoped to `KLUE100`.
 - `English100`: run the SciFact query spec with `path` scoped to `English100`.
@@ -215,6 +216,27 @@ expected path, rank within the scored limit, top matches, per-task scores, and a
 search. The inspection search defaults to `--failure-inspect-limit=50` and does not change scoring
 metrics or the reported run time. This is the primary input for deciding whether a miss is a
 candidate-limit, lexical-recall, or reranking problem.
+
+Use `--benchmark=index` when measuring vault indexing lifecycle cost instead of query quality:
+
+```bash
+npm run search:eval -- /path/to/test_search --benchmark=index
+npm run search:eval -- /path/to/test_search --benchmark=index --index-actions=clear-load,rebuild,load --repeat=3
+npm run search:eval -- /path/to/test_search --benchmark=index --format=json --quiet
+```
+
+Index benchmark actions are:
+
+- `clear-load`: clear the persisted search store, then run `LoadVault`.
+- `rebuild`: force `Rebuild` against the current vault.
+- `load`: run `LoadVault` with the current persisted cache.
+- `clear` and `clear-rebuild`: lower-level variants for isolating cache removal and forced rebuild
+  behavior.
+
+The text output is for quick local comparison. JSON output records vault Markdown file/byte counts,
+cache directory size before and after the run, per-action elapsed time and phases, snapshot id,
+daemon status, and observed memory summaries. Worker RSS is reported as a maximum observed RSS value,
+not a sum, because Node worker threads share process RSS.
 
 ## Baseline
 

@@ -8,6 +8,7 @@
 - Add repeat-run summaries and JSON failure reports to `search:eval` for search tuning.
 - Improve ranking by keeping weak ngram-only metadata coverage in the base bucket, raising KLUE100 to 100/100 and Mixed200 to 187/200.
 - Add dynamic body/snippet index budgets for long notes, including opt-in long-document stress tests, Hangul retrieval fallback, and bytes-aware lifecycle deadlines.
+- Split `search:eval` into quality and index benchmark modes while keeping a single script entrypoint and opt-in slow tests.
 
 <!--
 This file is not the release archive. GitHub Releases are the archive.

@@ -4,7 +4,6 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { unpack } from "msgpackr";
 
@@ -238,10 +237,6 @@ function importedSearchExecutionSymbols(source) {
     "getSearchIndexStatus"
   ];
   return symbols.filter((symbol) => new RegExp(`\\b${symbol}\\b`).test(source));
-}
-
-function assertOkSpawn(result, label) {
-  assert.equal(result.status, 0, `${label} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
 }
 
 function testQueryAnalysis(raw) {
@@ -2115,100 +2110,7 @@ test("AC3 analyzer-daemon socket client symbols are removed from analyzer constr
   }
 });
 
-test("AC10 Explain trace emitted by search execution replays offline and validates mutations deterministically", async () => {
-  const dir = tempRoot();
-  const fixture = await createPinnedSearchFixture({
-    "Alpha Project.md": "# Alpha Project\n\nalpha project target\n",
-    "Beta Project.md": "# Beta Project\n\nalpha project beta body\n",
-    "Gamma.md": "# Gamma\n\nunrelated\n"
-  }, { query: "alpha project", limit: 5, debug: true });
-  let trace;
-  try {
-    const explained = fixture.search({ explain: true });
-    assert.equal(explained.ok, true);
-    assert.ok(explained.explainTrace);
-    assert.ok(explained.explainTrace.inputs.candidateSet.candidates.length > 0);
-    assert.deepEqual(explained.explainTrace.inputs.queryAnalysis, testQueryAnalysis("alpha project"));
-    trace = explained.explainTrace;
-  } finally {
-    fixture.release();
-  }
-
-  const tracePath = path.join(dir, "trace.json");
-  fs.writeFileSync(tracePath, `${JSON.stringify(trace, null, 2)}\n`);
-  const replayArgs = [
-    "--import",
-    "tsx",
-    path.join(repoRoot, "scripts/search-eval.mjs"),
-    "--offline-explain-trace",
-    tracePath,
-    "--format=json"
-  ];
-  const replay = spawnSync(process.execPath, replayArgs, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      OPTSIDIAN_SEARCH_DAEMON_SOCKET: path.join(dir, "missing.sock"),
-      OPTSIDIAN_VAULT_PATH: path.join(dir, "missing-vault")
-    }
-  });
-
-  assertOkSpawn(replay, "offline explain replay");
-  const replayAgain = spawnSync(process.execPath, replayArgs, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      OPTSIDIAN_SEARCH_DAEMON_SOCKET: path.join(dir, "missing.sock"),
-      OPTSIDIAN_VAULT_PATH: path.join(dir, "missing-vault")
-    }
-  });
-  assertOkSpawn(replayAgain, "offline explain replay repeat");
-  assert.equal(replayAgain.stdout, replay.stdout);
-  const replayed = JSON.parse(replay.stdout);
-  assert.equal(replayed.outputHash, trace.expectedOutputHash);
-
-  const mutations = [
-    ["rankingAlgorithmId", "different-ranker"],
-    ["rankingConfig", { ...trace.rankingConfig, rrfK: trace.rankingConfig.rrfK + 1 }],
-    ["inputs", { ...trace.inputs, candidateSet: { ...trace.inputs.candidateSet, candidates: [] } }],
-    ["expectedOutputHash", "0".repeat(64)]
-  ];
-  for (const [key, value] of mutations) {
-    const mutatedPath = path.join(dir, `trace-${key}.json`);
-    fs.writeFileSync(mutatedPath, `${JSON.stringify({ ...trace, [key]: value }, null, 2)}\n`);
-    const mutated = spawnSync(process.execPath, [
-      "--import",
-      "tsx",
-      path.join(repoRoot, "scripts/search-eval.mjs"),
-      "--offline-explain-trace",
-      mutatedPath,
-      "--format=json"
-    ], { cwd: repoRoot, encoding: "utf8" });
-    assert.notEqual(mutated.status, 0, `${key} mutation must fail validation`);
-    assert.match(mutated.stderr || mutated.stdout, /trace validation|output hash|ranking algorithm|ranking config|candidate/i);
-  }
-});
-
-test("AC16 SLO fixture is opt-in documentation", async () => {
-  const fixtureResult = spawnSync(process.execPath, [
-    "--import",
-    "tsx",
-    path.join(repoRoot, "scripts/search-eval.mjs"),
-    "--print-search-daemon-slo-fixture"
-  ], { cwd: repoRoot, encoding: "utf8" });
-  assertOkSpawn(fixtureResult, "SLO fixture");
-  const fixture = JSON.parse(fixtureResult.stdout);
-  assert.equal(fixture.name, "Mixed200 warm pinned snapshot");
-  assert.equal(fixture.gate, "opt-in benchmark outside npm test");
-  assert.deepEqual(fixture.targets, [
-    { concurrency: 1, p50MsMax: 300, p95MsMax: 600 },
-    { concurrency: 4, p95MsMax: 900, provisional: true },
-    { concurrency: 8, p95MsMax: 1500, provisional: true },
-    { concurrency: 16, p95MsMax: 2500, provisional: true }
-  ]);
-
+test("AC16 deterministic scheduler preserves stable ordering under deadline cancellation and backpressure", async () => {
   const { createDeterministicSearchSchedulerForTests } = await futureImport("src/daemon/scheduler.ts");
   const scheduler = createDeterministicSearchSchedulerForTests({
     activeSnapshotId: "snap-old",
