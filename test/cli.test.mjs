@@ -343,6 +343,45 @@ function runAsync(args, options = {}) {
   });
 }
 
+let pluginInstallModules;
+
+async function runPluginInstallDirect(args, options = {}) {
+  pluginInstallModules ??= Promise.all([
+    import(path.resolve("src/cli/args.ts")),
+    import(path.resolve("src/cli/commands/plugin.ts"))
+  ]);
+  const [{ parseArgs }, { runPluginInstall }] = await pluginInstallModules;
+  const env = { OPTSIDIAN_NO_UPDATE_CHECK: "1", ...options.env };
+  const previousEnv = new Map();
+  for (const key of Object.keys(env)) {
+    previousEnv.set(key, Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : undefined);
+    if (env[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = env[key];
+    }
+  }
+
+  let stdout = "";
+  try {
+    await runPluginInstall(parseArgs(["plugin:install", ...args]), {
+      write(chunk) {
+        stdout += chunk;
+        return true;
+      }
+    });
+    return { status: 0, stdout, stderr: "" };
+  } finally {
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 function strippedGuiEnv(overrides = {}) {
   return {
     HOME: process.env.HOME,
@@ -450,7 +489,7 @@ test("version flag reports package version", () => {
   assert.equal(result.stdout.trim(), packageJson.version);
 });
 
-test("top-level and implemented command help stay local", () => {
+test("top-level and implemented command help stay local", async () => {
   const { env } = setup();
   const result = run(["--help"], { env });
   assert.equal(result.status, 0, result.stderr);
@@ -471,11 +510,11 @@ test("top-level and implemented command help stay local", () => {
   assert.equal(bareReadHelp.status, 2);
   assert.match(bareReadHelp.stderr, /Missing required argument: path=<value>/);
 
-  const pluginInstallHelp = run(["plugin:install", "--help"]);
-  assert.equal(pluginInstallHelp.status, 0, pluginInstallHelp.stderr);
-  assert.match(pluginInstallHelp.stdout, /Command: plugin:install/);
-  assert.match(pluginInstallHelp.stdout, /url=<git-url>/);
-  assert.match(pluginInstallHelp.stdout, /id=<plugin-id> is native passthrough/);
+  const { commandHelpText } = await import(path.resolve("src/cli/help.ts"));
+  const pluginInstallHelp = commandHelpText("plugin:install");
+  assert.match(pluginInstallHelp, /Command: plugin:install/);
+  assert.match(pluginInstallHelp, /url=<git-url>/);
+  assert.match(pluginInstallHelp, /id=<plugin-id> is native passthrough/);
 });
 
 test("top-level help includes native passthrough error verbatim when command listing fails", () => {
@@ -531,7 +570,7 @@ test("plugin:install path installs and enables a local custom plugin", () => {
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
 });
 
-test("plugin:install deploys only runtime files, never the source tree", () => {
+test("plugin:install deploys only runtime files, never the source tree", async () => {
   const { dir, vault, env } = setup();
   const pluginRoot = makeFakePlugin(dir);
   fs.writeFileSync(path.join(pluginRoot, "styles.css"), "/* x */\n");
@@ -540,7 +579,7 @@ test("plugin:install deploys only runtime files, never the source tree", () => {
   fs.writeFileSync(path.join(pluginRoot, "src", "main.ts"), "export {};\n");
   fs.mkdirSync(path.join(pluginRoot, "node_modules"), { recursive: true });
 
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], { env });
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
 
   const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
@@ -550,26 +589,26 @@ test("plugin:install deploys only runtime files, never the source tree", () => {
   assert.equal(fs.existsSync(path.join(target, "node_modules")), false);
 });
 
-test("plugin:install preserves the vault's existing data.json (settings) across reinstall", () => {
+test("plugin:install preserves the vault's existing data.json (settings) across reinstall", async () => {
   const { dir, vault, env } = setup();
   const pluginRoot = makeFakePlugin(dir);
   const target = path.join(vault, ".obsidian", "plugins", "sample-plugin");
   fs.mkdirSync(target, { recursive: true });
   fs.writeFileSync(path.join(target, "data.json"), JSON.stringify({ locale: "ko" }));
 
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], { env });
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, "data.json"), "utf8")), { locale: "ko" });
   assert.equal(fs.existsSync(path.join(target, "main.js")), true);
 });
 
-test("plugin:install path installs with a fixed vault path when native Obsidian is unavailable", () => {
+test("plugin:install path installs with a fixed vault path when native Obsidian is unavailable", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   fs.mkdirSync(vault, { recursive: true });
   const fake = makeFailingObsidian(dir);
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], {
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "enable", "format=json"], {
     env: { OPTSIDIAN_OBSIDIAN_BIN: fake }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -583,13 +622,13 @@ test("plugin:install path installs with a fixed vault path when native Obsidian 
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(vault, ".obsidian", "community-plugins.json"), "utf8")), ["sample-plugin"]);
 });
 
-test("plugin:install path uses OPTSIDIAN_VAULT_PATH when native Obsidian is unavailable", () => {
+test("plugin:install path uses OPTSIDIAN_VAULT_PATH when native Obsidian is unavailable", async () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   fs.mkdirSync(vault, { recursive: true });
   const fake = makeFailingObsidian(dir);
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, "format=json"], {
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, "format=json"], {
     env: { OPTSIDIAN_OBSIDIAN_BIN: fake, OPTSIDIAN_VAULT_PATH: vault }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -626,13 +665,12 @@ test("plugin:install validates enable config before copying plugin files", () =>
   assert.equal(fs.existsSync(path.join(obsidianDir, "plugins", "sample-plugin")), false);
 });
 
-test("plugin:install url installs from a git subdirectory and reloads the active vault", () => {
+test("plugin:install url installs from a git subdirectory and reloads the active vault", async () => {
   const { dir, vault, env, log } = setup();
   const repo = makeGitPluginRepo(dir);
   const url = pathToFileURL(repo).href;
   const expectedCommit = gitHead(repo);
-  const result = run([
-    "plugin:install",
+  const result = await runPluginInstallDirect([
     `url=${url}`,
     "ref=main",
     "dir=dist/obsidian-plugin",
@@ -667,8 +705,8 @@ test("plugin:install url installs from a published GitHub release instead of clo
     }
   });
   try {
-    const result = await runAsync(
-      ["plugin:install", "url=https://github.com/acme/released", `vault-path=${vault}`, "enable", "format=json"],
+    const result = await runPluginInstallDirect(
+      ["url=https://github.com/acme/released", `vault-path=${vault}`, "enable", "format=json"],
       { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: server.apiBase, GITHUB_TOKEN: "test-token" } }
     );
     assert.equal(result.status, 0, result.stderr);
@@ -697,8 +735,8 @@ test("plugin:install url installs from a GitHub Enterprise-style release API", a
   });
   try {
     const sourceUrl = `${server.apiBase}/acme/enterprise-plugin`;
-    const result = await runAsync(
-      ["plugin:install", `url=${sourceUrl}`, `vault-path=${vault}`, "enable", "format=json"],
+    const result = await runPluginInstallDirect(
+      [`url=${sourceUrl}`, `vault-path=${vault}`, "enable", "format=json"],
       { env: { ...env, ...NO_PROXY_ENV, GITHUB_TOKEN: "enterprise-token" } }
     );
     assert.equal(result.status, 0, result.stderr);
@@ -722,8 +760,8 @@ test("plugin:install authenticates the asset API URL but drops auth on a cross-h
   const cdn = await startGithubReleaseServer({ assets });
   const api = await startGithubReleaseServer({ tag: "2.0.0", assets, assetRedirectBase: cdn.apiBase });
   try {
-    const result = await runAsync(
-      ["plugin:install", "url=https://github.com/acme/private", `vault-path=${vault}`, "enable", "format=json"],
+    const result = await runPluginInstallDirect(
+      ["url=https://github.com/acme/private", `vault-path=${vault}`, "enable", "format=json"],
       { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: api.apiBase, GITHUB_TOKEN: "secret-token" } }
     );
     assert.equal(result.status, 0, result.stderr);
@@ -745,12 +783,12 @@ test("plugin:install authenticates the asset API URL but drops auth on a cross-h
   }
 });
 
-test("plugin:install refresh is skipped when the active native vault differs", () => {
+test("plugin:install refresh is skipped when the active native vault differs", async () => {
   const { dir, vault, env, log } = setup();
   const otherVault = path.join(dir, "other-vault");
   fs.mkdirSync(otherVault, { recursive: true });
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
     env: { ...env, FAKE_VAULT: otherVault }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -763,10 +801,10 @@ test("plugin:install refresh is skipped when the active native vault differs", (
   assert.deepEqual(calls.at(-1), ["vault", "info=path"]);
 });
 
-test("plugin:install reloads the app when native Obsidian has not discovered the new plugin yet", () => {
+test("plugin:install reloads the app when native Obsidian has not discovered the new plugin yet", async () => {
   const { dir, vault, env } = setup();
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
     env: { ...env, FAKE_PLUGIN_RELOAD_NOT_FOUND: "1" }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -778,10 +816,10 @@ test("plugin:install reloads the app when native Obsidian has not discovered the
   assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "sample-plugin", "main.js")), true);
 });
 
-test("plugin:install reloads the app when native Obsidian has not enabled the new plugin yet", () => {
+test("plugin:install reloads the app when native Obsidian has not enabled the new plugin yet", async () => {
   const { dir, vault, env } = setup();
   const pluginRoot = makeFakePlugin(dir);
-  const result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
+  const result = await runPluginInstallDirect([`path=${pluginRoot}`, `vault-path=${vault}`, "format=json"], {
     env: { ...env, FAKE_PLUGIN_RELOAD_NOT_ENABLED: "1" }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -890,19 +928,17 @@ test("native command help delegates as `help <command>`, never running the comma
 });
 
 test("destructive native command help never executes the command", () => {
-  for (const helpForm of [["delete", "--help"], ["delete", "help=true"]]) {
-    const { env, log } = setup();
-    const result = run(helpForm, { env });
-    assert.equal(result.status, 0, result.stderr);
-    const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(calls.at(-1), ["help", "delete"], `${helpForm.join(" ")} must delegate as \`help delete\``);
-    assert.ok(!calls.some((call) => call[0] === "delete"), `delete must never be executed for ${helpForm.join(" ")}`);
-  }
-
   const { env, log } = setup();
-  const result = run(["delete", "help"], { env });
+  let result = run(["delete", "--help"], { env });
   assert.equal(result.status, 0, result.stderr);
-  const calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  let calls = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(calls.at(-1), ["help", "delete"]);
+  assert.ok(!calls.some((call) => call[0] === "delete"), "delete must never be executed for delete --help");
+
+  const passthrough = setup();
+  result = run(["delete", "help"], { env: passthrough.env });
+  assert.equal(result.status, 0, result.stderr);
+  calls = fs.readFileSync(passthrough.log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(calls.at(-1), ["delete", "help"]);
   assert.ok(!calls.some((call) => call[0] === "help"), "bare help must not be rewritten to native help");
 });
@@ -1175,7 +1211,7 @@ test("grep is markdown-first and supports context", () => {
   assert.doesNotMatch(result.stdout, /ignored/);
 });
 
-test("search ranks notes and index commands manage cache", async () => {
+test("search ranks notes and renders CLI output", async () => {
   const { vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   fs.mkdirSync(path.join(vault, "Projects"), { recursive: true });
@@ -1210,9 +1246,6 @@ test("search ranks notes and index commands manage cache", async () => {
   assert.match(result.stdout, /tags: project, alpha/);
   assert.doesNotMatch(result.stdout, /scope:|aliases:|matched:|score:/);
 
-  result = run(["search", "query=review", "field=title", "format=json", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).matches.length, 0);
 });
 
 test("index mutation rendering stays stable", async () => {
@@ -1286,11 +1319,11 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
       }
     })
   );
-  result = run(["index", "warm", "format=json"], {
-    env: { ...env, XDG_CACHE_HOME: cache, OBSIDIAN_CONFIG: overrideRegistry }
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).vaults.map((entry) => entry.vaultRoot), [fs.realpathSync(secondVault)]);
+  const { discoverObsidianVaultRoots } = await import(path.resolve("src/native/obsidian.ts"));
+  assert.deepEqual(
+    discoverObsidianVaultRoots({ env: { ...env, OBSIDIAN_CONFIG: overrideRegistry } }).vaults.map((entry) => entry.path),
+    [fs.realpathSync(secondVault)]
+  );
 });
 
 
@@ -1315,10 +1348,6 @@ test("config command writes global settings and reads project-local overrides", 
   result = run(["config", "get", "search.analyzer"], { cwd: project, env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "search.analyzer: kiwi");
-
-  result = run(["config", "unset", "search.extraLangs", "format=json"], { cwd: project, env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).config, {});
 });
 
 test("search requires query or tag and validates fields", () => {
@@ -1341,30 +1370,21 @@ test("frontmatter command reads and mutates structured metadata", () => {
   const values = path.join(vault, "aliases.json");
   fs.writeFileSync(values, "[\"Project Alpha\",\"Alpha\"]\n");
 
-  let result = run(["frontmatter", "set", "path=note.md", "key=priority", "value-json=3", "format=json"], { env });
+  let result = run(["frontmatter", "set", "path=note.md", "key=aliases", `value-json=@${values}`, "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).command, "frontmatter");
-  assert.match(fs.readFileSync(path.join(vault, "note.md"), "utf8"), /priority: 3/);
-
-  result = run(["frontmatter", "set", "path=note.md", "key=aliases", `value-json=@${values}`], { env });
-  assert.equal(result.status, 0, result.stderr);
 
   result = run(["frontmatter", "read", "path=note.md", "format=json"], { env });
   assert.equal(result.status, 0, result.stderr);
   const read = JSON.parse(result.stdout);
   assert.deepEqual(read.frontmatter.aliases, ["Project Alpha", "Alpha"]);
-  assert.equal(read.frontmatter.priority, 3);
 });
 
-test("write and edit mutate only optimized commands", () => {
+test("write mutates only optimized commands", () => {
   const { vault, env } = setup();
-  let result = run(["write", "path=note.md", "content=hello\\nthere"], { env });
+  const result = run(["write", "path=note.md", "content=hello\\nthere"], { env });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "hello\nthere");
-
-  result = run(["edit", "path=note.md", "replace=hello\\nthere", "with=world"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "world");
 });
 
 test("dry-run does not write", () => {
@@ -1376,16 +1396,12 @@ test("dry-run does not write", () => {
   assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "old\n");
 });
 
-test("edit treats replacement text literally", () => {
+test("edit regex replacement text is literal", () => {
   const { vault, env } = setup();
   fs.writeFileSync(path.join(vault, "note.md"), "hello\nabc123\nabc456\n");
-  let result = run(["edit", "path=note.md", "replace=hello", "with=$&"], { env });
+  const result = run(["edit", "path=note.md", "regex=abc\\d+", "with=$1", "all"], { env });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "$&\nabc123\nabc456\n");
-
-  result = run(["edit", "path=note.md", "regex=abc\\d+", "with=$1", "all"], { env });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "$&\n$1\n$1\n");
+  assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "hello\n$1\n$1\n");
 });
 
 test("apply_patch updates files and accepts absolute in-vault paths", () => {

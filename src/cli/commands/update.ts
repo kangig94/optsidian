@@ -2,23 +2,34 @@ import { getValue, type ParsedArgs } from "../args.js";
 import { installRelease, checkForUpdate } from "../../update/installer.js";
 import { UsageError } from "../../errors.js";
 
-export async function runUpdate(args: ParsedArgs): Promise<void> {
+type OutputWriter = {
+  write(chunk: string): unknown;
+};
+
+type UpdateCommandOptions = {
+  env?: NodeJS.ProcessEnv;
+  output?: OutputWriter;
+};
+
+export async function runUpdate(args: ParsedArgs, options: UpdateCommandOptions = {}): Promise<void> {
   const action = args.positionals[0] ?? "install";
   const version = getValue(args, "version");
+  const env = options.env ?? process.env;
+  const output = options.output ?? process.stdout;
 
   switch (action) {
     case "install":
-      process.stdout.write(renderInstallResult(await installRelease({ tag: version })));
+      output.write(renderInstallResult(await installRelease({ tag: version, env })));
       return;
     case "check":
       if (version !== undefined) {
         throw new UsageError("update check does not accept version=; use optsidian update version=<tag>");
       }
-      process.stdout.write(renderCheckResult(await checkForUpdate()));
+      output.write(renderCheckResult(await checkForUpdate({ env })));
       return;
     default:
       if (action.startsWith("version=")) {
-        process.stdout.write(renderInstallResult(await installRelease({ tag: action.slice("version=".length) })));
+        output.write(renderInstallResult(await installRelease({ tag: action.slice("version=".length), env })));
         return;
       }
       throw new UsageError("update action must be check or version=<tag>");

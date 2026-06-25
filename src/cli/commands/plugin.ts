@@ -55,7 +55,11 @@ type EnablePlan = {
   next?: string[];
 };
 
-export async function runPluginInstall(args: ParsedArgs): Promise<void> {
+type OutputWriter = {
+  write(chunk: string): unknown;
+};
+
+export async function runPluginInstall(args: ParsedArgs, output: OutputWriter = process.stdout): Promise<void> {
   const hasCustomSource = args.values.has("url") || args.values.has("path");
   if (!hasCustomSource) {
     if (hasVaultPathArg(args)) {
@@ -108,7 +112,7 @@ export async function runPluginInstall(args: ParsedArgs): Promise<void> {
       enable: enablePlan.result,
       refresh
     };
-    process.stdout.write(renderPluginInstall(result, format));
+    output.write(renderPluginInstall(result, format));
   } finally {
     if (tempRoot) {
       fs.rmSync(tempRoot, { recursive: true, force: true });

@@ -98,6 +98,27 @@ function runCliAsync(args, env) {
   return runProcessAsync(process.execPath, [cli, ...args], env);
 }
 
+let updateModules;
+
+async function runUpdateDirect(args, env) {
+  updateModules ??= Promise.all([
+    import(path.resolve("src/cli/args.ts")),
+    import(path.resolve("src/cli/commands/update.ts"))
+  ]);
+  const [{ parseArgs }, { runUpdate }] = await updateModules;
+  let stdout = "";
+  await runUpdate(parseArgs(["update", ...args]), {
+    env: { ...process.env, OPTSIDIAN_NO_UPDATE_CHECK: "1", ...env },
+    output: {
+      write(chunk) {
+        stdout += chunk;
+        return true;
+      }
+    }
+  });
+  return { status: 0, stdout, stderr: "" };
+}
+
 function runBash(script, env) {
   return spawnSync("/bin/bash", [script], {
     encoding: "utf8",
@@ -405,7 +426,7 @@ test("update check without managed install reports latest release and guidance",
   const cache = path.join(dir, "cache");
 
   try {
-    const result = await runCliAsync(["update", "check"], {
+    const result = await runUpdateDirect(["check"], {
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
@@ -517,7 +538,7 @@ test("update installs a requested release into the managed bin dir and refreshes
   const managed = writeManagedInstall(cache, home, packageVersion, { vaultPath: vault });
 
   try {
-    const result = await runCliAsync([`update`, `version=v${newerVersion}`], {
+    const result = await runUpdateDirect([`version=v${newerVersion}`], {
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
@@ -551,7 +572,7 @@ test("update installs actual packaged release assets", async () => {
   writeManagedInstall(cache, home, "0.0.9");
 
   try {
-    const result = await runCliAsync([`update`, `version=v${packageVersion}`], {
+    const result = await runUpdateDirect([`version=v${packageVersion}`], {
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
@@ -574,7 +595,7 @@ test("update repairs a broken managed install even when already on the latest ve
   fs.rmSync(managed.optsidianPath, { force: true });
 
   try {
-    const check = await runCliAsync(["update", "check"], {
+    const check = await runUpdateDirect(["check"], {
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
@@ -584,7 +605,7 @@ test("update repairs a broken managed install even when already on the latest ve
     assert.match(check.stdout, /update: repair/);
     assert.match(check.stdout, /Managed install needs repair/);
 
-    const result = await runCliAsync(["update"], {
+    const result = await runUpdateDirect([], {
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
