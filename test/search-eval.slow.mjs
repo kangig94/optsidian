@@ -176,6 +176,81 @@ test("search:eval SLO fixture is opt-in documentation", () => {
   ]);
 });
 
+test("search:eval failure report summarizes failure classifications", () => {
+  const vault = tempRoot();
+  const reportPath = path.join(vault, "failure-report.json");
+  const specPath = path.join(vault, "SearchEval", "queries.json");
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nshared target body\n");
+  writeVaultFile(vault, "Beta.md", "# Beta\n\nshared target body\n");
+  fs.mkdirSync(path.dirname(specPath), { recursive: true });
+  fs.writeFileSync(specPath, `${JSON.stringify({
+    queries: [
+      {
+        id: "top1",
+        task: "toy",
+        query: "shared target",
+        expectFirst: "Beta.md",
+        limit: 2
+      },
+      {
+        id: "rerank",
+        task: "toy",
+        query: "shared target",
+        expected: "Beta.md",
+        limit: 1
+      },
+      {
+        id: "missing",
+        task: "toy",
+        query: "definitelymissingtoken",
+        expected: "Missing.md",
+        limit: 10
+      }
+    ]
+  }, null, 2)}\n`);
+
+  const result = spawnSync(process.execPath, [
+    "--import",
+    "tsx",
+    path.join(repoRoot, "scripts/search-eval.mjs"),
+    vault,
+    `--spec=${specPath}`,
+    `--failure-report=${reportPath}`,
+    "--failure-inspect-limit=5",
+    "--score-only",
+    "--no-warmup",
+    "--no-progress"
+  ], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      XDG_RUNTIME_DIR: tempRoot("optsidian-failure-report-runtime-"),
+      XDG_CACHE_HOME: tempRoot("optsidian-failure-report-cache-")
+    }
+  });
+  assertOkSpawn(result, "failure report");
+
+  const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.failureSummary.total, 3);
+  assert.equal(report.failureSummary.byTask.toy.total, 3);
+  assert.equal(report.failureSummary.byKind["top1-miss"], 1);
+  assert.equal(report.failureSummary.byKind["rerank-miss"], 1);
+  assert.equal(report.failureSummary.byKind["lexical-missing"], 1);
+  assert.equal(report.failureSummary.top1Miss, 1);
+  assert.equal(report.failureSummary.top10Miss, 1);
+  assert.equal(report.failureSummary.rerankMiss, 1);
+  assert.equal(report.failureSummary.lexicalMissing, 1);
+  assert.equal(report.runs[0].failureSummary.total, 3);
+
+  const failures = new Map(report.runs[0].failures.map((failure) => [failure.case.id, failure]));
+  assert.equal(failures.get("top1").case.expectation, "first");
+  assert.equal(failures.get("top1").classification.kind, "top1-miss");
+  assert.equal(failures.get("rerank").classification.kind, "rerank-miss");
+  assert.equal(failures.get("missing").classification.kind, "lexical-missing");
+});
+
 test("search:eval index benchmark reports cache and action timings", () => {
   const vault = tempRoot();
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nneedle alpha\n");

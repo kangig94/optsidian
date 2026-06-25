@@ -1,8 +1,15 @@
 import type { SearchDocument } from "../markdown.js";
 import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../analysis/index.js";
-import { COVERAGE_FIELD_WEIGHT, SEARCH_TOKEN_CHANNEL_WEIGHT, type CoverageField } from "../constants.js";
+import {
+  COVERAGE_FIELD_WEIGHT,
+  SEARCH_TOKEN_CHANNEL_WEIGHT,
+  WEAK_METADATA_COVERAGE_TERMS,
+  type CoverageField
+} from "../constants.js";
 import type { QueryContext } from "../internal-types.js";
 import { SEARCH_FIELD_CHANNEL_INDEX_PROPERTY } from "../schema.js";
+
+const WEAK_METADATA_COVERAGE_TERM_SET = new Set<string>(WEAK_METADATA_COVERAGE_TERMS);
 
 export function metadataCoverage(doc: SearchDocument, context: QueryContext): { terms: number; fieldScore: number } {
   if (context.terms.length === 0 && SEARCH_TOKEN_CHANNELS.every((channel) => context.channels[channel].length === 0)) {
@@ -17,6 +24,7 @@ export function metadataCoverage(doc: SearchDocument, context: QueryContext): { 
     const values = coverageFieldValues(doc, context, channel);
     const channelWeight = SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
     for (const term of terms) {
+      if (isWeakMetadataCoverageTerm(term)) continue;
       let matched = false;
       for (const [field, entries] of values) {
         if (entries.includes(term)) {
@@ -29,6 +37,10 @@ export function metadataCoverage(doc: SearchDocument, context: QueryContext): { 
   }
 
   return { terms: matchedTerms, fieldScore };
+}
+
+function isWeakMetadataCoverageTerm(term: string): boolean {
+  return WEAK_METADATA_COVERAGE_TERM_SET.has(term);
 }
 
 function coverageFieldValues(

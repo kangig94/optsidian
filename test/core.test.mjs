@@ -280,6 +280,64 @@ test("reranker does not let weak metadata ngram coverage outrank stronger body r
   assert.equal(rankBucketName(ranked[1].bucket), "base");
 });
 
+test("reranker ignores weak English function words for metadata coverage", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const strongBody = searchDocument({
+    path: "SciFact/strong-body.md",
+    bodyTokens: "aspirin inhibit product pge2",
+    bodySurfaceTokens: "aspirin inhibits production pge2 pge"
+  });
+  const weakMetadata = searchDocument({
+    path: "SciFact/weak-title.md",
+    titleTokens: "the of in",
+    titleSurfaceTokens: "the of in"
+  });
+  const queryChannels = {
+    morph: ["aspirin", "inhibit", "the", "product", "of", "pge2"],
+    surface: ["aspirin", "inhibits", "the", "production", "of", "pge2", "pge"],
+    ngram: []
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "Aspirin inhibits the production of PGE2.",
+    queryChannels.morph,
+    [
+      { document: strongBody, score: 10, queryChannels },
+      { document: weakMetadata, score: 9, queryChannels }
+    ],
+    undefined,
+    new Map()
+  );
+
+  assert.equal(ranked[0].path, "SciFact/strong-body.md");
+  assert.equal(ranked[1].coverageTerms, 0);
+  assert.equal(rankBucketName(ranked[1].bucket), "base");
+});
+
+test("reranker keeps English polarity terms eligible for metadata coverage", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const polarityMetadata = searchDocument({
+    path: "SciFact/not-title.md",
+    titleTokens: "not"
+  });
+  const queryChannels = {
+    morph: ["not"],
+    surface: [],
+    ngram: []
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "not",
+    queryChannels.morph,
+    [{ document: polarityMetadata, score: 1, queryChannels }],
+    undefined,
+    new Map()
+  );
+
+  assert.equal(ranked[0].coverageTerms, 1);
+  assert.notEqual(rankBucketName(ranked[0].bucket), "base");
+});
+
 test("intl search analyzer segments CJK text for lexical search", async () => {
   const {
     analyzerIdentityKey,

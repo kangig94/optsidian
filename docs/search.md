@@ -215,7 +215,10 @@ Use `--failure-report=<path>` when analyzing ranking misses. The report records 
 expected path, rank within the scored limit, top matches, per-task scores, and a follow-up inspection
 search. The inspection search defaults to `--failure-inspect-limit=50` and does not change scoring
 metrics or the reported run time. This is the primary input for deciding whether a miss is a
-candidate-limit, lexical-recall, or reranking problem.
+candidate-limit, lexical-recall, or reranking problem. Failure report schema version 2 also includes
+`failureSummary` at the report and run level, plus a per-failure `classification` block. Use
+`byKind`, `byTask`, `top1Miss`, `top10Miss`, `top50Missing`, `rerankMiss`, `candidateLimit`, and
+`lexicalMissing` to triage benchmark regressions before opening individual failures.
 
 Use `--benchmark=index` when measuring vault indexing lifecycle cost instead of query quality:
 
@@ -245,41 +248,42 @@ scoring mode.
 The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm run
 search:eval:spec`, lazy daemon startup, one-worker cold search preload, pinned positional
 snapshots, and the metadata coverage threshold that keeps weak ngram-only metadata matches in the
-base bucket. Body ngram budgets are dynamic by note length, and Hangul ngram retrieval falls back to
-morph/surface retrieval only when the ngram candidate set is empty.
+base bucket. It also excludes weak English function words from metadata coverage scoring while
+retaining polarity terms such as `not`. Body ngram budgets are dynamic by note length, and Hangul
+ngram retrieval falls back to morph/surface retrieval only when the ngram candidate set is empty.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 119.8ms | 119.0ms | 156.0ms |
-| English100 | 87/100 | 0.640 | 0.760 | 0.800 | 0.870 | 0.710 | 130.0ms | 127.0ms | 161.3ms |
-| Mixed200 | 187/200 | 0.780 | 0.870 | 0.900 | 0.935 | 0.831 | 118.9ms | 117.3ms | 152.5ms |
+| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 55.7ms | 53.8ms | 74.0ms |
+| English100 | 90/100 | 0.710 | 0.820 | 0.840 | 0.900 | 0.774 | 62.6ms | 60.7ms | 80.4ms |
+| Mixed200 | 188/200 | 0.815 | 0.900 | 0.920 | 0.940 | 0.862 | 56.8ms | 55.3ms | 75.6ms |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=119.8ms p50=119.0ms p95=156.0ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=118.9ms p50=119.6ms p95=145.7ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=133.8ms p50=133.9ms p95=159.2ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=127.5ms p50=124.4ms p95=156.0ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=106.2ms p50=106.7ms p95=131.8ms
+score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=55.7ms p50=53.8ms p95=74.0ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=53.6ms p50=52.3ms p95=72.1ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=58.2ms p50=56.8ms p95=70.7ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=58.4ms p50=56.7ms p95=74.0ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=54.5ms p50=53.8ms p95=78.2ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=130.0ms p50=127.0ms p95=161.3ms
-score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=130.0ms p50=127.0ms p95=161.3ms
+score: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.900 mrr@10=0.774 avg=62.6ms p50=60.7ms p95=80.4ms
+score.scifact: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.900 mrr@10=0.774 avg=62.6ms p50=60.7ms p95=80.4ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.780 recall@3=0.870 recall@5=0.900 recall@10=0.935 mrr@10=0.831 avg=118.9ms p50=117.3ms p95=152.5ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=107.7ms p50=106.9ms p95=124.1ms
-score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.709 avg=127.1ms p50=123.2ms p95=158.6ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=114.9ms p50=109.1ms p95=136.7ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=122.9ms p50=119.7ms p95=152.5ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=102.9ms p50=99.3ms p95=125.1ms
+score: n=200 top1=0.815 recall@3=0.900 recall@5=0.920 recall@10=0.940 mrr@10=0.862 avg=56.8ms p50=55.3ms p95=75.6ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=51.4ms p50=50.7ms p95=68.2ms
+score.scifact: n=100 top1=0.710 recall@3=0.820 recall@5=0.840 recall@10=0.880 mrr@10=0.772 avg=62.4ms p50=59.5ms p95=78.7ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=53.1ms p50=50.3ms p95=70.5ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=57.0ms p50=53.5ms p95=74.9ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=45.5ms p50=42.7ms p95=59.0ms
 ```
 
 ## Worker Pools

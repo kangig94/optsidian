@@ -1161,13 +1161,29 @@ function reportQueryCase(queryCase) {
     ...(queryCase.field !== undefined ? { field: queryCase.field } : {}),
     ...(queryCase.tag !== undefined ? { tag: queryCase.tag } : {}),
     ...(queryCase.tags !== undefined ? { tags: queryCase.tags } : {}),
+    expectation: failureExpectationKind(queryCase),
     limit: queryCase.limit ?? 10
   };
 }
 
+function failureExpectationKind(queryCase) {
+  if (queryCase.expected) {
+    return "any";
+  }
+  if (queryCase.expectFirst) {
+    return "first";
+  }
+  if (queryCase.expectIncludes) {
+    return "includes";
+  }
+  return "none";
+}
+
 function createFailureReport({ mode, concurrency, repeat, specPath, vaultRoot, inspectLimit, runs }) {
+  const allFailures = runs.flatMap((run) => run.failures);
+
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     mode,
     concurrency,
@@ -1176,6 +1192,7 @@ function createFailureReport({ mode, concurrency, repeat, specPath, vaultRoot, i
     vaultRoot,
     inspectLimit,
     repeatSummary: summarizeRuns(runs),
+    failureSummary: summarizeFailures(allFailures),
     runs: runs.map((run) => ({
       runIndex: run.runIndex,
       passed: run.passed,
@@ -1188,12 +1205,15 @@ function createFailureReport({ mode, concurrency, repeat, specPath, vaultRoot, i
           .sort(([left], [right]) => left.localeCompare(right))
           .map(([task, metrics]) => [task, summarizeMetrics(metrics)])
       ),
+      failureSummary: summarizeFailures(run.failures),
       failures: run.failures.map(serializeFailure)
     }))
   };
 }
 
 function serializeFailure(failure) {
+  const classification = classifyFailure(failure);
+
   return {
     index: failure.index,
     case: failure.case,
@@ -1201,8 +1221,158 @@ function serializeFailure(failure) {
     expected: failure.expected,
     rank: failure.rank,
     topMatches: failure.topMatches,
+    classification,
     ...(failure.error ? { error: failure.error } : {}),
     ...(failure.inspect ? { inspect: failure.inspect } : {})
+  };
+}
+
+function summarizeFailures(failures) {
+  const summary = emptyFailureSummary();
+
+  for (const failure of failures) {
+    const classification = classifyFailure(failure);
+    countFailure(summary, classification);
+
+    const task = failure.case.task ?? "unknown";
+    summary.byTask[task] ??= emptyFailureTaskSummary();
+    countFailure(summary.byTask[task], classification);
+  }
+
+  return finalizeFailureSummary(summary);
+}
+
+function emptyFailureSummary() {
+  return {
+    ...emptyFailureTaskSummary(),
+    byTask: {}
+  };
+}
+
+function emptyFailureTaskSummary() {
+  return {
+    total: 0,
+    top1Miss: 0,
+    topKMiss: 0,
+    top10Miss: 0,
+    top50Missing: 0,
+    rerankMiss: 0,
+    candidateLimit: 0,
+    lexicalMissing: 0,
+    errors: 0,
+    byKind: {}
+  };
+}
+
+function countFailure(summary, classification) {
+  summary.total += 1;
+  summary.byKind[classification.kind] = (summary.byKind[classification.kind] ?? 0) + 1;
+
+  if (classification.top1Miss) {
+    summary.top1Miss += 1;
+  }
+  if (classification.topKMiss) {
+    summary.topKMiss += 1;
+  }
+  if (classification.top10Miss) {
+    summary.top10Miss += 1;
+  }
+  if (classification.top50Missing) {
+    summary.top50Missing += 1;
+  }
+  if (classification.rerankMiss) {
+    summary.rerankMiss += 1;
+  }
+  if (classification.candidateLimit) {
+    summary.candidateLimit += 1;
+  }
+  if (classification.lexicalMissing) {
+    summary.lexicalMissing += 1;
+  }
+  if (classification.error) {
+    summary.errors += 1;
+  }
+}
+
+function finalizeFailureSummary(summary) {
+  const finalized = {
+    ...summary,
+    byKind: sortedCountRecord(summary.byKind)
+  };
+
+  if (summary.byTask) {
+    finalized.byTask = Object.fromEntries(
+      Object.entries(summary.byTask)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([task, taskSummary]) => [
+          task,
+          {
+            ...taskSummary,
+            byKind: sortedCountRecord(taskSummary.byKind)
+          }
+        ])
+    );
+  }
+
+  return finalized;
+}
+
+function sortedCountRecord(record) {
+  return Object.fromEntries(
+    Object.entries(record).sort(([left], [right]) => left.localeCompare(right))
+  );
+}
+
+function classifyFailure(failure) {
+  const scoringLimit = failure.case.limit ?? 10;
+  const scoringRank = failure.rank;
+  const inspect = failure.inspect;
+  const inspectOk = inspect?.ok === true;
+  const inspectLimit = inspect?.limit;
+  const inspectReturned = inspectOk ? inspect.topMatches.length : undefined;
+  const inspectRank = inspectOk ? inspect.rank : null;
+  const scoringMiss = scoringRank === null || scoringRank === 0;
+  const inspectMiss = inspectOk && (inspectRank === null || inspectRank === 0);
+  const inspectHit = inspectOk && inspectRank > 0;
+  const error = Boolean(failure.error) || inspect?.ok === false;
+  const top1Miss =
+    failure.case.expectation === "first" && scoringRank !== null && scoringRank > 1;
+  const topKMiss = scoringMiss;
+  const top10Miss = topKMiss && scoringLimit >= 10;
+  const top50Missing = inspectLimit >= 50 && inspectMiss;
+  const rerankMiss = topKMiss && inspectHit;
+  const candidateLimit = inspectMiss && inspectReturned >= inspectLimit;
+  const lexicalMissing = inspectMiss && inspectReturned < inspectLimit;
+
+  let kind = "expectation-mismatch";
+  if (error) {
+    kind = failure.error ? "search-error" : "inspect-error";
+  } else if (top1Miss) {
+    kind = "top1-miss";
+  } else if (rerankMiss) {
+    kind = "rerank-miss";
+  } else if (candidateLimit) {
+    kind = "candidate-limit";
+  } else if (lexicalMissing) {
+    kind = "lexical-missing";
+  } else if (topKMiss) {
+    kind = "topk-miss";
+  }
+
+  return {
+    kind,
+    scoringLimit,
+    scoringRank,
+    ...(inspectLimit !== undefined ? { inspectLimit } : {}),
+    ...(inspectOk ? { inspectRank, inspectReturned } : {}),
+    top1Miss,
+    topKMiss,
+    top10Miss,
+    top50Missing,
+    rerankMiss,
+    candidateLimit,
+    lexicalMissing,
+    error
   };
 }
 
