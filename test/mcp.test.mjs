@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,6 +16,28 @@ function tempVault() {
   const vault = path.join(tempRoot(), "vault");
   fs.mkdirSync(vault, { recursive: true });
   return vault;
+}
+
+async function startLatestReleaseServer(tag = "v9.9.9") {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.url);
+    if (req.url === "/releases/latest") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ tag_name: tag, draft: false, assets: [] }));
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    apiBase: `http://127.0.0.1:${address.port}/releases`,
+    requests,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  };
 }
 
 function payload(result) {
@@ -52,6 +75,7 @@ function strippedGuiEnv(overrides = {}) {
 function mcpProcessEnv(overrides = {}) {
   return {
     ...process.env,
+    OPTSIDIAN_NO_UPDATE_CHECK: "1",
     ...overrides
   };
 }
@@ -383,6 +407,57 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
     assert.equal(fs.readFileSync(path.join(vault, "patch.md"), "utf8"), "patched\n");
   } finally {
     await client.close();
+  }
+});
+
+test("mcp command_run surfaces automatic update notices in captured stderr", async () => {
+  const dir = tempRoot();
+  const cache = path.join(dir, "cache");
+  const home = path.join(dir, "home");
+  const release = await startLatestReleaseServer();
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpBin],
+    cwd: path.resolve("."),
+    env: mcpProcessEnv({
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: release.apiBase,
+      OPTSIDIAN_NO_UPDATE_CHECK: "0",
+      HTTPS_PROXY: "",
+      https_proxy: "",
+      HTTP_PROXY: "",
+      http_proxy: "",
+      ALL_PROXY: "",
+      all_proxy: ""
+    }),
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "optsidian-mcp-update-notice-test", version: "1.0.0" });
+
+  await client.connect(transport);
+  try {
+    const first = await client.callTool({
+      name: "command_run",
+      arguments: { command: "config", args: ["path"] }
+    });
+    assert.equal(first.structuredContent?.ok, true);
+    assert.match(String(first.structuredContent?.stderr), /Optsidian v9\.9\.9 is available/);
+    assert.match(String(first.structuredContent?.stderr), /Run `optsidian update`\./);
+    assert.equal(release.requests.filter((url) => url === "/releases/latest").length, 1);
+
+    const second = await client.callTool({
+      name: "command_run",
+      arguments: { command: "config", args: ["path"] }
+    });
+    assert.equal(second.structuredContent?.ok, true);
+    assert.equal(second.structuredContent?.stderr, "");
+    assert.equal(release.requests.filter((url) => url === "/releases/latest").length, 1);
+  } finally {
+    await client.close();
+    await release.close();
   }
 });
 

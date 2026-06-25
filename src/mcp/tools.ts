@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -100,24 +100,27 @@ export function createToolHandlers(resolveVaultRoot: () => string, onToolCall?: 
 function runOptsidianCommand(args: CommandRunToolArgs): ToolPayload {
   const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
   const argv = [cliBin, args.command, ...(args.args ?? [])];
-  try {
-    const stdout = execFileSync(process.execPath, argv, {
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024
-    });
-    return { ok: true, command: args.command, exit_code: 0, stdout };
-  } catch (error) {
-    // execFileSync throws on non-zero exit; surface the captured output as a structured
-    // result (not an MCP error) so the caller can read the command's own stdout/stderr.
-    const failure = error as { status?: number | null; stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
+  const result = spawnSync(process.execPath, argv, {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024
+  });
+  if (result.error) {
     return {
       ok: false,
       command: args.command,
-      exit_code: typeof failure.status === "number" ? failure.status : 1,
-      stdout: failure.stdout ? String(failure.stdout) : "",
-      stderr: failure.stderr ? String(failure.stderr) : (failure.message ?? "")
+      exit_code: 1,
+      stdout: result.stdout ?? "",
+      stderr: result.error.message
     };
   }
+  const exitCode = typeof result.status === "number" ? result.status : 1;
+  return {
+    ok: exitCode === 0,
+    command: args.command,
+    exit_code: exitCode,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? ""
+  };
 }
 
 export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () => string, onToolCall?: () => void): void {

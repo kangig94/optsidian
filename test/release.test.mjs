@@ -15,6 +15,14 @@ const packageVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), 
 const newerVersion = nextPatchVersion(packageVersion);
 const UPDATE_TOOLS = [];
 const INSTALL_TOOLS = ["curl", "cp", "chmod", "mv", "uname", "mktemp", "mkdir", "rm", "head"];
+const NO_PROXY_ENV = {
+  HTTPS_PROXY: "",
+  https_proxy: "",
+  HTTP_PROXY: "",
+  http_proxy: "",
+  ALL_PROXY: "",
+  all_proxy: ""
+};
 
 function tempRoot(prefix = "optsidian-release-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -82,7 +90,7 @@ process.exit(result.status ?? 1);
 function runCli(args, env) {
   return spawnSync(process.execPath, [cli, ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...env }
+    env: { ...process.env, OPTSIDIAN_NO_UPDATE_CHECK: "1", ...env }
   });
 }
 
@@ -150,7 +158,7 @@ process.exit(99);
 function runProcessAsync(command, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      env: { ...process.env, ...env },
+      env: { ...process.env, OPTSIDIAN_NO_UPDATE_CHECK: "1", ...env },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -229,6 +237,7 @@ function sha256(filePath) {
 async function startReleaseServer(releases, latestTag) {
   const latest = latestTag ?? releases[0].tag;
   let baseUrl = "";
+  const requests = [];
   const byTag = new Map(releases.map((release) => [release.tag, release]));
   const byAsset = new Map(
     releases.flatMap((release) => release.assets.map((asset) => [asset.name, asset.filePath]))
@@ -236,6 +245,7 @@ async function startReleaseServer(releases, latestTag) {
 
   const server = http.createServer((req, res) => {
     try {
+      requests.push(req.url);
       if (req.url === "/releases/latest") {
         const release = byTag.get(latest);
         res.setHeader("content-type", "application/json");
@@ -280,6 +290,7 @@ async function startReleaseServer(releases, latestTag) {
   baseUrl = `http://127.0.0.1:${address.port}`;
   return {
     apiBase: `${baseUrl}/releases`,
+    requests,
     async close() {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
@@ -409,6 +420,88 @@ test("update check without managed install reports latest release and guidance",
   } finally {
     await server.close();
   }
+});
+
+test("automatic update notice compares versions only and caches release lookups", async () => {
+  const dir = tempRoot();
+  const release = { tag: `v${newerVersion}`, version: newerVersion, assets: [] };
+  const server = await startReleaseServer([release], release.tag);
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const env = {
+    ...NO_PROXY_ENV,
+    HOME: home,
+    XDG_CACHE_HOME: cache,
+    OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+    OPTSIDIAN_NO_UPDATE_CHECK: "0",
+    OPTSIDIAN_UPDATE_CHECK_TIMEOUT_MS: "1000"
+  };
+
+  try {
+    const first = await runCliAsync(["config", "path"], env);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stderr, new RegExp(`Optsidian v${newerVersion.replace(/\./g, "\\.")} is available`));
+    assert.match(first.stderr, /Run `optsidian update`\./);
+    assert.equal(server.requests.filter((url) => url === "/releases/latest").length, 1);
+
+    const statePath = path.join(cache, "optsidian", "update-check.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(state.targetVersion, newerVersion);
+    assert.equal(state.targetTag, `v${newerVersion}`);
+    assert.equal(typeof state.lastNotifiedAt, "string");
+
+    const second = await runCliAsync(["config", "path"], env);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.stderr, "");
+    assert.equal(server.requests.filter((url) => url === "/releases/latest").length, 1);
+
+    state.lastNotifiedAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    const third = await runCliAsync(["config", "path"], env);
+    assert.equal(third.status, 0, third.stderr);
+    assert.match(third.stderr, new RegExp(`Optsidian v${newerVersion.replace(/\./g, "\\.")} is available`));
+    assert.equal(server.requests.filter((url) => url === "/releases/latest").length, 1);
+
+    const afterReminder = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    afterReminder.lastAttemptAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    afterReminder.lastNotifiedAt = new Date().toISOString();
+    fs.writeFileSync(statePath, `${JSON.stringify(afterReminder, null, 2)}\n`);
+
+    const fourth = await runCliAsync(["config", "path"], env);
+    assert.equal(fourth.status, 0, fourth.stderr);
+    assert.equal(fourth.stderr, "");
+    assert.equal(server.requests.filter((url) => url === "/releases/latest").length, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("automatic update notice skips failed lookups and still caches the attempt", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const env = {
+    ...NO_PROXY_ENV,
+    HOME: home,
+    XDG_CACHE_HOME: cache,
+    OPTSIDIAN_RELEASE_API_BASE: "http://127.0.0.1:1/releases",
+    OPTSIDIAN_NO_UPDATE_CHECK: "0",
+    OPTSIDIAN_UPDATE_CHECK_TIMEOUT_MS: "100"
+  };
+
+  const first = await runCliAsync(["config", "path"], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stderr, "");
+
+  const statePath = path.join(cache, "optsidian", "update-check.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(typeof state.lastAttemptAt, "string");
+  assert.equal(typeof state.lastError, "string");
+
+  const second = await runCliAsync(["config", "path"], env);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stderr, "");
 });
 
 test("update installs a requested release into the managed bin dir and refreshes available MCP clients", async () => {

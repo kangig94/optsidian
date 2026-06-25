@@ -10,6 +10,9 @@ import { OPTSIDIAN_VERSION } from "../version.js";
 
 const DEFAULT_RELEASE_API_BASE = "https://api.github.com/repos/kangig94/optsidian/releases";
 const MCP_NAME = "optsidian";
+const UPDATE_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_NOTICE_NOTIFICATION_INTERVAL_MS = 3 * 60 * 60 * 1000;
+const UPDATE_NOTICE_TIMEOUT_MS = 2500;
 
 export type InstallManifest = {
   version: string;
@@ -51,6 +54,13 @@ export type UpdateInstallResult = {
   warnings: string[];
 };
 
+export type UpdateNotice = {
+  currentVersion: string;
+  targetTag: string;
+  targetVersion: string;
+  message: string;
+};
+
 type ReleaseInfo = {
   tag: string;
   version: string;
@@ -70,6 +80,15 @@ type RegistrationResult = {
   warnings: string[];
 };
 
+type UpdateNoticeState = {
+  lastAttemptAt?: string;
+  lastNotifiedAt?: string;
+  currentVersion?: string;
+  targetTag?: string;
+  targetVersion?: string;
+  lastError?: string;
+};
+
 export function stateBaseDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.OPTSIDIAN_STATE_BASE) {
     return path.resolve(env.OPTSIDIAN_STATE_BASE);
@@ -84,6 +103,10 @@ export function manifestFilePath(env: NodeJS.ProcessEnv = process.env): string {
 
 export function releasesCacheDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(stateBaseDir(env), "releases");
+}
+
+export function updateNoticeStatePath(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(stateBaseDir(env), "update-check.json");
 }
 
 export function defaultBinDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -158,6 +181,81 @@ export function saveInstallManifest(manifest: InstallManifest, env: NodeJS.Proce
   const file = manifestFilePath(env);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+export async function maybeCheckForUpdateNotice(options: {
+  env?: NodeJS.ProcessEnv;
+  now?: Date;
+  currentVersion?: string;
+} = {}): Promise<UpdateNotice | undefined> {
+  const env = options.env ?? process.env;
+  if (isAutoUpdateCheckDisabled(env)) return undefined;
+
+  const now = options.now ?? new Date();
+  const state = readUpdateNoticeState(env);
+  const currentVersion = options.currentVersion ?? currentInstalledVersion(env);
+  let noticeState: UpdateNoticeState | undefined = state;
+  let shouldSaveState = false;
+
+  if (isUpdateNoticeFetchDue(state, now, updateNoticeIntervalMs(env))) {
+    try {
+      const target = await fetchLatestReleaseVersion(env, updateNoticeTimeoutMs(env));
+      const lastNotifiedAt = state?.targetVersion === target.version ? state.lastNotifiedAt : undefined;
+      noticeState = {
+        ...state,
+        lastAttemptAt: now.toISOString(),
+        lastNotifiedAt,
+        currentVersion,
+        targetTag: target.tag,
+        targetVersion: target.version,
+        lastError: undefined
+      };
+    } catch (error) {
+      noticeState = {
+        ...state,
+        lastAttemptAt: now.toISOString(),
+        currentVersion,
+        lastError: error instanceof Error ? error.message : String(error)
+      };
+    }
+    shouldSaveState = true;
+  }
+
+  const notice = noticeFromCachedRelease(noticeState, currentVersion, now, updateNoticeNotificationIntervalMs(env));
+  if (notice) {
+    writeUpdateNoticeState({ ...noticeState, currentVersion, lastNotifiedAt: now.toISOString() }, env);
+    return notice;
+  }
+
+  if (shouldSaveState && noticeState) {
+    writeUpdateNoticeState(noticeState, env);
+  }
+  return undefined;
+}
+
+function noticeFromCachedRelease(
+  state: UpdateNoticeState | undefined,
+  currentVersion: string,
+  now: Date,
+  intervalMs: number
+): UpdateNotice | undefined {
+  if (!state?.targetTag || !state.targetVersion) return undefined;
+  try {
+    if (compareVersions(currentVersion, state.targetVersion) >= 0) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  if (!isUpdateNoticeNotificationDue(state, now, intervalMs)) {
+    return undefined;
+  }
+  return {
+    currentVersion,
+    targetTag: state.targetTag,
+    targetVersion: state.targetVersion,
+    message: `Optsidian ${state.targetTag} is available (current v${currentVersion}). Run \`optsidian update\`.`
+  };
 }
 
 export async function checkForUpdate(options: { tag?: string; env?: NodeJS.ProcessEnv } = {}): Promise<UpdateCheckResult> {
@@ -291,6 +389,19 @@ async function fetchReleaseInfo(options: { tag?: string; env?: NodeJS.ProcessEnv
   const endpoint = requestedTag ? `${releaseApiBase(env)}/tags/${encodeURIComponent(requestedTag)}` : `${releaseApiBase(env)}/latest`;
   const payload = await fetchJson(endpoint, env);
   return parseReleaseInfo(payload, requestedTag);
+}
+
+async function fetchLatestReleaseVersion(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ tag: string; version: string }> {
+  const payload = await fetchJson(`${releaseApiBase(env)}/latest`, env, { timeoutMs, sendAuth: false });
+  if (!payload || typeof payload !== "object") {
+    throw new RuntimeError("Release metadata payload is invalid");
+  }
+  const json = payload as Record<string, unknown>;
+  const tag = normalizeTag(String(json.tag_name ?? ""));
+  if (json.draft === true) {
+    throw new RuntimeError(`Release ${tag} is still a draft`);
+  }
+  return { tag, version: versionFromTag(tag) };
 }
 
 function parseReleaseInfo(payload: unknown, requestedTag: string | undefined): ReleaseInfo {
@@ -552,6 +663,89 @@ function runCommand(command: string, args: string[], env: NodeJS.ProcessEnv): { 
 
 function sha256File(filePath: string): string {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function currentInstalledVersion(env: NodeJS.ProcessEnv): string {
+  try {
+    return loadInstallManifest(env)?.version ?? OPTSIDIAN_VERSION;
+  } catch {
+    return OPTSIDIAN_VERSION;
+  }
+}
+
+function isAutoUpdateCheckDisabled(env: NodeJS.ProcessEnv): boolean {
+  const value = env.OPTSIDIAN_NO_UPDATE_CHECK?.trim().toLowerCase();
+  if (value === "1" || value === "true" || value === "yes") return true;
+  if (value === "0" || value === "false" || value === "no") return false;
+  return env.CI === "true";
+}
+
+function readUpdateNoticeState(env: NodeJS.ProcessEnv): UpdateNoticeState | undefined {
+  try {
+    const file = updateNoticeStatePath(env);
+    if (!fs.existsSync(file)) return undefined;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<UpdateNoticeState>;
+    return {
+      lastAttemptAt: typeof parsed.lastAttemptAt === "string" ? parsed.lastAttemptAt : undefined,
+      lastNotifiedAt: typeof parsed.lastNotifiedAt === "string" ? parsed.lastNotifiedAt : undefined,
+      currentVersion: typeof parsed.currentVersion === "string" ? parsed.currentVersion : undefined,
+      targetTag: typeof parsed.targetTag === "string" ? parsed.targetTag : undefined,
+      targetVersion: typeof parsed.targetVersion === "string" ? parsed.targetVersion : undefined,
+      lastError: typeof parsed.lastError === "string" ? parsed.lastError : undefined
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeUpdateNoticeState(state: UpdateNoticeState, env: NodeJS.ProcessEnv): void {
+  try {
+    const file = updateNoticeStatePath(env);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
+  } catch {
+    // Update notices are best-effort and must never affect the command that triggered them.
+  }
+}
+
+function isUpdateNoticeFetchDue(state: UpdateNoticeState | undefined, now: Date, intervalMs: number): boolean {
+  if (!state?.lastAttemptAt) return true;
+  const lastAttemptMs = Date.parse(state.lastAttemptAt);
+  if (!Number.isFinite(lastAttemptMs)) return true;
+  return now.getTime() - lastAttemptMs >= intervalMs;
+}
+
+function isUpdateNoticeNotificationDue(state: UpdateNoticeState, now: Date, intervalMs: number): boolean {
+  if (!state.lastNotifiedAt) return true;
+  const lastNotifiedMs = Date.parse(state.lastNotifiedAt);
+  if (!Number.isFinite(lastNotifiedMs)) return true;
+  return now.getTime() - lastNotifiedMs >= intervalMs;
+}
+
+function updateNoticeIntervalMs(env: NodeJS.ProcessEnv): number {
+  return nonNegativeIntegerEnv(env, "OPTSIDIAN_UPDATE_CHECK_INTERVAL_MS", UPDATE_NOTICE_INTERVAL_MS);
+}
+
+function updateNoticeNotificationIntervalMs(env: NodeJS.ProcessEnv): number {
+  return nonNegativeIntegerEnv(env, "OPTSIDIAN_UPDATE_NOTICE_INTERVAL_MS", UPDATE_NOTICE_NOTIFICATION_INTERVAL_MS);
+}
+
+function updateNoticeTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return positiveIntegerEnv(env, "OPTSIDIAN_UPDATE_CHECK_TIMEOUT_MS", UPDATE_NOTICE_TIMEOUT_MS);
+}
+
+function nonNegativeIntegerEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function positiveIntegerEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 function compareVersions(left: string, right: string): number {

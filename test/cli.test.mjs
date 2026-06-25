@@ -308,7 +308,9 @@ function run(args, options = {}) {
     encoding: "utf8",
     input: options.input,
     cwd: options.cwd,
-    env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
+    env: options.mergeEnv === false
+      ? { OPTSIDIAN_NO_UPDATE_CHECK: "1", ...options.env }
+      : { ...process.env, OPTSIDIAN_NO_UPDATE_CHECK: "1", ...options.env }
   });
   return result;
 }
@@ -319,7 +321,9 @@ function runAsync(args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cli, ...args], {
       cwd: options.cwd,
-      env: options.mergeEnv === false ? { ...options.env } : { ...process.env, ...options.env }
+      env: options.mergeEnv === false
+        ? { OPTSIDIAN_NO_UPDATE_CHECK: "1", ...options.env }
+        : { ...process.env, OPTSIDIAN_NO_UPDATE_CHECK: "1", ...options.env }
     });
     let stdout = "";
     let stderr = "";

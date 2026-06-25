@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { isMainThread, workerData } from "node:worker_threads";
 import { parseArgs } from "./cli/args.js";
-import { delegateToObsidian } from "./cli/delegate.js";
+import { runDelegatedObsidian } from "./cli/delegate.js";
 import { UsageError, isCliError } from "./errors.js";
 import { commandHelpText, helpText } from "./cli/help.js";
 import { commandPolicy } from "./cli/policy.js";
@@ -22,10 +22,16 @@ import { runWrite } from "./cli/commands/write.js";
 import { runPluginInstall } from "./cli/commands/plugin.js";
 import { runSearchDaemon } from "./daemon/server.js";
 import { runSearchDaemonWorker } from "./daemon/worker-entry.js";
+import { maybeCheckForUpdateNotice } from "./update/installer.js";
 import { OPTSIDIAN_VERSION } from "./version.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  await runMain(argv);
+  await writeUpdateNoticeIfNeeded(argv);
+}
+
+async function runMain(argv: string[]): Promise<void> {
   if (argv.length === 0 || argv[0] === "--help" || (argv.length === 1 && argv[0] === "help=true")) {
     process.stdout.write(helpText());
     return;
@@ -43,7 +49,7 @@ async function main(): Promise<void> {
   }
 
   if (argv[0] === "raw") {
-    delegateToObsidian(argv.slice(1));
+    await delegateToObsidianAndExit(argv.slice(1), argv);
   }
 
   const args = parseArgs(argv);
@@ -51,7 +57,7 @@ async function main(): Promise<void> {
   if (command && isCommandHelpRequest(args)) {
     if (commandPolicy(command) === "delegate") {
       rejectVaultPathForNative(args);
-      delegateToObsidian(["help", command]);
+      await delegateToObsidianAndExit(["help", command], argv);
     }
     const text = commandHelpText(command);
     if (!text) {
@@ -62,7 +68,7 @@ async function main(): Promise<void> {
   }
   if (commandPolicy(command) === "delegate") {
     rejectVaultPathForNative(args);
-    delegateToObsidian(argv);
+    await delegateToObsidianAndExit(argv, argv);
   }
 
   if (command === "update") {
@@ -119,8 +125,33 @@ async function main(): Promise<void> {
       runApplyPatch(args, vaultRoot);
       return;
     default:
-      delegateToObsidian(argv);
+      await delegateToObsidianAndExit(argv, argv);
   }
+}
+
+async function delegateToObsidianAndExit(args: string[], originalArgv: string[]): Promise<never> {
+  const status = runDelegatedObsidian(args);
+  if (status === 0) {
+    await writeUpdateNoticeIfNeeded(originalArgv);
+  }
+  process.exit(status);
+}
+
+async function writeUpdateNoticeIfNeeded(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (!shouldCheckForUpdateNotice(argv)) return;
+  const notice = await maybeCheckForUpdateNotice({ env });
+  if (notice) {
+    process.stderr.write(`${notice.message}\n`);
+  }
+}
+
+function shouldCheckForUpdateNotice(argv: string[]): boolean {
+  if (argv.length === 0) return false;
+  const command = argv[0];
+  if (command === "--help" || command === "--version" || command === "help" || command === "__search-daemon" || command === "update") {
+    return false;
+  }
+  return !argv.includes("--help") && !argv.includes("help=true");
 }
 
 function isCommandHelpRequest(args: ReturnType<typeof parseArgs>): boolean {

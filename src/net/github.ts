@@ -16,10 +16,10 @@ const JSON_ACCEPT = "application/vnd.github+json";
 // that is the only form that works for a PRIVATE repo (browser_download_url 404s there).
 const ASSET_ACCEPT = "application/octet-stream";
 
-type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean };
+type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean; timeoutMs?: number };
 
-export async function fetchJson(url: string, env: NodeJS.ProcessEnv): Promise<unknown> {
-  const response = await requestBuffer(url, env);
+export async function fetchJson(url: string, env: NodeJS.ProcessEnv, options: FetchOptions = {}): Promise<unknown> {
+  const response = await requestBuffer(url, env, options);
   try {
     return JSON.parse(response.body.toString("utf8"));
   } catch {
@@ -48,17 +48,17 @@ export async function requestBuffer(
     }
     // curl -fsSL drops Authorization on a cross-host redirect by default, so an asset's
     // signed CDN URL is reached without our token.
-    return requestBufferWithCurl(url, env, accept, sendAuth);
+    return requestBufferWithCurl(url, env, accept, sendAuth, options.timeoutMs);
   }
-  return requestBufferDirect(url, env, { accept, redirects, sendAuth });
+  return requestBufferDirect(url, env, { accept, redirects, sendAuth, timeoutMs: options.timeoutMs });
 }
 
 async function requestBufferDirect(
   url: string,
   env: NodeJS.ProcessEnv,
-  options: Required<FetchOptions>
+  options: Required<Omit<FetchOptions, "timeoutMs">> & { timeoutMs?: number }
 ): Promise<{ statusCode: number; body: Buffer }> {
-  const { accept, redirects, sendAuth } = options;
+  const { accept, redirects, sendAuth, timeoutMs } = options;
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
@@ -87,6 +87,11 @@ async function requestBufferDirect(
           res.on("error", reject);
         }
       );
+      if (timeoutMs !== undefined) {
+        request.setTimeout(timeoutMs, () => {
+          request.destroy(new RuntimeError(`Timed out fetching ${url}`));
+        });
+      }
       request.on("error", reject);
       request.end();
     }
@@ -104,7 +109,8 @@ async function requestBufferDirect(
     return requestBuffer(nextUrl.toString(), env, {
       accept,
       redirects: redirects + 1,
-      sendAuth: sendAuth && nextUrl.host === target.host
+      sendAuth: sendAuth && nextUrl.host === target.host,
+      timeoutMs
     });
   }
 
@@ -122,9 +128,13 @@ async function requestBufferWithCurl(
   url: string,
   env: NodeJS.ProcessEnv,
   accept: string,
-  sendAuth: boolean
+  sendAuth: boolean,
+  timeoutMs?: number
 ): Promise<{ statusCode: number; body: Buffer }> {
   const args = ["-fsSL", "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
+  if (timeoutMs !== undefined) {
+    args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
+  }
   const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(new URL(url))) : undefined;
   if (token) {
     args.push("-H", `Authorization: Bearer ${token}`);

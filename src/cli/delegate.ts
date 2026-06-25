@@ -8,7 +8,7 @@ const OBSIDIAN_UNREACHABLE_HINT =
   "optsidian: if Obsidian is running, a command sandbox may be blocking the connection to its " +
   "local socket. Run through the optsidian MCP server (it is unsandboxed), or disable the sandbox for this command.";
 
-export function delegateToObsidian(args: string[]): never {
+export function runDelegatedObsidian(args: string[]): number {
   // Capture stderr (rather than inheriting it) so we can detect the unreachable message and
   // append the hint; stdin/stdout stay inherited for normal passthrough.
   const result = runObsidianSync(args, { stdio: ["inherit", "inherit", "pipe"] });
@@ -22,5 +22,9 @@ export function delegateToObsidian(args: string[]): never {
   if ((result.status ?? 0) !== 0 && shouldRefreshObsidianLaunch(stderr)) {
     process.stderr.write(`${stderr.endsWith("\n") ? "" : "\n"}${OBSIDIAN_UNREACHABLE_HINT}\n`);
   }
-  process.exit(result.status ?? 1);
+  return result.status ?? 1;
+}
+
+export function delegateToObsidian(args: string[]): never {
+  process.exit(runDelegatedObsidian(args));
 }
