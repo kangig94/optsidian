@@ -14,21 +14,29 @@ const resolvedVault = path.resolve(vaultRoot);
 const outputDir = args.outDir ? path.resolve(args.outDir) : path.join(resolvedVault, "SearchEval");
 const markdownFiles = listMarkdownFiles(resolvedVault);
 const notes = markdownFiles.map((file) => readNote(resolvedVault, file));
-const klueQueries = buildKlueQueries(notes);
-const scifactQueries = await buildScifactQueries(notes, args);
-const mixedQueries = [
-  ...klueQueries.map(({ path: _path, ...query }) => query),
-  ...scifactQueries.map(({ path: _path, ...query }) => query)
-];
+const klueQueries300 = buildKlueQueries(notes);
+const scifactQueries300 = await buildScifactQueries(notes, args);
+const klueQueries100 = subsetKlueQueries(klueQueries300);
+const scifactQueries100 = sampleEven(scifactQueries300, 100);
+const mixed200 = mixedQueries(klueQueries100, scifactQueries100);
+const mixed600 = mixedQueries(klueQueries300, scifactQueries300);
 
 fs.mkdirSync(outputDir, { recursive: true });
-writeSpec(path.join(outputDir, "klue100.queries.json"), klueQueries);
-writeSpec(path.join(outputDir, "english100.queries.json"), scifactQueries);
-writeSpec(path.join(outputDir, "queries.json"), mixedQueries);
+writeSpec(path.join(outputDir, "klue100.queries.json"), klueQueries100);
+writeSpec(path.join(outputDir, "klue300.queries.json"), klueQueries300);
+writeSpec(path.join(outputDir, "english100.queries.json"), scifactQueries100);
+writeSpec(path.join(outputDir, "english300.queries.json"), scifactQueries300);
+writeSpec(path.join(outputDir, "mixed200.queries.json"), mixed200);
+writeSpec(path.join(outputDir, "mixed600.queries.json"), mixed600);
+writeSpec(path.join(outputDir, "queries.json"), mixed600);
 
-console.log(`wrote ${path.join(outputDir, "klue100.queries.json")} (${klueQueries.length} queries)`);
-console.log(`wrote ${path.join(outputDir, "english100.queries.json")} (${scifactQueries.length} queries)`);
-console.log(`wrote ${path.join(outputDir, "queries.json")} (${mixedQueries.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "klue100.queries.json")} (${klueQueries100.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "klue300.queries.json")} (${klueQueries300.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "english100.queries.json")} (${scifactQueries100.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "english300.queries.json")} (${scifactQueries300.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "mixed200.queries.json")} (${mixed200.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "mixed600.queries.json")} (${mixed600.length} queries)`);
+console.log(`wrote ${path.join(outputDir, "queries.json")} (${mixed600.length} queries)`);
 
 function parseArgs(argv) {
   const parsed = {};
@@ -100,12 +108,12 @@ function buildKlueQueries(notes) {
         task,
         query: klueQuery(note, task),
         expected: note.path,
-        path: "KLUE100",
+        path: "KLUE",
         limit: 10
       });
     }
   }
-  assertCount("KLUE100", queries, 100);
+  assertCount("KLUE300", queries, 300);
   return queries;
 }
 
@@ -139,34 +147,52 @@ function klueQuery(note, task) {
 async function buildScifactQueries(notes, options) {
   const scifactNotes = notes
     .filter((note) => note.frontmatter?.source === "BEIR/scifact")
-    .sort((left, right) => numericCompare(left.frontmatter.beir_query_id, right.frontmatter.beir_query_id));
+    .sort((left, right) => numericCompare(left.frontmatter.beir_id, right.frontmatter.beir_id));
   const queryById = options.scifactQueriesJson
     ? readScifactQueriesJson(path.resolve(options.scifactQueriesJson))
     : await fetchScifactQueries();
-  const queries = scifactNotes.map((note) => {
-    const queryId = String(note.frontmatter.beir_query_id ?? "");
-    const query = queryById.get(queryId);
-    if (!query) throw new Error(`Missing SciFact query text for query id ${queryId}: ${note.path}`);
-    return {
-      task: "scifact",
-      query,
-      expected: note.path,
-      path: "English100",
-      limit: 10
-    };
-  });
-  assertCount("English100", queries, 100);
-  return queries;
+  const queries = [];
+  for (const note of scifactNotes) {
+    for (const queryId of scifactQueryIds(note)) {
+      const query = queryById.get(queryId);
+      if (!query) throw new Error(`Missing SciFact query text for query id ${queryId}: ${note.path}`);
+      queries.push({
+        queryId,
+        task: "scifact",
+        query,
+        expected: note.path,
+        path: "English",
+        limit: 10
+      });
+    }
+  }
+  queries.sort((left, right) => numericCompare(left.queryId, right.queryId));
+  const output = queries.map(({ queryId: _queryId, ...query }) => query);
+  assertCount("English300", output, 300);
+  return output;
+}
+
+function scifactQueryIds(note) {
+  if (Array.isArray(note.frontmatter?.beir_query_ids)) return note.frontmatter.beir_query_ids.map(String);
+  if (note.frontmatter?.beir_query_id !== undefined) return [String(note.frontmatter.beir_query_id)];
+  return [];
 }
 
 function readScifactQueriesJson(filePath) {
-  const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  const rows = Array.isArray(payload) ? payload : payload.rows;
-  if (!Array.isArray(rows)) throw new Error(`SciFact query JSON must be an array or contain rows[]: ${filePath}`);
+  const raw = fs.readFileSync(filePath, "utf8");
+  const rows = filePath.endsWith(".jsonl")
+    ? raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    : jsonRows(JSON.parse(raw), filePath);
   return new Map(rows.map((row) => {
     const value = row.row ?? row;
     return [String(value._id ?? value.id), String(value.text ?? value.query)];
   }));
+}
+
+function jsonRows(payload, filePath) {
+  const rows = Array.isArray(payload) ? payload : payload.rows;
+  if (!Array.isArray(rows)) throw new Error(`SciFact query JSON must be an array, JSONL, or contain rows[]: ${filePath}`);
+  return rows;
 }
 
 async function fetchScifactQueries() {
@@ -215,6 +241,40 @@ function section(markdown, heading) {
 
 function writeSpec(filePath, queries) {
   fs.writeFileSync(filePath, `${JSON.stringify({ queries }, null, 2)}\n`);
+}
+
+function subsetKlueQueries(queries) {
+  const counts = { ynat: 30, sts: 20, mrc: 30, wos: 20 };
+  const output = [];
+  for (const task of ["ynat", "sts", "mrc", "wos"]) {
+    output.push(...sampleEven(queries.filter((query) => query.task === task), counts[task]));
+  }
+  assertCount("KLUE100", output, 100);
+  return output;
+}
+
+function mixedQueries(klueQueries, scifactQueries) {
+  return [
+    ...klueQueries.map(({ path: _path, ...query }) => query),
+    ...scifactQueries.map(({ path: _path, ...query }) => query)
+  ];
+}
+
+function sampleEven(rows, count) {
+  if (count > rows.length) throw new Error(`Cannot sample ${count} rows from ${rows.length}`);
+  if (count === rows.length) return [...rows];
+  if (count === 1) return [rows[0]];
+  const selected = [];
+  const seen = new Set();
+  for (let index = 0; index < count; index += 1) {
+    let sourceIndex = Math.round(index * (rows.length - 1) / (count - 1));
+    while (seen.has(sourceIndex) && sourceIndex < rows.length - 1) sourceIndex += 1;
+    while (seen.has(sourceIndex) && sourceIndex > 0) sourceIndex -= 1;
+    if (seen.has(sourceIndex)) throw new Error(`Duplicate sample index ${sourceIndex}`);
+    seen.add(sourceIndex);
+    selected.push(rows[sourceIndex]);
+  }
+  return selected;
 }
 
 function assertCount(label, queries, expected) {

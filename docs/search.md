@@ -18,23 +18,27 @@ The English fixture is generated from BEIR SciFact data:
 
 ```text
 https://huggingface.co/datasets/BeIR/scifact
-https://huggingface.co/datasets/BeIR/scifact-qrels
+https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip
 ```
 
-BEIR SciFact and its qrels are published under CC BY-SA 4.0.
+BEIR SciFact is published under CC BY-SA 4.0. The Hugging Face repository is
+useful as a cloneable corpus/query source; the BEIR zip also includes test
+qrels in TSV form.
 
-## KLUE100 Sampling
+## KLUE Sampling
 
-`KLUE100` is a deterministic 100-document sample from the KLUE v1.1 dev split.
+`KLUE300` is a deterministic 300-document sample from the KLUE v1.1 dev split.
+`KLUE100` is a deterministic subset sampled from `KLUE300`; the benchmark specs
+target the `KLUE` corpus folder and do not use a separate `KLUE100` corpus.
 
 The sample is balanced across four KLUE tasks:
 
-| Task | Docs | Selection | Query |
-|------|------|-----------|-------|
-| YNAT | 30 | evenly spaced indices across the dev split | headline |
-| STS | 20 | evenly spaced indices across the dev split | sentence 2 |
-| MRC | 30 | evenly spaced indices across the dev article list | selected question plus first answer when available |
-| WOS | 20 | evenly spaced indices across the dev split | middle user turn, falling back to the first available turn |
+| Task | KLUE300 Docs | KLUE100 Subset | Selection | Query |
+|------|------:|------:|-----------|-------|
+| YNAT | 90 | 30 | evenly spaced indices across the dev split | headline |
+| STS | 60 | 20 | evenly spaced indices across the dev split | sentence 2 |
+| MRC | 90 | 30 | evenly spaced indices across non-impossible dev QAs | selected question plus answer text when available |
+| WOS | 60 | 20 | evenly spaced indices across the dev split | middle user turn, falling back to the first available turn |
 
 Use 0-based indexing. For a split with `total` rows and a desired sample count `count`, choose:
 
@@ -46,23 +50,28 @@ for i = 0..count-1
 If a rounded index is already selected, increment it until an unused index is found. This should not
 normally matter for the current KLUE counts, but it is the tie-break rule.
 
+`KLUE100` uses the same formula again over each task's selected `KLUE300`
+rows. Therefore every `KLUE100` expected note is also present in `KLUE300`.
+
 Task-specific construction:
 
 - YNAT: use the selected row as the document; query is `title`.
 - STS: use the selected row as the document; query is `sentence2`.
-- MRC: sample over the top-level `data` article list; use `paragraphs[0]`; choose the first QA with
-  at least one answer, otherwise the first QA; query is the question plus the first answer when an
-  answer exists, otherwise the question alone.
+- MRC: flatten non-impossible dev QAs across all articles and paragraphs; query is the question plus
+  all unique answer texts when available, otherwise the question alone.
 - WOS: use the selected row as the document; query is the middle `user` turn using
   `floor(userTurns.length / 2)`, falling back to the first available user turn, then the first
   dialogue turn.
 
-This deterministic procedure is intended to let a fresh setup produce the same 100 KLUE documents
-and queries.
+This deterministic procedure is intended to let a fresh setup produce the same
+300 KLUE notes and both query specs.
 
-## English100 Sampling
+## English Sampling
 
-`English100` is a deterministic 100-document sample from BEIR SciFact.
+`English300` is the BEIR SciFact test query set expressed as Obsidian notes.
+`English100` is a deterministic subset sampled from `English300`; the benchmark
+specs target the `English` corpus folder and do not use a separate `English100`
+corpus.
 
 The sample is built from the SciFact test qrels:
 
@@ -70,14 +79,14 @@ The sample is built from the SciFact test qrels:
 2. For each query, choose the highest-scored relevant document.
 3. If multiple relevant documents have the same score, choose the lowest corpus id by numeric value
    when possible, otherwise lexicographically.
-4. Skip documents already selected by earlier queries.
-5. Stop after 100 unique documents.
+4. Keep all 300 unique test query ids.
+5. Write one note per selected corpus document; multiple query ids may point to the same note.
 
 Each benchmark query uses the BEIR query text. The expected note is the selected relevant document
 from qrels.
 
-This deterministic procedure is intended to let a fresh setup produce the same 100 SciFact
-documents and queries.
+`English100` uses the same even-index formula over the 300-query list, so every
+`English100` expected note is also present in `English300`.
 
 ## Fixture Construction
 
@@ -91,7 +100,7 @@ Each generated note has frontmatter for search metadata:
 - `source`
 - `guid`
 - `klue_task`
-- source-specific ids such as `beir_id` or `beir_query_id`
+- source-specific ids such as `beir_id` or `beir_query_ids`
 
 The body text is shaped by task:
 
@@ -99,9 +108,9 @@ The body text is shaped by task:
 |------|-----------|
 | YNAT | headline and topic metadata |
 | STS | sentence 1 and sentence 2 |
-| MRC | article title, question, first answer when available, and context |
+| MRC | article title, question, answer texts when available, and context |
 | WOS | dialogue turns and dialogue state values |
-| SciFact | paper title, abstract text, BEIR corpus id, query id, and qrel score |
+| SciFact | paper title, abstract text, BEIR corpus id, query ids, and qrel scores |
 
 Each generated benchmark query has one expected note. Query construction follows the task:
 
@@ -109,31 +118,54 @@ Each generated benchmark query has one expected note. Query construction follows
 |------|--------------------|
 | YNAT | headline |
 | STS | sentence 2 |
-| MRC | selected question plus first answer when available; question only when no answer is available |
+| MRC | selected question plus answer texts when available; question only when no answer is available |
 | WOS | middle user turn, falling back to the first available turn |
 | SciFact | BEIR query text |
 
-The benchmark queries are scoped to their generated fixture so other benchmark samples do not
-compete with the target 100-document sample.
+The benchmark queries are scoped to their generated fixture for isolated runs.
+The mixed specs remove this path scope so Korean and English notes compete in
+the same result set.
 
 ## Query Spec Regeneration
 
-Upstream datasets do not provide Optsidian's `SearchEval/queries.json` file. Regenerate the local
-query specs from the generated benchmark vault:
+Upstream datasets do not provide Optsidian's generated Markdown vault or
+`SearchEval/*.queries.json` files. To rebuild the benchmark vault from cloned
+sources:
 
 ```bash
-npm run search:eval:spec -- /path/to/test_search
+git clone --depth=1 https://github.com/KLUE-benchmark/KLUE /tmp/KLUE
+git clone --depth=1 https://huggingface.co/datasets/BeIR/scifact /tmp/scifact-hf
+curl -fsSL https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip -o /tmp/scifact.zip
+unzip -q /tmp/scifact.zip -d /tmp/scifact-beir
+npm run search:eval:vault -- /path/to/test_search --klue-repo=/tmp/KLUE --scifact-dir=/tmp/scifact-beir/scifact --clean
+```
+
+The Hugging Face clone records the cloneable English dataset source. The BEIR
+zip is used by the generator because it includes qrels as plain TSV. The
+generator writes `KLUE` and `English` corpus folders. Existing legacy
+`KLUE100` or `English100` folders are left untouched, but the generated specs do
+not read or target them.
+
+Regenerate query specs from an existing generated benchmark vault:
+
+```bash
+npm run search:eval:spec -- /path/to/test_search --scifact-queries-json=/path/to/test_search/SearchEval/scifact-test-queries.jsonl
 ```
 
 This writes:
 
-- `SearchEval/klue100.queries.json`: KLUE100 queries with `path=KLUE100`
-- `SearchEval/english100.queries.json`: English100 queries with `path=English100`
-- `SearchEval/queries.json`: Mixed200 queries without path scoping
+- `SearchEval/klue100.queries.json`: KLUE100 subset queries with `path=KLUE`
+- `SearchEval/klue300.queries.json`: KLUE300 queries with `path=KLUE`
+- `SearchEval/english100.queries.json`: English100 subset queries with `path=English`
+- `SearchEval/english300.queries.json`: English300 queries with `path=English`
+- `SearchEval/mixed200.queries.json`: KLUE100 + English100 without path scoping
+- `SearchEval/mixed600.queries.json`: KLUE300 + English300 without path scoping
+- `SearchEval/queries.json`: the same Mixed600 spec, for the default `search:eval` path
 
-KLUE query text is reconstructed from the generated Markdown notes. SciFact query text is fetched
-from the Hugging Face `BeIR/scifact` queries split and joined through each note's `beir_query_id`.
-For offline regeneration, pass `--scifact-queries-json=<file>` with rows containing `_id` and `text`.
+KLUE query text is reconstructed from the generated Markdown notes. SciFact
+query text is joined through each note's `beir_query_ids`. Without
+`--scifact-queries-json`, the generator fetches the Hugging Face
+`BeIR/scifact` queries split.
 
 ## Search Architecture
 
@@ -169,10 +201,12 @@ warm pinned snapshot.
 Use the same evaluation script for both search-quality and index-lifecycle benchmarks. The default
 benchmark is `quality`, which scores queries from a query spec:
 
-- `KLUE100`: run the KLUE query spec with `path` scoped to `KLUE100`.
-- `English100`: run the SciFact query spec with `path` scoped to `English100`.
-- `Mixed200`: concatenate the KLUE100 and English100 query specs, remove the `path` filter from
-  every query, and evaluate against the shared 200-document vault.
+- `KLUE300`: run the KLUE query spec with `path` scoped to `KLUE`.
+- `English300`: run the SciFact query spec with `path` scoped to `English`.
+- `Mixed600`: concatenate the KLUE300 and English300 query specs, remove the `path` filter from
+  every query, and evaluate against the shared generated vault.
+- `KLUE100`, `English100`, and `Mixed200`: smaller deterministic subsets of the 300/600 specs for
+  quicker local checks.
 
 The mixed evaluation is the primary regression target for multilingual search behavior because
 Korean and English documents compete in the same result set. The per-fixture evaluations remain
@@ -256,36 +290,83 @@ the ngram candidate set is empty.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 52.9ms | 52.4ms | 67.6ms |
-| English100 | 92/100 | 0.720 | 0.820 | 0.850 | 0.920 | 0.782 | 72.4ms | 71.3ms | 89.9ms |
-| Mixed200 | 192/200 | 0.820 | 0.900 | 0.925 | 0.960 | 0.867 | 60.4ms | 59.7ms | 79.7ms |
+| KLUE100 | 99/100 | 0.800 | 0.940 | 0.940 | 0.990 | 0.868 | 138.2ms | 133.3ms | 176.3ms |
+| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 149.8ms | 151.2ms | 176.4ms |
+| Mixed200 | 182/200 | 0.755 | 0.845 | 0.860 | 0.910 | 0.804 | 189.6ms | 149.1ms | 179.9ms |
+| KLUE300 | 291/300 | 0.780 | 0.887 | 0.923 | 0.970 | 0.841 | 140.5ms | 139.0ms | 173.1ms |
+| English300 | 246/300 | 0.677 | 0.750 | 0.783 | 0.820 | 0.722 | 153.5ms | 153.9ms | 178.1ms |
+| Mixed600 | 536/600 | 0.728 | 0.818 | 0.853 | 0.893 | 0.781 | 147.5ms | 149.2ms | 179.1ms |
+
+The lower scores compared with the earlier hand-built 100/200 fixtures are
+expected: the 2026-06-26 fixture rebuild makes the 100 specs subsets of the
+larger 300/600 corpus instead of maintaining separate easier 100-note folders.
+The latest full failure reports have no lexical-missing failures. Mixed600 has
+64 misses: 55 SciFact, 3 STS, and 6 WOS. Of those, 52 are rerank misses and 12
+are candidate-limit misses.
+
+Full-spec wall-clock times from the same sequential run:
+
+| Spec | Total | QPS |
+| --- | ---: | ---: |
+| KLUE300 | 42.1s | 7.118 |
+| English300 | 46.1s | 6.512 |
+| Mixed600 | 88.5s | 6.780 |
+| KLUE300 + English300 + Mixed600 | 176.7s | - |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=52.9ms p50=52.4ms p95=67.6ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=54.0ms p50=52.7ms p95=66.4ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=55.4ms p50=53.4ms p95=70.8ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=57.5ms p50=55.1ms p95=69.7ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=46.9ms p50=44.0ms p95=60.0ms
+score: n=100 top1=0.800 recall@3=0.940 recall@5=0.940 recall@10=0.990 mrr@10=0.868 avg=138.2ms p50=133.3ms p95=176.3ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=139.0ms p50=139.8ms p95=160.9ms
+score.sts: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=1.000 mrr@10=0.687 avg=136.8ms p50=134.9ms p95=162.8ms
+score.wos: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=0.950 mrr@10=0.655 avg=158.2ms p50=162.4ms p95=181.7ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=125.1ms p50=123.0ms p95=140.8ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.782 avg=72.4ms p50=71.3ms p95=89.9ms
-score.scifact: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.782 avg=72.4ms p50=71.3ms p95=89.9ms
+score: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=149.8ms p50=151.2ms p95=176.4ms
+score.scifact: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=149.8ms p50=151.2ms p95=176.4ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.820 recall@3=0.900 recall@5=0.925 recall@10=0.960 mrr@10=0.867 avg=60.4ms p50=59.7ms p95=79.7ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=56.6ms p50=56.9ms p95=70.6ms
-score.scifact: n=100 top1=0.720 recall@3=0.820 recall@5=0.850 recall@10=0.920 mrr@10=0.781 avg=64.8ms p50=64.4ms p95=82.2ms
-score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=60.1ms p50=56.2ms p95=72.5ms
-score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=59.6ms p50=57.3ms p95=68.6ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.3ms p50=47.3ms p95=66.8ms
+score: n=200 top1=0.755 recall@3=0.845 recall@5=0.860 recall@10=0.910 mrr@10=0.804 avg=189.6ms p50=149.1ms p95=179.9ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=150.4ms p50=149.4ms p95=171.0ms
+score.scifact: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=233.4ms p50=151.4ms p95=178.8ms
+score.sts: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=1.000 mrr@10=0.687 avg=147.8ms p50=146.7ms p95=174.4ms
+score.wos: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=0.950 mrr@10=0.655 avg=163.1ms p50=167.1ms p95=193.8ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=128.1ms p50=128.9ms p95=144.4ms
+```
+
+KLUE300:
+
+```text
+score: n=300 top1=0.780 recall@3=0.887 recall@5=0.923 recall@10=0.970 mrr@10=0.841 avg=140.5ms p50=139.0ms p95=173.1ms
+score.mrc: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=146.2ms p50=143.7ms p95=171.9ms
+score.sts: n=60 top1=0.550 recall@3=0.783 recall@5=0.850 recall@10=0.950 mrr@10=0.686 avg=140.8ms p50=140.4ms p95=163.7ms
+score.wos: n=60 top1=0.350 recall@3=0.650 recall@5=0.767 recall@10=0.900 mrr@10=0.520 avg=152.9ms p50=152.1ms p95=180.0ms
+score.ynat: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=126.2ms p50=124.4ms p95=147.5ms
+```
+
+English300:
+
+```text
+score: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.820 mrr@10=0.722 avg=153.5ms p50=153.9ms p95=178.1ms
+score.scifact: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.820 mrr@10=0.722 avg=153.5ms p50=153.9ms p95=178.1ms
+```
+
+Mixed600:
+
+```text
+score: n=600 top1=0.728 recall@3=0.818 recall@5=0.853 recall@10=0.893 mrr@10=0.781 avg=147.5ms p50=149.2ms p95=179.1ms
+score.mrc: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=146.6ms p50=146.2ms p95=170.9ms
+score.scifact: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.817 mrr@10=0.721 avg=155.8ms p50=154.9ms p95=180.7ms
+score.sts: n=60 top1=0.550 recall@3=0.783 recall@5=0.850 recall@10=0.950 mrr@10=0.686 avg=140.6ms p50=140.4ms p95=164.2ms
+score.wos: n=60 top1=0.350 recall@3=0.650 recall@5=0.767 recall@10=0.900 mrr@10=0.520 avg=151.1ms p50=150.2ms p95=180.8ms
+score.ynat: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=122.8ms p50=121.5ms p95=137.6ms
 ```
 
 ## Worker Pools
@@ -315,6 +396,6 @@ Cold-start reference measurements from the 2026-06-24 lazy-startup run:
 | first metadata-only `search tag=...` from no daemon | 0.73s | 324MB |
 | first query `search <text>` from no daemon | 2.59s | 1.45GB |
 
-The deterministic quality baseline is the `--concurrency=1` Mixed200 score above. Higher
+The deterministic quality baseline is the `--concurrency=1` Mixed600 score above. Higher
 concurrency runs are load tests for queueing, cancellation, deadline handling, and tail latency, not
 quality baselines.

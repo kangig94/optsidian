@@ -168,7 +168,7 @@ test("search:eval SLO fixture is opt-in documentation", () => {
   assertOkSpawn(fixtureResult, "SLO fixture");
   const fixture = JSON.parse(fixtureResult.stdout);
 
-  assert.equal(fixture.name, "Mixed200 warm pinned snapshot");
+  assert.equal(fixture.name, "Mixed600 warm pinned snapshot");
   assert.equal(fixture.gate, "opt-in benchmark outside npm test");
   assert.deepEqual(fixture.targets, [
     { concurrency: 1, p50MsMax: 300, p95MsMax: 600 },

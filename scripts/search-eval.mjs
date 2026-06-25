@@ -7,9 +7,9 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
-  name: "Mixed200 warm pinned snapshot",
+  name: "Mixed600 warm pinned snapshot",
   gate: "opt-in benchmark outside npm test",
-  corpus: "Mixed200",
+  corpus: "Mixed600",
   envelope: {
     node: ">=20",
     storage: "local SSD",
