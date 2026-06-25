@@ -14,6 +14,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-bundle.mjs",
+    "search:eval:spec": "node scripts/generate-search-eval-spec.mjs",
     "search:eval": "node --import tsx scripts/search-eval.mjs",
     "package:release": "node scripts/package-release.mjs",
     "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"

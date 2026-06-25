@@ -116,6 +116,25 @@ Each generated benchmark query has one expected note. Query construction follows
 The benchmark queries are scoped to their generated fixture so other benchmark samples do not
 compete with the target 100-document sample.
 
+## Query Spec Regeneration
+
+Upstream datasets do not provide Optsidian's `SearchEval/queries.json` file. Regenerate the local
+query specs from the generated benchmark vault:
+
+```bash
+npm run search:eval:spec -- /path/to/test_search
+```
+
+This writes:
+
+- `SearchEval/klue100.queries.json`: KLUE100 queries with `path=KLUE100`
+- `SearchEval/english100.queries.json`: English100 queries with `path=English100`
+- `SearchEval/queries.json`: Mixed200 queries without path scoping
+
+KLUE query text is reconstructed from the generated Markdown notes. SciFact query text is fetched
+from the Hugging Face `BeIR/scifact` queries split and joined through each note's `beir_query_id`.
+For offline regeneration, pass `--scifact-queries-json=<file>` with rows containing `_id` and `text`.
+
 ## Search Architecture
 
 The search daemon owns the hot search path:
@@ -179,41 +198,42 @@ using that run as a search-quality baseline.
 
 Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
 scoring mode.
-The 2026-06-24 run uses lazy daemon startup, one-worker cold search preload, and pinned positional
+The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm run
+search:eval:spec`, lazy daemon startup, one-worker cold search preload, and pinned positional
 snapshots.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 98/100 | 0.730 | 0.840 | 0.890 | 0.980 | 0.798 | 73.9ms | 72.4ms | 89.0ms |
-| English100 | 87/100 | 0.630 | 0.760 | 0.800 | 0.870 | 0.705 | 81.2ms | 80.3ms | 91.9ms |
-| Mixed200 | 184/200 | 0.680 | 0.800 | 0.845 | 0.920 | 0.750 | 78.1ms | 77.2ms | 96.2ms |
+| KLUE100 | 98/100 | 0.790 | 0.870 | 0.910 | 0.980 | 0.838 | 56.1ms | 54.8ms | 72.1ms |
+| English100 | 87/100 | 0.640 | 0.760 | 0.800 | 0.870 | 0.710 | 66.3ms | 64.7ms | 83.5ms |
+| Mixed200 | 184/200 | 0.715 | 0.815 | 0.855 | 0.920 | 0.773 | 60.5ms | 59.1ms | 81.4ms |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.730 recall@3=0.840 recall@5=0.890 recall@10=0.980 mrr@10=0.798 avg=73.9ms p50=72.4ms p95=89.0ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=74.6ms p50=75.0ms p95=85.5ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=74.4ms p50=72.9ms p95=89.0ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=79.8ms p50=78.6ms p95=90.3ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=68.9ms p50=68.3ms p95=78.6ms
+score: n=100 top1=0.790 recall@3=0.870 recall@5=0.910 recall@10=0.980 mrr@10=0.838 avg=56.1ms p50=54.8ms p95=72.1ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=55.4ms p50=54.6ms p95=68.2ms
+score.sts: n=20 top1=0.400 recall@3=0.600 recall@5=0.750 recall@10=0.900 mrr@10=0.527 avg=56.7ms p50=54.8ms p95=68.2ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.663 avg=65.7ms p50=65.4ms p95=83.3ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.0ms p50=47.4ms p95=63.2ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=81.2ms p50=80.3ms p95=91.9ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.705 avg=81.2ms p50=80.3ms p95=91.9ms
+score: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=66.3ms p50=64.7ms p95=83.5ms
+score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=66.3ms p50=64.7ms p95=83.5ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.680 recall@3=0.800 recall@5=0.845 recall@10=0.920 mrr@10=0.750 avg=78.1ms p50=77.2ms p95=96.2ms
-score.mrc: n=30 top1=0.867 recall@3=0.933 recall@5=0.933 recall@10=1.000 mrr@10=0.910 avg=73.2ms p50=72.8ms p95=80.5ms
-score.scifact: n=100 top1=0.630 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.703 avg=83.4ms p50=82.2ms p95=103.6ms
-score.sts: n=20 top1=0.300 recall@3=0.550 recall@5=0.750 recall@10=0.900 mrr@10=0.461 avg=74.6ms p50=74.9ms p95=83.2ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.662 avg=76.8ms p50=75.1ms p95=88.2ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=68.6ms p50=67.7ms p95=78.9ms
+score: n=200 top1=0.715 recall@3=0.815 recall@5=0.855 recall@10=0.920 mrr@10=0.773 avg=60.5ms p50=59.1ms p95=81.4ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=55.1ms p50=53.9ms p95=67.7ms
+score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.708 avg=66.1ms p50=64.2ms p95=87.7ms
+score.sts: n=20 top1=0.400 recall@3=0.600 recall@5=0.750 recall@10=0.900 mrr@10=0.527 avg=56.7ms p50=55.3ms p95=69.7ms
+score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.663 avg=59.4ms p50=57.9ms p95=72.1ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.2ms p50=49.8ms p95=62.0ms
 ```
 
 ## Worker Pools
@@ -235,7 +255,7 @@ positional snapshot preload and hydrate only document metadata in the search wor
 lifecycle warmup commands such as `index warm`, `index rebuild`, `refresh`, and `compact` still
 preload all search-execution workers for the active snapshot.
 
-Current cold-start reference measurements:
+Cold-start reference measurements from the 2026-06-24 lazy-startup run:
 
 | Scenario | Latency | RSS After Ready |
 | --- | ---: | ---: |

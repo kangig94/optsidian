@@ -1,6 +1,10 @@
 # Next Release Notes
 
-Write source material for the next GitHub Release here.
+## Changes
+
+- Add a `search:eval:spec` generator that rebuilds KLUE100, English100, and Mixed200 query specs from the benchmark vault.
+- Document that Optsidian's `SearchEval/queries.json` is generated locally, not provided by upstream KLUE or BEIR sources.
+- Refresh search benchmark baselines against the regenerated query specs.
 
 <!--
 This file is not the release archive. GitHub Releases are the archive.
