@@ -30,6 +30,7 @@ export const RANK_BUCKET = {
   coverage: 2,
   base: 3
 } as const;
+export const COVERAGE_BUCKET_MIN_TERMS = 1;
 export const EXACT_PRIORITY = {
   title: 0,
   alias: 1,
@@ -60,6 +61,7 @@ export const RANKING_CONSTANTS = {
   RANK_SIGNAL_NORMALIZATION,
   SEARCH_TOKEN_CHANNEL_WEIGHT,
   COVERAGE_FIELD_WEIGHT,
+  COVERAGE_BUCKET_MIN_TERMS,
   EXACT_PRIORITY,
   PHRASE_PRIORITY,
   RANK_BUCKET,

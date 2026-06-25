@@ -38,6 +38,37 @@ function tarSingleFile(filePath, content) {
   return Buffer.concat([header, contentBuffer, padding, Buffer.alloc(1024, 0)]);
 }
 
+function searchDocument(overrides = {}) {
+  return {
+    id: overrides.path ?? "note.md",
+    path: overrides.path ?? "note.md",
+    title: overrides.title ?? "Test Note",
+    aliases: overrides.aliases ?? [],
+    tags: overrides.tags ?? [],
+    headings: overrides.headings ?? [],
+    body: overrides.body ?? "",
+    pathTokens: "",
+    titleTokens: "",
+    aliasesTokens: "",
+    tagsTokens: "",
+    headingsTokens: "",
+    bodyTokens: "",
+    pathSurfaceTokens: "",
+    titleSurfaceTokens: "",
+    aliasesSurfaceTokens: "",
+    tagsSurfaceTokens: "",
+    headingsSurfaceTokens: "",
+    bodySurfaceTokens: "",
+    pathNgramTokens: "",
+    titleNgramTokens: "",
+    aliasesNgramTokens: "",
+    tagsNgramTokens: "",
+    headingsNgramTokens: "",
+    bodyNgramTokens: "",
+    ...overrides
+  };
+}
+
 async function core() {
   return import(path.join(repoRoot, "src/core/index.ts"));
 }
@@ -96,6 +127,40 @@ test("search surface analyzer expands compound path title and acronym terms", as
   for (const term of ["research", "humanoidmotiontracking", "humanoid", "motion", "tracking", "ddpmscheduler", "ddpm", "scheduler", "sim2real", "sim", "real"]) {
     assert.ok(terms.includes(term), `expected ${term} in ${JSON.stringify(terms)}`);
   }
+});
+
+test("reranker does not let weak metadata ngram coverage outrank stronger body retrieval", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const strongBody = searchDocument({
+    path: "STS/strong-body.md",
+    bodyNgramTokens: "숙소"
+  });
+  const weakMetadata = searchDocument({
+    path: "WOS/weak-metadata.md",
+    titleNgramTokens: "숙소",
+    tagsNgramTokens: "숙소"
+  });
+  const queryChannels = {
+    morph: [],
+    surface: [],
+    ngram: ["숙소"]
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "숙소",
+    ["숙소"],
+    [
+      { document: strongBody, score: 10, queryChannels },
+      { document: weakMetadata, score: 9, queryChannels }
+    ],
+    undefined,
+    new Map()
+  );
+
+  assert.equal(ranked[0].path, "STS/strong-body.md");
+  assert.equal(rankBucketName(ranked[0].bucket), "base");
+  assert.equal(ranked[1].coverageTerms, 0.3);
+  assert.equal(rankBucketName(ranked[1].bucket), "base");
 });
 
 test("intl search analyzer segments CJK text for lexical search", async () => {

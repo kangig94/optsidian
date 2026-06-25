@@ -209,41 +209,42 @@ candidate-limit, lexical-recall, or reranking problem.
 Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
 scoring mode.
 The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm run
-search:eval:spec`, lazy daemon startup, one-worker cold search preload, and pinned positional
-snapshots.
+search:eval:spec`, lazy daemon startup, one-worker cold search preload, pinned positional
+snapshots, and the metadata coverage threshold that keeps weak ngram-only metadata matches in the
+base bucket.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 98/100 | 0.790 | 0.870 | 0.910 | 0.980 | 0.838 | 56.1ms | 54.8ms | 72.1ms |
-| English100 | 87/100 | 0.640 | 0.760 | 0.800 | 0.870 | 0.710 | 66.3ms | 64.7ms | 83.5ms |
-| Mixed200 | 184/200 | 0.715 | 0.815 | 0.855 | 0.920 | 0.773 | 60.5ms | 59.1ms | 81.4ms |
+| KLUE100 | 100/100 | 0.920 | 0.980 | 1.000 | 1.000 | 0.953 | 119.8ms | 119.0ms | 156.0ms |
+| English100 | 87/100 | 0.640 | 0.760 | 0.800 | 0.870 | 0.710 | 130.0ms | 127.0ms | 161.3ms |
+| Mixed200 | 187/200 | 0.780 | 0.870 | 0.900 | 0.935 | 0.831 | 118.9ms | 117.3ms | 152.5ms |
 
 KLUE100:
 
 ```text
-score: n=100 top1=0.790 recall@3=0.870 recall@5=0.910 recall@10=0.980 mrr@10=0.838 avg=56.1ms p50=54.8ms p95=72.1ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=55.4ms p50=54.6ms p95=68.2ms
-score.sts: n=20 top1=0.400 recall@3=0.600 recall@5=0.750 recall@10=0.900 mrr@10=0.527 avg=56.7ms p50=54.8ms p95=68.2ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.663 avg=65.7ms p50=65.4ms p95=83.3ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.0ms p50=47.4ms p95=63.2ms
+score: n=100 top1=0.920 recall@3=0.980 recall@5=1.000 recall@10=1.000 mrr@10=0.953 avg=119.8ms p50=119.0ms p95=156.0ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=118.9ms p50=119.6ms p95=145.7ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=133.8ms p50=133.9ms p95=159.2ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=127.5ms p50=124.4ms p95=156.0ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=106.2ms p50=106.7ms p95=131.8ms
 ```
 
 English100:
 
 ```text
-score: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=66.3ms p50=64.7ms p95=83.5ms
-score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=66.3ms p50=64.7ms p95=83.5ms
+score: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=130.0ms p50=127.0ms p95=161.3ms
+score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.710 avg=130.0ms p50=127.0ms p95=161.3ms
 ```
 
 Mixed200:
 
 ```text
-score: n=200 top1=0.715 recall@3=0.815 recall@5=0.855 recall@10=0.920 mrr@10=0.773 avg=60.5ms p50=59.1ms p95=81.4ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=55.1ms p50=53.9ms p95=67.7ms
-score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.860 mrr@10=0.708 avg=66.1ms p50=64.2ms p95=87.7ms
-score.sts: n=20 top1=0.400 recall@3=0.600 recall@5=0.750 recall@10=0.900 mrr@10=0.527 avg=56.7ms p50=55.3ms p95=69.7ms
-score.wos: n=20 top1=0.550 recall@3=0.750 recall@5=0.800 recall@10=1.000 mrr@10=0.663 avg=59.4ms p50=57.9ms p95=72.1ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=50.2ms p50=49.8ms p95=62.0ms
+score: n=200 top1=0.780 recall@3=0.870 recall@5=0.900 recall@10=0.935 mrr@10=0.831 avg=118.9ms p50=117.3ms p95=152.5ms
+score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=107.7ms p50=106.9ms p95=124.1ms
+score.scifact: n=100 top1=0.640 recall@3=0.760 recall@5=0.800 recall@10=0.870 mrr@10=0.709 avg=127.1ms p50=123.2ms p95=158.6ms
+score.sts: n=20 top1=0.850 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.910 avg=114.9ms p50=109.1ms p95=136.7ms
+score.wos: n=20 top1=0.750 recall@3=0.950 recall@5=1.000 recall@10=1.000 mrr@10=0.854 avg=122.9ms p50=119.7ms p95=152.5ms
+score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=102.9ms p50=99.3ms p95=125.1ms
 ```
 
 ## Worker Pools

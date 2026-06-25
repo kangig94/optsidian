@@ -335,7 +335,7 @@ function replayOfflineExplainTrace(trace) {
     const proximityScore = bestFeatureProximity(feature);
     return {
       path: candidate.path ?? feature.candidate?.path ?? candidate.documentId,
-      bucket: rankBucket(exactPriority, phrasePriority, coverageTerms),
+      bucket: rankBucket(exactPriority, phrasePriority, coverageTerms, config),
       score: 0,
       baseRank: index + 1,
       exactPriority,
@@ -362,7 +362,8 @@ function normalizeRankingConfig(config) {
   return {
     rrfK: config.rrfK,
     weights: config.weights,
-    signalWeights: config.signalWeights
+    signalWeights: config.signalWeights,
+    coverageBucketMinTerms: config.constants?.COVERAGE_BUCKET_MIN_TERMS ?? null
   };
 }
 
@@ -375,10 +376,11 @@ function featurePayloadMap(features) {
   return byCandidate;
 }
 
-function rankBucket(exactPriority, phrasePriority, coverageTerms) {
+function rankBucket(exactPriority, phrasePriority, coverageTerms, config = { coverageBucketMinTerms: null }) {
   if (Number.isFinite(exactPriority)) return 0;
   if (Number.isFinite(phrasePriority)) return 1;
-  if (coverageTerms > 0) return 2;
+  if (config.coverageBucketMinTerms === null) return coverageTerms > 0 ? 2 : 3;
+  if (coverageTerms >= config.coverageBucketMinTerms) return 2;
   return 3;
 }
 

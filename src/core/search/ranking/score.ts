@@ -1,6 +1,6 @@
 import type { SearchDocument } from "../markdown.js";
 import type { SearchField, SearchMatch } from "../../types.js";
-import { RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_WEIGHTS } from "../constants.js";
+import { COVERAGE_BUCKET_MIN_TERMS, RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_WEIGHTS } from "../constants.js";
 import type { QueryContext, RankedCandidate } from "../internal-types.js";
 import { SEARCH_PROPERTIES } from "../schema.js";
 import {
@@ -171,7 +171,7 @@ function normalizedQueryChannels(
 function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {
   if (Number.isFinite(exactPriority)) return RANK_BUCKET.exact;
   if (Number.isFinite(phrasePriority)) return RANK_BUCKET.phrase;
-  if (coverageTerms > 0) return RANK_BUCKET.coverage;
+  if (coverageTerms >= COVERAGE_BUCKET_MIN_TERMS) return RANK_BUCKET.coverage;
   return RANK_BUCKET.base;
 }
 

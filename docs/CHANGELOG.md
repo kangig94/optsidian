@@ -6,6 +6,7 @@
 - Document that Optsidian's `SearchEval/queries.json` is generated locally, not provided by upstream KLUE or BEIR sources.
 - Refresh search benchmark baselines against the regenerated query specs.
 - Add repeat-run summaries and JSON failure reports to `search:eval` for search tuning.
+- Improve ranking by keeping weak ngram-only metadata coverage in the base bucket, raising KLUE100 to 100/100 and Mixed200 to 187/200.
 
 <!--
 This file is not the release archive. GitHub Releases are the archive.
