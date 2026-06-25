@@ -1,5 +1,5 @@
-import { termsToSearchText } from "./channels.js";
-import { analyzeSearchText } from "./query.js";
+import { surfaceSearchTerms, termsToSearchText, uniqueSearchTerms } from "./channels.js";
+import { ngramSearchTerms } from "./korean.js";
 
 export type SearchFieldTokenTexts = {
   morph: string;
@@ -7,11 +7,33 @@ export type SearchFieldTokenTexts = {
   ngram: string;
 };
 
-export function searchFieldTokenTexts(raw: string, morphTokens: readonly string[]): SearchFieldTokenTexts {
-  const analysis = analyzeSearchText(raw, morphTokens);
+export type SearchFieldTokenTextOptions = {
+  morphMaxTerms?: number;
+  surfaceMaxTerms?: number;
+  ngramMaxTerms?: number;
+  ngramRaw?: string;
+};
+
+export function searchFieldTokenTexts(
+  raw: string,
+  morphTokens: readonly string[],
+  options: SearchFieldTokenTextOptions = {}
+): SearchFieldTokenTexts {
+  const morph = limitTerms(uniqueSearchTerms(morphTokens), options.morphMaxTerms);
+  const surface = limitTerms(surfaceSearchTerms(raw), options.surfaceMaxTerms);
+  const ngramSurface = options.ngramRaw === undefined
+    ? surface
+    : limitTerms(surfaceSearchTerms(options.ngramRaw), options.surfaceMaxTerms);
+  const ngram = ngramSearchTerms([...ngramSurface, ...morph], { maxTerms: options.ngramMaxTerms });
   return {
-    morph: termsToSearchText(analysis.channels.morph),
-    surface: termsToSearchText(analysis.channels.surface),
-    ngram: termsToSearchText(analysis.channels.ngram)
+    morph: termsToSearchText(morph),
+    surface: termsToSearchText(surface),
+    ngram: termsToSearchText(ngram)
   };
+}
+
+function limitTerms(terms: readonly string[], maxTerms?: number): readonly string[] {
+  if (typeof maxTerms !== "number" || !Number.isFinite(maxTerms)) return terms;
+  const limit = Math.max(0, Math.trunc(maxTerms));
+  return terms.slice(0, limit);
 }

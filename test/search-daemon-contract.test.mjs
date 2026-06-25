@@ -288,7 +288,7 @@ async function createPinnedSearchFixture(files, options = {}) {
           debug: options.debug ?? false,
           ...(overrides.search ?? {})
         }),
-        analysis: testQueryAnalysis(query),
+        analysis: overrides.analysis ?? options.analysis ?? testQueryAnalysis(query),
         analyzerIdentity: analyzer.identity,
         snapshot,
         explain: overrides.explain === true
@@ -1251,12 +1251,14 @@ test("search daemon preloads execution snapshots only for query searches", async
   }), false);
 });
 
-test("lifecycle deadlines scale with vault markdown count", async () => {
+test("lifecycle deadlines scale with vault markdown count and bytes", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const { vaultLifecycleDeadlineMs } = await futureImport("src/daemon/protocol.ts");
   const vault = tempRoot();
-  writeVaultFile(vault, "Alpha.md", "# Alpha\n");
-  writeVaultFile(vault, "nested/Beta.md", "# Beta\n");
+  const alpha = "# Alpha\n";
+  const beta = `# Beta\n\n${"x".repeat(1024 * 1024)}\n`;
+  writeVaultFile(vault, "Alpha.md", alpha);
+  writeVaultFile(vault, "nested/Beta.md", beta);
   fs.writeFileSync(path.join(vault, "ignored.txt"), "ignored");
 
   const requests = [];
@@ -1286,7 +1288,7 @@ test("lifecycle deadlines scale with vault markdown count", async () => {
   await client.loadVault({ vault });
   const loadRequest = requests.find((request) => request.method === "LoadVault");
   assert.ok(loadRequest);
-  const expected = vaultLifecycleDeadlineMs(2);
+  const expected = vaultLifecycleDeadlineMs(2, Buffer.byteLength(alpha) + Buffer.byteLength(beta));
   assert.ok(loadRequest.deadline >= before + expected - 100);
   assert.ok(loadRequest.deadline <= Date.now() + expected + 1000);
 
@@ -1317,6 +1319,27 @@ test("snapshot build reports deterministic progress counts", async () => {
   const segmenting = progress.filter((update) => update.phase === "segmenting");
   assert.ok(segmenting.length > 0);
   assert.equal(segmenting.at(-1).completed, segmenting.at(-1).total);
+});
+
+test("snapshot build caps body ngram terms without capping metadata ngrams", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { BODY_NGRAM_SHORT_MAX_TERMS } = await futureImport("src/core/search/analysis/budget.ts");
+  const vault = tempRoot();
+  const longHangul = Array.from({ length: BODY_NGRAM_SHORT_MAX_TERMS + 100 }, (_, index) =>
+    String.fromCodePoint(0xac00 + index)
+  ).join("");
+  writeVaultFile(vault, "Alpha.md", `# ${longHangul}\n\n${longHangul}\n`);
+
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer: testAnalyzer(),
+    partitionBits: 1
+  });
+  const document = built.diagnostics.documents[0].searchDocument;
+
+  assert.equal(document.bodyNgramTokens.split(" ").length, BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.ok(document.titleNgramTokens.split(" ").length > BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.equal(built.identityTuple.analyzerIdentity.ngram.bodyBudget.bodyNgramMaxTerms.short, BODY_NGRAM_SHORT_MAX_TERMS);
 });
 
 test("search execution state cache is scoped by immutable snapshot id, not request pin token", async () => {
@@ -1593,11 +1616,12 @@ test("AC9 canonical segment bytes and snapshot id are history-independent", asyn
   const { buildCanonicalSnapshotForTests } = await futureImport("src/core/search/segments/canonical.ts");
   const { canonicalValueBytes } = await futureImport("src/core/search/segments/index.ts");
   const { RANKING_CONSTANTS } = await futureImport("src/core/search/constants.ts");
+  const { BODY_INDEX_BUDGET_IDENTITY } = await futureImport("src/core/search/analysis/budget.ts");
   const identityTuple = {
     buildVersion: "positional-build-v1",
     fieldSetVersion: "field-set-v1",
     partitionBits: 4,
-    analyzerIdentity: { name: "router", channels: ["morph", "surface", "ngram"], ngram: { min: 2, max: 3 } },
+    analyzerIdentity: { name: "router", channels: ["morph", "surface", "ngram"], ngram: { min: 2, max: 3, bodyBudget: BODY_INDEX_BUDGET_IDENTITY } },
     searchSettingsHash: sha256("index-affecting-settings-only"),
     rankingFeatureVersion: sha256(canonicalValueBytes(RANKING_CONSTANTS)),
     retrieverIdentity: null
@@ -1903,6 +1927,32 @@ test("AC15 fixed positional corpus preserves expected top-N ranking", async () =
       "Ops/Alpha Calibration.md",
       "Alpha Calibration Guide.md"
     ]);
+  } finally {
+    fixture.release();
+  }
+});
+
+test("Hangul ngram retrieval falls back to morph and surface when ngram candidates are empty", async () => {
+  const fixture = await createPinnedSearchFixture({
+    "Target.md": "# Target\n\n희귀한국어\n",
+    "Other.md": "# Other\n\nordinary content\n"
+  }, { query: "희귀한국어", limit: 10 });
+
+  try {
+    const result = fixture.search({
+      analysis: {
+        raw: "희귀한국어",
+        primaryChannel: "morph",
+        primaryTerms: ["희귀한국어"],
+        channels: {
+          morph: ["희귀한국어"],
+          surface: ["희귀한국어"],
+          ngram: ["없는그램"]
+        }
+      }
+    });
+
+    assert.deepEqual(result.matches.map((match) => match.path), ["Target.md"]);
   } finally {
     fixture.release();
   }

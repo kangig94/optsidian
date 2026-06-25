@@ -3,7 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { vaultRelative, vaultRealpath, walkFiles } from "../../core/path.js";
 import type { SearchAnalyzer } from "../../core/search/analyzer.js";
-import { SEARCH_TOKEN_CHANNELS, searchFieldTokenTexts } from "../../core/search/analysis/index.js";
+import {
+  BODY_INDEX_BUDGET_IDENTITY,
+  SEARCH_TOKEN_CHANNELS,
+  SNIPPET_LINE_MORPH_MAX_TERMS,
+  SNIPPET_LINE_NGRAM_MAX_TERMS,
+  SNIPPET_LINE_SURFACE_MAX_TERMS,
+  bodyIndexBudgetForText,
+  searchFieldTokenTexts,
+  type BodyIndexBudget
+} from "../../core/search/analysis/index.js";
 import { MIN_NGRAM, MAX_NGRAM } from "../../core/search/analysis/korean.js";
 import { RANKING_CONSTANTS } from "../../core/search/constants.js";
 import { parseMarkdownNote, type SearchDocument } from "../../core/search/markdown.js";
@@ -43,7 +52,7 @@ export const DEFAULT_PARTITION_BITS = 4;
 // (fieldSetVersion = sha256(schema), rankingFeatureVersion = sha256(RANKING_CONSTANTS))
 // do not already capture. NEVER derive it from the binary hash: index identity is
 // deliberately decoupled from the build so unrelated code changes don't force a reindex.
-export const INDEX_BUILD_VERSION = "daemon-positional-build-v1";
+export const INDEX_BUILD_VERSION = "daemon-positional-build-v2";
 
 // No index-affecting search settings exist yet; the empty object makes that explicit.
 // When one is added, put it here and the hash — the shared invalidation key between
@@ -164,7 +173,7 @@ export function snapshotIdentityTupleForAnalyzerIdentity(
     analyzerIdentity: {
       analyzer: analyzerIdentity,
       channels: [...SEARCH_TOKEN_CHANNELS],
-      ngram: { min: MIN_NGRAM, max: MAX_NGRAM }
+      ngram: { min: MIN_NGRAM, max: MAX_NGRAM, bodyBudget: BODY_INDEX_BUDGET_IDENTITY }
     },
     searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH,
     rankingFeatureVersion: sha256(canonicalValueBytes(RANKING_CONSTANTS)),
@@ -224,22 +233,30 @@ async function parseBuildDocument(
   }
   const note = parseMarkdownNote(relPath, text);
   const lineSpans = lineSpanEntries(text);
+  const bodyBudget = bodyIndexBudgetForText(note.body);
+  const snippetLineInputs = snippetLineAnalysisInputs(lineSpans, bodyBudget);
   const tokenized = await analyzer.tokenizeBatch([
     note.path,
     note.title,
     note.aliases.join(" "),
     note.tags.join(" "),
     note.headings.join(" "),
-    note.body,
-    ...lineSpans.map((line) => line.text)
+    bodyBudget.bodyLexicalText,
+    ...snippetLineInputs.map((line) => line.analysisText)
   ]);
+  const bodyMorphTokens = normalizeTokenSequence(tokenized[5] ?? []).slice(0, bodyBudget.bodyMorphMaxTokens);
   const fields = {
     path: searchFieldTokenTexts(note.path, tokenized[0] ?? []),
     title: searchFieldTokenTexts(note.title, tokenized[1] ?? []),
     aliases: searchFieldTokenTexts(note.aliases.join(" "), tokenized[2] ?? []),
     tags: searchFieldTokenTexts(note.tags.join(" "), tokenized[3] ?? []),
     headings: searchFieldTokenTexts(note.headings.join(" "), tokenized[4] ?? []),
-    body: searchFieldTokenTexts(note.body, tokenized[5] ?? [])
+    body: searchFieldTokenTexts(bodyBudget.bodyLexicalText, bodyMorphTokens, {
+      morphMaxTerms: bodyBudget.bodyMorphMaxTokens,
+      surfaceMaxTerms: bodyBudget.bodySurfaceMaxTerms,
+      ngramMaxTerms: bodyBudget.bodyNgramMaxTerms,
+      ngramRaw: bodyBudget.bodyNgramText
+    })
   };
   const searchDocument: SearchDocument = {
     ...note,
@@ -269,7 +286,7 @@ async function parseBuildDocument(
       aliases: normalizeTokenSequence(tokenized[2] ?? []),
       tags: normalizeTokenSequence(tokenized[3] ?? []),
       headings: normalizeTokenSequence(tokenized[4] ?? []),
-      body: normalizeTokenSequence(tokenized[5] ?? [])
+      body: bodyMorphTokens
     },
     surface: channelPositionTokens(searchDocument, "surface"),
     ngram: channelPositionTokens(searchDocument, "ngram")
@@ -294,7 +311,7 @@ async function parseBuildDocument(
     canonicalRecord,
     partitionId,
     lineSnippets: lineSpans.map((line) => ({ line: line.line, text: line.text })),
-    snippetLines: lineSnippetEntries(documentId, lineSpans, tokenized.slice(6))
+    snippetLines: lineSnippetEntries(documentId, snippetLineInputs, tokenized.slice(6))
   };
 }
 
@@ -385,6 +402,11 @@ type LineSpanEntry = SearchSnippet & {
   byteEnd: number;
 };
 
+type SnippetLineAnalysisInput = {
+  source: LineSpanEntry;
+  analysisText: string;
+};
+
 function lineSpanEntries(content: string): LineSpanEntry[] {
   const parts = content.split(/(\r?\n)/u);
   const lines: LineSpanEntry[] = [];
@@ -406,18 +428,23 @@ function lineSpanEntries(content: string): LineSpanEntry[] {
 
 function lineSnippetEntries(
   documentId: string,
-  lines: readonly LineSpanEntry[],
+  lines: readonly SnippetLineAnalysisInput[],
   tokenizedLines: readonly string[][]
 ): Omit<SnapshotSnippetLine, "segmentId">[] {
   return lines.map((line, index) => {
-    const channels = searchFieldTokenTexts(line.text, tokenizedLines[index] ?? []);
+    const morphTokens = normalizeTokenSequence(tokenizedLines[index] ?? []).slice(0, SNIPPET_LINE_MORPH_MAX_TERMS);
+    const channels = searchFieldTokenTexts(line.analysisText, morphTokens, {
+      morphMaxTerms: SNIPPET_LINE_MORPH_MAX_TERMS,
+      surfaceMaxTerms: SNIPPET_LINE_SURFACE_MAX_TERMS,
+      ngramMaxTerms: SNIPPET_LINE_NGRAM_MAX_TERMS
+    });
     return {
-      snippetId: `${documentId}:${line.line}`,
+      snippetId: `${documentId}:${line.source.line}`,
       documentId,
-      line: line.line,
-      text: line.text,
-      byteStart: line.byteStart,
-      byteEnd: line.byteEnd,
+      line: line.source.line,
+      text: line.source.text,
+      byteStart: line.source.byteStart,
+      byteEnd: line.source.byteEnd,
       channels: {
         morph: channelTerms(channels.morph),
         surface: channelTerms(channels.surface),
@@ -425,6 +452,71 @@ function lineSnippetEntries(
       }
     };
   });
+}
+
+function snippetLineAnalysisInputs(
+  lines: readonly LineSpanEntry[],
+  budget: BodyIndexBudget
+): SnippetLineAnalysisInput[] {
+  const maxLines = budget.snippetDocMaxAnalyzedLines ?? lines.length;
+  const initialSelected = lines.length <= maxLines ? lines.map((_, index) => index) : evenSampledIndices(lines.length, maxLines);
+  const maxChars = budget.snippetDocMaxAnalyzedChars ?? Number.POSITIVE_INFINITY;
+  const selected = fitSnippetLineIndicesToCharBudget(
+    lines,
+    initialSelected,
+    maxChars,
+    budget.snippetLineAnalysisMaxChars
+  );
+  const output: SnippetLineAnalysisInput[] = [];
+  let usedChars = 0;
+  for (const index of selected) {
+    const line = lines[index];
+    if (!line) continue;
+    const remaining = maxChars - usedChars;
+    if (remaining <= 0) break;
+    const analysisText = line.text.slice(0, Math.min(budget.snippetLineAnalysisMaxChars, remaining));
+    usedChars += analysisText.length;
+    output.push({ source: line, analysisText });
+  }
+  return output;
+}
+
+function fitSnippetLineIndicesToCharBudget(
+  lines: readonly LineSpanEntry[],
+  selected: readonly number[],
+  maxChars: number,
+  maxLineChars: number
+): number[] {
+  if (!Number.isFinite(maxChars)) return [...selected];
+  const safeMaxChars = Math.max(0, Math.trunc(maxChars));
+  if (safeMaxChars === 0) return [];
+  let limit = selected.length;
+  let output = [...selected];
+  let total = snippetAnalysisCharTotal(lines, output, maxLineChars);
+  while (limit > 1 && total > safeMaxChars) {
+    const nextLimit = Math.max(1, Math.min(limit - 1, Math.floor((limit * safeMaxChars) / Math.max(total, 1))));
+    output = evenSampledIndices(lines.length, nextLimit);
+    limit = output.length;
+    total = snippetAnalysisCharTotal(lines, output, maxLineChars);
+  }
+  return output;
+}
+
+function snippetAnalysisCharTotal(lines: readonly LineSpanEntry[], indices: readonly number[], maxLineChars: number): number {
+  const lineLimit = Number.isFinite(maxLineChars) ? Math.max(0, Math.trunc(maxLineChars)) : Number.POSITIVE_INFINITY;
+  return indices.reduce((sum, index) => sum + Math.min(lines[index]?.text.length ?? 0, lineLimit), 0);
+}
+
+function evenSampledIndices(length: number, maxCount: number): number[] {
+  const limit = Number.isFinite(maxCount) ? Math.max(0, Math.trunc(maxCount)) : length;
+  if (length <= limit) return Array.from({ length }, (_, index) => index);
+  if (limit === 0) return [];
+  if (limit === 1) return [0];
+  const indices = new Set<number>();
+  for (let index = 0; index < limit; index += 1) {
+    indices.add(Math.round(((length - 1) * index) / (limit - 1)));
+  }
+  return [...indices].sort((left, right) => left - right);
 }
 
 function channelTerms(value: string): string[] {

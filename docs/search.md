@@ -149,6 +149,17 @@ The search daemon owns the hot search path:
 - Build updated snapshots in the background, then atomically swap the active snapshot. Search
   should always run against one deterministic snapshot.
 - Keep all ordering stable with explicit tie-breakers, usually score first and path second.
+- Budget long body-derived indexes without truncating the stored note body. Notes up to 64Ki chars
+  use full body analysis with 4096 body ngram terms; notes up to 512Ki chars use full body analysis
+  with 8192 body ngram terms; larger notes use deterministic whole-document sampling with 12288 or
+  16384 body ngram terms. Metadata ngrams for path, title, aliases, tags, and headings remain
+  uncapped because those fields are naturally small and carry high-value identity signals.
+- Cap snippet scoring analysis separately from snippet display: each analyzed line is capped at
+  4096 chars and 512 terms per channel, and each note analyzes at most 3000 sampled lines /
+  512Ki chars for snippet scoring. Raw line snippets remain available for fallback display.
+- Keep long-document build stress coverage out of the default test path. `npm test` covers budget
+  selection and normal snapshot contracts; run `npm run test:slow` before changing long-body
+  sampling, snippet sampling, or index-build timeout policy.
 
 `N` in load sweeps means daemon worker count. Quality baselines use `--concurrency=1` against a
 warm pinned snapshot.
@@ -171,12 +182,13 @@ daemon can load the vault and pin a snapshot. A cold `Search` only blocks on one
 worker preloading the snapshot; additional search workers hydrate the snapshot on demand. Use
 `--no-warmup` only when explicitly measuring cold-start behavior.
 
-Index lifecycle requests use a work-sized deadline rather than a fixed 30 second budget. When the
+Index lifecycle requests use a work-sized deadline rather than a fixed short budget. When the
 client sends `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, or a cold `Search` / `Explain`
-without an explicit `deadlineMs`, it counts visible Markdown notes in the vault and uses:
+without an explicit `deadlineMs`, it counts visible Markdown notes and Markdown bytes in the vault
+and uses:
 
 ```text
-deadline = 30 seconds + 750 milliseconds * markdown_note_count
+deadline = 60 seconds + 750 milliseconds * markdown_note_count + 5 seconds * markdown_MiB
 ```
 
 Warm search latency targets still apply to searches against an already loaded snapshot. The longer
@@ -211,7 +223,8 @@ scoring mode.
 The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm run
 search:eval:spec`, lazy daemon startup, one-worker cold search preload, pinned positional
 snapshots, and the metadata coverage threshold that keeps weak ngram-only metadata matches in the
-base bucket.
+base bucket. Body ngram budgets are dynamic by note length, and Hangul ngram retrieval falls back to
+morph/surface retrieval only when the ngram candidate set is empty.
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

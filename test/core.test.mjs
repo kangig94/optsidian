@@ -95,6 +95,41 @@ test("AC6 search query and Hangul ngram analysis are length-bounded", async () =
   assert.ok(longHangulTerms.length <= 8192);
 });
 
+test("body ngram field text can be capped without changing other channels", async () => {
+  const { BODY_NGRAM_SHORT_MAX_TERMS } = await import(path.join(repoRoot, "src/core/search/analysis/budget.ts"));
+  const { searchFieldTokenTexts } = await import(path.join(repoRoot, "src/core/search/analysis/fields.ts"));
+  const longHangul = Array.from({ length: BODY_NGRAM_SHORT_MAX_TERMS + 100 }, (_, index) =>
+    String.fromCodePoint(0xac00 + index)
+  ).join("");
+
+  const uncapped = searchFieldTokenTexts(longHangul, ["형태소"]);
+  const capped = searchFieldTokenTexts(longHangul, ["형태소"], { ngramMaxTerms: BODY_NGRAM_SHORT_MAX_TERMS });
+
+  assert.equal(capped.morph, "형태소");
+  assert.ok(uncapped.ngram.split(" ").length > BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.equal(capped.ngram.split(" ").length, BODY_NGRAM_SHORT_MAX_TERMS);
+});
+
+test("body index budget samples oversized bodies across the full text", async () => {
+  const {
+    BODY_FULL_ANALYSIS_MAX_CHARS,
+    BODY_LEXICAL_SAMPLE_MAX_CHARS,
+    bodyIndexBudgetForText
+  } = await import(path.join(repoRoot, "src/core/search/analysis/budget.ts"));
+  const body = [
+    "front-marker",
+    "가".repeat(BODY_FULL_ANALYSIS_MAX_CHARS + 1000),
+    "tail-marker"
+  ].join("\n");
+
+  const budget = bodyIndexBudgetForText(body);
+
+  assert.equal(budget.tier, "long");
+  assert.ok(budget.bodyLexicalText.length <= BODY_LEXICAL_SAMPLE_MAX_CHARS);
+  assert.match(budget.bodyLexicalText, /front-marker/);
+  assert.match(budget.bodyLexicalText, /tail-marker/);
+});
+
 
 test("markdown search parser extracts title aliases tags headings and body", async () => {
   const { parseMarkdownNote } = await import(path.join(repoRoot, "src/core/search/markdown.ts"));

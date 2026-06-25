@@ -288,12 +288,12 @@ function requestDeadlineMs(
 ): number | undefined {
   if (options.deadlineMs !== undefined) return options.deadlineMs;
   if ((method === "Search" || method === "Explain") && "vault" in payload && typeof payload.vault === "string") {
-    const fileCount = countVaultMarkdownFiles(payload.vault);
-    if (fileCount !== undefined) return Math.max(vaultLifecycleDeadlineMs(fileCount), SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS);
+    const stats = vaultMarkdownStats(payload.vault);
+    if (stats !== undefined) return Math.max(vaultLifecycleDeadlineMs(stats.fileCount, stats.byteCount), SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS);
   }
   if (isVaultLifecycleMethod(method) && "vault" in payload && typeof payload.vault === "string") {
-    const fileCount = countVaultMarkdownFiles(payload.vault);
-    if (fileCount !== undefined) return vaultLifecycleDeadlineMs(fileCount);
+    const stats = vaultMarkdownStats(payload.vault);
+    if (stats !== undefined) return vaultLifecycleDeadlineMs(stats.fileCount, stats.byteCount);
   }
   return undefined;
 }
@@ -306,10 +306,13 @@ function isVaultLifecycleMethod(method: SearchDaemonMethod): boolean {
     method === "Clear";
 }
 
-function countVaultMarkdownFiles(vault: string): number | undefined {
+function vaultMarkdownStats(vault: string): { fileCount: number; byteCount: number } | undefined {
   try {
     const root = vaultRealpath(vault);
-    return walkFiles(root, root, { includeHidden: false, all: false }).length;
+    const files = walkFiles(root, root, { includeHidden: false, all: false });
+    let byteCount = 0;
+    for (const file of files) byteCount += fs.statSync(file).size;
+    return { fileCount: files.length, byteCount };
   } catch {
     return undefined;
   }

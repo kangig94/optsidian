@@ -690,27 +690,27 @@ function positionalCandidateLimit(
 
 function snippetsForDocument(record: PersistedDocumentRecord, queryChannels: SearchTokenChannelTerms) {
   const storedSnippetLines = record.snippetLines ?? [];
-  const lines = storedSnippetLines.length > 0
-    ? storedSnippetLines
-    : record.lineSnippets.map((line): SnapshotSnippetLine => ({
-        ...line,
-        snippetId: `${record.documentId}:${line.line}`,
-        segmentId: "",
-        documentId: record.documentId,
-        byteStart: 0,
-        byteEnd: 0,
-        channels: emptySearchTokenChannels()
-      }));
-  const bodyStart = bodyStartLine(lines);
-  const candidates = lines.filter((line) => line.line > bodyStart && line.text.trim().length > 0);
+  const fallbackLines = record.lineSnippets.map((line): SnapshotSnippetLine => ({
+    ...line,
+    snippetId: `${record.documentId}:${line.line}`,
+    segmentId: "",
+    documentId: record.documentId,
+    byteStart: 0,
+    byteEnd: 0,
+    channels: emptySearchTokenChannels()
+  }));
+  const scoredLines = storedSnippetLines.length > 0 ? storedSnippetLines : fallbackLines;
+  const fallbackBodyStart = bodyStartLine(fallbackLines);
+  const candidates = scoredLines.filter((line) => line.line > fallbackBodyStart && line.text.trim().length > 0);
   const scored = candidates
     .map((line) => ({ line, score: snippetScore(line, queryChannels) }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score || left.line.line - right.line.line);
   if (scored.length > 0) return uniqueSnippets(scored.map((entry) => entry.line)).slice(0, 3);
-  const heading = candidates.find((line) => /^#{1,6}\s+/.test(line.text));
+  const fallbackCandidates = fallbackLines.filter((line) => line.line > fallbackBodyStart && line.text.trim().length > 0);
+  const heading = fallbackCandidates.find((line) => /^#{1,6}\s+/.test(line.text));
   if (heading) return [heading];
-  const first = candidates[0];
+  const first = fallbackCandidates[0];
   if (first) return [first];
   return record.searchDocument.title ? [{ line: 1, text: record.searchDocument.title }] : [];
 }

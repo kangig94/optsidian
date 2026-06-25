@@ -26,8 +26,9 @@ export const SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS = 15000;
 export const SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS = 1000;
 export const SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 3000;
 export const SEARCH_DAEMON_DEFAULT_EXPLAIN_DEADLINE_MS = 5000;
-export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS = 30_000;
+export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS = 60_000;
 export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS = 750;
+export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_MIB_DEADLINE_MS = 5000;
 export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS;
 
 export type SearchDaemonMethod = (typeof SEARCH_DAEMON_METHODS)[number];
@@ -237,10 +238,12 @@ export function methodDefaultDeadlineMs(method: SearchDaemonMethod): number {
   return SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
 }
 
-export function vaultLifecycleDeadlineMs(fileCount: number): number {
+export function vaultLifecycleDeadlineMs(fileCount: number, byteCount = 0): number {
   const safeCount = Number.isFinite(fileCount) ? Math.max(0, Math.floor(fileCount)) : 0;
+  const safeBytes = Number.isFinite(byteCount) ? Math.max(0, Math.floor(byteCount)) : 0;
   return SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS +
-    safeCount * SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS;
+    safeCount * SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS +
+    Math.ceil((safeBytes / (1024 * 1024)) * SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_MIB_DEADLINE_MS);
 }
 
 export function deadlineFromNow(method: SearchDaemonMethod, deadlineMs?: number, now = Date.now()): number {

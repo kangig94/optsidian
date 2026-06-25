@@ -1,21 +1,28 @@
-import { uniqueSearchTerms } from "./channels.js";
-
 const HANGUL_PATTERN = /\p{Script=Hangul}/u;
 export const MIN_NGRAM = 2;
 export const MAX_NGRAM = 3;
 const MAX_NGRAM_SOURCE_LENGTH = 4096;
 const MAX_NGRAMS_PER_TERM = 8192;
 
-export function ngramSearchTerms(terms: readonly string[]): string[] {
-  const ngrams: string[] = [];
+export type NgramSearchTermOptions = {
+  maxTerms?: number;
+};
+
+export function ngramSearchTerms(terms: readonly string[], options: NgramSearchTermOptions = {}): string[] {
+  const maxTerms = safeMaxTerms(options.maxTerms);
+  if (maxTerms === 0) return [];
+  const ngrams = new Set<string>();
   for (const term of terms) {
     if (!HANGUL_PATTERN.test(term)) continue;
     const grams = characterNgrams(term, MIN_NGRAM, MAX_NGRAM);
     for (const gram of grams) {
-      ngrams.push(gram);
+      const normalized = gram.trim();
+      if (!normalized || ngrams.has(normalized)) continue;
+      ngrams.add(normalized);
+      if (ngrams.size >= maxTerms) return [...ngrams];
     }
   }
-  return uniqueSearchTerms(ngrams);
+  return [...ngrams];
 }
 
 function characterNgrams(value: string, minLength: number, maxLength: number): string[] {
@@ -30,4 +37,10 @@ function characterNgrams(value: string, minLength: number, maxLength: number): s
     }
   }
   return grams;
+}
+
+function safeMaxTerms(maxTerms?: number): number {
+  if (typeof maxTerms !== "number") return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(maxTerms)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, Math.trunc(maxTerms));
 }

@@ -17,6 +17,7 @@
     "search:eval:spec": "node scripts/generate-search-eval-spec.mjs",
     "search:eval": "node --import tsx scripts/search-eval.mjs",
     "package:release": "node scripts/package-release.mjs",
+    "test:slow": "node --import tsx --test test/*.slow.mjs",
     "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
   },
   "engines": {

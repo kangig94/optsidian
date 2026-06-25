@@ -26,7 +26,10 @@ import {
 
 export const POSITIONAL_RETRIEVER_IDENTITY: RetrieverIdentity = {
   id: "positional-lexical",
-  version: "1"
+  version: "2",
+  parameters: {
+    hangulFallback: "ngram-to-morph-surface-when-empty"
+  }
 };
 
 type CandidateBuilder = {
@@ -61,11 +64,14 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
   const fields = allowedFields(query.fields);
   const candidateBuilders = new Map<PositionalDocId, CandidateBuilder>();
   const documentsByDocId = new Map(snapshot.documents.map((document) => [document.docId, document]));
+  const explicitChannels = Boolean(query.channels);
   const channels = positionalSearchChannels(query);
+  const searchedChannels = new Set<SearchTokenChannel>();
 
-  for (const channel of channels) {
+  const searchChannel = (channel: SearchTokenChannel) => {
+    searchedChannels.add(channel);
     const terms = query.analysis.channels[channel].map((term) => term.normalize("NFC").trim()).filter(Boolean);
-    if (terms.length === 0) continue;
+    if (terms.length === 0) return;
     const channelScores = scoreChannel(snapshot, channel, terms, fields, documentsByDocId);
     channelScores.forEach((scored, index) => {
       const rank = index + 1;
@@ -83,7 +89,7 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
     });
 
     const postings = snapshot.postingsByChannel[channel];
-    if (!postings) continue;
+    if (!postings) return;
     for (const phraseMatch of findPhraseMatches(postings, terms, { fieldIds: fields.map((field) => POSITIONAL_FIELD_ID[field]) })) {
       candidateBuilder(documentsByDocId, candidateBuilders, phraseMatch.docId).phraseMatches.push({
         channel,
@@ -103,6 +109,15 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
         score: proximityMatch.score,
         window: proximityMatch.window
       });
+    }
+  };
+
+  for (const channel of channels) searchChannel(channel);
+
+  if (!explicitChannels && shouldRunHangulFallback(query, channels, candidateBuilders.size, snapshot.documents.length)) {
+    for (const channel of SEARCH_TOKEN_CHANNELS) {
+      if (searchedChannels.has(channel) || channel === "ngram") continue;
+      searchChannel(channel);
     }
   }
 
@@ -218,6 +233,18 @@ function positionalSearchChannels(query: RetrievalQuery): readonly SearchTokenCh
   if (query.channels) return query.channels;
   if (query.analysis.channels.ngram.length > 0 && hangulTerms(query.analysis.channels.ngram)) return ["ngram"];
   return SEARCH_TOKEN_CHANNELS;
+}
+
+function shouldRunHangulFallback(
+  query: RetrievalQuery,
+  channels: readonly SearchTokenChannel[],
+  candidateCount: number,
+  documentCount: number
+): boolean {
+  if (channels.length !== 1 || channels[0] !== "ngram") return false;
+  if (!hangulTerms(query.analysis.channels.ngram)) return false;
+  const desired = Math.min(documentCount, query.limit ?? documentCount);
+  return desired > 0 && candidateCount === 0;
 }
 
 function hangulTerms(terms: readonly string[]): boolean {
