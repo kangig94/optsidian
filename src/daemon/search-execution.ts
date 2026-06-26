@@ -681,7 +681,7 @@ function explainTrace(input: {
   return {
     schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
     rankingAlgorithmId: "rrf-metadata-v1",
-    frozenReplayFormulaVersion: "rrf-metadata-v1/offline-1",
+    frozenReplayFormulaVersion: "rrf-metadata-v1/offline-2",
     rankingConfig,
     inputs: {
       candidateSet: input.candidateSet,

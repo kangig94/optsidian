@@ -1,5 +1,6 @@
-import type { SearchTextAnalysis } from "../core/search/analysis/index.js";
+import type { SearchTextAnalysis, SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import type { BuiltSnapshot } from "./search-store/types.js";
 import { DaemonWorkerPool, logicalCpuWorkerBudget, workerCountFromEnv, type WorkerPoolRunOptions } from "./worker-pool.js";
 import type {
@@ -55,8 +56,15 @@ export class AnalyzerWorkerPool {
     if (identity) this.analyzerIdentityValue = identity;
   }
 
-  async analyzeQuery(rawQuery: string, options: WorkerPoolRunOptions): Promise<AnalyzerPoolAnalysis> {
-    const result = await this.pool.run<AnalyzerPoolAnalysis>({ type: "analyzeQuery", payload: { rawQuery } }, options);
+  async analyzeQuery(
+    rawQuery: string,
+    options: WorkerPoolRunOptions,
+    analysisOptions: SearchTextAnalysisOptions = {}
+  ): Promise<AnalyzerPoolAnalysis> {
+    const result = await this.pool.run<AnalyzerPoolAnalysis>({
+      type: "analyzeQuery",
+      payload: { rawQuery, options: analysisOptions }
+    }, options);
     this.analyzerIdentityValue = result.analyzerIdentity;
     return result;
   }
@@ -78,8 +86,16 @@ export class AnalyzerWorkerPool {
     return { analyzerIdentity: this.requireAnalyzerIdentity(), tokens };
   }
 
-  async buildSnapshot(vaultRoot: string, partitionBits: number | undefined, options: WorkerPoolRunOptions): Promise<BuiltSnapshot> {
-    const built = await this.pool.run<BuiltSnapshot>({ type: "buildSnapshot", payload: { vaultRoot, partitionBits } }, options);
+  async buildSnapshot(
+    vaultRoot: string,
+    partitionBits: number | undefined,
+    options: WorkerPoolRunOptions,
+    searchSettings?: Partial<IndexAffectingSearchSettings>
+  ): Promise<BuiltSnapshot> {
+    const built = await this.pool.run<BuiltSnapshot>({
+      type: "buildSnapshot",
+      payload: { vaultRoot, partitionBits, searchSettings }
+    }, options);
     this.analyzerIdentityValue = built.diagnostics.analyzer;
     return built;
   }

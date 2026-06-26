@@ -78,6 +78,8 @@ function parseOptions(argv) {
       parsed.benchmark = parseBenchmark(arg.slice("--benchmark=".length));
     } else if (arg.startsWith("--bench=")) {
       parsed.benchmark = parseBenchmark(arg.slice("--bench=".length));
+    } else if (arg.startsWith("--ngram=")) {
+      parsed.ngram = parseBooleanOption(arg.slice("--ngram=".length), "ngram");
     } else if (arg.startsWith("--index-actions=")) {
       parsed.indexActions = parseIndexActions(arg.slice("--index-actions=".length));
     } else if (arg.startsWith("--index-action=")) {
@@ -193,7 +195,7 @@ async function runIndexBenchmark(options) {
   const actions = options.indexActions?.length ? options.indexActions : ["clear-load", "rebuild", "load"];
   const { createSearchDaemonClient } = await import("../src/daemon/client.ts");
   const { searchStoreCachePaths } = await import("../src/daemon/search-store/cache-paths.ts");
-  const client = createSearchDaemonClient({ binaryPath: cliPath });
+  const client = createSearchDaemonClient({ binaryPath: cliPath, env: searchEvalEnv(options) });
   const vault = markdownVaultStats(vaultRoot);
   const cachePaths = safeCachePaths(searchStoreCachePaths, vault.root);
   const cacheBefore = cachePaths ? directoryStats(cachePaths.rootDir) : undefined;
@@ -598,11 +600,12 @@ function parsePositiveInt(raw, name) {
 }
 
 async function searchRunner(mode, cliPath, vaultRoot, options) {
-  if (mode === "e2e") return (queryCase) => runE2eSearch(cliPath, vaultRoot, queryCase);
+  if (mode === "e2e") return (queryCase) => runE2eSearch(cliPath, vaultRoot, queryCase, options);
   try {
     const { createSearchDaemonClient } = await import("../src/daemon/client.ts");
     const client = createSearchDaemonClient({
-      binaryPath: cliPath
+      binaryPath: cliPath,
+      env: searchEvalEnv(options)
     });
     let pinnedSnapshotId = await loadPinnedSnapshotId(client, vaultRoot, {
       progress: shouldRenderProgress(options)
@@ -651,7 +654,7 @@ function validateOfflineExplainTrace(trace) {
   if (trace.rankingAlgorithmId !== "rrf-metadata-v1") {
     throwTraceValidation(`ranking algorithm mismatch: ${trace.rankingAlgorithmId}`);
   }
-  if (trace.frozenReplayFormulaVersion !== "rrf-metadata-v1/offline-1") {
+  if (trace.frozenReplayFormulaVersion !== "rrf-metadata-v1/offline-2") {
     throwTraceValidation(`ranking algorithm replay formula mismatch: ${trace.frozenReplayFormulaVersion}`);
   }
   if (!deepEqualCanonical(trace.rankingConfig, trace.inputs?.rankingConfig)) {
@@ -685,7 +688,10 @@ function replayOfflineExplainTrace(trace) {
   const candidates = trace.inputs.candidateSet.candidates.map((candidate, index) => {
     const feature = featuresByCandidate.get(candidate.candidateId) ?? featuresByCandidate.get(candidate.documentId);
     const exactPriority = priorityNumber(feature.identity?.exactPriority);
-    const phrasePriority = priorityNumber(feature.identity?.phrasePriority);
+    const phrasePriority = Math.min(
+      priorityNumber(feature.identity?.phrasePriority),
+      priorityNumber(bestReplayBodyPhrasePriority(feature, trace.inputs.queryAnalysis, config))
+    );
     const coverageTerms = numberOrZero(feature.coverage?.terms);
     const coverageFieldScore = numberOrZero(feature.coverage?.fieldScore);
     const rarityScore = numberOrZero(feature.rarity?.score);
@@ -732,7 +738,8 @@ function normalizeRankingConfig(config) {
     },
     includeBodyScore,
     tokenChannelWeights: constants.SEARCH_TOKEN_CHANNEL_WEIGHT ?? { morph: 1, surface: 0.65, ngram: 0.3 },
-    coverageBucketMinTerms: constants.COVERAGE_BUCKET_MIN_TERMS ?? null
+    coverageBucketMinTerms: constants.COVERAGE_BUCKET_MIN_TERMS ?? null,
+    bodyPhrasePriority: constants.PHRASE_PRIORITY?.body ?? 5
   };
 }
 
@@ -773,6 +780,43 @@ function featureBodyScore(feature, config) {
     score += numberOrZero(term.score) * numberOrZero(config.tokenChannelWeights[term.channel]);
   }
   return score;
+}
+
+function bestReplayBodyPhrasePriority(feature, queryAnalysis, config) {
+  if ((feature.phrasePositions ?? []).some((match) => match.field === "body")) return config.bodyPhrasePriority;
+  const compactRaw = compactBodyPhrase(queryAnalysis.raw ?? "");
+  if (
+    compactRaw.length > 1 &&
+    (feature.snippetScoringInputs ?? []).some((input) => compactBodyPhrase(input.text ?? "").includes(compactRaw))
+  ) {
+    return config.bodyPhrasePriority;
+  }
+  const surfaceTerms = queryAnalysis.channels?.surface ?? [];
+  if (surfaceTerms.length === 0) return undefined;
+  return (feature.snippetScoringInputs ?? []).some((input) =>
+    containsTokenSequence(input.channels?.surface ?? [], surfaceTerms)
+  )
+    ? config.bodyPhrasePriority
+    : undefined;
+}
+
+function compactBodyPhrase(value) {
+  return String(value).normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
+}
+
+function containsTokenSequence(tokens, sequence) {
+  if (sequence.length === 0 || sequence.length > tokens.length) return false;
+  for (let start = 0; start <= tokens.length - sequence.length; start += 1) {
+    let matched = true;
+    for (let offset = 0; offset < sequence.length; offset += 1) {
+      if (tokens[start + offset] !== sequence[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return true;
+  }
+  return false;
 }
 
 function featurePayloadMap(features) {
@@ -822,8 +866,16 @@ function rrfContribution(rank, weight, rrfK) {
 
 function compareRankedMatches(left, right) {
   if (left.bucket !== right.bucket) return left.bucket - right.bucket;
+  const priorityCompare = compareBucketPriority(left, right);
+  if (priorityCompare !== 0) return priorityCompare;
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
+}
+
+function compareBucketPriority(left, right) {
+  if (left.bucket === 0) return priorityNumber(left.exactPriority) - priorityNumber(right.exactPriority);
+  if (left.bucket === 1) return priorityNumber(left.phrasePriority) - priorityNumber(right.phrasePriority);
+  return 0;
 }
 
 function compareIdentityRank(left, right) {
@@ -1019,7 +1071,7 @@ function coreSearchParams(queryCase) {
   };
 }
 
-function runE2eSearch(cliPath, vaultRoot, queryCase) {
+function runE2eSearch(cliPath, vaultRoot, queryCase, options) {
   const cliArgs = [
     cliPath,
     "search",
@@ -1037,7 +1089,7 @@ function runE2eSearch(cliPath, vaultRoot, queryCase) {
   const child = spawnSync(process.execPath, cliArgs, {
     cwd: repoRoot,
     encoding: "utf8",
-    env: process.env
+    env: searchEvalEnv(options)
   });
 
   if (child.status !== 0) {
@@ -1062,6 +1114,20 @@ function parseFields(value) {
   if (Array.isArray(value)) return value;
   if (!value) return undefined;
   return String(value).split(",").map((field) => field.trim()).filter(Boolean);
+}
+
+function searchEvalEnv(options) {
+  return {
+    ...process.env,
+    OPTSIDIAN_SEARCH_NGRAM: options.ngram === true ? "true" : "false"
+  };
+}
+
+function parseBooleanOption(raw, name) {
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
+  if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
+  usage(`${name} must be on or off`);
 }
 
 function matchesExpectation(paths, queryCase) {
@@ -1517,8 +1583,8 @@ function roundMs(value) {
 
 function usage(message, code = 2) {
   if (message) console.error(message);
-  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--quiet] [--score-only] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
-  console.error("       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]");
+  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
+  console.error("       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--ngram=off|on] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]");
   console.error("       npm run search:eval -- --print-search-daemon-slo-fixture");
   process.exit(code);
 }

@@ -16,6 +16,7 @@ export const RANK_SIGNAL_WEIGHTS = {
   body: 0.08
 } as const;
 export const RANK_SIGNAL_NORMALIZATION = "snapshot-corpus-max-v1";
+export const RANK_FINAL_SORT_POLICY = "bucket-priority-score-path-v1";
 export const SEARCH_BM25_K1 = 1.2;
 export const SEARCH_BM25_B = 0.75;
 export const SEARCH_BM25_D = 0.5;
@@ -125,6 +126,7 @@ export const RANKING_CONSTANTS = {
   RRF_WEIGHTS,
   RANK_SIGNAL_WEIGHTS,
   RANK_SIGNAL_NORMALIZATION,
+  RANK_FINAL_SORT_POLICY,
   SEARCH_TOKEN_CHANNEL_WEIGHT,
   COVERAGE_FIELD_WEIGHT,
   WEAK_METADATA_COVERAGE_TERMS,

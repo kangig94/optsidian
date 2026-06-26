@@ -6,6 +6,7 @@ import { UsageError } from "../errors.js";
 export type SearchSettings = {
   analyzer?: "intl" | "kiwi";
   extraLangs?: string[];
+  ngram?: boolean;
   queryWorkers?: number;
   indexWorkers?: number;
   snapshotRetentionCount?: number;
@@ -41,9 +42,16 @@ export type ConfigMutationResult = {
 const SETTINGS_DIR = ".optsidian";
 const SETTINGS_FILE = "settings.json";
 const SETTINGS_PATH_ENV = "OPTSIDIAN_SETTINGS_PATH";
+const SEARCH_NGRAM_ENV = "OPTSIDIAN_SEARCH_NGRAM";
 
 export function readOptsidianSettings(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): OptsidianSettings {
   return mergeSettings(readGlobalSettings(cwd, env), readLocalOverrideSettings(cwd));
+}
+
+export function searchNgramEnabled(env: NodeJS.ProcessEnv = process.env, settings: OptsidianSettings = {}): boolean {
+  const raw = env[SEARCH_NGRAM_ENV];
+  if (raw !== undefined) return normalizeBoolean(raw, SEARCH_NGRAM_ENV);
+  return settings.search?.ngram ?? false;
 }
 
 export function getConfigValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): ConfigReadResult {
@@ -161,6 +169,7 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     settings.search = {};
     if (value.search.analyzer !== undefined) settings.search.analyzer = normalizeAnalyzer(value.search.analyzer);
     if (value.search.extraLangs !== undefined) settings.search.extraLangs = normalizeStringList(value.search.extraLangs, "search.extraLangs");
+    if (value.search.ngram !== undefined) settings.search.ngram = normalizeBoolean(value.search.ngram, "search.ngram");
     if (value.search.queryWorkers !== undefined) {
       settings.search.queryWorkers = normalizePositiveInteger(value.search.queryWorkers, "search.queryWorkers");
     }
@@ -192,6 +201,8 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.analyzer;
     case "search.extraLangs":
       return settings.search?.extraLangs ?? [];
+    case "search.ngram":
+      return settings.search?.ngram;
     case "search.queryWorkers":
       return settings.search?.queryWorkers;
     case "search.indexWorkers":
@@ -219,6 +230,9 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
       return;
     case "search.extraLangs":
       settings.search.extraLangs = normalizeStringList(value, key);
+      return;
+    case "search.ngram":
+      settings.search.ngram = normalizeBoolean(value, key);
       return;
     case "search.queryWorkers":
       settings.search.queryWorkers = normalizePositiveInteger(value, key);
@@ -253,6 +267,9 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.extraLangs":
       if (settings.search) delete settings.search.extraLangs;
+      return;
+    case "search.ngram":
+      if (settings.search) delete settings.search.ngram;
       return;
     case "search.queryWorkers":
       if (settings.search) delete settings.search.queryWorkers;
@@ -300,6 +317,20 @@ function normalizeStringList(value: unknown, key: string): string[] {
   );
 }
 
+function normalizeBoolean(value: unknown, key: string): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
+    if (["0", "false", "no", "off", "disabled", ""].includes(normalized)) return false;
+  }
+  throw new UsageError(`${key} must be true or false`);
+}
+
 function normalizePositiveInteger(value: unknown, key: string): number {
   const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new UsageError(`${key} must be a positive integer`);
@@ -322,7 +353,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

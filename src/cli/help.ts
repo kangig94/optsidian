@@ -91,6 +91,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     options: [
       { name: "search.analyzer=intl|kiwi", description: "Select the analyzer policy used by daemon workers" },
       { name: "search.extraLangs=ko", description: "Enable the Kiwi Korean target tier with Intl fallback" },
+      { name: "search.ngram=true|false", description: "Enable Korean 2/3-gram indexing and query expansion; default false" },
       { name: "search.queryWorkers=<n>", description: "Latency analyzer worker count" },
       { name: "search.indexWorkers=<n>", description: "Throughput analyzer worker count" },
       { name: "search.snapshotRetentionCount=<n>", description: "Retained persisted snapshot count per vault" },

@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
-import { readOptsidianSettings, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
+import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
+import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 
-export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 1;
+export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 2;
 
 export type SearchRuntimeProfile = {
   schemaVersion: typeof SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION;
@@ -16,6 +17,7 @@ export type SearchRuntimeProfile = {
       modelType: string;
     };
   };
+  index: IndexAffectingSearchSettings;
   workers: {
     query: number;
     index: number;
@@ -60,6 +62,9 @@ export function effectiveSearchRuntimeProfile(
         modelType: KIWI_MODEL_TYPE
       }
     },
+    index: {
+      ngram: searchNgramEnabled(env, settings)
+    },
     workers: {
       query: queryWorkers,
       index: indexWorkers,
@@ -93,6 +98,7 @@ export function effectiveSearchRuntimeProfile(
 export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProfile {
   if (!isRecord(value)) throw new Error("search runtime profile must be an object");
   const analyzer = asRecord(value.analyzer, "search runtime profile analyzer");
+  const index = optionalRecord(value.index, "search runtime profile index");
   const workers = asRecord(value.workers, "search runtime profile workers");
   const cache = asRecord(value.cache, "search runtime profile cache");
   const memory = asRecord(value.memory, "search runtime profile memory");
@@ -109,6 +115,9 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
         modelVersion: stringValue(asRecord(analyzer.kiwiModel, "search runtime kiwi model").modelVersion, "kiwi model version"),
         modelType: stringValue(asRecord(analyzer.kiwiModel, "search runtime kiwi model").modelType, "kiwi model type")
       }
+    },
+    index: {
+      ngram: booleanValue(index.ngram ?? false, "search runtime ngram")
     },
     workers: {
       query: positiveInt(workers.query, "query workers"),
@@ -145,6 +154,7 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     ...baseEnv,
     OPTSIDIAN_SEARCH_ANALYZER: normalized.analyzer.mode,
     OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(","),
+    OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
     OPTSIDIAN_SEARCH_QUERY_WORKERS: String(normalized.workers.query),
     OPTSIDIAN_SEARCH_INDEX_WORKERS: String(normalized.workers.index),
     OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(normalized.workers.searchExecution),
@@ -170,6 +180,7 @@ export function settingsForSearchRuntimeProfile(profile: SearchRuntimeProfile): 
   const search: SearchSettings = {
     analyzer: normalized.analyzer.mode,
     extraLangs: normalized.analyzer.extraLangs,
+    ngram: normalized.index.ngram,
     queryWorkers: normalized.workers.query,
     indexWorkers: normalized.workers.index,
     snapshotRetentionCount: normalized.cache.snapshotRetention,
@@ -192,6 +203,11 @@ function extraLangs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string
   const raw = env.OPTSIDIAN_SEARCH_EXTRA_LANGS;
   const values = raw !== undefined ? raw.split(",") : settings.search?.extraLangs ?? [];
   return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort();
+}
+
+function optionalRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === undefined || value === null) return {};
+  return asRecord(value, label);
 }
 
 function logicalCpuWorkerBudget(): number {
@@ -237,6 +253,16 @@ function stringList(value: unknown): string[] {
 function stringValue(value: unknown, label: string): string {
   if (typeof value !== "string") throw new Error(`${label} must be a string`);
   return value;
+}
+
+function booleanValue(value: unknown, label: string): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
+    if (["0", "false", "no", "off", "disabled", ""].includes(normalized)) return false;
+  }
+  throw new Error(`${label} must be true or false`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

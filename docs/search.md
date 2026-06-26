@@ -183,11 +183,12 @@ The search daemon owns the hot search path:
 - Build updated snapshots in the background, then atomically swap the active snapshot. Search
   should always run against one deterministic snapshot.
 - Keep all ordering stable with explicit tie-breakers, usually score first and path second.
-- Budget long body-derived indexes without truncating the stored note body. Notes up to 64Ki chars
-  use full body analysis with 4096 body ngram terms; notes up to 512Ki chars use full body analysis
-  with 8192 body ngram terms; larger notes use deterministic whole-document sampling with 12288 or
-  16384 body ngram terms. Metadata ngrams for path, title, aliases, tags, and headings remain
-  uncapped because those fields are naturally small and carry high-value identity signals.
+- Budget long body-derived indexes without truncating the stored note body. When ngram is enabled,
+  notes up to 64Ki chars use full body analysis with 4096 body ngram terms; notes up to 512Ki chars
+  use full body analysis with 8192 body ngram terms; larger notes use deterministic whole-document
+  sampling with 12288 or 16384 body ngram terms. Metadata ngrams for path, title, aliases, tags,
+  and headings remain uncapped because those fields are naturally small and carry high-value
+  identity signals.
 - Cap snippet scoring analysis separately from snippet display: each analyzed line is capped at
   4096 chars and 512 terms per channel, and each note analyzes at most 3000 sampled lines /
   512Ki chars for snippet scoring. Raw line snippets remain available for fallback display.
@@ -286,14 +287,14 @@ not a sum, because Node worker threads share process RSS.
 Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
 scoring mode. The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from
 `npm run search:eval:spec`, a 600-note vault (`KLUE300` + `English300`), lazy daemon startup,
-one-worker cold search preload, pinned positional snapshots, dynamic body ngram budgets by note
-length, and Hangul ngram retrieval that falls back to morph/surface retrieval only when the ngram
-candidate set is empty.
+one-worker cold search preload, pinned positional snapshots, and ngram disabled by default.
+Run `search:eval` with `--ngram=on` to measure the opt-in Korean 2/3-gram channel.
 
 All wall-clock values below are serial measurements. Do not compare them with older runs that
 started multiple eval processes at once. Run the no-Kiwi baseline with
 `OPTSIDIAN_SEARCH_EXTRA_LANGS=`. Run the Kiwi-on baseline with `search.extraLangs=["ko"]` or
-`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`.
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`. The eval runner sets `OPTSIDIAN_SEARCH_NGRAM=false` unless
+`--ngram=on` is passed.
 
 The ranking invariant is that no-Kiwi must be strong by itself, and enabling Kiwi must not let
 Korean morph expansions promote weak metadata evidence over exact body evidence. The current ranker

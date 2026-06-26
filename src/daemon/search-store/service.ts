@@ -3,6 +3,11 @@ import { UsageError } from "../../errors.js";
 import { normalizeSearchParams } from "../../core/search/params.js";
 import { createInlineQueryAnalyzer, type SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import { analyzeSearchQuery, SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
+import {
+  indexAffectingSearchSettingsHash,
+  normalizeIndexAffectingSearchSettings,
+  type IndexAffectingSearchSettings
+} from "../../core/search/index-settings.js";
 import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
 import type { SearchIndexMutationResult, SearchResult } from "../../core/types.js";
 import { resolveVaultPath } from "../../core/path.js";
@@ -11,7 +16,6 @@ import { remainingDeadlineMs } from "../protocol.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import type { SearchExecutionSnapshotHandle } from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
-import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./builder.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
@@ -33,16 +37,20 @@ export class DaemonSearchStoreService {
   private readonly store: DaemonSnapshotStore;
   private readonly latencyAnalyzer: AnalyzerWorkerPool;
   private readonly searchExecution: SearchExecutionWorkerPool;
+  private readonly searchSettings: IndexAffectingSearchSettings;
+  private readonly searchSettingsHash: string;
 
   constructor(
     store: DaemonSnapshotStore,
     latencyAnalyzer: AnalyzerWorkerPool,
     searchExecution: SearchExecutionWorkerPool,
-    options: { queryCacheSize?: number } = {}
+    options: { queryCacheSize?: number; searchSettings?: Partial<IndexAffectingSearchSettings> } = {}
   ) {
     this.store = store;
     this.latencyAnalyzer = latencyAnalyzer;
     this.searchExecution = searchExecution;
+    this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
+    this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
     this.queryAnalysisCache = new QueryAnalysisCache(options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? 512);
   }
 
@@ -196,7 +204,7 @@ export class DaemonSearchStoreService {
       analyzerIdentity,
       rawQuery,
       fields: search.fields,
-      searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH
+      searchSettingsHash: this.searchSettingsHash
     });
     if (cached) {
       assertQueryAnalysisTermCount(cached);
@@ -205,13 +213,13 @@ export class DaemonSearchStoreService {
 
     assertRemainingDeadline(context.deadline);
     if (inlineAnalyzer) {
-      const analysis = await analyzeSearchQuery(rawQuery, inlineAnalyzer);
+      const analysis = await analyzeSearchQuery(rawQuery, inlineAnalyzer, { ngram: this.searchSettings.ngram });
       assertQueryAnalysisTermCount(analysis);
       this.queryAnalysisCache.set({
         analyzerIdentity,
         rawQuery,
         fields: search.fields,
-        searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH
+        searchSettingsHash: this.searchSettingsHash
       }, analysis);
       return { analysis, analyzerIdentity };
     }
@@ -219,13 +227,13 @@ export class DaemonSearchStoreService {
       deadline: context.deadline,
       cancellationId: context.cancellationId,
       vault
-    });
+    }, { ngram: this.searchSettings.ngram });
     assertQueryAnalysisTermCount(result.analysis);
     this.queryAnalysisCache.set({
       analyzerIdentity: result.analyzerIdentity,
       rawQuery,
       fields: search.fields,
-      searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH
+      searchSettingsHash: this.searchSettingsHash
     }, result.analysis);
     return result;
   }

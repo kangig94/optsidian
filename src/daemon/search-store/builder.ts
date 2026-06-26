@@ -15,6 +15,12 @@ import {
 } from "../../core/search/analysis/index.js";
 import { MIN_NGRAM, MAX_NGRAM } from "../../core/search/analysis/korean.js";
 import { RANKING_CONSTANTS } from "../../core/search/constants.js";
+import {
+  INDEX_AFFECTING_SEARCH_SETTINGS_HASH,
+  indexAffectingSearchSettingsHash,
+  normalizeIndexAffectingSearchSettings,
+  type IndexAffectingSearchSettings
+} from "../../core/search/index-settings.js";
 import { parseMarkdownNote, type SearchDocument } from "../../core/search/markdown.js";
 import {
   canonicalSegmentHash,
@@ -53,16 +59,12 @@ export const DEFAULT_PARTITION_BITS = 4;
 // do not already capture. NEVER derive it from the binary hash: index identity is
 // deliberately decoupled from the build so unrelated code changes don't force a reindex.
 export const INDEX_BUILD_VERSION = "daemon-positional-build-v2";
-
-// No index-affecting search settings exist yet; the empty object makes that explicit.
-// When one is added, put it here and the hash — the shared invalidation key between
-// the snapshot identity and the query-analysis cache — falls out automatically.
-const INDEX_AFFECTING_SETTINGS = {} as const;
-export const INDEX_AFFECTING_SEARCH_SETTINGS_HASH = sha256(canonicalValueBytes({ indexAffectingSettings: INDEX_AFFECTING_SETTINGS }));
+export { INDEX_AFFECTING_SEARCH_SETTINGS_HASH, indexAffectingSearchSettingsHash };
 
 type BuildInput = {
   vaultRoot: string;
   analyzer: SearchAnalyzer;
+  searchSettings?: Partial<IndexAffectingSearchSettings>;
   partitionBits?: number;
   progress?: (progress: SearchIndexProgressUpdate) => void;
 };
@@ -81,9 +83,10 @@ type ParsedBuildDocument = {
 
 export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<BuiltSnapshot> {
   const partitionBits = input.partitionBits ?? DEFAULT_PARTITION_BITS;
-  const identityTuple = snapshotIdentityTuple(input.analyzer, partitionBits);
+  const searchSettings = normalizeIndexAffectingSearchSettings(input.searchSettings);
+  const identityTuple = snapshotIdentityTuple(input.analyzer, partitionBits, searchSettings);
   input.progress?.({ phase: "scanning", completed: 0 });
-  const documents = await parseVaultDocuments(input.vaultRoot, input.analyzer, partitionBits, input.progress);
+  const documents = await parseVaultDocuments(input.vaultRoot, input.analyzer, partitionBits, searchSettings, input.progress);
   const partitions = new Map<number, ParsedBuildDocument[]>();
   for (const document of documents) {
     const partition = partitions.get(document.partitionId) ?? [];
@@ -158,14 +161,20 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
   };
 }
 
-export function snapshotIdentityTuple(analyzer: SearchAnalyzer, partitionBits = DEFAULT_PARTITION_BITS): SnapshotIdentityTuple {
-  return snapshotIdentityTupleForAnalyzerIdentity(analyzer.identity, partitionBits);
+export function snapshotIdentityTuple(
+  analyzer: SearchAnalyzer,
+  partitionBits = DEFAULT_PARTITION_BITS,
+  searchSettings?: Partial<IndexAffectingSearchSettings>
+): SnapshotIdentityTuple {
+  return snapshotIdentityTupleForAnalyzerIdentity(analyzer.identity, partitionBits, searchSettings);
 }
 
 export function snapshotIdentityTupleForAnalyzerIdentity(
   analyzerIdentity: SearchAnalyzer["identity"],
-  partitionBits = DEFAULT_PARTITION_BITS
+  partitionBits = DEFAULT_PARTITION_BITS,
+  searchSettings?: Partial<IndexAffectingSearchSettings>
 ): SnapshotIdentityTuple {
+  const normalizedSearchSettings = normalizeIndexAffectingSearchSettings(searchSettings);
   return {
     buildVersion: INDEX_BUILD_VERSION,
     fieldSetVersion: SEARCH_SCHEMA_DIGEST,
@@ -173,9 +182,14 @@ export function snapshotIdentityTupleForAnalyzerIdentity(
     analyzerIdentity: {
       analyzer: analyzerIdentity,
       channels: [...SEARCH_TOKEN_CHANNELS],
-      ngram: { min: MIN_NGRAM, max: MAX_NGRAM, bodyBudget: BODY_INDEX_BUDGET_IDENTITY }
+      ngram: {
+        enabled: normalizedSearchSettings.ngram,
+        min: MIN_NGRAM,
+        max: MAX_NGRAM,
+        bodyBudget: BODY_INDEX_BUDGET_IDENTITY
+      }
     },
-    searchSettingsHash: INDEX_AFFECTING_SEARCH_SETTINGS_HASH,
+    searchSettingsHash: indexAffectingSearchSettingsHash(normalizedSearchSettings),
     rankingFeatureVersion: sha256(canonicalValueBytes(RANKING_CONSTANTS)),
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY
   };
@@ -185,6 +199,7 @@ async function parseVaultDocuments(
   vaultRoot: string,
   analyzer: SearchAnalyzer,
   partitionBits: number,
+  searchSettings: IndexAffectingSearchSettings,
   progress?: (progress: SearchIndexProgressUpdate) => void
 ): Promise<ParsedBuildDocument[]> {
   const root = vaultRealpath(vaultRoot);
@@ -195,7 +210,7 @@ async function parseVaultDocuments(
   const documents: ParsedBuildDocument[] = [];
   const interval = progressInterval(files.length);
   for (const [index, rel] of files.entries()) {
-    const parsed = await parseBuildDocument(root, rel, analyzer, partitionBits);
+    const parsed = await parseBuildDocument(root, rel, analyzer, partitionBits, searchSettings);
     if (parsed) documents.push(parsed);
     const completed = index + 1;
     if (completed === files.length || completed % interval === 0) {
@@ -220,7 +235,8 @@ async function parseBuildDocument(
   vaultRoot: string,
   relPath: string,
   analyzer: SearchAnalyzer,
-  partitionBits: number
+  partitionBits: number,
+  searchSettings: IndexAffectingSearchSettings
 ): Promise<ParsedBuildDocument | undefined> {
   const abs = path.join(vaultRoot, relPath);
   let bytes: Buffer;
@@ -246,14 +262,15 @@ async function parseBuildDocument(
   ]);
   const bodyMorphTokens = normalizeTokenSequence(tokenized[5] ?? []).slice(0, bodyBudget.bodyMorphMaxTokens);
   const fields = {
-    path: searchFieldTokenTexts(note.path, tokenized[0] ?? []),
-    title: searchFieldTokenTexts(note.title, tokenized[1] ?? []),
-    aliases: searchFieldTokenTexts(note.aliases.join(" "), tokenized[2] ?? []),
-    tags: searchFieldTokenTexts(note.tags.join(" "), tokenized[3] ?? []),
-    headings: searchFieldTokenTexts(note.headings.join(" "), tokenized[4] ?? []),
+    path: searchFieldTokenTexts(note.path, tokenized[0] ?? [], { ngram: searchSettings.ngram }),
+    title: searchFieldTokenTexts(note.title, tokenized[1] ?? [], { ngram: searchSettings.ngram }),
+    aliases: searchFieldTokenTexts(note.aliases.join(" "), tokenized[2] ?? [], { ngram: searchSettings.ngram }),
+    tags: searchFieldTokenTexts(note.tags.join(" "), tokenized[3] ?? [], { ngram: searchSettings.ngram }),
+    headings: searchFieldTokenTexts(note.headings.join(" "), tokenized[4] ?? [], { ngram: searchSettings.ngram }),
     body: searchFieldTokenTexts(bodyBudget.bodyLexicalText, bodyMorphTokens, {
       morphMaxTerms: bodyBudget.bodyMorphMaxTokens,
       surfaceMaxTerms: bodyBudget.bodySurfaceMaxTerms,
+      ngram: searchSettings.ngram,
       ngramMaxTerms: bodyBudget.bodyNgramMaxTerms,
       ngramRaw: bodyBudget.bodyNgramText
     })
@@ -311,7 +328,7 @@ async function parseBuildDocument(
     canonicalRecord,
     partitionId,
     lineSnippets: lineSpans.map((line) => ({ line: line.line, text: line.text })),
-    snippetLines: lineSnippetEntries(documentId, snippetLineInputs, tokenized.slice(6))
+    snippetLines: lineSnippetEntries(documentId, snippetLineInputs, tokenized.slice(6), searchSettings)
   };
 }
 
@@ -429,13 +446,15 @@ function lineSpanEntries(content: string): LineSpanEntry[] {
 function lineSnippetEntries(
   documentId: string,
   lines: readonly SnippetLineAnalysisInput[],
-  tokenizedLines: readonly string[][]
+  tokenizedLines: readonly string[][],
+  searchSettings: IndexAffectingSearchSettings
 ): Omit<SnapshotSnippetLine, "segmentId">[] {
   return lines.map((line, index) => {
     const morphTokens = normalizeTokenSequence(tokenizedLines[index] ?? []).slice(0, SNIPPET_LINE_MORPH_MAX_TERMS);
     const channels = searchFieldTokenTexts(line.analysisText, morphTokens, {
       morphMaxTerms: SNIPPET_LINE_MORPH_MAX_TERMS,
       surfaceMaxTerms: SNIPPET_LINE_SURFACE_MAX_TERMS,
+      ngram: searchSettings.ngram,
       ngramMaxTerms: SNIPPET_LINE_NGRAM_MAX_TERMS
     });
     return {

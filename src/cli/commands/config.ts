@@ -15,6 +15,7 @@ import { UsageError } from "../../errors.js";
 const SETTING_KEYS = new Set([
   "search.analyzer",
   "search.extraLangs",
+  "search.ngram",
   "search.queryWorkers",
   "search.indexWorkers",
   "search.snapshotRetentionCount",
@@ -85,7 +86,7 @@ function parseSettingValue(key: string, value: string): unknown {
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
     throw new UsageError(
-      "config key must be one of: search.analyzer, search.extraLangs, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs"
+      "config key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs"
     );
   }
 }

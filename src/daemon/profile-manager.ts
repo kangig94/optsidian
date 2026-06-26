@@ -57,15 +57,17 @@ export class ProfileRuntime {
       countCap: normalized.memory.snapshotCountCap,
       byteCap: normalized.memory.snapshotByteCap,
       retentionCount: normalized.cache.snapshotRetention,
+      searchSettings: normalized.index,
       snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
         deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
         cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
         vault: input.vaultRoot,
         onProgress: input.progress
-      })
+      }, input.searchSettings)
     });
     const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
-      queryCacheSize: normalized.cache.queryAnalysisEntries
+      queryCacheSize: normalized.cache.queryAnalysisEntries,
+      searchSettings: normalized.index
     });
     return new ProfileRuntime(normalized, pools, searchStore);
   }

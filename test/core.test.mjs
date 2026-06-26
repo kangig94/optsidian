@@ -90,6 +90,7 @@ test("settings helpers normalize supported config keys and apply local overrides
   const cases = [
     ["search.analyzer", "kiwi", "kiwi"],
     ["search.extraLangs", "ko, KO", ["ko"]],
+    ["search.ngram", "true", true],
     ["search.queryWorkers", "2", 2],
     ["search.indexWorkers", "2", 2],
     ["search.snapshotRetentionCount", "3", 3],
@@ -109,6 +110,7 @@ test("settings helpers normalize supported config keys and apply local overrides
   const expectedGlobalSearch = {
     analyzer: "kiwi",
     extraLangs: ["ko"],
+    ngram: true,
     queryWorkers: 2,
     indexWorkers: 2,
     snapshotRetentionCount: 3,
@@ -126,6 +128,7 @@ test("settings helpers normalize supported config keys and apply local overrides
   assert.deepEqual(readOptsidianSettings(project, env).search, {
     analyzer: "intl",
     extraLangs: ["ko"],
+    ngram: true,
     queryWorkers: 5,
     indexWorkers: 2,
     snapshotRetentionCount: 3,
@@ -177,6 +180,16 @@ test("AC6 search query and Hangul ngram analysis are length-bounded", async () =
   assert.ok(longHangulTerms.length <= 8192);
 });
 
+test("search text analysis keeps ngram disabled by default", async () => {
+  const { analyzeSearchText } = await import(path.join(repoRoot, "src/core/search/analysis/query.ts"));
+
+  const disabled = analyzeSearchText("한국어검색", ["한국어검색"]);
+  const enabled = analyzeSearchText("한국어검색", ["한국어검색"], { ngram: true });
+
+  assert.deepEqual(disabled.channels.ngram, []);
+  assert.deepEqual(enabled.channels.ngram, ["한국", "국어", "어검", "검색", "한국어", "국어검", "어검색"]);
+});
+
 test("body ngram field text can be capped without changing other channels", async () => {
   const { BODY_NGRAM_SHORT_MAX_TERMS } = await import(path.join(repoRoot, "src/core/search/analysis/budget.ts"));
   const { searchFieldTokenTexts } = await import(path.join(repoRoot, "src/core/search/analysis/fields.ts"));
@@ -184,9 +197,14 @@ test("body ngram field text can be capped without changing other channels", asyn
     String.fromCodePoint(0xac00 + index)
   ).join("");
 
-  const uncapped = searchFieldTokenTexts(longHangul, ["형태소"]);
-  const capped = searchFieldTokenTexts(longHangul, ["형태소"], { ngramMaxTerms: BODY_NGRAM_SHORT_MAX_TERMS });
+  const defaultOff = searchFieldTokenTexts(longHangul, ["형태소"]);
+  const uncapped = searchFieldTokenTexts(longHangul, ["형태소"], { ngram: true });
+  const capped = searchFieldTokenTexts(longHangul, ["형태소"], {
+    ngram: true,
+    ngramMaxTerms: BODY_NGRAM_SHORT_MAX_TERMS
+  });
 
+  assert.equal(defaultOff.ngram, "");
   assert.equal(capped.morph, "형태소");
   assert.ok(uncapped.ngram.split(" ").length > BODY_NGRAM_SHORT_MAX_TERMS);
   assert.equal(capped.ngram.split(" ").length, BODY_NGRAM_SHORT_MAX_TERMS);
@@ -316,6 +334,46 @@ test("reranker keeps exact body phrases ahead of weak Kiwi metadata coverage", a
   assert.equal(rankBucketName(ranked[0].bucket), "phrase");
   assert.equal(ranked[1].coverageTerms, 0.3);
   assert.equal(rankBucketName(ranked[1].bucket), "base");
+});
+
+test("reranker keeps higher-priority phrase fields ahead of stronger retrieval score", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const titlePhrase = searchDocument({
+    path: "Alpha Calibration Guide.md",
+    title: "Alpha Calibration Guide",
+    titleTokens: "alpha calibration guide",
+    titleSurfaceTokens: "alpha calibration guide"
+  });
+  const bodyPhrase = searchDocument({
+    path: "Calibration Alpha.md",
+    title: "Calibration Alpha",
+    titleTokens: "calibration alpha",
+    titleSurfaceTokens: "calibration alpha",
+    bodyTokens: "reverse order alpha calibration body",
+    bodySurfaceTokens: "reverse order alpha calibration body"
+  });
+  const queryChannels = {
+    morph: ["alpha", "calibration"],
+    surface: ["alpha", "calibration"],
+    ngram: []
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "alpha calibration",
+    queryChannels.morph,
+    [
+      { document: bodyPhrase, score: 100, queryChannels },
+      { document: titlePhrase, score: 1, queryChannels }
+    ],
+    undefined,
+    new Map()
+  );
+
+  assert.equal(ranked[0].path, "Alpha Calibration Guide.md");
+  assert.equal(rankBucketName(ranked[0].bucket), "phrase");
+  assert.equal(ranked[0].phrasePriority, 0);
+  assert.equal(ranked[1].path, "Calibration Alpha.md");
+  assert.equal(ranked[1].phrasePriority, 5);
 });
 
 test("reranker does not promote one-character identity fragments to phrase matches", async () => {

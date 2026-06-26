@@ -143,8 +143,16 @@ function rankedCandidate(
 
 function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): number {
   if (left.bucket !== right.bucket) return left.bucket - right.bucket;
+  const priorityCompare = compareBucketPriority(left, right);
+  if (priorityCompare !== 0) return priorityCompare;
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
+}
+
+function compareBucketPriority(left: RankedCandidate, right: RankedCandidate): number {
+  if (left.bucket === RANK_BUCKET.exact) return left.exactPriority - right.exactPriority;
+  if (left.bucket === RANK_BUCKET.phrase) return left.phrasePriority - right.phrasePriority;
+  return 0;
 }
 
 function searchFields(fields: SearchField[] | undefined): SearchField[] {

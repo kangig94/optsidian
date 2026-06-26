@@ -1,6 +1,7 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
-import { analyzeSearchQuery } from "../core/search/analysis/index.js";
+import { analyzeSearchQuery, type SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from "../core/search/analyzer.js";
+import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { readOptsidianSettings } from "../core/settings.js";
 import type { SearchIndexProgressUpdate } from "./protocol.js";
 import { buildCanonicalSearchSnapshot } from "./search-store/builder.js";
@@ -116,10 +117,10 @@ async function dispatch(
   }
   const activeAnalyzer = analyzerForWorker(env);
   if (type === "analyzeQuery") {
-    const input = payload as { rawQuery: string };
+    const input = payload as { rawQuery: string; options?: SearchTextAnalysisOptions };
     return withSearchAnalyzerLease(activeAnalyzer, async (leased) => ({
       analyzerIdentity: leased.identity,
-      analysis: await analyzeSearchQuery(input.rawQuery, leased)
+      analysis: await analyzeSearchQuery(input.rawQuery, leased, input.options)
     }), undefined, { wait: true, installIfMissing: true });
   }
   if (type === "tokenizeBatch") {
@@ -130,11 +131,16 @@ async function dispatch(
     }), undefined, { wait: true, installIfMissing: true });
   }
   if (type === "buildSnapshot") {
-    const input = payload as { vaultRoot: string; partitionBits?: number };
+    const input = payload as {
+      vaultRoot: string;
+      partitionBits?: number;
+      searchSettings?: Partial<IndexAffectingSearchSettings>;
+    };
     return withSearchAnalyzerLease(activeAnalyzer, (leased) =>
       buildCanonicalSearchSnapshot({
         vaultRoot: input.vaultRoot,
         analyzer: leased,
+        searchSettings: input.searchSettings,
         partitionBits: input.partitionBits,
         progress
       }), undefined, { wait: true, installIfMissing: true });

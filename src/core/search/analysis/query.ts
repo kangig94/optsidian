@@ -7,14 +7,26 @@ import {
 } from "./channels.js";
 import { ngramSearchTerms } from "./korean.js";
 
-export async function analyzeSearchQuery(raw: string, analyzer: SearchAnalyzer): Promise<SearchTextAnalysis> {
-  return analyzeSearchText(raw, await analyzer.tokenize(raw));
+export type SearchTextAnalysisOptions = {
+  ngram?: boolean;
+};
+
+export async function analyzeSearchQuery(
+  raw: string,
+  analyzer: SearchAnalyzer,
+  options: SearchTextAnalysisOptions = {}
+): Promise<SearchTextAnalysis> {
+  return analyzeSearchText(raw, await analyzer.tokenize(raw), options);
 }
 
-export function analyzeSearchText(raw: string, morphTokens: readonly string[]): SearchTextAnalysis {
+export function analyzeSearchText(
+  raw: string,
+  morphTokens: readonly string[],
+  options: SearchTextAnalysisOptions = {}
+): SearchTextAnalysis {
   const morph = uniqueSearchTerms(morphTokens);
   const surface = surfaceSearchTerms(raw);
-  const ngram = ngramSearchTerms([...surface, ...morph]);
+  const ngram = options.ngram === true ? ngramSearchTerms([...surface, ...morph]) : [];
   const primaryChannel = primarySearchChannel(morph, surface, ngram);
   return {
     raw,

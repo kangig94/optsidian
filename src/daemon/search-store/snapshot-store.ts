@@ -11,7 +11,11 @@ import {
 import type { PinnedSnapshot, SnapshotManifestView, SnapshotStore, SnapshotView } from "../../core/search/contracts.js";
 import { recordVaultAccess, recentVaultAccessRoots } from "../../core/vault-access.js";
 import { vaultRelative, walkFiles } from "../../core/path.js";
-import { readOptsidianSettings } from "../../core/settings.js";
+import { readOptsidianSettings, searchNgramEnabled } from "../../core/settings.js";
+import {
+  normalizeIndexAffectingSearchSettings,
+  type IndexAffectingSearchSettings
+} from "../../core/search/index-settings.js";
 import type { SearchIndexProgressUpdate } from "../protocol.js";
 import { buildCanonicalSearchSnapshot, DEFAULT_PARTITION_BITS, snapshotIdentityTuple, snapshotIdentityTupleForAnalyzerIdentity } from "./builder.js";
 import { searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
@@ -37,6 +41,7 @@ export type DaemonSnapshotStoreOptions = {
   retentionCount?: number;
   analyzer?: SearchAnalyzer;
   analyzerIdentity?: SearchAnalyzerIdentity;
+  searchSettings?: Partial<IndexAffectingSearchSettings>;
   snapshotBuilder?: (input: SnapshotBuilderInput) => Promise<BuiltSnapshot>;
   partitionBits?: number;
   durableRenameSegment?: DurableRename;
@@ -68,6 +73,7 @@ export type SnapshotRequestContext = {
 type SnapshotBuilderInput = {
   vaultRoot: string;
   partitionBits: number;
+  searchSettings: IndexAffectingSearchSettings;
   deadline?: number;
   cancellationId?: string;
   progress?: (progress: SearchIndexProgressUpdate) => void;
@@ -106,6 +112,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly partitionBits: number;
   private readonly analyzer: SearchAnalyzer | undefined;
   private readonly analyzerIdentity: SearchAnalyzerIdentity;
+  private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly snapshotBuilder: ((input: SnapshotBuilderInput) => Promise<BuiltSnapshot>) | undefined;
   private readonly renameSegment: DurableRename;
   private readonly renameManifest: DurableRename;
@@ -136,6 +143,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
     );
     this.partitionBits = options.partitionBits ?? DEFAULT_PARTITION_BITS;
     const settings = readOptsidianSettings(process.cwd(), this.env);
+    this.searchSettings = normalizeIndexAffectingSearchSettings(
+      options.searchSettings ?? { ngram: searchNgramEnabled(this.env, settings) }
+    );
     const runtime = searchAnalyzerRuntimeFromProcess();
     this.analyzer = options.analyzer ?? (options.snapshotBuilder ? undefined : resolveSearchAnalyzer(this.env, settings, runtime));
     this.analyzerIdentity = options.analyzerIdentity ?? options.analyzer?.identity ?? this.analyzer?.identity ?? resolveSearchAnalyzer(this.env, settings, runtime).identity;
@@ -312,6 +322,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       ? await this.snapshotBuilder({
           vaultRoot: paths.vaultRoot,
           partitionBits: this.partitionBits,
+          searchSettings: this.searchSettings,
           deadline: context.deadline,
           cancellationId: context.cancellationId,
           progress: context.progress
@@ -342,6 +353,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       buildCanonicalSearchSnapshot({
         vaultRoot,
         analyzer: leasedAnalyzer,
+        searchSettings: this.searchSettings,
         partitionBits: this.partitionBits,
         progress
       })
@@ -593,8 +605,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const envelope = this.readSnapshotEnvelope(paths, snapshotId);
     if (!envelope) return false;
     const expected = this.analyzer
-      ? snapshotIdentityTuple(this.analyzer, this.partitionBits)
-      : snapshotIdentityTupleForAnalyzerIdentity(this.analyzerIdentity, this.partitionBits);
+      ? snapshotIdentityTuple(this.analyzer, this.partitionBits, this.searchSettings)
+      : snapshotIdentityTupleForAnalyzerIdentity(this.analyzerIdentity, this.partitionBits, this.searchSettings);
     return Buffer.compare(Buffer.from(canonicalValueBytes(envelope.manifest.identityTuple)), Buffer.from(canonicalValueBytes(expected))) === 0;
   }
 

@@ -10,6 +10,7 @@ export type SearchFieldTokenTexts = {
 export type SearchFieldTokenTextOptions = {
   morphMaxTerms?: number;
   surfaceMaxTerms?: number;
+  ngram?: boolean;
   ngramMaxTerms?: number;
   ngramRaw?: string;
 };
@@ -24,7 +25,7 @@ export function searchFieldTokenTexts(
   const ngramSurface = options.ngramRaw === undefined
     ? surface
     : limitTerms(surfaceSearchTerms(options.ngramRaw), options.surfaceMaxTerms);
-  const ngram = ngramSearchTerms([...ngramSurface, ...morph], { maxTerms: options.ngramMaxTerms });
+  const ngram = options.ngram === true ? ngramSearchTerms([...ngramSurface, ...morph], { maxTerms: options.ngramMaxTerms }) : [];
   return {
     morph: termsToSearchText(morph),
     surface: termsToSearchText(surface),

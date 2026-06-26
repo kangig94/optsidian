@@ -1341,13 +1341,32 @@ test("snapshot build caps body ngram terms without capping metadata ngrams", asy
   const built = await buildCanonicalSearchSnapshot({
     vaultRoot: vault,
     analyzer: testAnalyzer(),
+    searchSettings: { ngram: true },
     partitionBits: 1
   });
   const document = built.diagnostics.documents[0].searchDocument;
 
   assert.equal(document.bodyNgramTokens.split(" ").length, BODY_NGRAM_SHORT_MAX_TERMS);
   assert.ok(document.titleNgramTokens.split(" ").length > BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.equal(built.identityTuple.analyzerIdentity.ngram.enabled, true);
   assert.equal(built.identityTuple.analyzerIdentity.ngram.bodyBudget.bodyNgramMaxTerms.short, BODY_NGRAM_SHORT_MAX_TERMS);
+});
+
+test("snapshot build disables ngram tokens and identity by default", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# 한국어검색\n\n한국어검색 본문\n");
+
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer: testAnalyzer(),
+    partitionBits: 1
+  });
+  const document = built.diagnostics.documents[0].searchDocument;
+
+  assert.equal(document.titleNgramTokens, "");
+  assert.equal(document.bodyNgramTokens, "");
+  assert.equal(built.identityTuple.analyzerIdentity.ngram.enabled, false);
 });
 
 test("search execution state cache is scoped by immutable snapshot id, not request pin token", async () => {
@@ -1614,6 +1633,8 @@ test("daemon client sends runtime profile per request even when owner is reused"
   assert.equal(searchRequests.length, 2);
   assert.deepEqual(searchRequests[0].payload.profile.analyzer.extraLangs, []);
   assert.deepEqual(searchRequests[1].payload.profile.analyzer.extraLangs, ["ko"]);
+  assert.equal(searchRequests[0].payload.profile.index.ngram, false);
+  assert.equal(searchRequests[1].payload.profile.index.ngram, false);
   const noProfile = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" });
   const kiwiProfile = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" });
   assert.notEqual(searchRuntimeProfileHash(noProfile), searchRuntimeProfileHash(kiwiProfile));
@@ -1722,6 +1743,23 @@ test("runtime profile canonicalizes extra language payloads", async () => {
 
   assert.deepEqual(messy.analyzer.extraLangs, ["ko", "zh"]);
   assert.equal(searchRuntimeProfileHash(messy), searchRuntimeProfileHash(canonical));
+});
+
+test("runtime profile tracks ngram as an index-affecting setting", async () => {
+  const {
+    effectiveSearchRuntimeProfile,
+    searchRuntimeProfileHash
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const baseEnv = {
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-ngram-config-")
+  };
+  const disabled = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_NGRAM: "false" });
+  const enabled = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_NGRAM: "true" });
+
+  assert.equal(disabled.index.ngram, false);
+  assert.equal(enabled.index.ngram, true);
+  assert.notEqual(searchRuntimeProfileHash(disabled), searchRuntimeProfileHash(enabled));
 });
 
 test("daemon readiness handshake authenticates owner nonce over RPC integration", async () => {
