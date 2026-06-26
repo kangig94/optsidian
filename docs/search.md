@@ -219,6 +219,11 @@ useful for isolating whether a change helps or hurts one language family. Use Mi
 inner-loop checks, then confirm with the full Mixed600 run before treating a change as a quality or
 throughput baseline.
 
+The standard search-quality target is no-ngram. Korean 2/3-gram indexing and query expansion are
+available behind `--ngram=on`, `search.ngram=true`, or `OPTSIDIAN_SEARCH_NGRAM=true`, but routine
+regression testing should leave ngram off. Keep ngram-on runs only as manual or archived comparison
+data when investigating Korean tokenization behavior.
+
 `search:eval` runs in warm mode by default: it executes one unmeasured search before scoring so the
 daemon can load the vault and pin a snapshot. A cold `Search` only blocks on one search-execution
 worker preloading the snapshot; additional search workers hydrate the snapshot on demand. Use
@@ -284,11 +289,10 @@ not a sum, because Node worker threads share process RSS.
 
 ## Baseline
 
-Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
-scoring mode. The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from
-`npm run search:eval:spec`, a 600-note vault (`KLUE300` + `English300`), lazy daemon startup,
-one-worker cold search preload, pinned positional snapshots, and ngram disabled by default.
-Run `search:eval` with `--ngram=on` to measure the opt-in Korean 2/3-gram channel.
+Current local subset baseline is measured through daemon RPC with `--mode=core --concurrency=1`
+in warm scoring mode. The 2026-06-27 no-ngram run uses regenerated `KLUE100`, `English100`, and
+`Mixed200` specs from `npm run search:eval:spec`, a 600-note vault (`KLUE300` + `English300`),
+lazy daemon startup, one-worker cold search preload, pinned positional snapshots, and `--ngram=off`.
 
 All wall-clock values below are serial measurements. Do not compare them with older runs that
 started multiple eval processes at once. Run the no-Kiwi baseline with
@@ -308,43 +312,50 @@ No-Kiwi baseline (`OPTSIDIAN_SEARCH_EXTRA_LANGS=`):
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.995 | 213.1ms | 209.4ms | 253.8ms | 21.3s | 4.692 |
-| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 224.4ms | 223.0ms | 253.5ms | 22.4s | 4.456 |
-| Mixed200 | 183/200 | 0.850 | 0.875 | 0.890 | 0.915 | 0.868 | 218.6ms | 218.0ms | 257.9ms | 43.7s | 4.573 |
-| KLUE300 | 300/300 | 0.993 | 1.000 | 1.000 | 1.000 | 0.997 | 209.2ms | 206.0ms | 254.0ms | 62.8s | 4.780 |
-| English300 | 246/300 | 0.677 | 0.750 | 0.780 | 0.820 | 0.722 | 222.8ms | 222.5ms | 252.0ms | 66.9s | 4.487 |
-| Mixed600 | 545/600 | 0.835 | 0.875 | 0.890 | 0.908 | 0.859 | 218.3ms | 218.9ms | 255.6ms | 131.0s | 4.581 |
+| KLUE100 | 100/100 | 0.990 | 0.990 | 1.000 | 1.000 | 0.993 | 154.9ms | 153.1ms | 184.6ms | 15.5s | 6.455 |
+| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 191.1ms | 194.6ms | 217.4ms | 19.1s | 5.232 |
+| Mixed200 | 183/200 | 0.845 | 0.870 | 0.890 | 0.915 | 0.864 | 165.4ms | 167.2ms | 209.0ms | 33.1s | 6.045 |
 
-Kiwi-on baseline (`search.extraLangs=["ko"]`):
+Kiwi-on baseline (`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`):
 
 | Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.995 | 210.5ms | 210.7ms | 249.0ms | 21.1s | 4.749 |
-| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 220.9ms | 222.9ms | 250.6ms | 22.1s | 4.527 |
-| Mixed200 | 183/200 | 0.850 | 0.875 | 0.890 | 0.915 | 0.868 | 214.6ms | 215.1ms | 252.7ms | 42.9s | 4.660 |
-| KLUE300 | 300/300 | 0.993 | 1.000 | 1.000 | 1.000 | 0.997 | 208.9ms | 206.3ms | 251.4ms | 62.7s | 4.788 |
-| English300 | 246/300 | 0.677 | 0.750 | 0.780 | 0.820 | 0.722 | 222.7ms | 222.1ms | 252.3ms | 66.8s | 4.489 |
-| Mixed600 | 545/600 | 0.835 | 0.875 | 0.890 | 0.908 | 0.859 | 216.5ms | 216.8ms | 251.4ms | 129.9s | 4.619 |
+| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.993 | 172.6ms | 170.9ms | 210.6ms | 17.3s | 5.794 |
+| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 192.5ms | 191.1ms | 223.1ms | 19.3s | 5.194 |
+| Mixed200 | 183/200 | 0.845 | 0.875 | 0.890 | 0.915 | 0.864 | 177.8ms | 178.8ms | 220.0ms | 35.6s | 5.623 |
 
-The Kiwi-on reference matches no-Kiwi on rounded aggregate quality metrics across all fixtures.
+The Kiwi-on reference matches no-Kiwi on Top1, Recall@10, and MRR@10 for the mixed no-ngram
+baseline. The remaining Recall@3 differences are one-query movements in the 100/200-query subsets.
 
-Mixed600 task slices:
+Mixed200 task slices:
 
 | Mode | Task | n | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| no-Kiwi | mrc | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 217.4ms | 220.2ms | 244.8ms |
-| no-Kiwi | scifact | 300 | 0.677 | 0.750 | 0.780 | 0.817 | 0.721 | 226.1ms | 225.6ms | 256.1ms |
-| no-Kiwi | sts | 60 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 212.9ms | 209.8ms | 253.5ms |
-| no-Kiwi | wos | 60 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 227.3ms | 224.8ms | 267.3ms |
-| no-Kiwi | ynat | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 190.6ms | 189.1ms | 214.0ms |
-| Kiwi-on | mrc | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 214.9ms | 216.1ms | 246.3ms |
-| Kiwi-on | scifact | 300 | 0.677 | 0.750 | 0.780 | 0.817 | 0.721 | 222.7ms | 222.5ms | 251.9ms |
-| Kiwi-on | sts | 60 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 215.7ms | 214.9ms | 246.9ms |
-| Kiwi-on | wos | 60 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 226.5ms | 231.6ms | 262.0ms |
-| Kiwi-on | ynat | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 191.0ms | 188.5ms | 216.2ms |
+| no-Kiwi | mrc | 30 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 154.0ms | 143.2ms | 201.8ms |
+| no-Kiwi | scifact | 100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 181.1ms | 180.6ms | 213.7ms |
+| no-Kiwi | sts | 20 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 143.6ms | 140.4ms | 177.6ms |
+| no-Kiwi | wos | 20 | 0.950 | 0.950 | 1.000 | 1.000 | 0.963 | 156.6ms | 149.0ms | 182.3ms |
+| no-Kiwi | ynat | 30 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 144.9ms | 140.9ms | 177.0ms |
+| Kiwi-on | mrc | 30 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 167.2ms | 168.2ms | 211.1ms |
+| Kiwi-on | scifact | 100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 192.4ms | 194.2ms | 225.9ms |
+| Kiwi-on | sts | 20 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 157.3ms | 154.9ms | 186.2ms |
+| Kiwi-on | wos | 20 | 0.950 | 1.000 | 1.000 | 1.000 | 0.967 | 174.2ms | 174.5ms | 204.6ms |
+| Kiwi-on | ynat | 30 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 155.9ms | 148.3ms | 205.9ms |
 
-Mixed600 has 55 Recall@10 misses in both modes, all from SciFact. KLUE tasks no longer have
-Recall@10 misses in the full mixed benchmark.
+Mixed200 has 17 Recall@10 misses in both modes, all from SciFact. KLUE tasks have no Recall@10
+misses in the mixed no-ngram benchmark.
+
+Archived opt-in ngram comparison from the 2026-06-26 tuning run (`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`,
+`--ngram=on`):
+
+| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| KLUE100 | 100/100 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 143.7ms | 139.8ms | 183.3ms | 14.4s | 6.957 |
+| English100 | 81/100 | 0.680 | 0.750 | 0.800 | 0.810 | 0.726 | 159.3ms | 159.1ms | 185.7ms | 15.9s | 6.274 |
+| Mixed200 | 181/200 | 0.840 | 0.875 | 0.900 | 0.905 | 0.863 | 152.5ms | 154.6ms | 184.5ms | 30.5s | 6.553 |
+
+These archived ngram-on numbers are retained to explain the previous experiment. They are not a
+regular acceptance target; current quality work should compare against the no-ngram baseline above.
 
 ## Worker Pools
 
