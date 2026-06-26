@@ -1557,6 +1557,173 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
   );
 });
 
+test("daemon client sends runtime profile per request even when owner is reused", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const {
+    effectiveSearchRuntimeProfile,
+    searchRuntimeProfileHash
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const runtimeDir = tempRoot();
+  const configHome = tempRoot("optsidian-profile-config-");
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const spawns = [];
+  const searchRequests = [];
+  const baseEnv = {
+    ...process.env,
+    XDG_CONFIG_HOME: configHome,
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1"
+  };
+  const connect = async () => ({
+    request: async (request) => {
+      if (request.method === "Status") {
+        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1 };
+      }
+      assert.equal(request.method, "Search");
+      searchRequests.push(request);
+      return { ok: true, command: "search", snapshotId: "snap-a", matches: [] };
+    },
+    close: async () => {}
+  });
+  const noKiwi = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath,
+    env: { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" },
+    spawnDaemon: async (record) => {
+      spawns.push(record);
+      return { pid: 3001 };
+    },
+    connect
+  });
+  const kiwi = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath,
+    env: { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" },
+    spawnDaemon: async (record) => {
+      spawns.push(record);
+      return { pid: 3002 };
+    },
+    connect
+  });
+
+  await noKiwi.search({ vault: runtimeDir, query: "alpha", limit: 1 });
+  await kiwi.search({ vault: runtimeDir, query: "한국어", limit: 1 });
+
+  assert.equal(spawns.length, 1);
+  assert.equal(searchRequests.length, 2);
+  assert.deepEqual(searchRequests[0].payload.profile.analyzer.extraLangs, []);
+  assert.deepEqual(searchRequests[1].payload.profile.analyzer.extraLangs, ["ko"]);
+  const noProfile = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" });
+  const kiwiProfile = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" });
+  assert.notEqual(searchRuntimeProfileHash(noProfile), searchRuntimeProfileHash(kiwiProfile));
+  assert.notEqual(
+    searchRuntimeProfileHash(searchRequests[0].payload.profile),
+    searchRuntimeProfileHash(searchRequests[1].payload.profile)
+  );
+});
+
+test("profile manager unloads idle runtimes after request release", async () => {
+  const { ProfileManager } = await futureImport("src/daemon/profile-manager.ts");
+  const {
+    effectiveSearchRuntimeProfile,
+    searchRuntimeProfileHash
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const configHome = tempRoot("optsidian-profile-idle-config-");
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: configHome,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "30"
+  };
+  const profile = effectiveSearchRuntimeProfile(repoRoot, env);
+  const profileHash = searchRuntimeProfileHash(profile);
+  const manager = new ProfileManager(env);
+
+  try {
+    await manager.withRuntimeFor({ profile }, async (runtime) => {
+      assert.equal(runtime.profileHash, profileHash);
+      assert.equal(runtime.profile.daemon.idleMs, 30);
+    });
+    const active = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-status-active" });
+    assert.ok(active[profileHash]);
+    assert.equal(active[profileHash].activeRequests, 0);
+    assert.equal(typeof active[profileHash].idleDeadline, "string");
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const idle = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-status-idle" });
+    assert.deepEqual(Object.keys(idle), []);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("profile manager keeps no-Kiwi and Kiwi runtimes isolated", async () => {
+  const { ProfileManager } = await futureImport("src/daemon/profile-manager.ts");
+  const {
+    effectiveSearchRuntimeProfile,
+    searchRuntimeProfileHash
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const configHome = tempRoot("optsidian-profile-isolation-config-");
+  const baseEnv = {
+    ...process.env,
+    XDG_CONFIG_HOME: configHome,
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "1000"
+  };
+  const noKiwi = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" });
+  const kiwi = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" });
+  const noKiwiHash = searchRuntimeProfileHash(noKiwi);
+  const kiwiHash = searchRuntimeProfileHash(kiwi);
+  const manager = new ProfileManager({ ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" });
+
+  try {
+    await manager.withRuntimeFor({ profile: noKiwi }, async (runtime) => {
+      assert.equal(runtime.profileHash, noKiwiHash);
+      assert.deepEqual(runtime.profile.analyzer.extraLangs, []);
+    });
+    await manager.withRuntimeFor({ profile: kiwi }, async (runtime) => {
+      assert.equal(runtime.profileHash, kiwiHash);
+      assert.deepEqual(runtime.profile.analyzer.extraLangs, ["ko"]);
+    });
+    const status = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-isolation-status" });
+    assert.deepEqual(Object.keys(status).sort(), [kiwiHash, noKiwiHash].sort());
+    assert.deepEqual(status[noKiwiHash].profile.analyzer.extraLangs, []);
+    assert.deepEqual(status[kiwiHash].profile.analyzer.extraLangs, ["ko"]);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("runtime profile canonicalizes extra language payloads", async () => {
+  const {
+    effectiveSearchRuntimeProfile,
+    normalizeSearchRuntimeProfile,
+    searchRuntimeProfileHash
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-canonical-config-"),
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko,zh"
+  };
+  const canonical = effectiveSearchRuntimeProfile(repoRoot, env);
+  const messy = normalizeSearchRuntimeProfile({
+    ...canonical,
+    analyzer: {
+      ...canonical.analyzer,
+      extraLangs: [" KO ", "zh", "ko", " "]
+    }
+  });
+
+  assert.deepEqual(messy.analyzer.extraLangs, ["ko", "zh"]);
+  assert.equal(searchRuntimeProfileHash(messy), searchRuntimeProfileHash(canonical));
+});
+
 test("daemon readiness handshake authenticates owner nonce over RPC integration", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const runtimeDir = tempRoot();

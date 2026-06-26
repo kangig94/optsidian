@@ -43,6 +43,10 @@ import type {
   SearchResult
 } from "../core/types.js";
 import { vaultRealpath, walkFiles } from "../core/path.js";
+import {
+  effectiveSearchRuntimeProfile,
+  type SearchRuntimeProfile
+} from "./runtime-profile.js";
 
 export type SearchDaemonClient = {
   search(request: SearchClientRequest): Promise<SearchResult & { snapshotId?: string }>;
@@ -73,6 +77,7 @@ export type SearchDaemonClientOptions = {
   ownerLockTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   registry?: OwnerRegistry;
+  runtimeProfile?: SearchRuntimeProfile;
   spawnDaemon?(record: OwnerRecord): Promise<{ pid?: number } | void> | { pid?: number } | void;
   connect?(record: OwnerRecord): Promise<RpcConnection> | RpcConnection;
 };
@@ -82,6 +87,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   const binaryPath = options.binaryPath ?? defaultSearchDaemonBinaryPath(env);
   const registry = options.registry ?? createOwnerRegistry({ runtimeDir: options.runtimeDir, env });
   const desired = desiredOwnerIdentity(binaryPath);
+  const runtimeProfile = options.runtimeProfile ?? effectiveSearchRuntimeProfile(process.cwd(), env);
   const readyTimeoutMs = options.readyTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
   const ownerLockTimeoutMs = options.ownerLockTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
   const connect = options.connect ?? ((owner: OwnerRecord) => connectRpc(owner.socketPath));
@@ -228,38 +234,45 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   return {
     search(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Search", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchResult & { snapshotId?: string }>;
+      return requestReady("Search", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchResult & { snapshotId?: string }>;
     },
     explain(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Explain", payload, { deadlineMs, cancellationId, traceId }) as Promise<ExplainResult>;
+      return requestReady("Explain", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<ExplainResult>;
     },
     status(options = {}) {
       return ensureReady().then((owner) => requestOnce(owner, "Status", { nonce: owner.nonce }, options) as Promise<StatusResult>);
     },
     loadVault(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("LoadVault", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexWarmResult>;
+      return requestReady("LoadVault", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexWarmResult>;
     },
     rebuild(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Rebuild", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return requestReady("Rebuild", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
     },
     refresh(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Refresh", payload, { deadlineMs, cancellationId, traceId }) as Promise<RefreshResult>;
+      return requestReady("Refresh", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<RefreshResult>;
     },
     compact(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Compact", payload, { deadlineMs, cancellationId, traceId }) as Promise<CompactResult>;
+      return requestReady("Compact", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<CompactResult>;
     },
     clear(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Clear", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return requestReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
     },
     shutdown(options = {}) {
       return ensureReady().then((owner) => requestOnce(owner, "Shutdown", { nonce: owner.nonce }, options) as Promise<ShutdownResult>);
     }
+  };
+}
+
+function withRuntimeProfile<T extends { profile?: SearchRuntimeProfile }>(payload: T, profile: SearchRuntimeProfile): T {
+  return {
+    ...payload,
+    profile: payload.profile ?? profile
   };
 }
 

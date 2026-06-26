@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import {
   isSearchDaemonMethod,
-  SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type OwnerStatus,
   type SearchIndexProgressUpdate,
@@ -25,9 +24,7 @@ import {
   type OwnerRegistry
 } from "./owner-registry.js";
 import { createRequestScheduler } from "./scheduler.js";
-import { createDaemonSnapshotStore, DaemonSearchStoreService } from "./search-store/index.js";
-import { createDaemonPools, type DaemonPools } from "./pools.js";
-import { VaultRegistry } from "./vault-registry.js";
+import { ProfileManager, type ProfileRuntime } from "./profile-manager.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
 import { searchTextContainsHangul } from "../core/search/analyzer.js";
 
@@ -64,10 +61,8 @@ type StartOptions = {
 class SearchDaemon {
   private phase: SearchDaemonPhase = "starting";
   private readonly metrics = new DaemonMetrics();
-  private readonly vaults = new VaultRegistry();
   private readonly scheduler = createRequestScheduler();
-  private readonly searchStore: DaemonSearchStoreService;
-  private readonly pools: DaemonPools;
+  private readonly profiles: ProfileManager;
   private readonly shutdownPromise: Promise<void>;
   private resolveShutdown!: () => void;
   private readonly registry: OwnerRegistry;
@@ -80,15 +75,13 @@ class SearchDaemon {
     registry: OwnerRegistry,
     owner: OwnerRecord,
     server: RpcServer,
-    searchStore: DaemonSearchStoreService,
-    pools: DaemonPools,
+    profiles: ProfileManager,
     idleMs: number
   ) {
     this.registry = registry;
     this.owner = owner;
     this.server = server;
-    this.searchStore = searchStore;
-    this.pools = pools;
+    this.profiles = profiles;
     this.idleMs = idleMs;
     this.shutdownPromise = new Promise((resolve) => {
       this.resolveShutdown = resolve;
@@ -103,7 +96,7 @@ class SearchDaemon {
     try {
       registry.writeOwner(owner);
       const settings = readOptsidianSettings(process.cwd(), options.env);
-      const pools = await createDaemonPools(options.env, settings);
+      const profiles = new ProfileManager(options.env);
 
       let daemon: SearchDaemon | undefined;
       const server = await createRpcServer({
@@ -118,26 +111,11 @@ class SearchDaemon {
           if (!daemon) return;
           for (const requestId of requestIds) {
             daemon.scheduler.cancel(requestId);
-            daemon.pools.cancel(requestId);
+            daemon.profiles.cancel(requestId);
           }
         }
       });
-      const snapshotStore = createDaemonSnapshotStore({
-        env: options.env,
-        countCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT, settings.search?.memoryBudgetCount),
-        byteCap: settingNumber(options.env.OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES, settings.search?.memoryBudgetBytes),
-        retentionCount: settingNumber(options.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT, settings.search?.snapshotRetentionCount),
-        snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
-          deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
-          cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
-          vault: input.vaultRoot,
-          onProgress: input.progress
-        })
-      });
-      const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
-        queryCacheSize: settingNumber(options.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE, settings.search?.queryCacheSize)
-      });
-      daemon = new SearchDaemon(registry, owner, server, searchStore, pools, daemonIdleMs(options.env, settings));
+      daemon = new SearchDaemon(registry, owner, server, profiles, daemonIdleMs(options.env, settings));
       daemon.initialize();
       return daemon;
     } catch (error) {
@@ -210,50 +188,67 @@ class SearchDaemon {
       case "Status":
         return this.status(request);
       case "Search": {
-        await this.ensureVaultReadyForSearch(request);
-        const result = await this.searchStore.search(request.payload, this.requestContext(request));
-        this.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
-        return result;
+        return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
+          await this.ensureVaultReadyForSearch(request, runtime);
+          const result = await runtime.searchStore.search(request.payload, this.requestContext(request));
+          runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+          return result;
+        });
       }
       case "Explain": {
-        await this.ensureVaultReadyForSearch(request);
-        const result = await this.searchStore.explain(request.payload, this.requestContext(request));
-        this.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
-        return result;
+        return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
+          await this.ensureVaultReadyForSearch(request, runtime);
+          const result = await runtime.searchStore.explain(request.payload, this.requestContext(request));
+          runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+          return result;
+        });
       }
       case "LoadVault": {
-        const progress = this.progressReporter(request.payload.vault, "loading");
-        this.vaults.transition(request.payload.vault, "loading");
-        try {
-          const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress));
-          const failed = result.vaults.find((vault) => vault.status === "failed");
-          if (failed) {
-            this.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+        return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
+          const progress = this.progressReporter(runtime, request.payload.vault, "loading");
+          runtime.vaults.transition(request.payload.vault, "loading");
+          try {
+            const result = await runtime.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress));
+            const failed = result.vaults.find((vault) => vault.status === "failed");
+            if (failed) {
+              runtime.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+              return result;
+            }
+            runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
             return result;
+          } catch (error) {
+            runtime.vaults.transition(request.payload.vault, "unloaded", { error: errorMessage(error) });
+            throw error;
           }
-          this.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
-          return result;
-        } catch (error) {
-          this.vaults.transition(request.payload.vault, "unloaded", { error: errorMessage(error) });
-          throw error;
-        }
+        });
       }
-      case "Rebuild":
-        return this.updating(request.payload.vault, (progress) => this.searchStore.rebuild(request.payload.vault, this.requestContext(request, progress)));
-      case "Refresh":
-        return this.updating(request.payload.vault, (progress) => this.searchStore.refresh(request.payload.vault, this.requestContext(request, progress)));
-      case "Compact":
-        return this.updating(request.payload.vault, (progress) => this.searchStore.compact(request.payload.vault, this.requestContext(request, progress)));
+      case "Rebuild": {
+        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
+          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.rebuild(request.payload.vault, this.requestContext(request, progress)))
+        );
+      }
+      case "Refresh": {
+        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
+          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.refresh(request.payload.vault, this.requestContext(request, progress)))
+        );
+      }
+      case "Compact": {
+        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
+          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.compact(request.payload.vault, this.requestContext(request, progress)))
+        );
+      }
       case "Clear": {
-        this.vaults.transition(request.payload.vault, "updating");
-        try {
-          const result = await this.searchStore.clear(request.payload.vault);
-          this.vaults.transition(request.payload.vault, "ready", { snapshotId: undefined });
-          return result;
-        } catch (error) {
-          this.vaults.transition(request.payload.vault, "ready", { error: errorMessage(error) });
-          throw error;
-        }
+        return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
+          runtime.vaults.transition(request.payload.vault, "updating");
+          try {
+            const result = await runtime.searchStore.clear(request.payload.vault);
+            runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: undefined });
+            return result;
+          } catch (error) {
+            runtime.vaults.transition(request.payload.vault, "ready", { error: errorMessage(error) });
+            throw error;
+          }
+        });
       }
       case "Shutdown":
         if (request.payload.nonce !== this.owner.nonce) {
@@ -269,55 +264,59 @@ class SearchDaemon {
   }
 
   private async updating<T>(
+    runtime: ProfileRuntime,
     vault: string,
     fn: (progress: (progress: SearchIndexProgressUpdate) => void) => Promise<T>,
     snapshotId?: string
   ): Promise<T> {
-    const progress = this.progressReporter(vault, "updating");
-    this.vaults.transition(vault, "updating");
+    const progress = this.progressReporter(runtime, vault, "updating");
+    runtime.vaults.transition(vault, "updating");
     try {
       const result = await fn(progress);
       const resultSnapshotId = snapshotId ?? snapshotIdFromResult(result);
-      this.vaults.transition(vault, "ready", resultSnapshotId ? { snapshotId: resultSnapshotId } : {});
+      runtime.vaults.transition(vault, "ready", resultSnapshotId ? { snapshotId: resultSnapshotId } : {});
       return result;
     } catch (error) {
-      this.vaults.transition(vault, "ready", { error: errorMessage(error) });
+      runtime.vaults.transition(vault, "ready", { error: errorMessage(error) });
       throw error;
     }
   }
 
-  private async ensureVaultReadyForSearch(request: SearchDaemonRequest): Promise<void> {
+  private async ensureVaultReadyForSearch(request: SearchDaemonRequest, runtime: ProfileRuntime): Promise<void> {
     if (request.method !== "Search" && request.method !== "Explain") return;
     if (request.payload.snapshotId) return;
-    const current = this.vaults.get(request.payload.vault);
+    const current = runtime.vaults.get(request.payload.vault);
     if (current.state === "ready" && current.snapshotId) return;
-    const progress = this.progressReporter(request.payload.vault, "loading");
-    this.vaults.transition(request.payload.vault, "loading");
+    const progress = this.progressReporter(runtime, request.payload.vault, "loading");
+    runtime.vaults.transition(request.payload.vault, "loading");
     const needsExecutionPreload = searchRequestNeedsExecutionPreload(request);
-    const result = await this.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress), {
+    const result = await runtime.searchStore.loadVault(request.payload.vault, this.requestContext(request, progress), {
       preload: needsExecutionPreload ? { minimumWorkers: 1 } : false,
       warmupQueryAnalyzer: searchRequestNeedsQueryAnalyzerWarmup(request)
     });
     const failed = result.vaults.find((vault) => vault.status === "failed");
     if (failed) {
-      this.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+      runtime.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
       throw Object.assign(new Error(failed.error ?? "vault warmup failed before search"), { code: "SEARCH_DAEMON_NOT_READY" });
     }
-    this.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
+    runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
   }
 
   private async status(request: SearchDaemonRequest) {
+    const context = this.requestContext(request);
+    const profiles = await this.profiles.status(context);
     return {
       ok: true,
       ready: this.phase === "ready",
       phase: this.phase,
       nonce: this.owner.nonce,
       protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-              owner: this.owner satisfies OwnerStatus,
+      owner: this.owner satisfies OwnerStatus,
       metrics: this.metrics.snapshot(),
-      pools: await this.pools.stats(this.requestContext(request)),
-      searchStore: this.searchStore.stats(),
-      vaults: this.vaults.list()
+      pools: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.pools])),
+      searchStore: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.searchStore])),
+      profiles,
+      vaults: this.profiles.listVaults()
     };
   }
 
@@ -332,7 +331,7 @@ class SearchDaemon {
       await this.server.close();
     } catch {}
     try {
-      await this.pools.close();
+      await this.profiles.close();
     } catch {}
     try {
       removeOrphanSocket(this.owner.socketPath);
@@ -364,10 +363,10 @@ class SearchDaemon {
     };
   }
 
-  private progressReporter(vault: string, state: "loading" | "updating"): (progress: SearchIndexProgressUpdate) => void {
+  private progressReporter(runtime: ProfileRuntime, vault: string, state: "loading" | "updating"): (progress: SearchIndexProgressUpdate) => void {
     const startedAt = new Date().toISOString();
     return (progress) => {
-      this.vaults.transition(vault, state, {
+      runtime.vaults.transition(vault, state, {
         progress: {
           ...progress,
           startedAt,

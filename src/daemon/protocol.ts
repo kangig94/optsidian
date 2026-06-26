@@ -7,6 +7,7 @@ import type {
   SearchResult
 } from "../core/types.js";
 import type { ExplainTrace } from "../core/search/contracts.js";
+import type { SearchRuntimeProfile } from "./runtime-profile.js";
 
 export const SEARCH_DAEMON_PROTOCOL_VERSION = 1;
 export const SEARCH_DAEMON_METHODS = [
@@ -60,14 +61,18 @@ export type SearchDaemonRequestBase<M extends SearchDaemonMethod, P> = {
   payload: P;
 };
 
-export type SearchRequestPayload = SearchParams & {
+export type ProfiledPayload = {
+  profile?: SearchRuntimeProfile;
+};
+
+export type SearchRequestPayload = SearchParams & ProfiledPayload & {
   vault: string;
   snapshotId?: string;
 };
 
 export type ExplainRequestPayload = SearchRequestPayload;
 
-export type VaultRequestPayload = {
+export type VaultRequestPayload = ProfiledPayload & {
   vault: string;
 };
 
@@ -135,6 +140,7 @@ export type StatusResult = {
   };
   pools: unknown;
   searchStore: unknown;
+  profiles?: unknown;
   vaults: Array<{
     vault: string;
     state: VaultState;
