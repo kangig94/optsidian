@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -101,9 +102,13 @@ function parseOptions(argv) {
       parsed.format = arg.slice("--format=".length);
     } else if (arg === "--quiet") {
       parsed.quiet = true;
+    } else if (arg === "--verbose") {
+      parsed.verbose = true;
     } else if (arg === "--score-only") {
       parsed.scoreOnly = true;
       parsed.quiet = true;
+    } else if (arg === "--measure-speed" || arg === "--measure-latency") {
+      parsed.measureSpeed = true;
     } else if (arg.startsWith("--concurrency=")) {
       parsed.concurrency = parsePositiveInt(arg.slice("--concurrency=".length), "concurrency");
     } else if (arg.startsWith("--repeat=")) {
@@ -132,7 +137,8 @@ function parseOptions(argv) {
 
 async function runQualityBenchmark(options) {
   const mode = options.mode ?? "core";
-  const concurrency = options.concurrency ?? 1;
+  const measureSpeed = Boolean(options.measureSpeed);
+  const concurrency = options.concurrency ?? defaultQualityConcurrency({ measureSpeed });
   const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
 
   if (!vaultRoot) {
@@ -158,17 +164,18 @@ async function runQualityBenchmark(options) {
   for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
     const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
     runs.push(run);
-    printRunSummary(run, { mode, concurrency, repeat, runIndex });
+    printRunSummary(run, { mode, concurrency, repeat, runIndex, measureSpeed });
   }
 
   if (repeat > 1) {
-    printRepeatSummary(runs, { mode, concurrency });
+    printRepeatSummary(runs, { mode, concurrency, measureSpeed });
   }
 
   if (options.failureReport) {
     writeFailureReport(options.failureReport, createFailureReport({
       mode,
       concurrency,
+      measureSpeed,
       repeat,
       specPath,
       vaultRoot,
@@ -178,6 +185,12 @@ async function runQualityBenchmark(options) {
   }
 
   return runs;
+}
+
+function defaultQualityConcurrency({ measureSpeed }) {
+  if (measureSpeed) return 1;
+  const available = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
+  return Math.max(1, available);
 }
 
 async function runIndexBenchmark(options) {
@@ -519,42 +532,59 @@ async function runEvaluation(queryCases, concurrency, runSearch, options, runInd
   const overallMetrics = createMetrics();
   const taskMetrics = new Map();
   const failures = [];
+  const progress = createEvaluationProgress({
+    enabled: shouldRenderProgress(options),
+    total: queryCases.length,
+    concurrency,
+    runIndex
+  });
 
   const runStarted = performance.now();
-  await runQueryCases(queryCases, concurrency, async (queryCase, caseIndex) => {
-    const started = performance.now();
-    const result = await runSearch(queryCase);
-    const elapsed = performance.now() - started;
-    timings.push(elapsed);
+  try {
+    await runQueryCases(queryCases, concurrency, async (queryCase, caseIndex) => {
+      progress.start(queryCase, caseIndex);
+      const started = performance.now();
+      const result = await runSearch(queryCase);
+      const elapsed = performance.now() - started;
+      timings.push(elapsed);
 
-    if (!result.ok) {
-      failed += 1;
-      recordMetrics(overallMetrics, undefined, elapsed);
-      recordTaskMetrics(taskMetrics, queryCase, undefined, elapsed);
-      failures.push(createFailure({ queryCase, caseIndex, elapsed, error: result.error }));
-      if (!options.quiet) printCase("FAIL", elapsed, queryLabel(queryCase), result.error);
-      return;
-    }
-
-    const paths = result.payload.matches.map((match) => match.path);
-    const ranking = rankingMetrics(paths, queryCase);
-    const rank = ranking.rank;
-    recordMetrics(overallMetrics, ranking, elapsed);
-    recordTaskMetrics(taskMetrics, queryCase, ranking, elapsed);
-    const ok = matchesExpectation(paths, queryCase);
-    if (ok) {
-      passed += 1;
-      if (!options.quiet) printCase("OK", elapsed, queryLabel(queryCase), paths.slice(0, 3).join(" | "));
-    } else {
-      failed += 1;
-      failures.push(createFailure({ queryCase, caseIndex, elapsed, paths, rank }));
-      if (!options.quiet) {
-        printCase("FAIL", elapsed, queryLabel(queryCase), paths.slice(0, 3).join(" | "));
-        const expected = expectedPaths(queryCase).join(", ") || "(no expectation)";
-        console.log(`      expected: ${expected}`);
+      if (!result.ok) {
+        failed += 1;
+        recordMetrics(overallMetrics, undefined, elapsed);
+        recordTaskMetrics(taskMetrics, queryCase, undefined, elapsed);
+        failures.push(createFailure({ queryCase, caseIndex, elapsed, error: result.error }));
+        if (shouldPrintCase(options, "FAIL")) {
+          printCase("FAIL", options.measureSpeed ? elapsed : undefined, queryLabel(queryCase), result.error);
+        }
+        progress.finish({ passed, failed });
+        return;
       }
-    }
-  });
+
+      const paths = result.payload.matches.map((match) => match.path);
+      const ranking = rankingMetrics(paths, queryCase);
+      const rank = ranking.rank;
+      recordMetrics(overallMetrics, ranking, elapsed);
+      recordTaskMetrics(taskMetrics, queryCase, ranking, elapsed);
+      const ok = matchesExpectation(paths, queryCase);
+      if (ok) {
+        passed += 1;
+        if (shouldPrintCase(options, "OK")) {
+          printCase("OK", options.measureSpeed ? elapsed : undefined, queryLabel(queryCase), paths.slice(0, 3).join(" | "));
+        }
+      } else {
+        failed += 1;
+        failures.push(createFailure({ queryCase, caseIndex, elapsed, paths, rank }));
+        if (shouldPrintCase(options, "FAIL")) {
+          printCase("FAIL", options.measureSpeed ? elapsed : undefined, queryLabel(queryCase), paths.slice(0, 3).join(" | "));
+          const expected = expectedPaths(queryCase).join(", ") || "(no expectation)";
+          console.log(`      expected: ${expected}`);
+        }
+      }
+      progress.finish({ passed, failed });
+    });
+  } finally {
+    progress.close({ passed, failed });
+  }
 
   const runElapsed = performance.now() - runStarted;
   failures.sort((left, right) => left.index - right.index);
@@ -593,6 +623,128 @@ async function runQueryCases(queryCases, concurrency, runCase) {
   await Promise.all(workers);
 }
 
+function createEvaluationProgress({ enabled, total, concurrency, runIndex }) {
+  const writer = createProgressWriter({ enabled, intervalMs: 1000 });
+  const startedAt = performance.now();
+  let active = 0;
+  let started = 0;
+  let completed = 0;
+  let passed = 0;
+  let failed = 0;
+  let current = "";
+
+  const render = () => {
+    const ratio = total > 0 ? Math.max(0, Math.min(1, completed / total)) : 1;
+    const elapsedMs = performance.now() - startedAt;
+    const rate = elapsedMs > 0 ? completed / (elapsedMs / 1000) : 0;
+    const remaining = Math.max(0, total - completed);
+    const etaMs = rate > 0 ? (remaining / rate) * 1000 : undefined;
+    const runLabel = runIndex ? ` run=${runIndex}` : "";
+    const currentText = current ? ` current=${truncateMiddle(current, 48)}` : "";
+    return [
+      `eval${runLabel}`,
+      `queries ${progressBar(ratio, total > 0)} ${Math.floor(ratio * 100).toString().padStart(3)}%`,
+      `${completed}/${total}`,
+      `started=${started}`,
+      `active=${active}/${Math.min(concurrency, Math.max(total, 1))}`,
+      `passed=${passed}`,
+      `failed=${failed}`,
+      `elapsed=${formatDuration(elapsedMs)}`,
+      `rate=${formatRate(rate)}`,
+      `eta=${etaMs === undefined ? "unknown" : formatDuration(etaMs)}${currentText}`
+    ].join(" ");
+  };
+
+  const timer = setInterval(() => writer.write(render()), 1000);
+  timer.unref();
+  writer.write(render(), { force: true });
+
+  return {
+    start(queryCase, caseIndex) {
+      active += 1;
+      started += 1;
+      current = `${caseIndex + 1}:${queryLabel(queryCase)}`;
+      writer.write(render(), { force: started === 1 });
+    },
+    finish(counts) {
+      active = Math.max(0, active - 1);
+      completed += 1;
+      passed = counts.passed;
+      failed = counts.failed;
+      writer.write(render(), { force: completed === total });
+    },
+    close(counts) {
+      clearInterval(timer);
+      passed = counts.passed;
+      failed = counts.failed;
+      completed = Math.max(completed, passed + failed);
+      active = 0;
+      writer.finish(render());
+    }
+  };
+}
+
+function createProgressWriter({ enabled, intervalMs }) {
+  const interactive = process.stderr.isTTY === true;
+  let lastLength = 0;
+  let lastLine = "";
+  let lastWrite = 0;
+
+  return {
+    write(line, { force = false } = {}) {
+      if (!enabled) return;
+      const now = Date.now();
+      if (!force && !interactive) {
+        if (line === lastLine) return;
+        if (now - lastWrite < intervalMs) return;
+      }
+      lastLine = line;
+      lastWrite = now;
+      if (interactive) {
+        const padded = line.padEnd(lastLength);
+        lastLength = Math.max(lastLength, line.length);
+        process.stderr.write(`\r${padded}`);
+      } else {
+        process.stderr.write(`${line}\n`);
+      }
+    },
+    clear() {
+      if (!enabled || !interactive || lastLength === 0) return;
+      process.stderr.write(`\r${" ".repeat(lastLength)}\r`);
+      lastLength = 0;
+    },
+    finish(line) {
+      if (!enabled) return;
+      if (interactive) {
+        this.write(line, { force: true });
+        process.stderr.write("\n");
+        lastLength = 0;
+      } else if (line && line !== lastLine) {
+        this.write(line, { force: true });
+      }
+    }
+  };
+}
+
+function progressBar(ratio, knownTotal) {
+  const filled = knownTotal ? Math.round(ratio * 20) : 0;
+  return `[${"#".repeat(filled)}${".".repeat(20 - filled)}]`;
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m${Math.floor(seconds % 60).toString().padStart(2, "0")}s`;
+}
+
+function formatRate(itemsPerSecond) {
+  if (!Number.isFinite(itemsPerSecond) || itemsPerSecond <= 0) return "0.00it/s";
+  if (itemsPerSecond >= 100) return `${itemsPerSecond.toFixed(1)}it/s`;
+  return `${itemsPerSecond.toFixed(2)}it/s`;
+}
+
 function parsePositiveInt(raw, name) {
   if (!/^\d+$/.test(raw)) usage(`${name} must be a positive integer`);
   const parsed = Number(raw);
@@ -609,7 +761,8 @@ async function searchRunner(mode, cliPath, vaultRoot, options) {
       env: searchEvalEnv(options)
     });
     let pinnedSnapshotId = await loadPinnedSnapshotId(client, vaultRoot, {
-      progress: shouldRenderProgress(options)
+      progress: shouldRenderProgress(options),
+      deadlineMs: options.deadlineMs
     });
     return async (queryCase) => {
       try {
@@ -986,8 +1139,19 @@ function ratioNumber(value) {
 }
 
 async function loadPinnedSnapshotId(client, vaultRoot, options = {}) {
-  await withWarmupProgress(client, vaultRoot, options, () => client.loadVault({ vault: vaultRoot }));
-  const status = await client.status();
+  const loadResult = await withWarmupProgress(client, vaultRoot, options, () => client.loadVault({
+    vault: vaultRoot,
+    ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {})
+  }));
+  const loadedSnapshotId = payloadSnapshotId(loadResult);
+  if (loadedSnapshotId) return loadedSnapshotId;
+
+  const failed = loadResult?.vaults?.find((vault) => path.resolve(vault.vaultRoot) === path.resolve(vaultRoot) && vault.status === "failed");
+  if (failed) {
+    throw new Error(`warm LoadVault failed: ${failed.error ?? "unknown error"}`);
+  }
+
+  const status = await client.status({ deadlineMs: options.deadlineMs ?? 30000 });
   const resolvedVault = path.resolve(vaultRoot);
   const vault = status.vaults.find((candidate) => path.resolve(candidate.vault) === resolvedVault);
   if (!vault?.snapshotId) {
@@ -1000,23 +1164,15 @@ async function loadPinnedSnapshotId(client, vaultRoot, options = {}) {
 async function withWarmupProgress(client, vaultRoot, options, run) {
   if (!options.progress) return run();
 
-  let lastLength = 0;
+  const writer = createProgressWriter({ enabled: true, intervalMs: 1000 });
   let polling = false;
-  const write = (line) => {
-    const padded = line.padEnd(lastLength);
-    lastLength = Math.max(lastLength, line.length);
-    process.stderr.write(`\r${padded}`);
-  };
-  const clear = () => {
-    if (lastLength > 0) process.stderr.write(`\r${" ".repeat(lastLength)}\r`);
-  };
   const poll = async () => {
     if (polling) return;
     polling = true;
     try {
-      write(renderWarmupProgress(await client.status({ deadlineMs: 1000 }), vaultRoot));
+      writer.write(renderWarmupProgress(await client.status({ deadlineMs: 1000 }), vaultRoot));
     } catch {
-      write(`warmup loading ${path.basename(path.resolve(vaultRoot))}`);
+      writer.write(`warmup loading ${path.basename(path.resolve(vaultRoot))}`);
     } finally {
       polling = false;
     }
@@ -1026,16 +1182,19 @@ async function withWarmupProgress(client, vaultRoot, options, run) {
   }, 500);
   timer.unref();
   void poll();
+  let ok = false;
   try {
-    return await run();
+    const result = await run();
+    ok = true;
+    return result;
   } finally {
     clearInterval(timer);
-    clear();
+    writer.finish(`warmup ${ok ? "done" : "stopped"} ${path.basename(path.resolve(vaultRoot))}`);
   }
 }
 
 function shouldRenderProgress(options) {
-  return options.noProgress !== true && process.stderr.isTTY === true;
+  return options.noProgress !== true;
 }
 
 function renderWarmupProgress(status, vaultRoot) {
@@ -1282,7 +1441,7 @@ function recordMetrics(metrics, ranking, elapsed) {
   }
 }
 
-function metricsLine(label, metrics) {
+function metricsLine(label, metrics, { includeTiming = true } = {}) {
   const sortedTimings = [...metrics.timings].sort((a, b) => a - b);
   const denominator = metrics.total || 1;
   const parts = [
@@ -1305,11 +1464,13 @@ function metricsLine(label, metrics) {
       `ndcg@10=${ratio(metrics.ndcg10, qrelDenominator)}`
     );
   }
-  parts.push(
-    `avg=${average(metrics.timings).toFixed(1)}ms`,
-    `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
-    `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`
-  );
+  if (includeTiming) {
+    parts.push(
+      `avg=${average(metrics.timings).toFixed(1)}ms`,
+      `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
+      `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`
+    );
+  }
   return parts.join(" ");
 }
 
@@ -1319,23 +1480,27 @@ function printRunSummary(run, context) {
   const summary = [
     `${prefix}summary: mode=${context.mode}`,
     `concurrency=${context.concurrency}`,
-    `${run.passed}/${run.total} passed,`,
-    `total=${run.elapsedMs.toFixed(1)}ms,`,
-    `qps=${queriesPerSecond(run.total, run.elapsedMs)},`,
-    `p50=${percentile(sortedTimings, 50).toFixed(1)}ms,`,
-    `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`
-  ].join(" ");
-  console.log(summary);
-  printPrefixedMetrics("score", run.overallMetrics, prefix);
+    `${run.passed}/${run.total} passed`
+  ];
+  if (context.measureSpeed) {
+    summary.push(
+      `total=${run.elapsedMs.toFixed(1)}ms`,
+      `qps=${queriesPerSecond(run.total, run.elapsedMs)}`,
+      `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
+      `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`
+    );
+  }
+  console.log(summary.join(" "));
+  printPrefixedMetrics("score", run.overallMetrics, prefix, { includeTiming: context.measureSpeed });
   if (run.taskMetrics.size > 0) {
     for (const [task, metrics] of [...run.taskMetrics.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-      printPrefixedMetrics(`score.${task}`, metrics, prefix);
+      printPrefixedMetrics(`score.${task}`, metrics, prefix, { includeTiming: context.measureSpeed });
     }
   }
 }
 
-function printPrefixedMetrics(label, metrics, prefix) {
-  const line = metricsLine(label, metrics);
+function printPrefixedMetrics(label, metrics, prefix, options) {
+  const line = metricsLine(label, metrics, options);
   console.log(prefix ? `${prefix}${line}` : line);
 }
 
@@ -1349,12 +1514,16 @@ function printRepeatSummary(runs, context) {
     `passedMedian=${median(runs.map((run) => run.passed)).toFixed(1)}/${total}`,
     `top1Median=${median(scoreSummaries.map((score) => score.top1)).toFixed(3)}`,
     `recall@10Median=${median(scoreSummaries.map((score) => score.recall10)).toFixed(3)}`,
-    `mrr@10Median=${median(scoreSummaries.map((score) => score.mrr10)).toFixed(3)}`,
-    `avgMedian=${median(scoreSummaries.map((score) => score.avgMs)).toFixed(1)}ms`,
-    `p50Median=${median(scoreSummaries.map((score) => score.p50Ms)).toFixed(1)}ms`,
-    `p95Median=${median(scoreSummaries.map((score) => score.p95Ms)).toFixed(1)}ms`
-  ].join(" ");
-  console.log(summary);
+    `mrr@10Median=${median(scoreSummaries.map((score) => score.mrr10)).toFixed(3)}`
+  ];
+  if (context.measureSpeed) {
+    summary.push(
+      `avgMedian=${median(scoreSummaries.map((score) => score.avgMs)).toFixed(1)}ms`,
+      `p50Median=${median(scoreSummaries.map((score) => score.p50Ms)).toFixed(1)}ms`,
+      `p95Median=${median(scoreSummaries.map((score) => score.p95Ms)).toFixed(1)}ms`
+    );
+  }
+  console.log(summary.join(" "));
 }
 
 async function inspectFailures(failures, runSearch, inspectLimit) {
@@ -1371,7 +1540,7 @@ async function inspectFailures(failures, runSearch, inspectLimit) {
     failure.inspect = {
       limit,
       ok: true,
-      rank: expectedRank(paths, failure.queryCase) ?? null,
+      rank: rankingMetrics(paths, failure.queryCase).rank ?? null,
       topMatches: paths.slice(0, Math.min(paths.length, limit))
     };
   }
@@ -1405,6 +1574,9 @@ function reportQueryCase(queryCase) {
 }
 
 function failureExpectationKind(queryCase) {
+  if (relevanceMap(queryCase).size > 0) {
+    return "relevance";
+  }
   if (queryCase.expected) {
     return "any";
   }
@@ -1417,7 +1589,7 @@ function failureExpectationKind(queryCase) {
   return "none";
 }
 
-function createFailureReport({ mode, concurrency, repeat, specPath, vaultRoot, inspectLimit, runs }) {
+function createFailureReport({ mode, concurrency, measureSpeed, repeat, specPath, vaultRoot, inspectLimit, runs }) {
   const allFailures = runs.flatMap((run) => run.failures);
 
   return {
@@ -1425,6 +1597,7 @@ function createFailureReport({ mode, concurrency, repeat, specPath, vaultRoot, i
     generatedAt: new Date().toISOString(),
     mode,
     concurrency,
+    measureSpeed,
     repeat,
     specPath,
     vaultRoot,
@@ -1683,10 +1856,16 @@ function queryLabel(queryCase) {
   return queryCase.query ?? "(empty query)";
 }
 
+function shouldPrintCase(options, status) {
+  if (options.quiet) return false;
+  if (options.verbose || options.measureSpeed) return true;
+  return status !== "OK";
+}
+
 function printCase(status, elapsed, label, details) {
   const paddedStatus = status.padEnd(4);
-  const paddedMs = `${elapsed.toFixed(1)}ms`.padStart(8);
-  console.log(`${paddedStatus} ${paddedMs} ${label} -> ${details}`);
+  const elapsedText = elapsed === undefined ? "" : ` ${`${elapsed.toFixed(1)}ms`.padStart(8)}`;
+  console.log(`${paddedStatus}${elapsedText} ${label} -> ${details}`);
 }
 
 function percentile(sortedValues, percent) {
@@ -1709,7 +1888,7 @@ function roundMs(value) {
 
 function usage(message, code = 2) {
   if (message) console.error(message);
-  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
+  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
   console.error("       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--ngram=off|on] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]");
   console.error("       npm run search:eval -- --print-search-daemon-slo-fixture");
   process.exit(code);

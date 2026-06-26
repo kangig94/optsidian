@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -13,12 +14,16 @@ from pathlib import Path
 
 import ir_datasets
 
+CORPUS_MODES = ("judged", "sample", "smoke", "full")
+
 
 def main() -> int:
     args = parse_args()
     dataset = ir_datasets.load(args.dataset)
+    output = Path(args.output)
+    documents_output = Path(args.documents_output or output.with_suffix(".documents.jsonl"))
     qrels_by_query = load_qrels(dataset, args.min_relevance)
-    query_ids = select_query_ids(qrels_by_query, args.max_queries)
+    query_ids = select_query_ids(qrels_by_query, args.max_queries, args.query_sample, args.query_seed)
     query_by_id = load_queries(dataset, query_ids)
     selected_queries = []
     required_doc_ids = set()
@@ -36,7 +41,15 @@ def main() -> int:
             }
         )
 
-    documents, missing_doc_ids = load_documents(dataset, required_doc_ids, args.max_background_docs)
+    documents_count, missing_doc_ids = export_documents(
+        dataset,
+        required_doc_ids,
+        documents_output,
+        args.corpus_mode,
+        args.max_background_docs,
+        args.sample_size,
+        args.sample_seed,
+    )
     payload = {
         "schemaVersion": 1,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -52,13 +65,18 @@ def main() -> int:
             "maxQrelsPerQuery": args.max_qrels_per_query,
             "minRelevance": args.min_relevance,
             "maxBackgroundDocs": args.max_background_docs,
+            "corpusMode": args.corpus_mode,
+            "sampleSize": args.sample_size,
+            "sampleSeed": args.sample_seed,
+            "querySample": args.query_sample,
+            "querySeed": args.query_seed,
         },
         "queries": selected_queries,
-        "documents": documents,
+        "documentsFile": str(documents_output),
+        "documentsCount": documents_count,
         "missingDocIds": missing_doc_ids,
     }
 
-    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
@@ -68,10 +86,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, help="ir_datasets dataset id, e.g. beir/nfcorpus/test")
     parser.add_argument("--output", required=True, help="JSON output path")
+    parser.add_argument("--documents-output", help="JSONL document output path")
     parser.add_argument("--max-queries", type=int, default=50, help="0 means all positive-query ids")
+    parser.add_argument("--query-sample", choices=("even", "random"), default="even")
+    parser.add_argument("--query-seed", type=int, default=0)
     parser.add_argument("--max-qrels-per-query", type=int, default=0, help="0 means all qrels for selected queries")
     parser.add_argument("--min-relevance", type=float, default=1.0, help="minimum positive qrel grade")
     parser.add_argument("--max-background-docs", type=int, default=0, help="extra corpus docs with no qrels")
+    parser.add_argument(
+        "--corpus-mode",
+        choices=CORPUS_MODES,
+        default="judged",
+        help="judged writes selected qrel docs, smoke adds seed-0 random background to 100 docs, sample adds background docs, full writes the entire corpus",
+    )
+    parser.add_argument("--sample-size", type=int, default=100, help="target document count for --corpus-mode=smoke")
+    parser.add_argument("--sample-seed", type=int, default=0, help="random seed for --corpus-mode=smoke")
     return parser.parse_args()
 
 
@@ -102,10 +131,13 @@ def load_qrels(dataset, min_relevance: float) -> dict[str, list[dict]]:
     }
 
 
-def select_query_ids(qrels_by_query: dict[str, list[dict]], max_queries: int) -> list[str]:
+def select_query_ids(qrels_by_query: dict[str, list[dict]], max_queries: int, sample_mode: str, seed: int) -> list[str]:
     query_ids = sorted(qrels_by_query.keys(), key=natural_key)
     if max_queries <= 0 or max_queries >= len(query_ids):
         return query_ids
+    if sample_mode == "random":
+        rng = random.Random(seed)
+        return sorted(rng.sample(query_ids, max_queries), key=natural_key)
     return sample_even(query_ids, max_queries)
 
 
@@ -133,7 +165,91 @@ def load_queries(dataset, query_ids: list[str]) -> dict[str, dict]:
     return query_by_id
 
 
-def load_documents(dataset, required_doc_ids: set[str], max_background_docs: int) -> tuple[list[dict], list[str]]:
+def export_documents(
+    dataset,
+    required_doc_ids: set[str],
+    output_path: Path,
+    corpus_mode: str,
+    max_background_docs: int,
+    sample_size: int,
+    sample_seed: int,
+) -> tuple[int, list[str]]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if corpus_mode == "full":
+        return export_full_documents(dataset, required_doc_ids, output_path)
+    if corpus_mode == "smoke":
+        return export_smoke_documents(dataset, required_doc_ids, output_path, sample_size, sample_seed)
+
+    background_count = max_background_docs if corpus_mode == "sample" else 0
+    documents, missing_doc_ids = load_selected_documents(dataset, required_doc_ids, background_count)
+    with output_path.open("w", encoding="utf-8") as output:
+        for document in documents:
+            output.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return len(documents), missing_doc_ids
+
+
+def export_full_documents(dataset, required_doc_ids: set[str], output_path: Path) -> tuple[int, list[str]]:
+    missing = set(required_doc_ids)
+    count = 0
+    with output_path.open("w", encoding="utf-8") as output:
+        for doc in dataset.docs_iter():
+            row = row_dict(doc)
+            doc_id = str(row.get("doc_id", ""))
+            if not doc_id:
+                continue
+            missing.discard(doc_id)
+            output.write(json.dumps({"docId": doc_id, "fields": row}, ensure_ascii=False) + "\n")
+            count += 1
+    return count, sorted(missing, key=natural_key)
+
+
+def export_smoke_documents(
+    dataset,
+    required_doc_ids: set[str],
+    output_path: Path,
+    sample_size: int,
+    sample_seed: int,
+) -> tuple[int, list[str]]:
+    if sample_size < 1:
+        raise ValueError("--sample-size must be at least 1")
+
+    required_documents, missing_doc_ids = load_selected_documents(dataset, required_doc_ids, 0)
+    required_count = len(required_documents)
+    background_target = max(0, sample_size - required_count)
+    background_documents = sample_background_documents(dataset, required_doc_ids, background_target, sample_seed)
+    documents = sorted(required_documents + background_documents, key=lambda item: natural_key(item["docId"]))
+
+    with output_path.open("w", encoding="utf-8") as output:
+        for document in documents:
+            output.write(json.dumps(document, ensure_ascii=False) + "\n")
+    return len(documents), missing_doc_ids
+
+
+def sample_background_documents(dataset, required_doc_ids: set[str], count: int, seed: int) -> list[dict]:
+    if count <= 0:
+        return []
+
+    rng = random.Random(seed)
+    reservoir = []
+    seen = 0
+    for doc in dataset.docs_iter():
+        row = row_dict(doc)
+        doc_id = str(row.get("doc_id", ""))
+        if not doc_id or doc_id in required_doc_ids:
+            continue
+        seen += 1
+        document = {"docId": doc_id, "fields": row}
+        if len(reservoir) < count:
+            reservoir.append(document)
+            continue
+        replace_at = rng.randrange(seen)
+        if replace_at < count:
+            reservoir[replace_at] = document
+
+    return reservoir
+
+
+def load_selected_documents(dataset, required_doc_ids: set[str], max_background_docs: int) -> tuple[list[dict], list[str]]:
     documents_by_id = {}
     missing = set(required_doc_ids)
 

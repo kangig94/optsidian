@@ -207,12 +207,14 @@ export type SearchIndexWarmResult = {
   action: "warm";
   vaults: SearchIndexWarmVaultResult[];
   warnings?: string[];
+  snapshotId?: string;
 };
 
 export type SearchIndexMutationResult = {
   ok: true;
   command: "index";
   action: "rebuild" | "clear";
+  snapshotId?: string;
 };
 
 export type FrontmatterValue = null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };

@@ -11,13 +11,28 @@ Upstream IR datasets do not provide Optsidian's generated Markdown vault or
 [`ir_datasets`](https://ir-datasets.com/) and [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-npm run search:eval:ir-vault -- /path/to/test_search --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --max-queries=50 --clean
+npm run search:eval:ir-vault -- /path/to/test_search --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --max-queries=50 --corpus=full --clean
 ```
 
 The generator runs Python through `uv run --with ir_datasets`, exports selected queries, qrels, and
-documents, then writes Obsidian-shaped Markdown notes under `IR/`. It writes dataset-specific specs
-as `SearchEval/ir.<dataset>.queries.json` and an `IR`-scoped mixed spec to
-`SearchEval/queries.json`, which is the default `search:eval` spec path.
+documents, then writes Obsidian-shaped Markdown notes under `IR/`. Document export is JSONL-backed
+so full-corpus generation does not require holding every source document in memory. Generated note
+paths preserve the dataset id directory hierarchy, such as `IR/beir/nfcorpus/test` or
+`IR/miracl/ko/dev`, then shard documents by source doc id hash so large corpora do not put every file
+in one directory. The generator writes dataset-specific specs as
+`SearchEval/ir.<dataset>.queries.json` and an `IR`-scoped mixed spec to `SearchEval/queries.json`,
+which is the default `search:eval` spec path.
+
+Use `--corpus=full` for real search-quality baselines. It writes every document from each selected
+dataset so the qrels are evaluated against the same full candidate space as the upstream IR task. Use
+`--smoke` for fast smoke checks. The smoke preset selects 100 queries with `--query-sample=random`
+and `--query-seed=0`, keeps one qrel document per selected query, then fills the corpus to
+`--sample-size=100` with seed `--sample-seed=0` random background documents. `--corpus=smoke` is the
+lower-level corpus mode; it uses the current query selection but still fills the document corpus to
+the seed-0 sample size. Use `--corpus=judged` only for minimal qrel-document checks, and
+`--corpus=sample --background-docs=<n>` for local debugging with deterministic extra distractors. Do
+not treat `judged`, `smoke`, or small `sample` runs as acceptance baselines because they can overstate
+retrieval quality.
 
 Do not evaluate Optsidian directly against raw corpus files. Keep upstream datasets and qrels as
 immutable source material, then regenerate an Obsidian-shaped vault from them. The generated vault
@@ -65,8 +80,8 @@ The search daemon owns the hot search path:
   selection and normal snapshot contracts; run `npm run test:slow` before changing long-body
   sampling, snippet sampling, `search:eval` benchmark modes, or index-build timeout policy.
 
-`N` in load sweeps means daemon worker count. Quality baselines use `--concurrency=1` against a
-warm pinned snapshot.
+`N` in load sweeps means daemon worker count. Default quality evaluation is optimized for quick
+completion, not latency measurement.
 
 ## Evaluation Modes
 
@@ -157,15 +172,22 @@ lifecycle deadline exists so large vault load/build/preload work can finish inst
 fixed timeout.
 
 The daemon reports lifecycle progress through `index status` and daemon `Status` JSON. Interactive
-`index warm`, `index rebuild`, and `search:eval` warmup render a single stderr progress line showing
-the current phase, completed count, total count when known, and current file. This progress output is
-TTY-only and does not change stdout JSON/text results.
+`index warm` and `index rebuild` render a single stderr progress line showing the current phase,
+completed count, total count when known, and current file. This progress output does not change
+stdout JSON/text results.
 
-Use `--concurrency=<n>` to run benchmark queries through concurrent workers. This is required when
-measuring daemon queueing behavior because sequential evaluation does not stress the worker pools.
-Treat `--concurrency=1` as the quality-scoring mode. Higher search concurrency is a load test for
-queueing and tail latency; if recall changes there, investigate shared daemon/cache behavior before
-using that run as a search-quality baseline.
+By default, quality evaluation runs queries in parallel with the host's available CPU count and
+prints score metrics only. This is the normal path for local iteration because it finishes as quickly
+as the daemon and machine allow. Use `--concurrency=<n>` only when pinning a specific amount of
+parallelism. Use `--measure-speed` when measuring latency or throughput; without it, CLI summaries do
+not print total time, QPS, average latency, or latency percentiles.
+
+Progress is always rendered to stderr for quality evaluation unless `--no-progress` is explicitly
+passed. This applies to full, sampled, and judged-only fixtures. Warmup/index progress reports the
+daemon phase and file counts; query progress reports completed query count, active workers, pass/fail
+counts, elapsed time, throughput in `it/s`, estimated remaining time, and the current query label.
+TTY output updates one line in place; non-TTY output writes periodic progress lines so long-running
+evals remain observable in logs.
 
 Use `--repeat=<n>` when comparing latency changes. It reuses the same warm pinned snapshot, runs the
 same spec repeatedly, prints every run, and ends with a median repeat summary. Prefer the median over
@@ -204,19 +226,21 @@ not a sum, because Node worker threads share process RSS.
 ## Baseline
 
 No current acceptance baseline has been recorded for the `ir_datasets` qrels fixture yet. The first
-new baseline should be measured through daemon RPC with `--mode=core --concurrency=1`, warm scoring
-mode, `--ngram=off`, and a generated `SearchEval/queries.json` from `search:eval:ir-vault`.
+new baseline should be measured through daemon RPC with `--mode=core`, default parallel scoring,
+`--ngram=off`, and a full-corpus `SearchEval/queries.json` from
+`search:eval:ir-vault --corpus=full`.
 
 Record both no-Kiwi and Kiwi-on runs:
 
 ```bash
-OPTSIDIAN_SEARCH_EXTRA_LANGS= npm run search:eval -- /path/to/test_search --mode=core --concurrency=1 --ngram=off
-OPTSIDIAN_SEARCH_EXTRA_LANGS=ko npm run search:eval -- /path/to/test_search --mode=core --concurrency=1 --ngram=off
+OPTSIDIAN_SEARCH_EXTRA_LANGS= npm run search:eval -- /path/to/test_search --mode=core --ngram=off
+OPTSIDIAN_SEARCH_EXTRA_LANGS=ko npm run search:eval -- /path/to/test_search --mode=core --ngram=off
 ```
 
-The baseline table should include Top1, Recall@3/5/10, MRR@10, Precision@1/3/5/10, MAP, nDCG@10,
-latency percentiles, total time, and QPS. Keep old single-expected fixture numbers out of this file;
-they are not comparable to qrels-based IR results.
+The baseline table should include Top1, Recall@3/5/10, MRR@10, Precision@1/3/5/10, MAP, and
+nDCG@10. Record latency percentiles, total time, and QPS only for explicit `--measure-speed` runs.
+Keep old single-expected fixture numbers out of this file; they are not comparable to qrels-based IR
+results.
 
 ## Worker Pools
 
@@ -245,6 +269,6 @@ Cold-start reference measurements from the 2026-06-24 lazy-startup run:
 | first metadata-only `search tag=...` from no daemon | 0.73s | 324MB |
 | first query `search <text>` from no daemon | 2.59s | 1.45GB |
 
-The deterministic quality baseline is the `--concurrency=1` qrels score above once recorded. Higher
-concurrency runs are load tests for queueing, cancellation, deadline handling, and tail latency, not
-quality baselines.
+The deterministic quality baseline is the qrels score above once recorded. Explicit
+`--measure-speed` runs are for queueing, cancellation, deadline handling, and tail latency, not
+quality acceptance.
