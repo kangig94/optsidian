@@ -271,12 +271,84 @@ test("reranker does not let weak metadata ngram coverage outrank stronger body r
       { document: weakMetadata, score: 9, queryChannels }
     ],
     undefined,
-    new Map()
+    new Map([
+      ["STS/exact-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0, phrasePriority: 5 }]
+    ])
   );
 
   assert.equal(ranked[0].path, "STS/strong-body.md");
   assert.equal(rankBucketName(ranked[0].bucket), "base");
   assert.equal(ranked[1].coverageTerms, 0.3);
+  assert.equal(rankBucketName(ranked[1].bucket), "base");
+});
+
+test("reranker keeps exact body phrases ahead of weak Kiwi metadata coverage", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const strongBody = searchDocument({
+    path: "STS/exact-body.md",
+    bodySurfaceTokens: "독일을 다음에 또간다면 이숙소에 머물겁니다"
+  });
+  const weakMetadata = searchDocument({
+    path: "WOS/weak-metadata.md",
+    titleTokens: "숙소",
+    tagsTokens: "숙소",
+    titleNgramTokens: "숙소",
+    tagsNgramTokens: "숙소"
+  });
+  const queryChannels = {
+    morph: ["독일", "다음", "가", "숙소", "머물", "거"],
+    surface: ["독일을", "다음에", "또간다면", "이숙소에", "머물겁니다"],
+    ngram: ["독일", "다음", "숙소", "니다"]
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "독일을 다음에 또간다면 이숙소에 머물겁니다.",
+    queryChannels.morph,
+    [
+      { document: strongBody, score: 10, queryChannels },
+      { document: weakMetadata, score: 9, queryChannels }
+    ],
+    undefined,
+    new Map()
+  );
+
+  assert.equal(ranked[0].path, "STS/exact-body.md");
+  assert.equal(rankBucketName(ranked[0].bucket), "phrase");
+  assert.equal(ranked[1].coverageTerms, 0.3);
+  assert.equal(rankBucketName(ranked[1].bucket), "base");
+});
+
+test("reranker does not promote one-character identity fragments to phrase matches", async () => {
+  const { rankBucketName, rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
+  const exactBody = searchDocument({
+    path: "WOS/exact-body.md",
+    bodySurfaceTokens: "3 일간이요"
+  });
+  const noisyTitle = searchDocument({
+    path: "MRC/noisy-title.md",
+    title: "제3회 한경 청년신춘문예 12월5일까지 접수"
+  });
+  const queryChannels = {
+    morph: ["3", "일간이요"],
+    surface: ["3", "일간이요"],
+    ngram: ["일간", "간이", "이요", "일간이", "간이요"]
+  };
+
+  const ranked = rerankCandidatesWithSignals(
+    "3일간이요",
+    queryChannels.morph,
+    [
+      { document: exactBody, score: 10, queryChannels },
+      { document: noisyTitle, score: 9, queryChannels }
+    ],
+    undefined,
+    new Map([
+      ["WOS/exact-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0, phrasePriority: 5 }]
+    ])
+  );
+
+  assert.equal(ranked[0].path, "WOS/exact-body.md");
+  assert.equal(rankBucketName(ranked[0].bucket), "phrase");
   assert.equal(rankBucketName(ranked[1].bucket), "base");
 });
 

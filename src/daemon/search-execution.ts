@@ -13,7 +13,7 @@ import type {
   RetrievalQuery
 } from "../core/search/contracts.js";
 import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from "../core/search/contracts.js";
-import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, RANKING_CONSTANTS, RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_K, RRF_WEIGHTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../core/search/constants.js";
+import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, PHRASE_PRIORITY, RANKING_CONSTANTS, RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_K, RRF_WEIGHTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../core/search/constants.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import type { SearchDocument } from "../core/search/markdown.js";
 import {
@@ -385,6 +385,7 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: Readonl
           snippetScoringInputs: (record?.snippetLines ?? []).map((line) => ({
             snippetId: line.snippetId,
             line: line.line,
+            text: line.text,
             channels: line.channels,
             byteSpan: {
               start: line.byteStart,
@@ -602,10 +603,43 @@ function rankSignalsFromFeatures(
     signals.set(path, {
       rarityScore: feature.rarity.score,
       proximityScore: bestFeatureProximity(feature),
-      bodyScore: maxBodyScore > 0 ? (rawBodyScores.get(path) ?? 0) / maxBodyScore : 0
+      bodyScore: maxBodyScore > 0 ? (rawBodyScores.get(path) ?? 0) / maxBodyScore : 0,
+      phrasePriority: bestFeatureBodyPhrasePriority(feature, analysis)
     });
   }
   return signals;
+}
+
+function bestFeatureBodyPhrasePriority(feature: CandidateFeaturePayload, analysis: SearchTextAnalysis): number | undefined {
+  if (feature.phrasePositions.some((match) => match.field === "body")) return PHRASE_PRIORITY.body;
+  const compactRaw = compactBodyPhrase(analysis.raw);
+  if (compactRaw.length > 1 && feature.snippetScoringInputs.some((input) => compactBodyPhrase(input.text).includes(compactRaw))) {
+    return PHRASE_PRIORITY.body;
+  }
+  const surfaceTerms = analysis.channels.surface;
+  if (surfaceTerms.length === 0) return undefined;
+  return feature.snippetScoringInputs.some((input) => containsTokenSequence(input.channels.surface, surfaceTerms))
+    ? PHRASE_PRIORITY.body
+    : undefined;
+}
+
+function compactBodyPhrase(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
+}
+
+function containsTokenSequence(tokens: readonly string[], sequence: readonly string[]): boolean {
+  if (sequence.length === 0 || sequence.length > tokens.length) return false;
+  for (let start = 0; start <= tokens.length - sequence.length; start += 1) {
+    let matched = true;
+    for (let offset = 0; offset < sequence.length; offset += 1) {
+      if (tokens[start + offset] !== sequence[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return true;
+  }
+  return false;
 }
 
 function shouldUseBodyRankSignal(analysis: SearchTextAnalysis): boolean {

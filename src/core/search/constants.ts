@@ -42,7 +42,8 @@ export const PHRASE_PRIORITY = {
   alias: 1,
   filenameStem: 2,
   heading: 3,
-  pathSegment: 4
+  pathSegment: 4,
+  body: 5
 } as const;
 
 export type CoverageField = "title" | "aliases" | "tags" | "headings" | "path";

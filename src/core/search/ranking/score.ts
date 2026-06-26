@@ -17,6 +17,7 @@ export type CandidateRankSignals = {
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;
+  phrasePriority?: number;
 };
 
 export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
@@ -24,6 +25,8 @@ export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
   proximityScore: 0,
   bodyScore: 0
 };
+
+const BODY_SCORE_COMPARE_EPSILON = 0.02;
 
 export function rerankCandidates(
   query: string,
@@ -119,7 +122,7 @@ function rankedCandidate(
   signals: CandidateRankSignals
 ): RankedCandidate {
   const exactPriority = bestExactPriority(doc, context);
-  const phrasePriority = bestPhrasePriority(doc, context);
+  const phrasePriority = Math.min(bestPhrasePriority(doc, context), signals.phrasePriority ?? Number.POSITIVE_INFINITY);
   const coverage = metadataCoverage(doc, context);
   return {
     path: doc.path,
@@ -213,7 +216,8 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
   if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
+  const bodyScoreCompare = compareDescendingWithEpsilon(left.bodyScore, right.bodyScore, BODY_SCORE_COMPARE_EPSILON);
+  if (bodyScoreCompare !== 0) return bodyScoreCompare;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
@@ -223,9 +227,15 @@ function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): numbe
 function compareCoverageRank(left: RankedCandidate, right: RankedCandidate): number {
   if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
   if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
+  const bodyScoreCompare = compareDescendingWithEpsilon(left.bodyScore, right.bodyScore, BODY_SCORE_COMPARE_EPSILON);
+  if (bodyScoreCompare !== 0) return bodyScoreCompare;
   if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
   if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
   if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
   return left.path.localeCompare(right.path);
+}
+
+function compareDescendingWithEpsilon(left: number, right: number, epsilon: number): number {
+  const delta = right - left;
+  return Math.abs(delta) > epsilon ? delta : 0;
 }

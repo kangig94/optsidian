@@ -18,6 +18,7 @@ export function metadataCoverage(doc: SearchDocument, context: QueryContext): { 
 
   let matchedTerms = 0;
   let fieldScore = 0;
+  const surfaceTerms = new Set(context.channels.surface);
   for (const channel of SEARCH_TOKEN_CHANNELS) {
     const terms = context.channels[channel];
     if (terms.length === 0) continue;
@@ -25,6 +26,7 @@ export function metadataCoverage(doc: SearchDocument, context: QueryContext): { 
     const channelWeight = SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
     for (const term of terms) {
       if (isWeakMetadataCoverageTerm(term)) continue;
+      if (isMorphMetadataExpansion(channel, term, surfaceTerms)) continue;
       let matched = false;
       for (const [field, entries] of values) {
         if (entries.includes(term)) {
@@ -41,6 +43,10 @@ export function metadataCoverage(doc: SearchDocument, context: QueryContext): { 
 
 function isWeakMetadataCoverageTerm(term: string): boolean {
   return WEAK_METADATA_COVERAGE_TERM_SET.has(term);
+}
+
+function isMorphMetadataExpansion(channel: SearchTokenChannel, term: string, surfaceTerms: ReadonlySet<string>): boolean {
+  return channel === "morph" && /[\uac00-\ud7af]/u.test(term) && !surfaceTerms.has(term);
 }
 
 function coverageFieldValues(

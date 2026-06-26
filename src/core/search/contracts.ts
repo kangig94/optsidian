@@ -128,6 +128,7 @@ export type CandidateIdentityFeature = {
 export type SnippetScoringInput = {
   snippetId: string;
   line: number;
+  text: string;
   field?: SearchField;
   channels: SearchTokenChannelTerms;
   byteSpan?: {

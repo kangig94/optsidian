@@ -284,101 +284,66 @@ not a sum, because Node worker threads share process RSS.
 ## Baseline
 
 Current baseline is measured through daemon RPC with `--mode=core --concurrency=1` in warm
-scoring mode.
-The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from `npm run
-search:eval:spec`, lazy daemon startup, one-worker cold search preload, pinned positional
-snapshots, and the metadata coverage threshold that keeps weak ngram-only metadata matches in the
-base bucket. It also excludes weak English function words from metadata coverage scoring while
-retaining polarity terms such as `not`. Long Latin query ranking includes a normalized body BM25
-signal so body evidence can break otherwise metadata-heavy SciFact ties. Body ngram budgets are
-dynamic by note length, and Hangul ngram retrieval falls back to morph/surface retrieval only when
-the ngram candidate set is empty.
+scoring mode. The 2026-06-26 run uses regenerated `SearchEval/*.queries.json` specs from
+`npm run search:eval:spec`, a 600-note vault (`KLUE300` + `English300`), lazy daemon startup,
+one-worker cold search preload, pinned positional snapshots, dynamic body ngram budgets by note
+length, and Hangul ngram retrieval that falls back to morph/surface retrieval only when the ngram
+candidate set is empty.
 
-| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 99/100 | 0.800 | 0.940 | 0.940 | 0.990 | 0.868 | 138.2ms | 133.3ms | 176.3ms |
-| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 149.8ms | 151.2ms | 176.4ms |
-| Mixed200 | 182/200 | 0.755 | 0.845 | 0.860 | 0.910 | 0.804 | 189.6ms | 149.1ms | 179.9ms |
-| KLUE300 | 291/300 | 0.780 | 0.887 | 0.923 | 0.970 | 0.841 | 140.5ms | 139.0ms | 173.1ms |
-| English300 | 246/300 | 0.677 | 0.750 | 0.783 | 0.820 | 0.722 | 153.5ms | 153.9ms | 178.1ms |
-| Mixed600 | 536/600 | 0.728 | 0.818 | 0.853 | 0.893 | 0.781 | 147.5ms | 149.2ms | 179.1ms |
+All wall-clock values below are serial measurements. Do not compare them with older runs that
+started multiple eval processes at once. Run the no-Kiwi baseline with
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=`. Run the Kiwi-on baseline with `search.extraLangs=["ko"]` or
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`.
 
-The lower scores compared with the earlier hand-built 100/200 fixtures are
-expected: the 2026-06-26 fixture rebuild makes the 100 specs subsets of the
-larger 300/600 corpus instead of maintaining separate easier 100-note folders.
-The latest full failure reports have no lexical-missing failures. Mixed600 has
-64 misses: 55 SciFact, 3 STS, and 6 WOS. Of those, 52 are rerank misses and 12
-are candidate-limit misses.
+The ranking invariant is that no-Kiwi must be strong by itself, and enabling Kiwi must not let
+Korean morph expansions promote weak metadata evidence over exact body evidence. The current ranker
+keeps exact body surface and raw-line phrases in the phrase bucket, excludes weak English function
+words from metadata coverage while retaining polarity terms such as `not`, and ignores Hangul morph
+terms for metadata coverage unless the same term is present in the query surface terms. Long Latin
+query ranking includes a normalized body BM25 signal so body evidence can break otherwise
+metadata-heavy SciFact ties.
 
-Wall-clock reference times:
+No-Kiwi baseline (`OPTSIDIAN_SEARCH_EXTRA_LANGS=`):
 
-| Spec | Total | QPS |
-| --- | ---: | ---: |
-| KLUE300 | 42.1s | 7.118 |
-| English300 | 46.1s | 6.512 |
-| Mixed600 | 88.5s | 6.780 |
-| Mixed600 smoke60 | 8.9s | 6.756 |
-| KLUE300 + English300 + Mixed600 | 176.7s | - |
+| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.995 | 213.1ms | 209.4ms | 253.8ms | 21.3s | 4.692 |
+| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 224.4ms | 223.0ms | 253.5ms | 22.4s | 4.456 |
+| Mixed200 | 183/200 | 0.850 | 0.875 | 0.890 | 0.915 | 0.868 | 218.6ms | 218.0ms | 257.9ms | 43.7s | 4.573 |
+| KLUE300 | 300/300 | 0.993 | 1.000 | 1.000 | 1.000 | 0.997 | 209.2ms | 206.0ms | 254.0ms | 62.8s | 4.780 |
+| English300 | 246/300 | 0.677 | 0.750 | 0.780 | 0.820 | 0.722 | 222.8ms | 222.5ms | 252.0ms | 66.9s | 4.487 |
+| Mixed600 | 545/600 | 0.835 | 0.875 | 0.890 | 0.908 | 0.859 | 218.3ms | 218.9ms | 255.6ms | 131.0s | 4.581 |
 
-The Mixed600 smoke60 reference run scored 55/60 with
-`top1=0.750 recall@10=0.917 mrr@10=0.801`. Treat it as a quick regression
-signal, not as the authoritative quality baseline.
+Kiwi-on baseline (`search.extraLangs=["ko"]`):
 
-KLUE100:
+| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.995 | 210.5ms | 210.7ms | 249.0ms | 21.1s | 4.749 |
+| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 220.9ms | 222.9ms | 250.6ms | 22.1s | 4.527 |
+| Mixed200 | 183/200 | 0.850 | 0.875 | 0.890 | 0.915 | 0.868 | 214.6ms | 215.1ms | 252.7ms | 42.9s | 4.660 |
+| KLUE300 | 300/300 | 0.993 | 1.000 | 1.000 | 1.000 | 0.997 | 208.9ms | 206.3ms | 251.4ms | 62.7s | 4.788 |
+| English300 | 246/300 | 0.677 | 0.750 | 0.780 | 0.820 | 0.722 | 222.7ms | 222.1ms | 252.3ms | 66.8s | 4.489 |
+| Mixed600 | 545/600 | 0.835 | 0.875 | 0.890 | 0.908 | 0.859 | 216.5ms | 216.8ms | 251.4ms | 129.9s | 4.619 |
 
-```text
-score: n=100 top1=0.800 recall@3=0.940 recall@5=0.940 recall@10=0.990 mrr@10=0.868 avg=138.2ms p50=133.3ms p95=176.3ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=139.0ms p50=139.8ms p95=160.9ms
-score.sts: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=1.000 mrr@10=0.687 avg=136.8ms p50=134.9ms p95=162.8ms
-score.wos: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=0.950 mrr@10=0.655 avg=158.2ms p50=162.4ms p95=181.7ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=125.1ms p50=123.0ms p95=140.8ms
-```
+The Kiwi-on reference matches no-Kiwi on rounded aggregate quality metrics across all fixtures.
 
-English100:
+Mixed600 task slices:
 
-```text
-score: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=149.8ms p50=151.2ms p95=176.4ms
-score.scifact: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=149.8ms p50=151.2ms p95=176.4ms
-```
+| Mode | Task | n | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| no-Kiwi | mrc | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 217.4ms | 220.2ms | 244.8ms |
+| no-Kiwi | scifact | 300 | 0.677 | 0.750 | 0.780 | 0.817 | 0.721 | 226.1ms | 225.6ms | 256.1ms |
+| no-Kiwi | sts | 60 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 212.9ms | 209.8ms | 253.5ms |
+| no-Kiwi | wos | 60 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 227.3ms | 224.8ms | 267.3ms |
+| no-Kiwi | ynat | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 190.6ms | 189.1ms | 214.0ms |
+| Kiwi-on | mrc | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 214.9ms | 216.1ms | 246.3ms |
+| Kiwi-on | scifact | 300 | 0.677 | 0.750 | 0.780 | 0.817 | 0.721 | 222.7ms | 222.5ms | 251.9ms |
+| Kiwi-on | sts | 60 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 215.7ms | 214.9ms | 246.9ms |
+| Kiwi-on | wos | 60 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 226.5ms | 231.6ms | 262.0ms |
+| Kiwi-on | ynat | 90 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 191.0ms | 188.5ms | 216.2ms |
 
-Mixed200:
-
-```text
-score: n=200 top1=0.755 recall@3=0.845 recall@5=0.860 recall@10=0.910 mrr@10=0.804 avg=189.6ms p50=149.1ms p95=179.9ms
-score.mrc: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=150.4ms p50=149.4ms p95=171.0ms
-score.scifact: n=100 top1=0.710 recall@3=0.750 recall@5=0.780 recall@10=0.830 mrr@10=0.740 avg=233.4ms p50=151.4ms p95=178.8ms
-score.sts: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=1.000 mrr@10=0.687 avg=147.8ms p50=146.7ms p95=174.4ms
-score.wos: n=20 top1=0.500 recall@3=0.850 recall@5=0.850 recall@10=0.950 mrr@10=0.655 avg=163.1ms p50=167.1ms p95=193.8ms
-score.ynat: n=30 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=128.1ms p50=128.9ms p95=144.4ms
-```
-
-KLUE300:
-
-```text
-score: n=300 top1=0.780 recall@3=0.887 recall@5=0.923 recall@10=0.970 mrr@10=0.841 avg=140.5ms p50=139.0ms p95=173.1ms
-score.mrc: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=146.2ms p50=143.7ms p95=171.9ms
-score.sts: n=60 top1=0.550 recall@3=0.783 recall@5=0.850 recall@10=0.950 mrr@10=0.686 avg=140.8ms p50=140.4ms p95=163.7ms
-score.wos: n=60 top1=0.350 recall@3=0.650 recall@5=0.767 recall@10=0.900 mrr@10=0.520 avg=152.9ms p50=152.1ms p95=180.0ms
-score.ynat: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=126.2ms p50=124.4ms p95=147.5ms
-```
-
-English300:
-
-```text
-score: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.820 mrr@10=0.722 avg=153.5ms p50=153.9ms p95=178.1ms
-score.scifact: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.820 mrr@10=0.722 avg=153.5ms p50=153.9ms p95=178.1ms
-```
-
-Mixed600:
-
-```text
-score: n=600 top1=0.728 recall@3=0.818 recall@5=0.853 recall@10=0.893 mrr@10=0.781 avg=147.5ms p50=149.2ms p95=179.1ms
-score.mrc: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=146.6ms p50=146.2ms p95=170.9ms
-score.scifact: n=300 top1=0.677 recall@3=0.750 recall@5=0.783 recall@10=0.817 mrr@10=0.721 avg=155.8ms p50=154.9ms p95=180.7ms
-score.sts: n=60 top1=0.550 recall@3=0.783 recall@5=0.850 recall@10=0.950 mrr@10=0.686 avg=140.6ms p50=140.4ms p95=164.2ms
-score.wos: n=60 top1=0.350 recall@3=0.650 recall@5=0.767 recall@10=0.900 mrr@10=0.520 avg=151.1ms p50=150.2ms p95=180.8ms
-score.ynat: n=90 top1=1.000 recall@3=1.000 recall@5=1.000 recall@10=1.000 mrr@10=1.000 avg=122.8ms p50=121.5ms p95=137.6ms
-```
+Mixed600 has 55 Recall@10 misses in both modes, all from SciFact. KLUE tasks no longer have
+Recall@10 misses in the full mixed benchmark.
 
 ## Worker Pools
 

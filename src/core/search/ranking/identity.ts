@@ -32,6 +32,9 @@ export function bestPhrasePriority(doc: SearchDocument, context: QueryContext): 
   if (context.allowed.has("headings") && doc.headings.some((heading) => containsAnyIdentityPhrase(heading, context.phrases))) {
     priorities.push(PHRASE_PRIORITY.heading);
   }
+  if (context.allowed.has("body") && containsAnyTokenPhrase(doc.bodySurfaceTokens, context.phrases)) {
+    priorities.push(PHRASE_PRIORITY.body);
+  }
   return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
 }
 
@@ -59,12 +62,26 @@ function containsAnyIdentityPhrase(value: string, phrases: readonly string[]): b
   const candidates = identityPhraseCandidates(value);
   return candidates.some((candidate) => {
     const compactCandidate = compactIdentityPhrase(candidate);
-    return phrases.some((phrase) => candidate.includes(phrase) || compactCandidate.includes(compactIdentityPhrase(phrase)));
+    return phrases.some(
+      (phrase) =>
+        isPhraseContainmentCandidate(phrase) &&
+        (candidate.includes(phrase) || compactCandidate.includes(compactIdentityPhrase(phrase)))
+    );
   });
+}
+
+function containsAnyTokenPhrase(tokenText: string, phrases: readonly string[]): boolean {
+  if (!tokenText) return false;
+  const haystack = ` ${tokenText} `;
+  return phrases.some((phrase) => haystack.includes(` ${phrase} `));
 }
 
 function compactIdentityPhrase(value: string): string {
   return value.replace(/\s+/gu, "");
+}
+
+function isPhraseContainmentCandidate(phrase: string): boolean {
+  return compactIdentityPhrase(phrase).length >= 2;
 }
 
 function hasExplicitTermBoundary(value: string): boolean {
