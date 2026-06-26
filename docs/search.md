@@ -1,173 +1,42 @@
 # Search Benchmark
 
-This document records the benchmark fixtures used for Optsidian search work.
+This document records the current qrels-based benchmark fixtures used for Optsidian search work.
+Legacy KLUE/SciFact-specific eval generators and npm commands have been removed; the supported
+fixture path is `search:eval:ir-vault`.
 
-## KLUE Source
+## IR Dataset Generation
 
-The Korean fixture is generated from KLUE v1.1 dev data:
-
-```text
-https://github.com/KLUE-benchmark/KLUE
-```
-
-KLUE is published under CC BY-SA 4.0.
-
-## English Source
-
-The English fixture is generated from BEIR SciFact data:
-
-```text
-https://huggingface.co/datasets/BeIR/scifact
-https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip
-```
-
-BEIR SciFact is published under CC BY-SA 4.0. The Hugging Face repository is
-useful as a cloneable corpus/query source; the BEIR zip also includes test
-qrels in TSV form.
-
-## KLUE Sampling
-
-`KLUE300` is a deterministic 300-document sample from the KLUE v1.1 dev split.
-`KLUE100` is a deterministic subset sampled from `KLUE300`; the benchmark specs
-target the `KLUE` corpus folder and do not use a separate `KLUE100` corpus.
-
-The sample is balanced across four KLUE tasks:
-
-| Task | KLUE300 Docs | KLUE100 Subset | Selection | Query |
-|------|------:|------:|-----------|-------|
-| YNAT | 90 | 30 | evenly spaced indices across the dev split | headline |
-| STS | 60 | 20 | evenly spaced indices across the dev split | sentence 2 |
-| MRC | 90 | 30 | evenly spaced indices across non-impossible dev QAs | selected question plus answer text when available |
-| WOS | 60 | 20 | evenly spaced indices across the dev split | middle user turn, falling back to the first available turn |
-
-Use 0-based indexing. For a split with `total` rows and a desired sample count `count`, choose:
-
-```text
-index(i) = round(i * (total - 1) / (count - 1))
-for i = 0..count-1
-```
-
-If a rounded index is already selected, increment it until an unused index is found. This should not
-normally matter for the current KLUE counts, but it is the tie-break rule.
-
-`KLUE100` uses the same formula again over each task's selected `KLUE300`
-rows. Therefore every `KLUE100` expected note is also present in `KLUE300`.
-
-Task-specific construction:
-
-- YNAT: use the selected row as the document; query is `title`.
-- STS: use the selected row as the document; query is `sentence2`.
-- MRC: flatten non-impossible dev QAs across all articles and paragraphs; query is the question plus
-  all unique answer texts when available, otherwise the question alone.
-- WOS: use the selected row as the document; query is the middle `user` turn using
-  `floor(userTurns.length / 2)`, falling back to the first available user turn, then the first
-  dialogue turn.
-
-This deterministic procedure is intended to let a fresh setup produce the same
-300 KLUE notes and both query specs.
-
-## English Sampling
-
-`English300` is the BEIR SciFact test query set expressed as Obsidian notes.
-`English100` is a deterministic subset sampled from `English300`; the benchmark
-specs target the `English` corpus folder and do not use a separate `English100`
-corpus.
-
-The sample is built from the SciFact test qrels:
-
-1. Sort query ids by numeric value when possible, otherwise lexicographically.
-2. For each query, choose the highest-scored relevant document.
-3. If multiple relevant documents have the same score, choose the lowest corpus id by numeric value
-   when possible, otherwise lexicographically.
-4. Keep all 300 unique test query ids.
-5. Write one note per selected corpus document; multiple query ids may point to the same note.
-
-Each benchmark query uses the BEIR query text. The expected note is the selected relevant document
-from qrels.
-
-`English100` uses the same even-index formula over the 300-query list, so every
-`English100` expected note is also present in `English300`.
-
-## Fixture Construction
-
-Dataset rows are converted into Obsidian Markdown notes rather than indexed as raw JSON.
-
-Each generated note has frontmatter for search metadata:
-
-- `title`
-- `aliases`
-- `tags`
-- `source`
-- `guid`
-- `klue_task`
-- source-specific ids such as `beir_id` or `beir_query_ids`
-
-The body text is shaped by task:
-
-| Task | Note body |
-|------|-----------|
-| YNAT | headline and topic metadata |
-| STS | sentence 1 and sentence 2 |
-| MRC | article title, question, answer texts when available, and context |
-| WOS | dialogue turns and dialogue state values |
-| SciFact | paper title, abstract text, BEIR corpus id, query ids, and qrel scores |
-
-Each generated benchmark query has one expected note. Query construction follows the task:
-
-| Task | Query construction |
-|------|--------------------|
-| YNAT | headline |
-| STS | sentence 2 |
-| MRC | selected question plus answer texts when available; question only when no answer is available |
-| WOS | middle user turn, falling back to the first available turn |
-| SciFact | BEIR query text |
-
-The benchmark queries are scoped to their generated fixture for isolated runs.
-The mixed specs remove this path scope so Korean and English notes compete in
-the same result set.
-
-## Query Spec Regeneration
-
-Upstream datasets do not provide Optsidian's generated Markdown vault or
-`SearchEval/*.queries.json` files. To rebuild the benchmark vault from cloned
-sources:
+Upstream IR datasets do not provide Optsidian's generated Markdown vault or
+`SearchEval/*.queries.json` files. Generate the benchmark vault through
+[`ir_datasets`](https://ir-datasets.com/) and [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-git clone --depth=1 https://github.com/KLUE-benchmark/KLUE /tmp/KLUE
-git clone --depth=1 https://huggingface.co/datasets/BeIR/scifact /tmp/scifact-hf
-curl -fsSL https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip -o /tmp/scifact.zip
-unzip -q /tmp/scifact.zip -d /tmp/scifact-beir
-npm run search:eval:vault -- /path/to/test_search --klue-repo=/tmp/KLUE --scifact-dir=/tmp/scifact-beir/scifact --clean
+npm run search:eval:ir-vault -- /path/to/test_search --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --max-queries=50 --clean
 ```
 
-The Hugging Face clone records the cloneable English dataset source. The BEIR
-zip is used by the generator because it includes qrels as plain TSV. The
-generator writes `KLUE` and `English` corpus folders. Existing legacy
-`KLUE100` or `English100` folders are left untouched, but the generated specs do
-not read or target them.
+The generator runs Python through `uv run --with ir_datasets`, exports selected queries, qrels, and
+documents, then writes Obsidian-shaped Markdown notes under `IR/`. It writes dataset-specific specs
+as `SearchEval/ir.<dataset>.queries.json` and an `IR`-scoped mixed spec to
+`SearchEval/queries.json`, which is the default `search:eval` spec path.
 
-Regenerate query specs from an existing generated benchmark vault:
+Do not evaluate Optsidian directly against raw corpus files. Keep upstream datasets and qrels as
+immutable source material, then regenerate an Obsidian-shaped vault from them. The generated vault
+preserves each source `doc_id` in frontmatter, uses deterministic paths, and exposes realistic
+Obsidian retrieval surfaces:
 
-```bash
-npm run search:eval:spec -- /path/to/test_search --scifact-queries-json=/path/to/test_search/SearchEval/scifact-test-queries.jsonl
-```
+- File path and note title derived from the source title when available, with a stable disambiguator
+  from `doc_id`.
+- YAML frontmatter for dataset id, source doc id, language, split, and safe source metadata.
+- Body text normalized into Markdown paragraphs rather than raw JSON fields.
+- Optional aliases/tags only when generated by a documented deterministic rule.
+- A separate query spec that maps query ids to relevant generated note paths and graded relevance.
 
-This writes:
+Do not inject query text, qrel labels, or relevance information into searchable note fields. Qrels
+belong only in `SearchEval/*.queries.json`.
 
-- `SearchEval/klue100.queries.json`: KLUE100 subset queries with `path=KLUE`
-- `SearchEval/klue300.queries.json`: KLUE300 queries with `path=KLUE`
-- `SearchEval/english100.queries.json`: English100 subset queries with `path=English`
-- `SearchEval/english300.queries.json`: English300 queries with `path=English`
-- `SearchEval/mixed200.queries.json`: KLUE100 + English100 without path scoping
-- `SearchEval/mixed600.queries.json`: KLUE300 + English300 without path scoping
-- `SearchEval/mixed600.smoke60.queries.json`: representative 60-query Mixed600 subset without
-  path scoping, for fast smoke/proxy runs
-- `SearchEval/queries.json`: the same Mixed600 spec, for the default `search:eval` path
-
-KLUE query text is reconstructed from the generated Markdown notes. SciFact
-query text is joined through each note's `beir_query_ids`. Without
-`--scifact-queries-json`, the generator fetches the Hugging Face
-`BeIR/scifact` queries split.
+Always prefer `uv` for Python-backed dataset work. Do not document or rely on ad hoc `pip install`,
+checked-in virtual environments, or conda environments for benchmark generation unless debugging
+`uv` itself.
 
 ## Search Architecture
 
@@ -204,25 +73,70 @@ warm pinned snapshot.
 Use the same evaluation script for both search-quality and index-lifecycle benchmarks. The default
 benchmark is `quality`, which scores queries from a query spec:
 
-- `KLUE300`: run the KLUE query spec with `path` scoped to `KLUE`.
-- `English300`: run the SciFact query spec with `path` scoped to `English`.
-- `Mixed600`: concatenate the KLUE300 and English300 query specs, remove the `path` filter from
-  every query, and evaluate against the shared generated vault.
-- `Mixed600 smoke60`: fixed 60-query subset of Mixed600 for quick smoke/proxy checks. It
-  keeps the same task proportions as Mixed600: 9 YNAT, 6 STS, 9 MRC, 6 WOS, and 30 SciFact queries.
-- `KLUE100`, `English100`, and `Mixed200`: smaller deterministic subsets of the 300/600 specs for
-  quicker local checks.
+- `SearchEval/queries.json`: the default mixed IR qrels spec generated by `search:eval:ir-vault`
+  with `path=IR`.
+- `SearchEval/ir.<dataset>.queries.json`: a dataset-specific qrels spec scoped to that generated
+  dataset folder under `IR/`.
 
-The mixed evaluation is the primary regression target for multilingual search behavior because
-Korean and English documents compete in the same result set. The per-fixture evaluations remain
-useful for isolating whether a change helps or hurts one language family. Use Mixed600 smoke60 for
-inner-loop checks, then confirm with the full Mixed600 run before treating a change as a quality or
-throughput baseline.
+The mixed IR evaluation is the primary regression target for multilingual search behavior because
+Korean and English documents compete in the same result set. Dataset-specific specs remain useful for
+isolating whether a change helps or hurts one dataset family.
 
 The standard search-quality target is no-ngram. Korean 2/3-gram indexing and query expansion are
 available behind `--ngram=on`, `search.ngram=true`, or `OPTSIDIAN_SEARCH_NGRAM=true`, but routine
 regression testing should leave ngram off. Keep ngram-on runs only as manual or archived comparison
 data when investigating Korean tokenization behavior.
+
+### Dataset Direction
+
+Search-quality fixtures should be qrels-based. Single-expected fixtures can be useful for navigation
+smoke checks, but Precision@k, MAP, and nDCG are under-specified because unlisted relevant documents
+are treated as non-relevant.
+
+Use qrels-based datasets to measure:
+
+- Recall@k and MRR@k for whether a known relevant document is surfaced early.
+- Precision@k for how much of the top result page is relevant.
+- MAP for how consistently relevant documents appear throughout the ranked list.
+- nDCG@k for graded relevance when judgments distinguish partially and highly relevant documents.
+
+Precision@k and MAP are only trustworthy when the dataset has enough judged documents per query.
+Sparse positive-only qrels are still useful for recall and MRR, but they understate precision because
+many unjudged documents may be relevant.
+
+Dataset probe from 2026-06-27:
+
+| Dataset id | Lang | Docs | Queries | Qrels | Judgment shape | Decision |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| `miracl/ko/dev` | ko | 1,486,752 | 213 | 3,057 | 0/1 labels, about 14 judged docs/query | Primary Korean retrieval target. Good enough for Korean Precision@k, MAP, and nDCG@k. |
+| `mr-tydi/ko/dev` | ko | 1,496,126 | 303 | 307 | sparse positive-only, about 1 positive/query | Korean auxiliary QA/recall target. Do not use as the main precision target. |
+| `beir/nfcorpus/test` | en | 3,633 | 323 | 12,334 | graded 1/2 labels, about 38 judged docs/query | Primary small English precision/MAP/nDCG target. |
+| `beir/trec-covid` | en | 171,332 | 50 | 66,336 | graded -1/0/1/2 labels, about 1327 judged docs/query | English precision/nDCG stress target. Topic count is small, so do not use alone. |
+| `beir/fiqa/test` | en | 57,638 | 648 | 1,706 | sparse positive-only, about 3 positives/query | English auxiliary practical QA target. |
+| `beir/scifact/test` | en | 5,183 | 300 | 339 | sparse positive-only, about 1 positive/query | Continuity target for the current SciFact-derived fixture. |
+| `miracl/en/dev` | en | 32,893,221 | 799 | 8,350 | 0/1 labels, about 10 judged docs/query | Not a local default target because the corpus is too large for routine regression. |
+
+The default replacement direction is:
+
+- Korean: use `miracl/ko/dev` as the primary dataset, with `mr-tydi/ko/dev` as a secondary
+  sparse-recall check.
+- English: use `beir/nfcorpus/test` plus `beir/trec-covid` for precision/nDCG, and keep
+  `beir/fiqa/test` / `beir/scifact/test` as auxiliary continuity checks.
+- Mixed multilingual: build deterministic subsets from the selected Korean and English qrels-based
+  datasets so Korean and English documents still compete in one shared vault.
+
+Use [`ir_datasets`](https://ir-datasets.com/) as the ingestion layer for these datasets. It provides
+stable dataset ids, a common Python API for `docs_iter()`, `queries_iter()`, and `qrels_iter()`, and
+centralized download/cache/decompression handling through `IR_DATASETS_HOME`. That keeps the
+Optsidian generator focused on mapping documents into Markdown notes and qrels into eval specs
+instead of maintaining one raw parser per upstream dataset. It also supports streaming-style corpus
+iteration, which matters for the 1.5M-document Korean corpora and for any future larger benchmark.
+
+Record the `ir_datasets` package version, dataset ids, subset seed/rules, query count, document
+count, and qrel count in generated result docs. Source data does not need to be committed or
+redistributed, but the result must be reproducible from dataset ids and generator settings. The
+local probe that produced the table above was kept outside the repo under
+`/home/kang/documents/search_eval_sources/probe/`.
 
 `search:eval` runs in warm mode by default: it executes one unmeasured search before scoring so the
 daemon can load the vault and pin a snapshot. A cold `Search` only blocks on one search-execution
@@ -289,73 +203,20 @@ not a sum, because Node worker threads share process RSS.
 
 ## Baseline
 
-Current local subset baseline is measured through daemon RPC with `--mode=core --concurrency=1`
-in warm scoring mode. The 2026-06-27 no-ngram run uses regenerated `KLUE100`, `English100`, and
-`Mixed200` specs from `npm run search:eval:spec`, a 600-note vault (`KLUE300` + `English300`),
-lazy daemon startup, one-worker cold search preload, pinned positional snapshots, and `--ngram=off`.
+No current acceptance baseline has been recorded for the `ir_datasets` qrels fixture yet. The first
+new baseline should be measured through daemon RPC with `--mode=core --concurrency=1`, warm scoring
+mode, `--ngram=off`, and a generated `SearchEval/queries.json` from `search:eval:ir-vault`.
 
-All wall-clock values below are serial measurements. Do not compare them with older runs that
-started multiple eval processes at once. Run the no-Kiwi baseline with
-`OPTSIDIAN_SEARCH_EXTRA_LANGS=`. Run the Kiwi-on baseline with `search.extraLangs=["ko"]` or
-`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`. The eval runner sets `OPTSIDIAN_SEARCH_NGRAM=false` unless
-`--ngram=on` is passed.
+Record both no-Kiwi and Kiwi-on runs:
 
-The ranking invariant is that no-Kiwi must be strong by itself, and enabling Kiwi must not let
-Korean morph expansions promote weak metadata evidence over exact body evidence. The current ranker
-keeps exact body surface and raw-line phrases in the phrase bucket, excludes weak English function
-words from metadata coverage while retaining polarity terms such as `not`, and ignores Hangul morph
-terms for metadata coverage unless the same term is present in the query surface terms. Long Latin
-query ranking includes a normalized body BM25 signal so body evidence can break otherwise
-metadata-heavy SciFact ties.
+```bash
+OPTSIDIAN_SEARCH_EXTRA_LANGS= npm run search:eval -- /path/to/test_search --mode=core --concurrency=1 --ngram=off
+OPTSIDIAN_SEARCH_EXTRA_LANGS=ko npm run search:eval -- /path/to/test_search --mode=core --concurrency=1 --ngram=off
+```
 
-No-Kiwi baseline (`OPTSIDIAN_SEARCH_EXTRA_LANGS=`):
-
-| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.990 | 0.990 | 1.000 | 1.000 | 0.993 | 154.9ms | 153.1ms | 184.6ms | 15.5s | 6.455 |
-| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 191.1ms | 194.6ms | 217.4ms | 19.1s | 5.232 |
-| Mixed200 | 183/200 | 0.845 | 0.870 | 0.890 | 0.915 | 0.864 | 165.4ms | 167.2ms | 209.0ms | 33.1s | 6.045 |
-
-Kiwi-on baseline (`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`):
-
-| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 0.990 | 1.000 | 1.000 | 1.000 | 0.993 | 172.6ms | 170.9ms | 210.6ms | 17.3s | 5.794 |
-| English100 | 83/100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 192.5ms | 191.1ms | 223.1ms | 19.3s | 5.194 |
-| Mixed200 | 183/200 | 0.845 | 0.875 | 0.890 | 0.915 | 0.864 | 177.8ms | 178.8ms | 220.0ms | 35.6s | 5.623 |
-
-The Kiwi-on reference matches no-Kiwi on Top1, Recall@10, and MRR@10 for the mixed no-ngram
-baseline. The remaining Recall@3 differences are one-query movements in the 100/200-query subsets.
-
-Mixed200 task slices:
-
-| Mode | Task | n | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| no-Kiwi | mrc | 30 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 154.0ms | 143.2ms | 201.8ms |
-| no-Kiwi | scifact | 100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 181.1ms | 180.6ms | 213.7ms |
-| no-Kiwi | sts | 20 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 143.6ms | 140.4ms | 177.6ms |
-| no-Kiwi | wos | 20 | 0.950 | 0.950 | 1.000 | 1.000 | 0.963 | 156.6ms | 149.0ms | 182.3ms |
-| no-Kiwi | ynat | 30 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 144.9ms | 140.9ms | 177.0ms |
-| Kiwi-on | mrc | 30 | 0.967 | 1.000 | 1.000 | 1.000 | 0.983 | 167.2ms | 168.2ms | 211.1ms |
-| Kiwi-on | scifact | 100 | 0.710 | 0.750 | 0.780 | 0.830 | 0.740 | 192.4ms | 194.2ms | 225.9ms |
-| Kiwi-on | sts | 20 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 157.3ms | 154.9ms | 186.2ms |
-| Kiwi-on | wos | 20 | 0.950 | 1.000 | 1.000 | 1.000 | 0.967 | 174.2ms | 174.5ms | 204.6ms |
-| Kiwi-on | ynat | 30 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 155.9ms | 148.3ms | 205.9ms |
-
-Mixed200 has 17 Recall@10 misses in both modes, all from SciFact. KLUE tasks have no Recall@10
-misses in the mixed no-ngram benchmark.
-
-Archived opt-in ngram comparison from the 2026-06-26 tuning run (`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko`,
-`--ngram=on`):
-
-| Fixture | Passed | Top1 | Recall@3 | Recall@5 | Recall@10 | MRR@10 | Avg | P50 | P95 | Total | QPS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| KLUE100 | 100/100 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 143.7ms | 139.8ms | 183.3ms | 14.4s | 6.957 |
-| English100 | 81/100 | 0.680 | 0.750 | 0.800 | 0.810 | 0.726 | 159.3ms | 159.1ms | 185.7ms | 15.9s | 6.274 |
-| Mixed200 | 181/200 | 0.840 | 0.875 | 0.900 | 0.905 | 0.863 | 152.5ms | 154.6ms | 184.5ms | 30.5s | 6.553 |
-
-These archived ngram-on numbers are retained to explain the previous experiment. They are not a
-regular acceptance target; current quality work should compare against the no-ngram baseline above.
+The baseline table should include Top1, Recall@3/5/10, MRR@10, Precision@1/3/5/10, MAP, nDCG@10,
+latency percentiles, total time, and QPS. Keep old single-expected fixture numbers out of this file;
+they are not comparable to qrels-based IR results.
 
 ## Worker Pools
 
@@ -384,6 +245,6 @@ Cold-start reference measurements from the 2026-06-24 lazy-startup run:
 | first metadata-only `search tag=...` from no daemon | 0.73s | 324MB |
 | first query `search <text>` from no daemon | 2.59s | 1.45GB |
 
-The deterministic quality baseline is the `--concurrency=1` Mixed600 score above. Higher
+The deterministic quality baseline is the `--concurrency=1` qrels score above once recorded. Higher
 concurrency runs are load tests for queueing, cancellation, deadline handling, and tail latency, not
 quality baselines.

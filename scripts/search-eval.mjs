@@ -7,9 +7,9 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
-  name: "Mixed600 warm pinned snapshot",
+  name: "IR qrels warm pinned snapshot",
   gate: "opt-in benchmark outside npm test",
-  corpus: "Mixed600",
+  corpus: "IR qrels fixture",
   envelope: {
     node: ">=20",
     storage: "local SSD",
@@ -537,9 +537,10 @@ async function runEvaluation(queryCases, concurrency, runSearch, options, runInd
     }
 
     const paths = result.payload.matches.map((match) => match.path);
-    const rank = expectedRank(paths, queryCase);
-    recordMetrics(overallMetrics, rank, elapsed);
-    recordTaskMetrics(taskMetrics, queryCase, rank, elapsed);
+    const ranking = rankingMetrics(paths, queryCase);
+    const rank = ranking.rank;
+    recordMetrics(overallMetrics, ranking, elapsed);
+    recordTaskMetrics(taskMetrics, queryCase, ranking, elapsed);
     const ok = matchesExpectation(paths, queryCase);
     if (ok) {
       passed += 1;
@@ -1131,6 +1132,8 @@ function parseBooleanOption(raw, name) {
 }
 
 function matchesExpectation(paths, queryCase) {
+  const relevance = relevanceMap(queryCase);
+  if (relevance.size > 0) return paths.some((candidate) => (relevance.get(candidate) ?? 0) > 0);
   if (queryCase.expected) return paths.includes(queryCase.expected);
   if (queryCase.expectFirst) return paths[0] === queryCase.expectFirst;
   if (queryCase.expectIncludes) return queryCase.expectIncludes.every((expected) => paths.includes(expected));
@@ -1151,6 +1154,86 @@ function expectedRank(paths, queryCase) {
   return index === -1 ? 0 : index + 1;
 }
 
+function rankingMetrics(paths, queryCase) {
+  const relevance = relevanceMap(queryCase);
+  if (relevance.size === 0) {
+    return { rank: expectedRank(paths, queryCase), hasQrels: false };
+  }
+
+  const positiveRelevance = [...relevance.values()].filter((score) => score > 0).sort((left, right) => right - left);
+  const positiveCount = positiveRelevance.length;
+  const rankIndex = paths.findIndex((candidate) => (relevance.get(candidate) ?? 0) > 0);
+  const rank = rankIndex === -1 ? 0 : rankIndex + 1;
+  let positiveSeen = 0;
+  let averagePrecisionSum = 0;
+
+  for (let index = 0; index < paths.length; index += 1) {
+    if ((relevance.get(paths[index]) ?? 0) <= 0) continue;
+    positiveSeen += 1;
+    averagePrecisionSum += positiveSeen / (index + 1);
+  }
+
+  return {
+    rank,
+    hasQrels: true,
+    precision1: precisionAt(paths, relevance, 1),
+    precision3: precisionAt(paths, relevance, 3),
+    precision5: precisionAt(paths, relevance, 5),
+    precision10: precisionAt(paths, relevance, 10),
+    averagePrecision: positiveCount > 0 ? averagePrecisionSum / positiveCount : 0,
+    ndcg10: ndcgAt(paths, relevance, positiveRelevance, 10)
+  };
+}
+
+function relevanceMap(queryCase) {
+  const source = queryCase.relevance ?? queryCase.relevant ?? queryCase.qrels;
+  const map = new Map();
+  if (!source) return map;
+
+  if (Array.isArray(source)) {
+    for (const entry of source) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        map.set(String(entry[0]), Number(entry[1]));
+      } else if (entry && typeof entry === "object") {
+        const candidatePath = entry.path ?? entry.expected ?? entry.doc ?? entry.document ?? entry.documentPath;
+        const score = entry.relevance ?? entry.score ?? entry.grade;
+        if (candidatePath !== undefined && score !== undefined) map.set(String(candidatePath), Number(score));
+      }
+    }
+    return map;
+  }
+
+  if (typeof source === "object") {
+    for (const [candidatePath, score] of Object.entries(source)) {
+      map.set(candidatePath, Number(score));
+    }
+  }
+
+  return map;
+}
+
+function precisionAt(paths, relevance, cutoff) {
+  let relevant = 0;
+  for (const candidate of paths.slice(0, cutoff)) {
+    if ((relevance.get(candidate) ?? 0) > 0) relevant += 1;
+  }
+  return relevant / cutoff;
+}
+
+function ndcgAt(paths, relevance, positiveRelevance, cutoff) {
+  const dcg = paths.slice(0, cutoff).reduce((sum, candidate, index) => {
+    const score = relevance.get(candidate) ?? 0;
+    if (score <= 0) return sum;
+    return sum + dcgGain(score, index + 1);
+  }, 0);
+  const ideal = positiveRelevance.slice(0, cutoff).reduce((sum, score, index) => sum + dcgGain(score, index + 1), 0);
+  return ideal > 0 ? dcg / ideal : 0;
+}
+
+function dcgGain(relevance, rank) {
+  return (2 ** relevance - 1) / Math.log2(rank + 1);
+}
+
 function createMetrics() {
   return {
     total: 0,
@@ -1159,19 +1242,27 @@ function createMetrics() {
     recall5: 0,
     recall10: 0,
     reciprocalRank: 0,
+    qrelTotal: 0,
+    precision1: 0,
+    precision3: 0,
+    precision5: 0,
+    precision10: 0,
+    averagePrecision: 0,
+    ndcg10: 0,
     timings: []
   };
 }
 
-function recordTaskMetrics(taskMetrics, queryCase, rank, elapsed) {
+function recordTaskMetrics(taskMetrics, queryCase, ranking, elapsed) {
   if (!queryCase.task) return;
   if (!taskMetrics.has(queryCase.task)) taskMetrics.set(queryCase.task, createMetrics());
-  recordMetrics(taskMetrics.get(queryCase.task), rank, elapsed);
+  recordMetrics(taskMetrics.get(queryCase.task), ranking, elapsed);
 }
 
-function recordMetrics(metrics, rank, elapsed) {
+function recordMetrics(metrics, ranking, elapsed) {
   metrics.total += 1;
   metrics.timings.push(elapsed);
+  const rank = ranking?.rank;
   if (rank === undefined) return;
   if (rank === 1) metrics.top1 += 1;
   if (rank > 0 && rank <= 3) metrics.recall3 += 1;
@@ -1180,22 +1271,46 @@ function recordMetrics(metrics, rank, elapsed) {
     metrics.recall10 += 1;
     metrics.reciprocalRank += 1 / rank;
   }
+  if (ranking.hasQrels) {
+    metrics.qrelTotal += 1;
+    metrics.precision1 += ranking.precision1;
+    metrics.precision3 += ranking.precision3;
+    metrics.precision5 += ranking.precision5;
+    metrics.precision10 += ranking.precision10;
+    metrics.averagePrecision += ranking.averagePrecision;
+    metrics.ndcg10 += ranking.ndcg10;
+  }
 }
 
 function metricsLine(label, metrics) {
   const sortedTimings = [...metrics.timings].sort((a, b) => a - b);
   const denominator = metrics.total || 1;
-  return [
+  const parts = [
     `${label}: n=${metrics.total}`,
     `top1=${ratio(metrics.top1, denominator)}`,
     `recall@3=${ratio(metrics.recall3, denominator)}`,
     `recall@5=${ratio(metrics.recall5, denominator)}`,
     `recall@10=${ratio(metrics.recall10, denominator)}`,
-    `mrr@10=${ratio(metrics.reciprocalRank, denominator)}`,
+    `mrr@10=${ratio(metrics.reciprocalRank, denominator)}`
+  ];
+  if (metrics.qrelTotal > 0) {
+    const qrelDenominator = metrics.qrelTotal;
+    parts.push(
+      `qrels=${metrics.qrelTotal}`,
+      `p@1=${ratio(metrics.precision1, qrelDenominator)}`,
+      `p@3=${ratio(metrics.precision3, qrelDenominator)}`,
+      `p@5=${ratio(metrics.precision5, qrelDenominator)}`,
+      `p@10=${ratio(metrics.precision10, qrelDenominator)}`,
+      `map=${ratio(metrics.averagePrecision, qrelDenominator)}`,
+      `ndcg@10=${ratio(metrics.ndcg10, qrelDenominator)}`
+    );
+  }
+  parts.push(
     `avg=${average(metrics.timings).toFixed(1)}ms`,
     `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
     `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`
-  ].join(" ");
+  );
+  return parts.join(" ");
 }
 
 function printRunSummary(run, context) {
@@ -1518,7 +1633,7 @@ function summarizeRuns(runs) {
 function summarizeMetrics(metrics) {
   const sortedTimings = [...metrics.timings].sort((a, b) => a - b);
   const denominator = metrics.total || 1;
-  return {
+  const summary = {
     n: metrics.total,
     top1: Number(ratio(metrics.top1, denominator)),
     recall3: Number(ratio(metrics.recall3, denominator)),
@@ -1529,6 +1644,17 @@ function summarizeMetrics(metrics) {
     p50Ms: roundMs(percentile(sortedTimings, 50)),
     p95Ms: roundMs(percentile(sortedTimings, 95))
   };
+  if (metrics.qrelTotal > 0) {
+    const qrelDenominator = metrics.qrelTotal;
+    summary.qrels = metrics.qrelTotal;
+    summary.precision1 = Number(ratio(metrics.precision1, qrelDenominator));
+    summary.precision3 = Number(ratio(metrics.precision3, qrelDenominator));
+    summary.precision5 = Number(ratio(metrics.precision5, qrelDenominator));
+    summary.precision10 = Number(ratio(metrics.precision10, qrelDenominator));
+    summary.map = Number(ratio(metrics.averagePrecision, qrelDenominator));
+    summary.ndcg10 = Number(ratio(metrics.ndcg10, qrelDenominator));
+  }
+  return summary;
 }
 
 function writeFailureReport(reportPath, report) {
