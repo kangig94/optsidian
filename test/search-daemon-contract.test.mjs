@@ -652,6 +652,29 @@ test("daemon pools defer latency analyzer warmup until query analysis", async ()
   }
 });
 
+test("daemon pools treat OPTSIDIAN_SEARCH_WORKERS as search execution workers only", async () => {
+  const { createDaemonPools } = await futureImport("src/daemon/pools.ts");
+  const env = {
+    ...process.env,
+    OPTSIDIAN_SEARCH_WORKERS: "2",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: undefined
+  };
+  const pools = await createDaemonPools(env, {});
+  try {
+    const stats = await pools.stats({
+      deadline: Date.now() + 1000,
+      cancellationId: "single-worker-env-stats"
+    });
+    assert.equal(stats.latencyAnalyzer.workers, 1);
+    assert.equal(stats.throughputAnalyzer.workers, 1);
+    assert.equal(stats.searchExecution.workers, 2);
+  } finally {
+    await pools.close();
+  }
+});
+
 test("worker pool memory restart guard ignores shared/native memory when heap is below limit", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
@@ -1745,6 +1768,31 @@ test("runtime profile canonicalizes extra language payloads", async () => {
   assert.equal(searchRuntimeProfileHash(messy), searchRuntimeProfileHash(canonical));
 });
 
+test("runtime profile maps single worker setting to search execution only", async () => {
+  const {
+    effectiveSearchRuntimeProfile,
+    envForSearchRuntimeProfile
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-workers-config-"),
+    OPTSIDIAN_SEARCH_WORKERS: "3",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: undefined
+  };
+  const profile = effectiveSearchRuntimeProfile(repoRoot, env);
+  assert.equal(profile.workers.query, 1);
+  assert.equal(profile.workers.index, 1);
+  assert.equal(profile.workers.searchExecution, 3);
+
+  const projected = envForSearchRuntimeProfile(profile, {});
+  assert.equal(projected.OPTSIDIAN_SEARCH_WORKERS, "3");
+  assert.equal(projected.OPTSIDIAN_SEARCH_EXECUTION_WORKERS, "3");
+  assert.equal(projected.OPTSIDIAN_SEARCH_QUERY_WORKERS, "1");
+  assert.equal(projected.OPTSIDIAN_SEARCH_INDEX_WORKERS, "1");
+});
+
 test("runtime profile tracks ngram as an index-affecting setting", async () => {
   const {
     effectiveSearchRuntimeProfile,
@@ -1974,6 +2022,28 @@ test("AC11 cross-vault count budget evicts cold snapshots and reloads on demand"
   assert.equal(reloadedA.snapshotId, first.snapshotId);
   assert.ok(store.statsForTests().loadedSnapshots <= 1);
   store.release(reloadedA);
+});
+
+test("snapshot pin survives snapshots larger than the byte budget", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  writeVaultFile(vault, "Large.md", `# Large\n\n${"needle ".repeat(4096)}\n`);
+  const store = createDaemonSnapshotStore({
+    env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
+    analyzer: testAnalyzer(),
+    countCap: 4,
+    byteCap: 1
+  });
+
+  const loaded = await store.loadVault(vault);
+  const pin = await store.pin(vault);
+  try {
+    assert.equal(pin.snapshotId, loaded.snapshotId);
+    assert.equal(store.snapshotHandleForPin(pin).snapshotId, loaded.snapshotId);
+  } finally {
+    store.release(pin);
+  }
 });
 
 test("AC4 snippets resolve from the pinned snapshot without rereading vault files or tokenizing lines", async () => {

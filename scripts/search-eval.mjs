@@ -109,6 +109,8 @@ function parseOptions(argv) {
       parsed.quiet = true;
     } else if (arg === "--measure-speed" || arg === "--measure-latency") {
       parsed.measureSpeed = true;
+    } else if (arg.startsWith("--workers=")) {
+      parsed.workers = parsePositiveInt(arg.slice("--workers=".length), "workers");
     } else if (arg.startsWith("--concurrency=")) {
       parsed.concurrency = parsePositiveInt(arg.slice("--concurrency=".length), "concurrency");
     } else if (arg.startsWith("--repeat=")) {
@@ -138,7 +140,7 @@ function parseOptions(argv) {
 async function runQualityBenchmark(options) {
   const mode = options.mode ?? "core";
   const measureSpeed = Boolean(options.measureSpeed);
-  const concurrency = options.concurrency ?? defaultQualityConcurrency({ measureSpeed });
+  const concurrency = options.concurrency ?? defaultQualityConcurrency({ measureSpeed, workers: effectiveEvalWorkers(options) });
   const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
 
   if (!vaultRoot) {
@@ -187,10 +189,9 @@ async function runQualityBenchmark(options) {
   return runs;
 }
 
-function defaultQualityConcurrency({ measureSpeed }) {
+function defaultQualityConcurrency({ measureSpeed, workers }) {
   if (measureSpeed) return 1;
-  const available = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
-  return Math.max(1, available);
+  return workers;
 }
 
 async function runIndexBenchmark(options) {
@@ -1277,10 +1278,35 @@ function parseFields(value) {
 }
 
 function searchEvalEnv(options) {
+  const workers = effectiveEvalWorkers(options);
   return {
     ...process.env,
-    OPTSIDIAN_SEARCH_NGRAM: options.ngram === true ? "true" : "false"
+    OPTSIDIAN_SEARCH_NGRAM: options.ngram === true ? "true" : "false",
+    OPTSIDIAN_SEARCH_WORKERS: String(workers),
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers),
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: process.env.OPTSIDIAN_SEARCH_QUERY_WORKERS ?? "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: process.env.OPTSIDIAN_SEARCH_INDEX_WORKERS ?? "1"
   };
+}
+
+function effectiveEvalWorkers(options) {
+  return options.workers ??
+    envPositiveInt(process.env.OPTSIDIAN_SEARCH_WORKERS) ??
+    envPositiveInt(process.env.OPTSIDIAN_SEARCH_EXECUTION_WORKERS) ??
+    defaultSearchExecutionWorkers(process.env);
+}
+
+function defaultSearchExecutionWorkers(env) {
+  const logicalBudget = Math.max(4, typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length);
+  const queryWorkers = envPositiveInt(env.OPTSIDIAN_SEARCH_QUERY_WORKERS) ?? 1;
+  const indexWorkers = envPositiveInt(env.OPTSIDIAN_SEARCH_INDEX_WORKERS) ?? 1;
+  return Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers));
+}
+
+function envPositiveInt(raw) {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw.trim())) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function parseBooleanOption(raw, name) {
@@ -1888,7 +1914,7 @@ function roundMs(value) {
 
 function usage(message, code = 2) {
   if (message) console.error(message);
-  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
+  console.error("Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--workers=<n>] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]");
   console.error("       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--ngram=off|on] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]");
   console.error("       npm run search:eval -- --print-search-daemon-slo-fixture");
   process.exit(code);

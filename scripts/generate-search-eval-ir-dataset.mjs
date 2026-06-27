@@ -17,7 +17,10 @@ if (args.datasets.length === 0) usage("Missing --dataset=<ir_datasets id>.");
 const resolvedVault = path.resolve(vaultRoot);
 const outputDir = args.outDir ? path.resolve(args.outDir) : path.join(resolvedVault, "SearchEval");
 const workDir = args.workDir ? path.resolve(args.workDir) : path.join(outputDir, "ir-datasets");
-const fixtureName = args.fixtureName ?? args.datasets.map((datasetId) => safeSegment(datasetId, 40)).join("__");
+const fixtureName = args.fixtureName ?? [
+  args.preset ? safeSegment(args.preset, 16) : undefined,
+  args.datasets.map((datasetId) => safeSegment(datasetId, 40)).join("__")
+].filter(Boolean).join(".");
 const allQueries = [];
 const datasetReports = [];
 
@@ -32,27 +35,31 @@ for (const datasetId of args.datasets) {
   const datasetSlug = safeSegment(datasetId, 64);
   const exportPath = path.join(workDir, `${datasetSlug}.export.json`);
   const documentsPath = path.join(workDir, `${datasetSlug}.documents.jsonl`);
-  runExporter(datasetId, exportPath, documentsPath);
+  const datasetOptions = optionsForDataset(args, datasetId);
+  runExporter(datasetId, exportPath, documentsPath, datasetOptions);
   const payload = readJson(exportPath);
   const report = await writeDatasetVault(payload);
   datasetReports.push(report);
   allQueries.push(...report.queries.map((query) => ({ ...query, path: "IR" })));
   writeSpec(path.join(outputDir, `ir.${datasetSlug}.queries.json`), report.queries, {
     fixture: datasetSlug,
+    preset: args.preset,
     datasets: [datasetId],
     scopedPath: report.root,
-    corpusMode: args.corpusMode
+    corpusMode: datasetOptions.corpusMode
   });
 }
 
 writeSpec(path.join(outputDir, `ir.${fixtureName}.queries.json`), allQueries, {
   fixture: fixtureName,
+  preset: args.preset,
   datasets: args.datasets,
   scopedPath: "IR",
   corpusMode: args.corpusMode
 });
 writeSpec(path.join(outputDir, "queries.json"), allQueries, {
   fixture: fixtureName,
+  preset: args.preset,
   datasets: args.datasets,
   scopedPath: "IR",
   corpusMode: args.corpusMode
@@ -65,7 +72,7 @@ for (const report of datasetReports) {
 }
 console.log(`wrote ${path.join(outputDir, `ir.${fixtureName}.queries.json`)} (${allQueries.length} queries)`);
 
-function runExporter(datasetId, exportPath, documentsPath) {
+function runExporter(datasetId, exportPath, documentsPath, datasetOptions) {
   const exporter = path.join(repoRoot, "scripts", "export-ir-dataset.py");
   const uv = args.uv ?? process.env.UV ?? "uv";
   const uvArgs = [
@@ -81,23 +88,27 @@ function runExporter(datasetId, exportPath, documentsPath) {
     "--documents-output",
     documentsPath,
     "--max-queries",
-    String(args.maxQueries),
+    String(datasetOptions.maxQueries),
     "--query-sample",
-    args.querySample,
+    datasetOptions.querySample,
     "--query-seed",
-    String(args.querySeed),
+    String(datasetOptions.querySeed),
     "--max-qrels-per-query",
-    String(args.maxQrelsPerQuery),
+    String(datasetOptions.maxQrelsPerQuery),
+    "--max-negative-qrels-per-query",
+    String(datasetOptions.maxNegativeQrelsPerQuery),
     "--min-relevance",
-    String(args.minRelevance),
+    String(datasetOptions.minRelevance),
     "--corpus-mode",
-    args.corpusMode,
+    datasetOptions.corpusMode,
     "--sample-size",
-    String(args.sampleSize),
+    String(datasetOptions.sampleSize),
     "--sample-seed",
-    String(args.sampleSeed),
+    String(datasetOptions.sampleSeed),
+    "--document-sample",
+    datasetOptions.documentSample,
     "--max-background-docs",
-    String(args.maxBackgroundDocs)
+    String(datasetOptions.maxBackgroundDocs)
   ];
   const env = { ...process.env };
   if (args.irHome) env.IR_DATASETS_HOME = path.resolve(args.irHome);
@@ -148,6 +159,7 @@ async function writeDatasetVault(payload) {
     sourceCounts: payload.dataset,
     exportOptions: payload.options,
     irDatasetsVersion: payload.irDatasetsVersion,
+    sampling: payload.sampling,
     documentsWritten,
     missingDocIds: [...missingDocIds],
     queries
@@ -340,6 +352,7 @@ function parseArgs(argv) {
     datasets: [],
     maxQueries: 50,
     maxQrelsPerQuery: 0,
+    maxNegativeQrelsPerQuery: 0,
     minRelevance: 1,
     maxBackgroundDocs: 0,
     corpusMode: "judged",
@@ -347,6 +360,8 @@ function parseArgs(argv) {
     sampleSeed: 0,
     querySample: "even",
     querySeed: 0,
+    documentSample: "random",
+    preset: undefined,
     explicit: new Set()
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -355,7 +370,13 @@ function parseArgs(argv) {
     if (arg === "--clean") {
       parsed.clean = true;
     } else if (arg === "--smoke") {
-      parsed.smoke = true;
+      setPreset(parsed, "smoke");
+    } else if (arg === "--dev") {
+      setPreset(parsed, "dev");
+    } else if (arg === "--full") {
+      setPreset(parsed, "full");
+    } else if (arg.startsWith("--preset=")) {
+      setPreset(parsed, parsePreset(arg.slice("--preset=".length)));
     } else if (arg.startsWith("--vault=")) {
       parsed.vault = arg.slice("--vault=".length);
     } else if (arg.startsWith("--vault-path=")) {
@@ -378,6 +399,9 @@ function parseArgs(argv) {
     } else if (arg.startsWith("--max-qrels-per-query=")) {
       parsed.maxQrelsPerQuery = parseAllOrNonnegativeInt(arg.slice("--max-qrels-per-query=".length), "max-qrels-per-query");
       parsed.explicit.add("maxQrelsPerQuery");
+    } else if (arg.startsWith("--max-negative-qrels-per-query=")) {
+      parsed.maxNegativeQrelsPerQuery = parseNonnegativeInt(arg.slice("--max-negative-qrels-per-query=".length), "max-negative-qrels-per-query");
+      parsed.explicit.add("maxNegativeQrelsPerQuery");
     } else if (arg.startsWith("--min-relevance=")) {
       parsed.minRelevance = Number(arg.slice("--min-relevance=".length));
       if (!Number.isFinite(parsed.minRelevance)) usage("--min-relevance must be numeric");
@@ -393,6 +417,9 @@ function parseArgs(argv) {
     } else if (arg.startsWith("--sample-seed=")) {
       parsed.sampleSeed = parseNonnegativeInt(arg.slice("--sample-seed=".length), "sample-seed");
       parsed.explicit.add("sampleSeed");
+    } else if (arg.startsWith("--document-sample=")) {
+      parsed.documentSample = parseDocumentSample(arg.slice("--document-sample=".length));
+      parsed.explicit.add("documentSample");
     } else if (arg.startsWith("--background-docs=")) {
       parsed.maxBackgroundDocs = parseNonnegativeInt(arg.slice("--background-docs=".length), "background-docs");
     } else if (arg.startsWith("--max-background-docs=")) {
@@ -413,20 +440,104 @@ function parseArgs(argv) {
       usage(`Unknown argument: ${arg}`);
     }
   }
-  applySmokePreset(parsed);
-  delete parsed.explicit;
+  applyPreset(parsed);
   return parsed;
 }
 
-function applySmokePreset(parsed) {
-  if (!parsed.smoke) return;
-  if (!parsed.explicit.has("corpusMode")) parsed.corpusMode = "smoke";
-  if (!parsed.explicit.has("maxQueries")) parsed.maxQueries = 100;
-  if (!parsed.explicit.has("maxQrelsPerQuery")) parsed.maxQrelsPerQuery = 1;
-  if (!parsed.explicit.has("querySample")) parsed.querySample = "random";
-  if (!parsed.explicit.has("querySeed")) parsed.querySeed = 0;
-  if (!parsed.explicit.has("sampleSize")) parsed.sampleSize = 100;
-  if (!parsed.explicit.has("sampleSeed")) parsed.sampleSeed = 0;
+function setPreset(parsed, preset) {
+  if (parsed.preset && parsed.preset !== preset) usage(`Conflicting presets: ${parsed.preset}, ${preset}`);
+  parsed.preset = preset;
+}
+
+function parsePreset(value) {
+  if (["smoke", "dev", "full"].includes(value)) return value;
+  usage("--preset must be one of: smoke, dev, full");
+}
+
+function applyPreset(parsed) {
+  if (!parsed.preset) return;
+  if (parsed.preset === "smoke") {
+    if (!parsed.explicit.has("corpusMode")) parsed.corpusMode = "smoke";
+    if (!parsed.explicit.has("maxQueries")) parsed.maxQueries = 100;
+    if (!parsed.explicit.has("maxQrelsPerQuery")) parsed.maxQrelsPerQuery = 1;
+    if (!parsed.explicit.has("maxNegativeQrelsPerQuery")) parsed.maxNegativeQrelsPerQuery = 0;
+    if (!parsed.explicit.has("querySample")) parsed.querySample = "random";
+    if (!parsed.explicit.has("querySeed")) parsed.querySeed = 0;
+    if (!parsed.explicit.has("sampleSize")) parsed.sampleSize = 100;
+    if (!parsed.explicit.has("sampleSeed")) parsed.sampleSeed = 0;
+    if (!parsed.explicit.has("documentSample")) parsed.documentSample = "random";
+    return;
+  }
+  if (parsed.preset === "dev") {
+    if (!parsed.explicit.has("corpusMode")) parsed.corpusMode = "smoke";
+    if (!parsed.explicit.has("maxQueries")) parsed.maxQueries = 400;
+    if (!parsed.explicit.has("maxQrelsPerQuery")) parsed.maxQrelsPerQuery = 3;
+    if (!parsed.explicit.has("maxNegativeQrelsPerQuery")) parsed.maxNegativeQrelsPerQuery = 2;
+    if (!parsed.explicit.has("querySample")) parsed.querySample = "stratified";
+    if (!parsed.explicit.has("querySeed")) parsed.querySeed = 0;
+    if (!parsed.explicit.has("sampleSize")) parsed.sampleSize = 10000;
+    if (!parsed.explicit.has("sampleSeed")) parsed.sampleSeed = 0;
+    if (!parsed.explicit.has("documentSample")) parsed.documentSample = "stratified";
+    return;
+  }
+  if (!parsed.explicit.has("corpusMode")) parsed.corpusMode = "full";
+  if (!parsed.explicit.has("maxQueries")) parsed.maxQueries = 0;
+  if (!parsed.explicit.has("maxQrelsPerQuery")) parsed.maxQrelsPerQuery = 0;
+  if (!parsed.explicit.has("maxNegativeQrelsPerQuery")) parsed.maxNegativeQrelsPerQuery = 0;
+  if (!parsed.explicit.has("querySample")) parsed.querySample = "even";
+  if (!parsed.explicit.has("documentSample")) parsed.documentSample = "random";
+}
+
+function optionsForDataset(parsed, datasetId) {
+  return {
+    maxQueries: balancedPresetValue(parsed, datasetId, "maxQueries"),
+    maxQrelsPerQuery: parsed.maxQrelsPerQuery,
+    maxNegativeQrelsPerQuery: parsed.maxNegativeQrelsPerQuery,
+    minRelevance: parsed.minRelevance,
+    maxBackgroundDocs: parsed.maxBackgroundDocs,
+    corpusMode: parsed.corpusMode,
+    sampleSize: balancedPresetValue(parsed, datasetId, "sampleSize"),
+    sampleSeed: parsed.sampleSeed,
+    documentSample: parsed.documentSample,
+    querySample: parsed.querySample,
+    querySeed: parsed.querySeed
+  };
+}
+
+function balancedPresetValue(parsed, datasetId, key) {
+  if (!["smoke", "dev"].includes(parsed.preset) || parsed.explicit.has(key)) return parsed[key];
+  return balancedShare(parsed.datasets, datasetId, parsed[key]);
+}
+
+function balancedShare(datasetIds, datasetId, total) {
+  if (total <= 0 || datasetIds.length <= 1) return total;
+  const groups = datasetLanguageGroups(datasetIds);
+  const groupName = datasetLanguageGroup(datasetId);
+  const groupIndex = groups.findIndex((group) => group.name === groupName);
+  const group = groups[groupIndex];
+  const groupShare = integerShare(total, groups.length, groupIndex);
+  const datasetIndex = group.datasets.indexOf(datasetId);
+  return integerShare(groupShare, group.datasets.length, datasetIndex);
+}
+
+function datasetLanguageGroups(datasetIds) {
+  const groups = new Map();
+  for (const datasetId of datasetIds) {
+    const group = datasetLanguageGroup(datasetId);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(datasetId);
+  }
+  return [...groups.entries()].map(([name, datasets]) => ({ name, datasets }));
+}
+
+function datasetLanguageGroup(datasetId) {
+  return languageForDataset(datasetId) ?? "other";
+}
+
+function integerShare(total, parts, index) {
+  const base = Math.floor(total / parts);
+  const remainder = total % parts;
+  return base + (index < remainder ? 1 : 0);
 }
 
 function parseAllOrNonnegativeInt(value, name) {
@@ -440,8 +551,13 @@ function parseCorpusMode(value) {
 }
 
 function parseQuerySample(value) {
-  if (["even", "random"].includes(value)) return value;
-  usage("--query-sample must be one of: even, random");
+  if (["even", "random", "stratified"].includes(value)) return value;
+  usage("--query-sample must be one of: even, random, stratified");
+}
+
+function parseDocumentSample(value) {
+  if (["random", "stratified"].includes(value)) return value;
+  usage("--document-sample must be one of: random, stratified");
 }
 
 function parsePositiveInt(value, name) {
@@ -459,7 +575,7 @@ function parseNonnegativeInt(value, name) {
 function usage(message, code = 2) {
   if (message) console.error(message);
   console.error("Usage: node scripts/generate-search-eval-ir-dataset.mjs <vault-path> --dataset=<ir_datasets id> [--dataset=<id> ...] [--clean]");
-  console.error("       npm run search:eval:ir-vault -- <vault-path> --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --max-queries=50 --corpus=full");
-  console.error("       Options: [--smoke] [--corpus=judged|sample|smoke|full] [--query-sample=even|random] [--query-seed=<n>] [--sample-size=<n>] [--sample-seed=<n>] [--max-qrels-per-query=<n|all>] [--background-docs=<n>] [--ir-home=<dir>] [--uv=<uv>]");
+  console.error("       npm run search:eval:ir-vault -- <vault-path> --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --preset=dev");
+  console.error("       Options: [--preset=smoke|dev|full] [--smoke] [--dev] [--full] [--corpus=judged|sample|smoke|full] [--query-sample=even|random|stratified] [--query-seed=<n>] [--document-sample=random|stratified] [--sample-size=<n>] [--sample-seed=<n>] [--max-qrels-per-query=<n|all>] [--max-negative-qrels-per-query=<n>] [--background-docs=<n>] [--ir-home=<dir>] [--uv=<uv>]");
   process.exit(code);
 }

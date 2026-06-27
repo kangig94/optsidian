@@ -250,6 +250,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     recordVaultAccess(paths.vaultRoot, { env: this.env, nowMs: loaded.lastAccessMs });
     const pinToken = `${paths.vaultStateHash}:${activeSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
     loaded.pinTokens.add(pinToken);
+    this.enforceBudget();
     return {
       snapshotId: activeSnapshotId,
       view: loaded.view,
@@ -419,7 +420,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     if (!envelope) throw new Error(`snapshot ${snapshotId} is not available for vault ${paths.vaultRoot}`);
     const loaded = this.loadEnvelope(paths, envelope);
     this.loaded.set(key, loaded);
-    this.enforceBudget();
     return loaded;
   }
 

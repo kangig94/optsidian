@@ -48,8 +48,9 @@ export function effectiveSearchRuntimeProfile(
   settings: OptsidianSettings = readOptsidianSettings(cwd, env)
 ): SearchRuntimeProfile {
   const logicalBudget = logicalCpuWorkerBudget();
-  const queryWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? settings.search?.queryWorkers ?? 1;
-  const indexWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? settings.search?.indexWorkers ?? 1;
+  const searchWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
+  const queryWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (searchWorkers ? 1 : settings.search?.queryWorkers ?? 1);
+  const indexWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (searchWorkers ? 1 : settings.search?.indexWorkers ?? 1);
   const defaultSearchWorkers = Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers));
   return normalizeSearchRuntimeProfile({
     schemaVersion: SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION,
@@ -68,7 +69,7 @@ export function effectiveSearchRuntimeProfile(
     workers: {
       query: queryWorkers,
       index: indexWorkers,
-      searchExecution: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? defaultSearchWorkers,
+      searchExecution: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? searchWorkers ?? defaultSearchWorkers,
       analyzerMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH") ?? 16,
       indexMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH") ?? 128
     },
@@ -157,6 +158,7 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
     OPTSIDIAN_SEARCH_QUERY_WORKERS: String(normalized.workers.query),
     OPTSIDIAN_SEARCH_INDEX_WORKERS: String(normalized.workers.index),
+    OPTSIDIAN_SEARCH_WORKERS: String(normalized.workers.searchExecution),
     OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(normalized.workers.searchExecution),
     OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH: String(normalized.workers.analyzerMicrobatch),
     OPTSIDIAN_SEARCH_INDEX_MICROBATCH: String(normalized.workers.indexMicrobatch),

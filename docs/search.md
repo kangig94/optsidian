@@ -11,7 +11,7 @@ Upstream IR datasets do not provide Optsidian's generated Markdown vault or
 [`ir_datasets`](https://ir-datasets.com/) and [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-npm run search:eval:ir-vault -- /path/to/test_search --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --max-queries=50 --corpus=full --clean
+npm run search:eval:ir-vault -- /path/to/test_search --dataset=miracl/ko/dev --dataset=beir/nfcorpus/test --preset=dev --clean
 ```
 
 The generator runs Python through `uv run --with ir_datasets`, exports selected queries, qrels, and
@@ -23,13 +23,32 @@ in one directory. The generator writes dataset-specific specs as
 `SearchEval/ir.<dataset>.queries.json` and an `IR`-scoped mixed spec to `SearchEval/queries.json`,
 which is the default `search:eval` spec path.
 
-Use `--corpus=full` for real search-quality baselines. It writes every document from each selected
-dataset so the qrels are evaluated against the same full candidate space as the upstream IR task. Use
-`--smoke` for fast smoke checks. The smoke preset selects 100 queries with `--query-sample=random`
-and `--query-seed=0`, keeps one qrel document per selected query, then fills the corpus to
-`--sample-size=100` with seed `--sample-seed=0` random background documents. `--corpus=smoke` is the
-lower-level corpus mode; it uses the current query selection but still fills the document corpus to
-the seed-0 sample size. Use `--corpus=judged` only for minimal qrel-document checks, and
+Use preset-level fixtures for routine work:
+
+- `--preset=smoke` / `--smoke`: wiring and quick behavior checks. The preset targets 100 total
+  queries and 100 total documents, balanced across dataset language groups. With the default Korean
+  and English pair, that means 50 Korean queries/documents and 50 English queries/documents. It keeps
+  one qrel document per query and fills the rest with seed-0 random background documents. Smoke uses
+  simple random sampling by design; do not expect it to preserve full-corpus distribution.
+- `--preset=dev` / `--dev`: frequent search tuning and performance proxy runs. The preset targets
+  400 total queries and 10,000 total documents, balanced across dataset language groups. With one
+  Korean and one English dataset, that means 200 queries and 5,000 documents per language. It uses
+  seed-0 stratified query sampling, keeps up to three positive qrels and two non-positive judged qrels
+  per query, then fills the remaining corpus with seed-0 stratified background documents.
+- `--preset=full` / `--full`: acceptance baselines. It writes every document from each selected
+  dataset and all positive-query ids so qrels are evaluated against the same full candidate space as
+  the upstream IR task.
+
+The lower-level `--corpus=smoke` mode fills the current query selection to `--sample-size` with the
+selected document sampling strategy; smoke uses `--document-sample=random`, while dev uses
+`--document-sample=stratified`.
+Use `--document-sample=stratified` when manually building a sampled corpus that should preserve
+source/category/url/numeric-doc-id-range/doc-id-prefix buckets better than a simple random reservoir.
+For sampled corpora, required qrel documents are included first and background allocation is adjusted
+so the final output, not only the background slice, stays close to the full stratum distribution.
+Sampling metadata is recorded in the exporter payload and generator summary so dev fixture inputs are
+reproducible and auditable.
+Use `--corpus=judged` only for minimal qrel-document checks, and
 `--corpus=sample --background-docs=<n>` for local debugging with deterministic extra distractors. Do
 not treat `judged`, `smoke`, or small `sample` runs as acceptance baselines because they can overstate
 retrieval quality.
@@ -140,6 +159,11 @@ The default replacement direction is:
 - Mixed multilingual: build deterministic subsets from the selected Korean and English qrels-based
   datasets so Korean and English documents still compete in one shared vault.
 
+For mixed smoke/dev presets, pass at least one Korean dataset and one English dataset. The generator
+balances target query and document counts across language groups before splitting within each group,
+so a `miracl/ko/dev` + `beir/nfcorpus/test` run is half Korean and half English unless explicit
+`--max-queries` or `--sample-size` values override the preset.
+
 Use [`ir_datasets`](https://ir-datasets.com/) as the ingestion layer for these datasets. It provides
 stable dataset ids, a common Python API for `docs_iter()`, `queries_iter()`, and `qrels_iter()`, and
 centralized download/cache/decompression handling through `IR_DATASETS_HOME`. That keeps the
@@ -176,11 +200,14 @@ The daemon reports lifecycle progress through `index status` and daemon `Status`
 completed count, total count when known, and current file. This progress output does not change
 stdout JSON/text results.
 
-By default, quality evaluation runs queries in parallel with the host's available CPU count and
-prints score metrics only. This is the normal path for local iteration because it finishes as quickly
-as the daemon and machine allow. Use `--concurrency=<n>` only when pinning a specific amount of
-parallelism. Use `--measure-speed` when measuring latency or throughput; without it, CLI summaries do
-not print total time, QPS, average latency, or latency percentiles.
+By default, quality evaluation runs queries with the daemon search-execution worker count and prints
+score metrics only. Use `--workers=<n>` as the normal control: it sets
+`OPTSIDIAN_SEARCH_WORKERS`, `OPTSIDIAN_SEARCH_EXECUTION_WORKERS`, and eval concurrency to the same
+value. Query and index analyzer worker counts stay at 1 unless explicitly overridden, because the
+current analyzer path is not a useful concurrency target. Use `--concurrency=<n>` only when
+intentionally decoupling eval pressure from daemon worker count. Use `--measure-speed` when
+measuring latency or throughput; without it, CLI summaries do not print total time, QPS, average
+latency, or latency percentiles.
 
 Progress is always rendered to stderr for quality evaluation unless `--no-progress` is explicitly
 passed. This applies to full, sampled, and judged-only fixtures. Warmup/index progress reports the
@@ -228,7 +255,7 @@ not a sum, because Node worker threads share process RSS.
 No current acceptance baseline has been recorded for the `ir_datasets` qrels fixture yet. The first
 new baseline should be measured through daemon RPC with `--mode=core`, default parallel scoring,
 `--ngram=off`, and a full-corpus `SearchEval/queries.json` from
-`search:eval:ir-vault --corpus=full`.
+`search:eval:ir-vault --preset=full`.
 
 Record both no-Kiwi and Kiwi-on runs:
 
@@ -244,10 +271,11 @@ results.
 
 ## Worker Pools
 
-Worker pool size is controlled by `search.queryWorkers`, `search.indexWorkers`, and daemon
-environment overrides such as `OPTSIDIAN_SEARCH_QUERY_WORKERS` and
-`OPTSIDIAN_SEARCH_INDEX_WORKERS`. Search-execution worker sizing is daemon-managed unless overridden
-for stress tests with `OPTSIDIAN_SEARCH_EXECUTION_WORKERS`.
+Search-execution pool size is controlled by `OPTSIDIAN_SEARCH_WORKERS` or `--workers=<n>` in
+`search:eval`. The legacy `OPTSIDIAN_SEARCH_EXECUTION_WORKERS` override remains available for
+focused daemon stress tests. Query and index analyzer worker pools default to 1; keep them there
+unless specifically testing analyzer pool behavior with `OPTSIDIAN_SEARCH_QUERY_WORKERS` or
+`OPTSIDIAN_SEARCH_INDEX_WORKERS`.
 
 Daemon startup is lazy. The daemon becomes ready after one search-execution worker is ready; latency
 analyzer workers warm on the first query analysis request, and throughput analyzer workers warm only

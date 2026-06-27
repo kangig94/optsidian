@@ -2,7 +2,7 @@ import type { SearchTextAnalysis, SearchTextAnalysisOptions } from "../core/sear
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import type { BuiltSnapshot } from "./search-store/types.js";
-import { DaemonWorkerPool, logicalCpuWorkerBudget, workerCountFromEnv, type WorkerPoolRunOptions } from "./worker-pool.js";
+import { DaemonWorkerPool, logicalCpuWorkerBudget, optionalWorkerCountFromEnv, workerCountFromEnv, type WorkerPoolRunOptions } from "./worker-pool.js";
 import type {
   SearchExecutionCacheStats,
   SearchExecutionJob,
@@ -190,9 +190,10 @@ export async function createDaemonPools(
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
 ): Promise<DaemonPools> {
   const logicalBudget = logicalCpuWorkerBudget();
-  const queryWorkers = workerCountFromEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS", settings.search?.queryWorkers ?? 1);
-  const indexWorkers = workerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS", settings.search?.indexWorkers ?? 1);
-  const searchWorkers = workerCountFromEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS", Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers)));
+  const singleWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
+  const queryWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (singleWorkers ? 1 : settings.search?.queryWorkers ?? 1);
+  const indexWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (singleWorkers ? 1 : settings.search?.indexWorkers ?? 1);
+  const searchWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? singleWorkers ?? Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers));
   const latencyAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
     name: "latency-analyzer",
     kind: "analyzer",

@@ -576,9 +576,13 @@ export function logicalCpuWorkerBudget(): number {
 }
 
 export function workerCountFromEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  return optionalWorkerCountFromEnv(env, key) ?? Math.max(1, fallback);
+}
+
+export function optionalWorkerCountFromEnv(env: NodeJS.ProcessEnv, key: string): number | undefined {
   const raw = env[key]?.trim();
-  if (!raw) return Math.max(1, fallback);
-  if (!/^\d+$/.test(raw)) return Math.max(1, fallback);
+  if (!raw) return undefined;
+  if (!/^\d+$/.test(raw)) return undefined;
   return Math.max(1, Number(raw));
 }
 
