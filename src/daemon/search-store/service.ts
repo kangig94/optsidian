@@ -14,9 +14,10 @@ import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
-import type { SearchExecutionSnapshotHandle } from "../search-execution.js";
+import { executeMetadataSearchFromSnapshotHandle, type SearchExecutionSnapshotHandle } from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
+import { QueryCoordinator } from "./query-coordinator.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 
@@ -37,6 +38,7 @@ export class DaemonSearchStoreService {
   private readonly store: DaemonSnapshotStore;
   private readonly latencyAnalyzer: AnalyzerWorkerPool;
   private readonly searchExecution: SearchExecutionWorkerPool;
+  private readonly queryCoordinator: QueryCoordinator;
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly searchSettingsHash: string;
 
@@ -49,6 +51,7 @@ export class DaemonSearchStoreService {
     this.store = store;
     this.latencyAnalyzer = latencyAnalyzer;
     this.searchExecution = searchExecution;
+    this.queryCoordinator = new QueryCoordinator(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
     this.queryAnalysisCache = new QueryAnalysisCache(options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? 512);
@@ -119,22 +122,29 @@ export class DaemonSearchStoreService {
     const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
     const pin = await this.store.pin(payload.vault, payload.snapshotId, snapshotContext(context));
     try {
+      const snapshot = this.store.snapshotHandleForPin(pin);
+      if (!search.query) {
+        return executeMetadataSearchFromSnapshotHandle({
+          search,
+          pathFilter,
+          snapshot,
+          analyzerIdentity: this.requireAnalyzerIdentity()
+        });
+      }
       const analysisResult = search.query
         ? await this.queryAnalysis(search.query, search, payload.vault, context)
         : undefined;
-      const snapshot = this.store.snapshotHandleForPin(pin);
-      return await this.searchExecution.search({
+      if (!analysisResult) throw Object.assign(new Error("query analysis is required for query search"), { code: "INTERNAL" });
+      return await this.queryCoordinator.execute({
         vault: payload.vault,
         search,
         pathFilter,
-        analysis: analysisResult?.analysis,
-        analyzerIdentity: analysisResult?.analyzerIdentity ?? this.requireAnalyzerIdentity(),
+        analysis: analysisResult.analysis,
+        analyzerIdentity: analysisResult.analyzerIdentity,
         snapshot,
-        explain
-      }, {
         deadline: context.deadline,
         cancellationId: context.cancellationId,
-        vault: payload.vault
+        explain
       });
     } finally {
       this.store.release(pin);

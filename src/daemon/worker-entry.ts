@@ -1,16 +1,22 @@
-import { isMainThread, parentPort, workerData } from "node:worker_threads";
+import { isMainThread, parentPort, workerData, type TransferListItem } from "node:worker_threads";
 import { analyzeSearchQuery, type SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from "../core/search/analyzer.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { readOptsidianSettings } from "../core/settings.js";
 import type { SearchIndexProgressUpdate } from "./protocol.js";
-import { buildCanonicalSearchSnapshot } from "./search-store/builder.js";
+import {
+  buildCanonicalSearchSnapshot,
+  parseBuildDocumentBatch,
+  reduceBuildSegment
+} from "./search-store/builder.js";
 import {
   executeSearchJob,
+  executeSearchShardJob,
   preloadSearchExecutionSnapshot,
   searchExecutionCacheStats,
   type SearchExecutionJob,
-  type SearchExecutionSnapshotHandle
+  type SearchExecutionSnapshotHandle,
+  type SearchShardExecutionJob
 } from "./search-execution.js";
 
 type WorkerEnvelope = {
@@ -53,13 +59,14 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
       });
     });
     const memory = workerLocalMemoryUsage();
-    parentPort?.postMessage({
+    const response = {
       id: message.id,
       ok: true,
       result,
       memory,
       memoryRss: memory.rss
-    });
+    };
+    parentPort?.postMessage(response, transferListForWorkerResult(result));
   } catch (error) {
     const memory = workerLocalMemoryUsage();
     parentPort?.postMessage({
@@ -108,6 +115,7 @@ async function dispatch(
   }
   if (context.kind === "search") {
     if (type === "search") return executeSearchJob(payload as SearchExecutionJob);
+    if (type === "searchShard") return executeSearchShardJob(payload as SearchShardExecutionJob);
     if (type === "preloadSnapshot") return preloadSearchExecutionSnapshot(payload as SearchExecutionSnapshotHandle);
     if (type === "searchExecutionStats") return searchExecutionCacheStats();
     throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: "BAD_REQUEST" });
@@ -145,6 +153,20 @@ async function dispatch(
         progress
       }), undefined, { wait: true, installIfMissing: true });
   }
+  if (type === "parseBuildDocuments") {
+    const input = payload as {
+      vaultRoot: string;
+      relPaths: readonly string[];
+      partitionBits: number;
+      searchSettings: IndexAffectingSearchSettings;
+    };
+    return withSearchAnalyzerLease(activeAnalyzer, (leased) =>
+      parseBuildDocumentBatch(input, leased), undefined, { wait: true, installIfMissing: true });
+  }
+  if (type === "reduceBuildSegment") {
+    const input = payload as Parameters<typeof reduceBuildSegment>[0];
+    return reduceBuildSegment(input);
+  }
   throw Object.assign(new Error(`unsupported analyzer worker job: ${type}`), { code: "BAD_REQUEST" });
 }
 
@@ -174,4 +196,29 @@ function logSearchDaemonWorkerProcessError(kind: string, error: unknown): void {
   try {
     process.stderr.write(`[optsidian search worker] ${kind}: ${message}\n`);
   } catch {}
+}
+
+function transferListForWorkerResult(result: unknown): TransferListItem[] {
+  const buffers = new Set<ArrayBuffer>();
+  if (isObjectRecord(result)) {
+    addUint8ArrayTransfer(buffers, result.bytes);
+    addUint8ArrayTransfer(buffers, result.canonicalManifestBytes);
+    const segments = result.segments;
+    if (Array.isArray(segments)) {
+      for (const segment of segments) {
+        if (isObjectRecord(segment)) addUint8ArrayTransfer(buffers, segment.bytes);
+      }
+    }
+  }
+  return [...buffers];
+}
+
+function addUint8ArrayTransfer(buffers: Set<ArrayBuffer>, value: unknown): void {
+  if (!(value instanceof Uint8Array)) return;
+  if (!(value.buffer instanceof ArrayBuffer)) return;
+  buffers.add(value.buffer);
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

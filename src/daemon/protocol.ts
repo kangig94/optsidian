@@ -7,7 +7,19 @@ import type {
   SearchResult
 } from "../core/types.js";
 import type { ExplainTrace } from "../core/search/contracts.js";
+import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import type { SearchRuntimeProfile } from "./runtime-profile.js";
+import type {
+  SearchExecutionCacheStats,
+  SearchExecutionJob,
+  SearchExecutionPreloadResult,
+  SearchExecutionResult,
+  SearchExecutionSnapshotHandle,
+  SearchShardExecutionJob,
+  SearchShardExecutionResult
+} from "./search-execution.js";
+import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
 
 export const SEARCH_DAEMON_PROTOCOL_VERSION = 1;
 export const SEARCH_DAEMON_METHODS = [
@@ -63,6 +75,80 @@ export type SearchDaemonRequestBase<M extends SearchDaemonMethod, P> = {
 
 export type ProfiledPayload = {
   profile?: SearchRuntimeProfile;
+};
+
+export type WorkerWarmupResult = {
+  ready?: true;
+  analyzerIdentity?: SearchAnalyzerIdentity;
+};
+
+export type AnalyzeQueryWorkerPayload = {
+  rawQuery: string;
+  options?: import("../core/search/analysis/index.js").SearchTextAnalysisOptions;
+};
+
+export type AnalyzeQueryWorkerResult = {
+  analyzerIdentity: SearchAnalyzerIdentity;
+  analysis: import("../core/search/analysis/index.js").SearchTextAnalysis;
+};
+
+export type TokenizeBatchWorkerPayload = {
+  texts: readonly string[];
+};
+
+export type TokenizeBatchWorkerResult = {
+  analyzerIdentity: SearchAnalyzerIdentity;
+  tokens: string[][];
+};
+
+export type BuildSnapshotWorkerPayload = {
+  vaultRoot: string;
+  partitionBits?: number;
+  searchSettings?: Partial<IndexAffectingSearchSettings>;
+};
+
+export type ParseBuildDocumentsWorkerPayload = {
+  vaultRoot: string;
+  relPaths: readonly string[];
+  partitionBits: number;
+  searchSettings: IndexAffectingSearchSettings;
+};
+
+export type ParseBuildDocumentsWorkerResult = {
+  analyzerIdentity: SearchAnalyzerIdentity;
+  documents: ParsedBuildDocument[];
+};
+
+export type ReduceBuildSegmentWorkerPayload = {
+  partitionId: number;
+  documents: readonly ParsedBuildDocument[];
+};
+
+export type ReduceBuildSegmentWorkerResult = BuiltSegment;
+
+export type SearchDaemonWorkerJob =
+  | { type: "warmup" }
+  | { type: "analyzeQuery"; payload: AnalyzeQueryWorkerPayload }
+  | { type: "tokenizeBatch"; payload: TokenizeBatchWorkerPayload }
+  | { type: "buildSnapshot"; payload: BuildSnapshotWorkerPayload }
+  | { type: "parseBuildDocuments"; payload: ParseBuildDocumentsWorkerPayload }
+  | { type: "reduceBuildSegment"; payload: ReduceBuildSegmentWorkerPayload }
+  | { type: "search"; payload: SearchExecutionJob }
+  | { type: "searchShard"; payload: SearchShardExecutionJob }
+  | { type: "preloadSnapshot"; payload: SearchExecutionSnapshotHandle }
+  | { type: "searchExecutionStats" };
+
+export type SearchDaemonWorkerResultByType = {
+  warmup: WorkerWarmupResult;
+  analyzeQuery: AnalyzeQueryWorkerResult;
+  tokenizeBatch: TokenizeBatchWorkerResult;
+  buildSnapshot: BuiltSnapshot;
+  parseBuildDocuments: ParseBuildDocumentsWorkerResult;
+  reduceBuildSegment: ReduceBuildSegmentWorkerResult;
+  search: SearchExecutionResult;
+  searchShard: SearchShardExecutionResult;
+  preloadSnapshot: SearchExecutionPreloadResult;
+  searchExecutionStats: SearchExecutionCacheStats;
 };
 
 export type SearchRequestPayload = SearchParams & ProfiledPayload & {

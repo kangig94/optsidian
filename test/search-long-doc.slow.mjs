@@ -116,6 +116,7 @@ test("long document snippets exclude frontmatter even when snippet lines are sam
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
+      partitionId: segment.partitionId,
       bytes: sharedHandle(segment.bytes)
     }))
   };

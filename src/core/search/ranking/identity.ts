@@ -16,6 +16,13 @@ export function bestExactPriority(doc: SearchDocument, context: QueryContext): n
   return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
 }
 
+export function identityScoreFromExactPriority(priority: number | null | undefined): number {
+  if (priority === EXACT_PRIORITY.title) return 3;
+  if (priority === EXACT_PRIORITY.alias) return 2;
+  if (priority === EXACT_PRIORITY.filenameStem) return 1;
+  return 0;
+}
+
 export function bestPhrasePriority(doc: SearchDocument, context: QueryContext): number {
   if (context.phrases.length === 0) return Number.POSITIVE_INFINITY;
   const priorities: number[] = [];

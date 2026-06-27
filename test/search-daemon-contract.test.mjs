@@ -85,6 +85,35 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function emptyBm25Stats() {
+  return {
+    schemaId: 1,
+    corpusStats: [],
+    rows: [],
+    hash: sha256(canonicalJson({ schemaId: 1, corpusStats: [], rows: [] }))
+  };
+}
+
+function bm25StatsFromManifest(manifest) {
+  return {
+    schemaId: manifest.bm25StatsSchemaId,
+    corpusStats: manifest.corpusStats.map((entry) => ({
+      channel: entry.channel,
+      fieldId: entry.fieldId,
+      documentCount: entry.documentCount,
+      totalFieldLength: entry.totalFieldLength,
+      averageFieldLength: entry.documentCount > 0 ? entry.totalFieldLength / entry.documentCount : 0
+    })),
+    rows: manifest.bm25GlobalStatsRows.map((row) => ({
+      channel: row[0],
+      fieldId: row[1],
+      term: row[2],
+      documentFrequency: row[3]
+    })),
+    hash: manifest.bm25GlobalStatsHash
+  };
+}
+
 function asBytes(value) {
   if (value instanceof Uint8Array) return Buffer.from(value);
   if (Buffer.isBuffer(value)) return value;
@@ -790,7 +819,7 @@ test("search store loadVault preloads the active snapshot into search workers", 
     },
     snapshotHandleForPin: (inputPin) => {
       calls.push(["handle", inputPin.pinToken]);
-      return { snapshotId: "snap-a", pinToken: inputPin.pinToken, documents: sharedHandle(Buffer.from("[]")), segments: [] };
+      return { snapshotId: "snap-a", pinToken: inputPin.pinToken, bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] };
     },
     release: (inputPin) => calls.push(["release", inputPin.pinToken])
   };
@@ -831,7 +860,7 @@ test("search store loadVault can skip search worker preload", async () => {
     },
     snapshotHandleForPin: () => {
       calls.push("handle");
-      return { snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] };
+      return { snapshotId: "snap-a", pinToken: "pin-a", bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] };
     },
     release: () => calls.push("release")
   };
@@ -862,7 +891,7 @@ test("search store loadVault can warm the query analyzer alongside preload", asy
   const fakeStore = {
     loadVault: async () => ({ ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" }),
     pin: async () => pin,
-    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] }),
     release: () => {}
   };
   const fakeAnalyzer = {
@@ -908,7 +937,7 @@ test("search store service analyzes non-Hangul queries inline without warming Ki
   };
   const fakeStore = {
     pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
-    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] }),
     release: () => {},
     searchAnalyzerIdentity: () => analyzerIdentity
   };
@@ -919,27 +948,21 @@ test("search store service analyzes non-Hangul queries inline without warming Ki
       throw new Error("Kiwi analyzer should not be used for non-Hangul query");
     }
   };
-  let capturedJob;
-  const fakeSearchExecution = {
-    search: async (job) => {
-      capturedJob = job;
-      return { ok: true, command: "search", matches: [], snapshotId: job.snapshot.snapshotId };
-    }
-  };
+  const fakeSearchExecution = {};
   const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
 
-  await service.search(
-    { vault, query: "scifact evidence running studies", limit: 1 },
+  const result = await service.search(
+    { vault, query: "scifact evidence running studies", limit: 1, debug: true },
     { deadline: Date.now() + 1000, cancellationId: "inline-query", requestId: "inline-query" }
   );
 
   assert.equal(analyzerCalls, 0);
-  assert.equal(capturedJob.analyzerIdentity.name, "router");
-  assert.deepEqual(capturedJob.analyzerIdentity.declaredAnalyzers, ["ko"]);
-  assert.deepEqual(capturedJob.analyzerIdentity.activeAnalyzers, []);
-  assert.equal(capturedJob.analyzerIdentity.model, undefined);
-  assert.equal(capturedJob.analysis.raw, "scifact evidence running studies");
-  assert.ok(capturedJob.analysis.primaryTerms.includes("scifact"));
+  assert.equal(result.debug.analyzer.name, "router");
+  assert.deepEqual(result.debug.analyzer.declaredAnalyzers, ["ko"]);
+  assert.deepEqual(result.debug.analyzer.activeAnalyzers, []);
+  assert.equal(result.debug.analyzer.model, undefined);
+  assert.equal(result.debug.query.raw, "scifact evidence running studies");
+  assert.ok(result.debug.query.terms.includes("scifact"));
 });
 
 test("search store service keeps Hangul query analysis on the analyzer worker", async () => {
@@ -957,7 +980,7 @@ test("search store service keeps Hangul query analysis on the analyzer worker", 
   };
   const fakeStore = {
     pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
-    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", documents: sharedHandle(Buffer.from("[]")), segments: [] }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] }),
     release: () => {},
     searchAnalyzerIdentity: () => analyzerIdentity
   };
@@ -976,23 +999,17 @@ test("search store service keeps Hangul query analysis on the analyzer worker", 
       };
     }
   };
-  let capturedJob;
-  const fakeSearchExecution = {
-    search: async (job) => {
-      capturedJob = job;
-      return { ok: true, command: "search", matches: [], snapshotId: job.snapshot.snapshotId };
-    }
-  };
+  const fakeSearchExecution = {};
   const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
 
-  await service.search(
-    { vault, query: "한국어 검색", limit: 1 },
+  const result = await service.search(
+    { vault, query: "한국어 검색", limit: 1, debug: true },
     { deadline: Date.now() + 1000, cancellationId: "hangul-query", requestId: "hangul-query" }
   );
 
   assert.equal(analyzerCalls, 1);
-  assert.deepEqual(capturedJob.analyzerIdentity.activeAnalyzers, ["ko"]);
-  assert.deepEqual(capturedJob.analysis.primaryTerms, ["한국어"]);
+  assert.deepEqual(result.debug.analyzer.activeAnalyzers, ["ko"]);
+  assert.deepEqual(result.debug.query.terms, ["한국어"]);
 });
 
 test("search store service rejects excessive analyzed query terms per channel", async () => {
@@ -1001,7 +1018,7 @@ test("search store service rejects excessive analyzed query terms per channel", 
   const released = [];
   const fakeStore = {
     pin: async () => ({ snapshotId: "snap-a", pinToken: "pin-a" }),
-    snapshotHandleForPin: () => ({ snapshotId: "snap-a" }),
+    snapshotHandleForPin: () => ({ snapshotId: "snap-a", pinToken: "pin-a", bm25Stats: emptyBm25Stats(), documents: sharedHandle(Buffer.from("[]")), segments: [] }),
     release: (pin) => {
       released.push(pin.pinToken);
     }
@@ -1407,15 +1424,18 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
   const snapshot = {
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
+      partitionId: segment.partitionId,
       bytes: sharedHandle(segment.bytes)
     }))
   };
   const job = {
     vault,
-    search: normalizeSearchParams({ tags: ["alpha"], limit: 10 }),
+    search: normalizeSearchParams({ query: "alpha", limit: 10 }),
+    analysis: testQueryAnalysis("alpha"),
     analyzerIdentity: analyzer.identity,
     snapshot
   };
@@ -1426,8 +1446,7 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
   const corruptedSameSnapshot = {
     ...snapshot,
     pinToken: "pin-b",
-    documents: sharedHandle(Buffer.from("{not-json")),
-    segments: []
+    segments: [{ segmentId: "broken", partitionId: 0, bytes: sharedHandle(Buffer.from("not-a-canonical-segment")) }]
   };
   const second = executeSearchJob({ ...job, snapshot: corruptedSameSnapshot });
   assert.deepEqual(second.matches.map((match) => match.path), ["Alpha.md"]);
@@ -1448,8 +1467,9 @@ test("metadata-only search does not hydrate positional segments", async () => {
   const snapshot = {
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
-    segments: [{ segmentId: "broken", bytes: sharedHandle(Buffer.from("not-a-canonical-segment")) }]
+    segments: [{ segmentId: "broken", partitionId: 0, bytes: sharedHandle(Buffer.from("not-a-canonical-segment")) }]
   };
 
   const result = executeSearchJob({
@@ -1476,9 +1496,11 @@ test("search execution preload materializes snapshot cache before search", async
   const snapshot = {
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
+      partitionId: segment.partitionId,
       bytes: sharedHandle(segment.bytes)
     }))
   };
@@ -2208,7 +2230,7 @@ test("AC15 fixed positional corpus preserves expected top-N ranking", async () =
     assert.deepEqual(paths.slice(0, 3), [
       "Alpha Calibration.md",
       "Ops/Alpha Calibration.md",
-      "Alpha Calibration Guide.md"
+      "Calibration Alpha.md"
     ]);
   } finally {
     fixture.release();

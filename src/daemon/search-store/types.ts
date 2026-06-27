@@ -1,11 +1,13 @@
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import type { SearchTokenChannelTerms } from "../../core/search/analysis/index.js";
 import type {
+  CanonicalBm25FieldStats,
   CanonicalSnapshotManifest,
+  CanonicalDocumentRecord,
   SnapshotIdentityTuple
 } from "../../core/search/segments/index.js";
 import type { SearchDocument } from "../../core/search/markdown.js";
-import type { SearchSnippet } from "../../core/types.js";
+import type { SearchField, SearchSnippet } from "../../core/types.js";
 
 // One persistence-format version gates every on-disk snapshot artifact (envelope
 // + active pointer). Bump when the snapshot envelope or active-pointer layout
@@ -48,6 +50,19 @@ export type BuiltSegment = {
   hash: string;
   bytes: Uint8Array;
   documentIds: readonly string[];
+  bm25Stats: readonly CanonicalBm25FieldStats[];
+};
+
+export type ParsedBuildDocument = {
+  documentId: string;
+  path: string;
+  contentHash: string;
+  searchDocument: SearchDocument;
+  positionTokens: Record<"morph" | "surface" | "ngram", Record<SearchField, readonly string[]>>;
+  canonicalRecord: CanonicalDocumentRecord;
+  lineSnippets: SearchSnippet[];
+  snippetLines: Omit<SnapshotSnippetLine, "segmentId">[];
+  partitionId: number;
 };
 
 export type BuiltSnapshot = {

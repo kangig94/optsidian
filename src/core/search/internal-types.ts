@@ -26,6 +26,10 @@ export type RankedCandidate = {
   phrasePriority: number;
   coverageTerms: number;
   coverageFieldScore: number;
+  lexicalScore: number;
+  identityScore: number;
+  exactLambda: number;
+  denseAgreement: number;
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;

@@ -9,6 +9,13 @@ export type SegmentId = string;
 export type DocumentId = string;
 export type CandidateId = string;
 
+export type ShardDocRef = {
+  segmentId: SegmentId;
+  partitionId: number;
+  localDocId: number;
+  documentId: DocumentId;
+};
+
 export type RetrieverIdentity = {
   id: string;
   version: string;
@@ -18,7 +25,7 @@ export type RetrieverIdentity = {
 export type CandidateRef = {
   candidateId: CandidateId;
   documentId: DocumentId;
-  ordinalDocId?: number;
+  shardDocRef: ShardDocRef;
   path?: string;
 };
 
@@ -190,9 +197,7 @@ export interface SnapshotStore {
 }
 
 export type RankingConfigTrace = {
-  rrfK: number;
-  weights: Record<string, number>;
-  signalWeights: Record<string, number>;
+  constants: unknown;
   [key: string]: unknown;
 };
 

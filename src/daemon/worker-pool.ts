@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Worker } from "node:worker_threads";
+import { Worker, type TransferListItem } from "node:worker_threads";
 import type { SearchIndexProgressUpdate } from "./protocol.js";
 
 export type DaemonWorkerKind = "analyzer" | "search";
@@ -10,6 +10,7 @@ export type DaemonWorkerKind = "analyzer" | "search";
 export type DaemonWorkerRequest = {
   type: string;
   payload?: unknown;
+  transferList?: readonly TransferListItem[];
 };
 
 export type WorkerPoolRunOptions = {
@@ -209,6 +210,10 @@ export class DaemonWorkerPool {
     return this.enqueue(request, options);
   }
 
+  runOnSlot<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, slotId: number): Promise<T> {
+    return this.enqueue(request, options, slotId);
+  }
+
   runOnAll<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions): Promise<T[]> {
     return this.runOnSlots(request, options, this.slotIds());
   }
@@ -352,7 +357,7 @@ export class DaemonWorkerPool {
   private startWarmup(slot: WorkerSlot): void {
     if (slot.warmupStarted || slot.readyState || slot.restarting) return;
     slot.warmupStarted = true;
-    slot.worker.postMessage({ id: 0, request: { type: "warmup" } } satisfies WorkerEnvelope);
+    this.postToWorker(slot, { id: 0, request: { type: "warmup" } });
   }
 
   private recordMemory(slot: WorkerSlot, message: WorkerReply): void {
@@ -476,7 +481,7 @@ export class DaemonWorkerPool {
     for (const slot of this.slots) {
       if (!slot.readyState || slot.busy || slot.restarting) continue;
       const item = this.dequeueRunnable(slot);
-      if (!item) return;
+      if (!item) continue;
       if (Date.now() >= item.options.deadline) {
         this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before execution`);
         continue;
@@ -486,10 +491,16 @@ export class DaemonWorkerPool {
         continue;
       }
       slot.busy = item;
-      slot.worker.postMessage({ id: item.id, request: item.request } satisfies WorkerEnvelope);
+      this.postToWorker(slot, { id: item.id, request: item.request });
     }
   }
 
+  private postToWorker(slot: WorkerSlot, envelope: WorkerEnvelope): void {
+    const { transferList, ...request } = envelope.request;
+    slot.worker.postMessage({ id: envelope.id, request } satisfies WorkerEnvelope, transferList ?? []);
+  }
+
+  // drain calls this per idle slot, so the scan is O(slots × queue); the queue is expected to stay small.
   private dequeueRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
     if (this.queue.length === 0) return undefined;
     const targetIndex = this.queue.findIndex((item) => item.targetSlotId === slot.id);

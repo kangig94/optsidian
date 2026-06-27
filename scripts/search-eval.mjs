@@ -806,10 +806,10 @@ function runOfflineExplainTrace(options) {
 
 function validateOfflineExplainTrace(trace) {
   if (trace?.schemaVersion !== 1) throwTraceValidation("trace validation failed: schemaVersion must be 1");
-  if (trace.rankingAlgorithmId !== "rrf-metadata-v1") {
+  if (trace.rankingAlgorithmId !== "unified-scalar-ac4-v1") {
     throwTraceValidation(`ranking algorithm mismatch: ${trace.rankingAlgorithmId}`);
   }
-  if (trace.frozenReplayFormulaVersion !== "rrf-metadata-v1/offline-2") {
+  if (trace.frozenReplayFormulaVersion !== "unified-scalar-ac4-v1/offline-1") {
     throwTraceValidation(`ranking algorithm replay formula mismatch: ${trace.frozenReplayFormulaVersion}`);
   }
   if (!deepEqualCanonical(trace.rankingConfig, trace.inputs?.rankingConfig)) {
@@ -839,19 +839,15 @@ function validateOfflineExplainTrace(trace) {
 function replayOfflineExplainTrace(trace) {
   const config = normalizeRankingConfig(trace.rankingConfig);
   const featuresByCandidate = featurePayloadMap(trace.inputs.featurePayloads);
-  const bodyScoresByCandidate = normalizedBodyScores(trace.inputs.featurePayloads, trace.inputs.queryAnalysis, config);
   const candidates = trace.inputs.candidateSet.candidates.map((candidate, index) => {
     const feature = featuresByCandidate.get(candidate.candidateId) ?? featuresByCandidate.get(candidate.documentId);
     const exactPriority = priorityNumber(feature.identity?.exactPriority);
-    const phrasePriority = Math.min(
-      priorityNumber(feature.identity?.phrasePriority),
-      priorityNumber(bestReplayBodyPhrasePriority(feature, trace.inputs.queryAnalysis, config))
-    );
+    const phrasePriority = priorityNumber(feature.identity?.phrasePriority);
     const coverageTerms = numberOrZero(feature.coverage?.terms);
     const coverageFieldScore = numberOrZero(feature.coverage?.fieldScore);
-    const rarityScore = numberOrZero(feature.rarity?.score);
-    const proximityScore = bestFeatureProximity(feature);
-    const bodyScore = bodyScoresByCandidate.get(candidate.candidateId) ?? bodyScoresByCandidate.get(candidate.documentId) ?? 0;
+    const lexicalScore = featureLexicalScore(feature, config);
+    const identityScore = identityScoreFromExactPriority(exactPriority);
+    const proximityScore = featureProximityScore(feature);
     return {
       path: candidate.path ?? feature.candidate?.path ?? candidate.documentId,
       bucket: rankBucket(exactPriority, phrasePriority, coverageTerms, config),
@@ -861,117 +857,64 @@ function replayOfflineExplainTrace(trace) {
       phrasePriority,
       coverageTerms,
       coverageFieldScore,
-      rarityScore,
+      lexicalScore,
+      identityScore,
+      exactLambda: config.exactLambda,
+      denseAgreement: 0,
+      rarityScore: 0,
       proximityScore,
-      bodyScore,
-      includeBodyScore: config.includeBodyScore
+      bodyScore: 0
     };
   });
-  const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === 0), compareIdentityRank);
-  const phraseRanks = rankMap(candidates.filter((candidate) => candidate.bucket === 1), comparePhraseRank);
-  const coverageRanks = rankMap(candidates.filter((candidate) => candidate.bucket === 1 || candidate.bucket === 2), compareCoverageRank);
   return candidates
     .map((candidate) => ({
       ...candidate,
-      score: rerankScore(candidate, identityRanks, phraseRanks, coverageRanks, config)
+      score: rerankScore(candidate, config)
     }))
     .sort(compareRankedMatches)
     .map(rankedOutputCandidate);
 }
 
 function normalizeRankingConfig(config) {
-  const signalWeights = config.signalWeights ?? {};
   const constants = config.constants ?? {};
-  const includeBodyScore = Object.prototype.hasOwnProperty.call(signalWeights, "body");
+  const lambdas = constants.SEARCH_SCORING_LAMBDAS ?? { phrase: 0.06, exact: 0, dense: 0 };
   return {
-    rrfK: config.rrfK,
-    weights: config.weights,
-    signalWeights: {
-      rarity: numberOrZero(signalWeights.rarity),
-      proximity: numberOrZero(signalWeights.proximity),
-      body: includeBodyScore ? numberOrZero(signalWeights.body) : 0
+    lambdas: {
+      phrase: numberOrZero(lambdas.phrase),
+      exact: numberOrZero(lambdas.exact),
+      dense: numberOrZero(lambdas.dense)
     },
-    includeBodyScore,
+    exactLambda: numberOrZero(config.exactDominanceBound?.lambdaExact ?? lambdas.exact),
     tokenChannelWeights: constants.SEARCH_TOKEN_CHANNEL_WEIGHT ?? { morph: 1, surface: 0.65, ngram: 0.3 },
-    coverageBucketMinTerms: constants.COVERAGE_BUCKET_MIN_TERMS ?? null,
-    bodyPhrasePriority: constants.PHRASE_PRIORITY?.body ?? 5
+    fieldChannelBoosts: constants.SEARCH_FIELD_CHANNEL_BOOST ?? {
+      morph: { title: 8, tags: 7, aliases: 6, headings: 4, path: 2, body: 1 },
+      surface: { title: 6, tags: 5, aliases: 4, headings: 3, path: 1.5, body: 0.8 },
+      ngram: { title: 3, tags: 2.5, aliases: 2, headings: 1.5, path: 1, body: 0.4 }
+    },
+    coverageBucketMinTerms: constants.COVERAGE_BUCKET_MIN_TERMS ?? 1,
+    exactPriority: constants.EXACT_PRIORITY ?? { title: 0, alias: 1, filenameStem: 2 }
   };
 }
 
-function normalizedBodyScores(features, queryAnalysis, config) {
-  const scores = new Map();
-  if (!config.includeBodyScore || !shouldUseBodyRankSignal(queryAnalysis)) return scores;
-  const rawScores = [];
-  let maxBodyScore = 0;
-  for (const feature of features) {
-    const keys = [feature?.candidate?.candidateId, feature?.candidate?.documentId].filter(Boolean);
-    if (keys.length === 0) continue;
-    const bodyScore = featureBodyScore(feature, config);
-    rawScores.push({ keys, bodyScore });
-    if (bodyScore > maxBodyScore) maxBodyScore = bodyScore;
-  }
-  if (maxBodyScore <= 0) return scores;
-  for (const entry of rawScores) {
-    for (const key of entry.keys) scores.set(key, entry.bodyScore / maxBodyScore);
-  }
-  return scores;
-}
-
-function shouldUseBodyRankSignal(queryAnalysis) {
-  if (/[\uac00-\ud7af]/u.test(queryAnalysis.raw ?? "")) return false;
-  let asciiTerms = 0;
-  for (const term of queryAnalysis.channels?.surface ?? []) {
-    if (!/[a-z]/i.test(term)) continue;
-    asciiTerms += 1;
-    if (asciiTerms >= 4) return true;
-  }
-  return false;
-}
-
-function featureBodyScore(feature, config) {
+function featureLexicalScore(feature, config) {
   let score = 0;
   for (const term of feature?.bm25 ?? []) {
-    if (term.field !== "body") continue;
-    score += numberOrZero(term.score) * numberOrZero(config.tokenChannelWeights[term.channel]);
+    score += numberOrZero(term.score) *
+      numberOrZero(config.tokenChannelWeights[term.channel]) *
+      numberOrZero(config.fieldChannelBoosts[term.channel]?.[term.field]);
   }
   return score;
 }
 
-function bestReplayBodyPhrasePriority(feature, queryAnalysis, config) {
-  if ((feature.phrasePositions ?? []).some((match) => match.field === "body")) return config.bodyPhrasePriority;
-  const compactRaw = compactBodyPhrase(queryAnalysis.raw ?? "");
-  if (
-    compactRaw.length > 1 &&
-    (feature.snippetScoringInputs ?? []).some((input) => compactBodyPhrase(input.text ?? "").includes(compactRaw))
-  ) {
-    return config.bodyPhrasePriority;
-  }
-  const surfaceTerms = queryAnalysis.channels?.surface ?? [];
-  if (surfaceTerms.length === 0) return undefined;
-  return (feature.snippetScoringInputs ?? []).some((input) =>
-    containsTokenSequence(input.channels?.surface ?? [], surfaceTerms)
-  )
-    ? config.bodyPhrasePriority
-    : undefined;
+function featureProximityScore(feature) {
+  return (feature?.proximity ?? []).reduce((sum, match) => sum + numberOrZero(match.score), 0);
 }
 
-function compactBodyPhrase(value) {
-  return String(value).normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
-}
-
-function containsTokenSequence(tokens, sequence) {
-  if (sequence.length === 0 || sequence.length > tokens.length) return false;
-  for (let start = 0; start <= tokens.length - sequence.length; start += 1) {
-    let matched = true;
-    for (let offset = 0; offset < sequence.length; offset += 1) {
-      if (tokens[start + offset] !== sequence[offset]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) return true;
-  }
-  return false;
+function identityScoreFromExactPriority(priority) {
+  if (priority === 0) return 3;
+  if (priority === 1) return 2;
+  if (priority === 2) return 1;
+  return 0;
 }
 
 function featurePayloadMap(features) {
@@ -991,72 +934,15 @@ function rankBucket(exactPriority, phrasePriority, coverageTerms, config = { cov
   return 3;
 }
 
-function rankMap(candidates, compare) {
-  return new Map([...candidates].sort(compare).map((candidate, index) => [candidate.path, index + 1]));
-}
-
-function rerankScore(candidate, identityRanks, phraseRanks, coverageRanks, config) {
-  let score = rrfContribution(candidate.baseRank, config.weights.base, config.rrfK);
-  if (candidate.bucket === 0) {
-    const rank = identityRanks.get(candidate.path);
-    if (rank) score += rrfContribution(rank, config.weights.identity, config.rrfK);
-  } else if (candidate.bucket === 1) {
-    const phraseRank = phraseRanks.get(candidate.path);
-    if (phraseRank) score += rrfContribution(phraseRank, config.weights.phrase, config.rrfK);
-    const coverageRank = coverageRanks.get(candidate.path);
-    if (coverageRank) score += rrfContribution(coverageRank, config.weights.coverage, config.rrfK);
-  } else if (candidate.bucket === 2) {
-    const coverageRank = coverageRanks.get(candidate.path);
-    if (coverageRank) score += rrfContribution(coverageRank, config.weights.coverage, config.rrfK);
-  }
-  score += candidate.rarityScore * config.signalWeights.rarity;
-  score += candidate.proximityScore * config.signalWeights.proximity;
-  score += candidate.bodyScore * config.signalWeights.body;
-  return score;
-}
-
-function rrfContribution(rank, weight, rrfK) {
-  return weight / (rrfK + rank);
+function rerankScore(candidate, config) {
+  return numberOrZero(candidate.lexicalScore) +
+    numberOrZero(config.lambdas.phrase) * numberOrZero(candidate.proximityScore) +
+    numberOrZero(candidate.exactLambda) * numberOrZero(candidate.identityScore) +
+    numberOrZero(config.lambdas.dense) * numberOrZero(candidate.denseAgreement);
 }
 
 function compareRankedMatches(left, right) {
-  if (left.bucket !== right.bucket) return left.bucket - right.bucket;
-  const priorityCompare = compareBucketPriority(left, right);
-  if (priorityCompare !== 0) return priorityCompare;
   if (right.score !== left.score) return right.score - left.score;
-  return left.path.localeCompare(right.path);
-}
-
-function compareBucketPriority(left, right) {
-  if (left.bucket === 0) return priorityNumber(left.exactPriority) - priorityNumber(right.exactPriority);
-  if (left.bucket === 1) return priorityNumber(left.phrasePriority) - priorityNumber(right.phrasePriority);
-  return 0;
-}
-
-function compareIdentityRank(left, right) {
-  if (left.exactPriority !== right.exactPriority) return left.exactPriority - right.exactPriority;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
-  return left.path.localeCompare(right.path);
-}
-
-function comparePhraseRank(left, right) {
-  if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
-  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
-  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
-  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
-  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
-  return left.path.localeCompare(right.path);
-}
-
-function compareCoverageRank(left, right) {
-  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
-  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  if (right.bodyScore !== left.bodyScore) return right.bodyScore - left.bodyScore;
-  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
-  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
   return left.path.localeCompare(right.path);
 }
 
@@ -1070,9 +956,13 @@ function rankedOutputCandidate(candidate) {
     phrasePriority: nullablePriority(candidate.phrasePriority),
     coverageTerms: candidate.coverageTerms,
     coverageFieldScore: candidate.coverageFieldScore,
+    lexicalScore: candidate.lexicalScore,
+    identityScore: candidate.identityScore,
+    exactLambda: candidate.exactLambda,
+    denseAgreement: candidate.denseAgreement,
     rarityScore: candidate.rarityScore,
     proximityScore: candidate.proximityScore,
-    ...(candidate.includeBodyScore ? { bodyScore: candidate.bodyScore } : {})
+    bodyScore: candidate.bodyScore
   };
   return output;
 }
@@ -1082,23 +972,6 @@ function rankBucketName(bucket) {
   if (bucket === 1) return "phrase";
   if (bucket === 2) return "coverage";
   return "base";
-}
-
-function bestFeatureProximity(feature) {
-  let best = 0;
-  for (const match of feature.proximity ?? []) {
-    best = Math.max(best, numberOrZero(match.score) * fieldWeight(match.field) * channelWeight(match.channel));
-  }
-  return best;
-}
-
-function fieldWeight(field) {
-  const boost = { title: 8, tags: 7, aliases: 6, headings: 4, path: 2, body: 1 };
-  return (boost[field] ?? 1) / boost.title;
-}
-
-function channelWeight(channel) {
-  return { morph: 1, surface: 0.65, ngram: 0.3 }[channel] ?? 0;
 }
 
 function priorityNumber(value) {

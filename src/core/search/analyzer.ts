@@ -5,6 +5,15 @@ import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from "../kiwi/manag
 import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
 import type { SearchAnalyzerRuntimeStatus } from "../types.js";
 
+export type SearchEmbeddingModelIdentity = {
+  id: string;
+  sha256: string;
+  opset: string;
+  quantization: string;
+  dim: number;
+  pooling: string;
+};
+
 export type SearchAnalyzerIdentity = {
   name: string;
   version: string;
@@ -12,6 +21,7 @@ export type SearchAnalyzerIdentity = {
   node: string;
   icu?: string;
   model?: string;
+  embeddingModel?: SearchEmbeddingModelIdentity | null;
   declaredAnalyzers?: string[];
   activeAnalyzers?: string[];
 };

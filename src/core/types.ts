@@ -99,6 +99,10 @@ export type SearchMatchDebug = {
   phrasePriority?: number | null;
   coverageTerms?: number;
   coverageFieldScore?: number;
+  lexicalScore?: number;
+  identityScore?: number;
+  exactLambda?: number;
+  denseAgreement?: number;
   rarityScore?: number;
   proximityScore?: number;
   bodyScore?: number;
@@ -130,7 +134,7 @@ export type SearchDebugInfo = {
   analyzer: SearchAnalyzerDebug;
   candidates: number;
   snapshotId?: string;
-  reranker?: "rrf-metadata-v1";
+  reranker?: "unified-scalar-ac4-v1";
 };
 
 export type SearchResult = {

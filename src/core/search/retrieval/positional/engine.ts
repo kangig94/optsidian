@@ -1,12 +1,9 @@
 import type { CandidateSet, FeatureStore, Retriever, RetrievalQuery } from "../../contracts.js";
 import type { SearchTokenChannel } from "../../analysis/index.js";
-import type { SearchField } from "../../../types.js";
-import type { Bm25Stats } from "./bm25.js";
-import type {
-  PositionalChannelIndex,
-  PositionalDocumentRecord,
-  PositionalPostings
-} from "./types.js";
+import type { ProjectionReader } from "./segment-projection-reader.js";
+import type { CanonicalSegmentPostingsReader } from "./segment-postings-reader.js";
+import type { PositionalBm25GlobalStats } from "./snapshot.js";
+import type { PositionalPostings } from "./types.js";
 
 export type RankingInput = {
   candidateSet: CandidateSet;
@@ -17,11 +14,17 @@ export type RankingInput = {
 
 export type SearchSnapshot = {
   snapshotId: string;
-  documents: readonly PositionalDocumentRecord[];
-  postingsByChannel: PositionalChannelIndex;
-  bm25: Bm25Stats;
-  bm25ByChannel?: Partial<Record<SearchTokenChannel, Bm25Stats>>;
-  canonicalFieldText?: ReadonlyMap<string, Partial<Record<SearchField, readonly string[]>>>;
+  documentCount: number;
+  segments: readonly SearchSnapshotSegment[];
+  bm25Stats: PositionalBm25GlobalStats;
+};
+
+export type SearchSnapshotSegment = {
+  segmentId: string;
+  partitionId: number;
+  bytes: Uint8Array;
+  postings: CanonicalSegmentPostingsReader;
+  projection: ProjectionReader;
 };
 
 export type SearchEngine = {
@@ -41,5 +44,7 @@ export function createSearchEngine(snapshot: SearchSnapshot, retriever: Retrieve
 }
 
 export function postingsForChannel(snapshot: SearchSnapshot, channel: SearchTokenChannel): PositionalPostings {
-  return snapshot.postingsByChannel[channel] ?? new Map();
+  void snapshot;
+  void channel;
+  throw new Error("decoded positional postings maps are not retained; use segment postings readers");
 }

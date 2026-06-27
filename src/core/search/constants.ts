@@ -3,20 +3,14 @@ import { SEARCH_BOOST, SEARCH_FIELD_CHANNEL_BOOST } from "./schema.js";
 
 export const CANDIDATE_LIMIT_MIN = 50;
 export const CANDIDATE_LIMIT_MULTIPLIER = 10;
-export const RRF_K = 10;
-export const RRF_WEIGHTS = {
-  identity: 4,
-  phrase: 3,
-  coverage: 2,
-  base: 1
+export const RANK_FINAL_SORT_POLICY = "unified-score-path-v1";
+export const SEARCH_SCORING_LAMBDAS = {
+  phrase: 0.06,
+  exact: 0,
+  dense: 0
 } as const;
-export const RANK_SIGNAL_WEIGHTS = {
-  rarity: 0.04,
-  proximity: 0.06,
-  body: 0.08
-} as const;
-export const RANK_SIGNAL_NORMALIZATION = "snapshot-corpus-max-v1";
-export const RANK_FINAL_SORT_POLICY = "bucket-priority-score-path-v1";
+export const EXACT_DOMINANCE_EPSILON = 1e-9;
+export const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 export const SEARCH_BM25_K1 = 1.2;
 export const SEARCH_BM25_B = 0.75;
 export const SEARCH_BM25_D = 0.5;
@@ -122,18 +116,15 @@ export const WEAK_METADATA_COVERAGE_TERMS = [
 ] as const;
 
 export const RANKING_CONSTANTS = {
-  RRF_K,
-  RRF_WEIGHTS,
-  RANK_SIGNAL_WEIGHTS,
-  RANK_SIGNAL_NORMALIZATION,
   RANK_FINAL_SORT_POLICY,
+  SEARCH_SCORING_LAMBDAS,
+  EXACT_DOMINANCE_EPSILON,
+  MAX_SEARCH_QUERY_TERMS_PER_CHANNEL,
   SEARCH_TOKEN_CHANNEL_WEIGHT,
   COVERAGE_FIELD_WEIGHT,
   WEAK_METADATA_COVERAGE_TERMS,
-  COVERAGE_BUCKET_MIN_TERMS,
   EXACT_PRIORITY,
   PHRASE_PRIORITY,
-  RANK_BUCKET,
   SEARCH_BOOST,
   SEARCH_FIELD_CHANNEL_BOOST,
   SEARCH_BM25_K1,

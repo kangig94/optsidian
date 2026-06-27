@@ -13,23 +13,26 @@ import type {
   RetrievalQuery
 } from "../core/search/contracts.js";
 import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from "../core/search/contracts.js";
-import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, PHRASE_PRIORITY, RANKING_CONSTANTS, RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_K, RRF_WEIGHTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../core/search/constants.js";
+import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, COVERAGE_FIELD_WEIGHT, EXACT_PRIORITY, PHRASE_PRIORITY, RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT, WEAK_METADATA_COVERAGE_TERMS } from "../core/search/constants.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import type { SearchDocument } from "../core/search/markdown.js";
 import {
-  bm25TermScore,
-  bm25TermStats,
+  bm25CorpusStats,
+  bm25DocumentFrequency,
+  bm25TermScoreFromGlobalStats,
   createSearchEngine,
   createPositionalRetriever,
+  POSITIONAL_RETRIEVER_IDENTITY,
   POSITIONAL_FIELD_BY_ID,
   POSITIONAL_FIELD_ID,
-  positionsForTerm,
   buildSearchSnapshotFromSegments,
-  type SearchSnapshot
+  type PositionalBm25GlobalStats,
+  type SearchSnapshot,
+  type SearchSnapshotSegment
 } from "../core/search/retrieval/positional/index.js";
-import { compareTagOnlyMatches, metadataCoverage, bestExactPriority, bestPhrasePriority, identityPhraseCandidates, nullableRankPriority, rankBucketName, rerankCandidatesWithSignals, rrfContribution, type CandidateRankSignals } from "../core/search/ranking/index.js";
+import { bm25BoundKey, compareCanonicalBm25Terms, compareTagOnlyMatches, exactDominanceLambda, identityPhraseCandidates, identityScoreFromExactPriority, nullableRankPriority, rankBucketName, rerankCandidatesWithSignals, type CandidateRankSignals, type ExactDominanceBound } from "../core/search/ranking/index.js";
 import { matchesPathFilter, matchesTagFilter } from "../core/search/params.js";
-import { SEARCH_BOOST } from "../core/search/schema.js";
+import { SEARCH_FIELD_CHANNEL_BOOST } from "../core/search/schema.js";
 import { SEARCH_PROPERTIES } from "../core/search/schema.js";
 import type { NormalizedSearchParams, PathFilter, QueryContext, RankedCandidate } from "../core/search/internal-types.js";
 import type { SearchField, SearchMatch, SearchResult } from "../core/types.js";
@@ -44,9 +47,11 @@ export type SharedBytesHandle = {
 export type SearchExecutionSnapshotHandle = {
   snapshotId: string;
   pinToken: string;
+  bm25Stats: PositionalBm25GlobalStats;
   documents: SharedBytesHandle;
   segments: Array<{
     segmentId: string;
+    partitionId: number;
     bytes: SharedBytesHandle;
   }>;
 };
@@ -58,6 +63,22 @@ export type SearchExecutionJob = {
   analysis?: SearchTextAnalysis;
   analyzerIdentity: SearchAnalyzerIdentity;
   snapshot: SearchExecutionSnapshotHandle;
+  explain?: boolean;
+};
+
+export type SearchShardExecutionJob = {
+  vault: string;
+  search: NormalizedSearchParams;
+  pathFilter?: PathFilter;
+  analysis: SearchTextAnalysis;
+  analyzerIdentity: SearchAnalyzerIdentity;
+  snapshot: SearchExecutionSnapshotHandle;
+  channels?: readonly SearchTokenChannel[];
+  exactBound: ExactDominanceBound;
+  requestedLimit: number;
+  workEstimate: number;
+  deadline: number;
+  cancellationId: string;
   explain?: boolean;
 };
 
@@ -79,17 +100,11 @@ export type SearchExecutionPreloadResult = {
 
 type SearchExecutionState = {
   snapshot: SearchSnapshot;
-  documents: Map<string, PersistedDocumentRecord>;
-};
-
-type MetadataExecutionState = {
-  snapshotId: string;
-  documents: Map<string, PersistedDocumentRecord>;
 };
 
 const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt("OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
 const searchExecutionStateCache = new Map<string, SearchExecutionState>();
-const searchExecutionMetadataCache = new Map<string, MetadataExecutionState>();
+const bm25SingleTermBoundCache = new WeakMap<SearchSnapshot, ReadonlyMap<string, number>>();
 const searchExecutionStateCacheCounters = {
   hits: 0,
   misses: 0,
@@ -97,6 +112,7 @@ const searchExecutionStateCacheCounters = {
   preloads: 0
 };
 const textDecoder = new TextDecoder();
+const WEAK_METADATA_COVERAGE_TERM_SET = new Set<string>(WEAK_METADATA_COVERAGE_TERMS);
 
 type PositionalHit = {
   document: SearchDocument;
@@ -109,19 +125,58 @@ type PositionalHit = {
   source: "persisted";
 };
 
-type MutablePositionalPostings = Map<string, Array<{ docId: number; fieldId: number; positions: readonly number[] }>>;
+export type SearchHitEvidence = Omit<PositionalHit, "document"> & {
+  documentId: string;
+  path: string;
+  shardDocRef: CandidateRef["shardDocRef"];
+};
+
+export type SearchShardFinalist = SearchHitEvidence & {
+  rank: RankedCandidate;
+  feature: CandidateFeaturePayload;
+};
+
+export type SearchShardExecutionResult = {
+  snapshotId: string;
+  partitionIds: number[];
+  requestedLimit: number;
+  workEstimate: number;
+  scoredCount: number;
+  finalists: SearchShardFinalist[];
+  explain?: {
+    candidateSet: CandidateSet;
+    exactBound: ExactDominanceBound;
+  };
+};
 
 export type SearchExecutionResult = SearchResult & { snapshotId: string; explainTrace?: ExplainTrace };
 
 export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult {
   if (!job.search.query || !job.analysis) {
-    const metadataState = cachedMetadataStateFromHandle(job.snapshot).state;
-    const result = metadataSearch(job.search, job.pathFilter, metadataState.documents, metadataState.snapshotId, job.analyzerIdentity);
-    return { ...result, snapshotId: metadataState.snapshotId };
+    const documents = documentsFromHandle(job.snapshot);
+    return metadataSearch(job.search, job.pathFilter, documents, job.snapshot.snapshotId, job.analyzerIdentity);
   }
   const state = cachedStateFromHandle(job.snapshot).state;
-  const result = querySearch(job.search, job.pathFilter, state.snapshot, state.documents, job.analysis, job.analyzerIdentity, job.explain === true);
-  return { ...result, snapshotId: state.snapshot.snapshotId };
+  const documents = documentsFromHandle(job.snapshot);
+  return querySearch(job.search, job.pathFilter, state.snapshot, documents, job.analysis, job.analyzerIdentity, job.explain === true);
+}
+
+export function executeSearchShardJob(job: SearchShardExecutionJob): SearchShardExecutionResult {
+  assertSearchShardDeadline(job);
+  if (!job.search.query || job.analysis.primaryTerms.length === 0) {
+    return {
+      snapshotId: job.snapshot.snapshotId,
+      partitionIds: sortedPartitionIds(job.snapshot),
+      requestedLimit: job.requestedLimit,
+      workEstimate: job.workEstimate,
+      scoredCount: 0,
+      finalists: []
+    };
+  }
+  const state = stateFromHandle(job.snapshot);
+  const result = querySearchShard(job, state.snapshot);
+  assertSearchShardDeadline(job);
+  return result;
 }
 
 export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
@@ -167,24 +222,6 @@ function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: 
   return { state, cacheHit: false };
 }
 
-function cachedMetadataStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: MetadataExecutionState; cacheHit: boolean } {
-  const cacheKey = handle.snapshotId;
-  const cached = searchExecutionMetadataCache.get(cacheKey);
-  if (cached) {
-    searchExecutionMetadataCache.delete(cacheKey);
-    searchExecutionMetadataCache.set(cacheKey, cached);
-    return { state: cached, cacheHit: true };
-  }
-  const state = metadataStateFromHandle(handle);
-  searchExecutionMetadataCache.set(cacheKey, state);
-  while (searchExecutionMetadataCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
-    const oldest = searchExecutionMetadataCache.keys().next().value;
-    if (!oldest) break;
-    searchExecutionMetadataCache.delete(oldest);
-  }
-  return { state, cacheHit: false };
-}
-
 function querySearch(
   search: NormalizedSearchParams,
   pathFilter: PathFilter | undefined,
@@ -195,14 +232,14 @@ function querySearch(
   explain: boolean
 ): SearchExecutionResult {
   const query = search.query ?? "";
-  if (analysis.primaryTerms.length === 0) return { ...searchResult([], snapshot.snapshotId, analyzerIdentity, search, 0), snapshotId: snapshot.snapshotId };
+  if (analysis.primaryTerms.length === 0) return searchResult([], snapshot.snapshotId, analyzerIdentity, search, 0);
   const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot, documents));
   const retrievalQuery: RetrievalQuery = {
     rawQuery: query,
     analysis,
     fields: search.fields,
     tags: search.tags,
-    limit: positionalCandidateLimit(snapshot.documents.length, search, analysis.channels),
+    limit: exhaustiveCandidateLimit(snapshot.documentCount, search, analysis.channels),
     snapshotId: snapshot.snapshotId
   };
   const candidateSet = engine.retrieve(retrievalQuery) as CandidateSet;
@@ -210,13 +247,17 @@ function querySearch(
     .map((candidate) => hitFromCandidate(candidate, documents, analysis.channels))
     .filter((hit): hit is PositionalHit => Boolean(hit))
     .filter((hit) =>
-      (!pathFilter || matchesPathFilter(hit.document.path, pathFilter)) &&
-      matchesTagFilter(hit.document.tags, search.tags)
+      (!pathFilter || matchesPathFilter(hit.candidate.path ?? hit.document.path, pathFilter)) &&
+      matchesTagFilter(candidateTags(snapshot, hit.candidate), search.tags)
     );
   const rerankCandidateSet = candidateSetForHits(candidateSet, hits);
   const featurePayloads = engine.featureStore.featuresFor(retrievalQuery, rerankCandidateSet) as readonly CandidateFeaturePayload[];
-  const signals = rankSignalsFromFeatures(featurePayloads, analysis);
-  const rankedAll = rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals);
+  const exactBound = exactDominanceBoundForQuery(snapshot, retrievalQuery);
+  const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
+  const rankedAll = deterministicRankedHits(
+    hits,
+    rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals)
+  ).map((entry) => entry.rank);
   const ranked = rankedAll.slice(0, search.limit);
   const hitByPath = new Map(hits.map((hit) => [hit.document.path, hit]));
   const documentsByRelPath = documentsByPath(documents);
@@ -243,10 +284,11 @@ function querySearch(
       : {})
     };
   });
-  const result = searchResult(matches, snapshot.snapshotId, analyzerIdentity, search, hits.length, analysis.channels) as SearchExecutionResult;
+  const result: SearchExecutionResult = searchResult(matches, snapshot.snapshotId, analyzerIdentity, search, hits.length, analysis.channels);
   if (explain) {
     result.explainTrace = explainTrace({
       candidateSet: rerankCandidateSet,
+      exactBound,
       featurePayloads,
       queryAnalysis: analysis,
       ranked: rankedAll
@@ -255,13 +297,162 @@ function querySearch(
   return result;
 }
 
+export function executeMetadataSearchFromSnapshotHandle(input: {
+  search: NormalizedSearchParams;
+  pathFilter?: PathFilter;
+  snapshot: SearchExecutionSnapshotHandle;
+  analyzerIdentity: SearchAnalyzerIdentity;
+}): SearchExecutionResult {
+  const documents = documentsFromHandle(input.snapshot);
+  return metadataSearch(input.search, input.pathFilter, documents, input.snapshot.snapshotId, input.analyzerIdentity);
+}
+
+export function exactDominanceBoundForSearchHandle(input: {
+  search: NormalizedSearchParams;
+  snapshot: SearchExecutionSnapshotHandle;
+  analysis: SearchTextAnalysis;
+}): ExactDominanceBound {
+  const snapshot = stateFromHandle(input.snapshot).snapshot;
+  return exactDominanceBoundForQuery(snapshot, {
+    rawQuery: input.search.query ?? "",
+    analysis: input.analysis,
+    fields: input.search.fields,
+    tags: input.search.tags,
+    limit: exhaustiveCandidateLimit(snapshot.documentCount, input.search, input.analysis.channels),
+    snapshotId: snapshot.snapshotId
+  });
+}
+
+export function hydrateSearchShardFinalists(input: {
+  search: NormalizedSearchParams;
+  snapshot: SearchExecutionSnapshotHandle;
+  analysis: SearchTextAnalysis;
+  analyzerIdentity: SearchAnalyzerIdentity;
+  finalists: readonly SearchShardFinalist[];
+  scoredCount: number;
+  explain?: boolean;
+  exactBound?: ExactDominanceBound;
+}): SearchExecutionResult {
+  const documents = documentsFromHandle(input.snapshot);
+  const documentsByRelPath = documentsByPath(documents);
+  const rankedAll = sortedSearchShardFinalists(input.finalists);
+  const ranked = rankedAll.slice(0, input.search.limit);
+  const matches = ranked.map((finalist): SearchMatch => {
+    const record = documents.get(finalist.documentId) ?? documentsByRelPath.get(finalist.path);
+    const document = record?.searchDocument;
+    return {
+      path: finalist.rank.path,
+      title: document?.title ?? finalist.rank.title,
+      tags: document?.tags ?? finalist.rank.tags,
+      snippets: record ? snippetsForDocument(record, input.analysis.channels) : [],
+      ...(input.search.debug
+        ? {
+            debug: matchDebug({
+              hit: finalist,
+              rank: finalist.rank,
+              snapshotId: input.snapshot.snapshotId,
+              analyzer: input.analyzerIdentity,
+              snippetSource: "snapshot-field-text"
+            })
+          }
+        : {})
+    };
+  });
+  const result: SearchExecutionResult = searchResult(
+    matches,
+    input.snapshot.snapshotId,
+    input.analyzerIdentity,
+    input.search,
+    input.scoredCount,
+    input.analysis.channels
+  );
+  if (input.explain) {
+    if (!input.exactBound) throw Object.assign(new Error("explain requires shard exact-bound evidence"), { code: "INTERNAL" });
+    result.explainTrace = explainTrace({
+      candidateSet: {
+        schemaVersion: 1,
+        snapshotId: input.snapshot.snapshotId,
+        retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
+        complete: true,
+        candidates: rankedAll.map((finalist) => finalist.candidate)
+      },
+      exactBound: input.exactBound,
+      featurePayloads: rankedAll.map((finalist) => finalist.feature),
+      queryAnalysis: input.analysis,
+      ranked: rankedAll.map((finalist) => finalist.rank)
+    });
+  }
+  return result;
+}
+
+function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot): SearchShardExecutionResult {
+  const search = job.search;
+  const query = search.query ?? "";
+  const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot, new Map()));
+  const retrievalQuery: RetrievalQuery = {
+    rawQuery: query,
+    analysis: job.analysis,
+    fields: search.fields,
+    tags: search.tags,
+    limit: exhaustiveCandidateLimit(snapshot.documentCount, search, job.analysis.channels),
+    channels: job.channels,
+    snapshotId: snapshot.snapshotId
+  };
+  const candidateSet = engine.retrieve(retrievalQuery) as CandidateSet;
+  assertSearchShardDeadline(job);
+  const hits = candidateSet.candidates
+    .map((candidate) => shardHitFromCandidate(snapshot, candidate, job.analysis.channels))
+    .filter((hit): hit is SearchHitEvidence => Boolean(hit))
+    .filter((hit) =>
+      (!job.pathFilter || matchesPathFilter(hit.candidate.path ?? hit.path, job.pathFilter)) &&
+      matchesTagFilter(candidateTags(snapshot, hit.candidate), search.tags)
+    );
+  const rerankCandidateSet = candidateSetForHits(candidateSet, hits);
+  const featurePayloads = engine.featureStore.featuresFor(retrievalQuery, rerankCandidateSet) as readonly CandidateFeaturePayload[];
+  const exactBound = job.exactBound;
+  const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
+  const rankHits = deterministicRankedHits(
+    hits,
+    rerankCandidatesWithSignals(query, job.analysis.primaryTerms, minimalRankDocuments(hits), search.fields, signals)
+  );
+  const featureByCandidateId = new Map(featurePayloads.map((feature) => [feature.candidate.candidateId, feature]));
+  const finalists = rankHits.map(({ hit, rank }): SearchShardFinalist => {
+    const feature = featureByCandidateId.get(hit.candidate.candidateId);
+    if (!feature) throw new Error(`missing feature payload for candidate ${hit.candidate.candidateId}`);
+    return {
+      ...hit,
+      documentId: hit.candidate.documentId,
+      path: hit.path,
+      shardDocRef: hit.candidate.shardDocRef,
+      rank,
+      feature
+    };
+  });
+  return {
+    snapshotId: snapshot.snapshotId,
+    partitionIds: sortedPartitionIds(job.snapshot),
+    requestedLimit: job.requestedLimit,
+    workEstimate: job.workEstimate,
+    scoredCount: hits.length,
+    finalists,
+    ...(job.explain
+      ? {
+          explain: {
+            candidateSet: rerankCandidateSet,
+            exactBound: job.exactBound
+          }
+        }
+      : {})
+  };
+}
+
 function metadataSearch(
   search: NormalizedSearchParams,
   pathFilter: PathFilter | undefined,
   documents: Map<string, PersistedDocumentRecord>,
   snapshotId: string,
   analyzerIdentity: SearchAnalyzerIdentity
-): SearchResult {
+): SearchResult & { snapshotId: string } {
   const matches = [...documents.values()]
     .filter((record) =>
       (!pathFilter || matchesPathFilter(record.path, pathFilter)) &&
@@ -279,36 +470,35 @@ function metadataSearch(
 }
 
 function stateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
-  const metadataState = cachedMetadataStateFromHandle(handle).state;
-  const documents = metadataState.documents;
-  const documentMetadata = new Map<string, { documentId: string; tags: readonly string[] }>();
-  for (const document of documents.values()) {
-    documentMetadata.set(document.documentId, {
-      documentId: document.documentId,
-      tags: document.searchDocument.tags
-    });
-  }
   const snapshot = buildSearchSnapshotFromSegments({
     snapshotId: handle.snapshotId,
-    documents: documentMetadata,
     segments: handle.segments.map((segment) => ({
       segmentId: segment.segmentId,
+      partitionId: segment.partitionId,
       bytes: sharedBytes(segment.bytes)
-    }))
+    })),
+    bm25Stats: handle.bm25Stats
   });
-  return { snapshot, documents };
+  return { snapshot };
 }
 
-function metadataStateFromHandle(handle: SearchExecutionSnapshotHandle): MetadataExecutionState {
+function documentsFromHandle(handle: SearchExecutionSnapshotHandle): Map<string, PersistedDocumentRecord> {
   const records = JSON.parse(textDecoder.decode(sharedBytes(handle.documents))) as PersistedDocumentRecord[];
-  return {
-    snapshotId: handle.snapshotId,
-    documents: new Map(records.map((document) => [document.documentId, document]))
-  };
+  return new Map(records.map((document) => [document.documentId, document]));
 }
 
 function sharedBytes(handle: SharedBytesHandle): Uint8Array {
   return new Uint8Array(handle.buffer, handle.byteOffset, handle.byteLength);
+}
+
+function sortedPartitionIds(handle: SearchExecutionSnapshotHandle): number[] {
+  return [...new Set(handle.segments.map((segment) => segment.partitionId))].sort((left, right) => left - right);
+}
+
+function assertSearchShardDeadline(job: SearchShardExecutionJob): void {
+  if (Date.now() >= job.deadline) {
+    throw Object.assign(new Error(`search shard ${sortedPartitionIds(job.snapshot).join(",")} deadline expired`), { code: "DEADLINE_EXCEEDED" });
+  }
 }
 
 function envPositiveInt(key: string): number | undefined {
@@ -336,40 +526,89 @@ function hitFromCandidate(
   };
 }
 
+function shardHitFromCandidate(
+  snapshot: SearchSnapshot,
+  candidate: RetrievalCandidate,
+  queryChannels: SearchTokenChannelTerms
+): SearchHitEvidence | undefined {
+  const segment = segmentForCandidate(snapshot, candidate);
+  const document = segment.projection.doc(candidate.shardDocRef.localDocId);
+  return {
+    documentId: candidate.documentId,
+    path: candidate.path ?? document.path,
+    shardDocRef: candidate.shardDocRef,
+    score: candidate.retrievalScore,
+    queryTerms: [...(candidate.channels[0]?.matchedTerms ?? [])],
+    queryChannels,
+    matchedChannels: [...new Set(candidate.channels.map((channel) => channel.channel))],
+    channelScores: Object.fromEntries(candidate.channels.map((channel) => [channel.channel, channel.score])),
+    candidate: {
+      ...candidate,
+      path: candidate.path ?? document.path
+    },
+    source: "persisted"
+  };
+}
+
+function minimalRankDocuments(hits: readonly SearchHitEvidence[]): Array<{ document: SearchDocument; score: number; queryChannels: SearchTokenChannelTerms }> {
+  return hits.map((hit) => ({
+    document: minimalSearchDocument(hit.candidate.documentId, hit.path),
+    score: hit.score,
+    queryChannels: hit.queryChannels
+  }));
+}
+
+function minimalSearchDocument(documentId: string, relPath: string): SearchDocument {
+  const title = relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
+  return {
+    id: documentId,
+    path: relPath,
+    title,
+    aliases: [],
+    tags: [],
+    headings: [],
+    body: "",
+    pathTokens: "",
+    titleTokens: "",
+    aliasesTokens: "",
+    tagsTokens: "",
+    headingsTokens: "",
+    bodyTokens: "",
+    pathSurfaceTokens: "",
+    titleSurfaceTokens: "",
+    aliasesSurfaceTokens: "",
+    tagsSurfaceTokens: "",
+    headingsSurfaceTokens: "",
+    bodySurfaceTokens: "",
+    pathNgramTokens: "",
+    titleNgramTokens: "",
+    aliasesNgramTokens: "",
+    tagsNgramTokens: "",
+    headingsNgramTokens: "",
+    bodyNgramTokens: ""
+  };
+}
+
 function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: ReadonlyMap<string, PersistedDocumentRecord>): FeatureStore {
   return {
     featuresFor: (query, candidateSet) => {
       const allowedFields = query.fields ?? [...SEARCH_PROPERTIES];
       const terms = weightedQueryTerms(query.analysis.channels);
-      const documentFrequency = documentFrequencyByTerm(snapshot, terms, allowedFields);
-      const rarityWeights = new Map(terms.map((term) => [
-        term.id,
-        term.weight * rarityWeight(candidateSet.candidates.length, documentFrequency.get(term.id) ?? 0)
-      ]));
-      const totalRarityWeight = [...rarityWeights.values()].reduce((sum, weight) => sum + weight, 0);
-      const rawRarityScores = new Map<string, number>();
-      for (const candidate of candidateSet.candidates) {
-        const matched = matchedTermIds(snapshot, candidate, terms, allowedFields);
-        const matchedRarityWeight = [...matched].reduce((sum, term) => sum + (rarityWeights.get(term) ?? 0), 0);
-        rawRarityScores.set(candidate.candidateId, totalRarityWeight > 0 ? matchedRarityWeight / totalRarityWeight : 0);
-      }
-      const maxRarityScore = Math.max(0, ...rawRarityScores.values());
       return candidateSet.candidates.map((candidate) => {
         const record = documents.get(candidate.documentId);
         const context = featureQueryContext(query);
-        const coverage = record ? metadataCoverage(record.searchDocument, context) : { terms: 0, fieldScore: 0 };
-        const exactPriority = record ? nullableRankPriority(bestExactPriority(record.searchDocument, context)) : null;
-        const phrasePriority = record ? nullableRankPriority(bestPhrasePriority(record.searchDocument, context)) : null;
-        const rawRarityScore = rawRarityScores.get(candidate.candidateId) ?? 0;
+        const coverage = projectionCoverage(snapshot, candidate, context);
+        const exactPriority = nullableRankPriority(projectionExactPriority(snapshot, candidate, context));
+        const phrasePriority = nullableRankPriority(projectionPhrasePriority(snapshot, candidate, context));
         return {
           candidate: candidateRef(candidate),
           bm25: bm25Features(snapshot, candidate, allowedFields),
           phrasePositions: candidate.phraseMatches,
           proximity: candidate.proximityMatches,
           rarity: {
-            matchedWeightedTerms: rawRarityScore * totalRarityWeight,
-            totalWeightedTerms: totalRarityWeight,
-            score: maxRarityScore > 0 ? rawRarityScore / maxRarityScore : 0
+            matchedWeightedTerms: 0,
+            totalWeightedTerms: 0,
+            score: 0
           },
           coverage: {
             terms: coverage.terms,
@@ -379,9 +618,9 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: Readonl
           identity: {
             exactPriority,
             phrasePriority,
-            canonicalFieldText: canonicalFieldTextPayload(snapshot, candidate.documentId)
+            canonicalFieldText: {}
           },
-          tags: record?.searchDocument.tags ?? [],
+          tags: candidateTags(snapshot, candidate),
           snippetScoringInputs: (record?.snippetLines ?? []).map((line) => ({
             snippetId: line.snippetId,
             line: line.line,
@@ -395,57 +634,10 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: Readonl
         } satisfies CandidateFeaturePayload;
       });
     },
-    canonicalFieldText: (candidate, field) => {
-      if (!candidate.documentId) return undefined;
-      return snapshot.canonicalFieldText?.get(candidate.documentId)?.[field];
+    canonicalFieldText: (_candidate, _field) => {
+      return undefined;
     }
   };
-}
-
-function documentFrequencyByTerm(
-  snapshot: SearchSnapshot,
-  terms: ReadonlyArray<{ id: string; channel: SearchTokenChannel; term: string }>,
-  fields: readonly SearchField[]
-): Map<string, number> {
-  const documentFrequency = new Map(terms.map((term) => [term.id, 0]));
-  for (const document of snapshot.documents) {
-    for (const term of terms) {
-      if (documentHasTerm(snapshot, document.docId, term, fields)) {
-        documentFrequency.set(term.id, (documentFrequency.get(term.id) ?? 0) + 1);
-      }
-    }
-  }
-  return documentFrequency;
-}
-
-function documentHasTerm(
-  snapshot: SearchSnapshot,
-  docId: number,
-  term: { channel: SearchTokenChannel; term: string },
-  fields: readonly SearchField[]
-): boolean {
-  for (const field of fields) {
-    const fieldId = POSITIONAL_FIELD_ID[field];
-    if (positionsForTerm(snapshot.postingsByChannel[term.channel] ?? new Map(), term.term, docId, fieldId).length > 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function matchedTermIds(
-  snapshot: SearchSnapshot,
-  candidate: RetrievalCandidate,
-  terms: ReadonlyArray<{ id: string; channel: SearchTokenChannel; term: string }>,
-  fields: readonly SearchField[]
-): Set<string> {
-  const matched = new Set<string>();
-  const docId = candidate.ordinalDocId;
-  if (typeof docId !== "number") return matched;
-  for (const term of terms) {
-    if (documentHasTerm(snapshot, docId, term, fields)) matched.add(term.id);
-  }
-  return matched;
 }
 
 function bm25Features(
@@ -453,29 +645,26 @@ function bm25Features(
   candidate: RetrievalCandidate,
   fields: readonly SearchField[]
 ): CandidateFeaturePayload["bm25"] {
-  const docId = candidate.ordinalDocId;
-  if (typeof docId !== "number") return [];
   const output: CandidateBm25Feature[] = [];
   for (const channelRank of candidate.channels) {
-    const stats = snapshot.bm25ByChannel?.[channelRank.channel] ?? snapshot.bm25;
     for (const term of channelRank.matchedTerms) {
       for (const field of fields) {
         const fieldId = POSITIONAL_FIELD_ID[field];
-        const frequency = positionsForTerm(snapshot.postingsByChannel[channelRank.channel] ?? new Map(), term, docId, fieldId).length;
+        const frequency = positionsForCandidateTerm(snapshot, candidate, channelRank.channel, term, fieldId).length;
         if (frequency <= 0) continue;
-        const termStats = bm25TermStats(stats, term, fieldId);
-        const fieldStats = stats.fields.get(fieldId);
+        const corpus = bm25CorpusStats(snapshot.bm25Stats, channelRank.channel, fieldId);
+        const fieldLength = candidateFieldLength(snapshot, candidate, channelRank.channel, fieldId);
         output.push({
           channel: channelRank.channel,
           field,
           fieldId,
           term,
           frequency,
-          documentFrequency: termStats.documentFrequency,
-          documentCount: termStats.documentCount,
-          fieldLength: fieldStats?.documentLengths.get(docId) ?? 0,
-          averageFieldLength: termStats.averageFieldLength,
-          score: bm25TermScore(stats, term, docId, fieldId)
+          documentFrequency: bm25DocumentFrequency(snapshot.bm25Stats, channelRank.channel, term, fieldId),
+          documentCount: corpus?.documentCount ?? 0,
+          fieldLength,
+          averageFieldLength: corpus?.averageFieldLength ?? 0,
+          score: bm25TermScoreFromGlobalStats(snapshot.bm25Stats, channelRank.channel, term, fieldId, frequency, fieldLength)
         });
       }
     }
@@ -489,14 +678,12 @@ function coverageMatches(
   terms: ReadonlyArray<{ channel: SearchTokenChannel; term: string; weight: number }>,
   fields: readonly SearchField[]
 ): CandidateCoverageFeature["matched"] {
-  const docId = candidate.ordinalDocId;
-  if (typeof docId !== "number") return [];
   const matched: Array<CandidateCoverageFeature["matched"][number]> = [];
   for (const term of terms) {
     for (const field of fields) {
       if (field === "body") continue;
       const fieldId = POSITIONAL_FIELD_ID[field];
-      if (positionsForTerm(snapshot.postingsByChannel[term.channel] ?? new Map(), term.term, docId, fieldId).length > 0) {
+      if (positionsForCandidateTerm(snapshot, candidate, term.channel, term.term, fieldId).length > 0) {
         matched.push({ channel: term.channel, field, term: term.term, weight: term.weight });
       }
     }
@@ -504,17 +691,158 @@ function coverageMatches(
   return matched;
 }
 
-function canonicalFieldTextPayload(snapshot: SearchSnapshot, documentId: string): Partial<Record<SearchField, readonly string[]>> {
-  return { ...(snapshot.canonicalFieldText?.get(documentId) ?? {}) };
-}
-
 function candidateRef(candidate: RetrievalCandidate): CandidateRef {
   return {
     candidateId: candidate.candidateId,
     documentId: candidate.documentId,
-    ordinalDocId: candidate.ordinalDocId,
+    shardDocRef: candidate.shardDocRef,
     path: candidate.path
   };
+}
+
+function segmentForCandidate(snapshot: SearchSnapshot, candidate: RetrievalCandidate | CandidateRef): SearchSnapshotSegment {
+  const ref = candidate.shardDocRef;
+  const segment = snapshot.segments.find((entry) => entry.segmentId === ref.segmentId && entry.partitionId === ref.partitionId);
+  if (!segment) throw new Error(`unknown search segment ${ref.segmentId}`);
+  return segment;
+}
+
+function positionsForCandidateTerm(
+  snapshot: SearchSnapshot,
+  candidate: RetrievalCandidate,
+  channel: SearchTokenChannel,
+  term: string,
+  fieldId: number
+): readonly number[] {
+  const segment = segmentForCandidate(snapshot, candidate);
+  const localDocId = candidate.shardDocRef.localDocId;
+  const canonicalTerm = `${channel}\u0000${term.normalize("NFC").trim()}`;
+  const posting = segment.postings.postingsForTerm(canonicalTerm)
+    .find((entry) => entry.docId === localDocId && entry.fieldId === fieldId);
+  return posting?.positions ?? [];
+}
+
+function candidateFieldLength(
+  snapshot: SearchSnapshot,
+  candidate: RetrievalCandidate,
+  channel: SearchTokenChannel,
+  fieldId: number
+): number {
+  return segmentForCandidate(snapshot, candidate).projection.fieldLength(candidate.shardDocRef.localDocId, channel, fieldId);
+}
+
+function candidateTags(snapshot: SearchSnapshot, candidate: RetrievalCandidate | CandidateRef): string[] {
+  const segment = segmentForCandidate(snapshot, candidate);
+  return segment.projection.tagIds(candidate.shardDocRef.localDocId).map((tagId) => segment.projection.tagForId(tagId));
+}
+
+function projectionCoverage(
+  snapshot: SearchSnapshot,
+  candidate: RetrievalCandidate,
+  context: QueryContext
+): { terms: number; fieldScore: number } {
+  if (context.terms.length === 0 && SEARCH_TOKEN_CHANNELS.every((channel) => context.channels[channel].length === 0)) {
+    return { terms: 0, fieldScore: 0 };
+  }
+
+  let matchedTerms = 0;
+  let fieldScore = 0;
+  const surfaceTerms = new Set(context.channels.surface);
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    const terms = context.channels[channel];
+    if (terms.length === 0) continue;
+    const channelWeight = SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
+    for (const term of terms) {
+      if (isWeakMetadataCoverageTerm(term)) continue;
+      if (isMorphMetadataExpansion(channel, term, surfaceTerms)) continue;
+      let matched = false;
+      for (const field of metadataCoverageFields(context)) {
+        const fieldId = POSITIONAL_FIELD_ID[field];
+        if (positionsForCandidateTerm(snapshot, candidate, channel, term, fieldId).length === 0) continue;
+        matched = true;
+        fieldScore += COVERAGE_FIELD_WEIGHT[field] * channelWeight;
+      }
+      if (matched) matchedTerms += channelWeight;
+    }
+  }
+
+  return { terms: matchedTerms, fieldScore };
+}
+
+function projectionExactPriority(snapshot: SearchSnapshot, candidate: RetrievalCandidate, context: QueryContext): number {
+  const keys = segmentForCandidate(snapshot, candidate).projection.identityKeys(candidate.shardDocRef.localDocId);
+  const priorities: number[] = [];
+  if (context.allowed.has("title") && keys.title.some((key) => exactIdentityKeyMatches(key, context.phrases))) {
+    priorities.push(EXACT_PRIORITY.title);
+  }
+  if (context.allowed.has("aliases") && keys.aliases.some((key) => exactIdentityKeyMatches(key, context.phrases))) {
+    priorities.push(EXACT_PRIORITY.alias);
+  }
+  if (context.allowed.has("path") && exactIdentityKeyMatches(keys.filenameStem, context.phrases)) {
+    priorities.push(EXACT_PRIORITY.filenameStem);
+  }
+  return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
+}
+
+function projectionPhrasePriority(snapshot: SearchSnapshot, candidate: RetrievalCandidate, context: QueryContext): number {
+  if (context.phrases.length === 0) return Number.POSITIVE_INFINITY;
+  const keys = segmentForCandidate(snapshot, candidate).projection.identityKeys(candidate.shardDocRef.localDocId);
+  const priorities: number[] = [];
+  if (context.allowed.has("title") && keys.title.some((key) => containsAnyIdentityKeyPhrase(key, context.phrases))) {
+    priorities.push(PHRASE_PRIORITY.title);
+  }
+  if (context.allowed.has("aliases") && keys.aliases.some((key) => containsAnyIdentityKeyPhrase(key, context.phrases))) {
+    priorities.push(PHRASE_PRIORITY.alias);
+  }
+  if (context.allowed.has("path") && containsAnyIdentityKeyPhrase(keys.filenameStem, context.phrases)) {
+    priorities.push(PHRASE_PRIORITY.filenameStem);
+  }
+  if (context.allowed.has("path") && keys.pathSegments.some((key) => containsAnyIdentityKeyPhrase(key, context.phrases))) {
+    priorities.push(PHRASE_PRIORITY.pathSegment);
+  }
+  if (context.allowed.has("headings") && keys.headings.some((key) => containsAnyIdentityKeyPhrase(key, context.phrases))) {
+    priorities.push(PHRASE_PRIORITY.heading);
+  }
+  return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
+}
+
+function metadataCoverageFields(context: QueryContext): Array<Exclude<SearchField, "body">> {
+  const fields: Array<Exclude<SearchField, "body">> = [];
+  for (const field of ["title", "aliases", "tags", "headings", "path"] as const) {
+    if (context.allowed.has(field)) fields.push(field);
+  }
+  return fields;
+}
+
+function isWeakMetadataCoverageTerm(term: string): boolean {
+  return WEAK_METADATA_COVERAGE_TERM_SET.has(term);
+}
+
+function isMorphMetadataExpansion(channel: SearchTokenChannel, term: string, surfaceTerms: ReadonlySet<string>): boolean {
+  return channel === "morph" && /[\uac00-\ud7af]/u.test(term) && !surfaceTerms.has(term);
+}
+
+function exactIdentityKeyMatches(key: string, phrases: readonly string[]): boolean {
+  if (!key) return false;
+  const compactKey = compactIdentityPhrase(key);
+  return phrases.some((phrase) => key === phrase || compactKey === compactIdentityPhrase(phrase));
+}
+
+function containsAnyIdentityKeyPhrase(key: string, phrases: readonly string[]): boolean {
+  if (!key) return false;
+  const compactKey = compactIdentityPhrase(key);
+  return phrases.some((phrase) =>
+    isPhraseContainmentCandidate(phrase) &&
+    (key.includes(phrase) || compactKey.includes(compactIdentityPhrase(phrase)))
+  );
+}
+
+function compactIdentityPhrase(value: string): string {
+  return value.replace(/\s+/gu, "");
+}
+
+function isPhraseContainmentCandidate(phrase: string): boolean {
+  return compactIdentityPhrase(phrase).length >= 2;
 }
 
 function featureQueryContext(query: RetrievalQuery): QueryContext {
@@ -564,105 +892,167 @@ function weightedQueryTerms(channels: SearchTokenChannelTerms): Array<{ id: stri
   return terms;
 }
 
-function bestCandidateProximity(candidate: RetrievalCandidate): number {
-  let best = 0;
-  for (const match of candidate.proximityMatches) {
-    best = Math.max(best, match.score * fieldWeight(match.field) * SEARCH_TOKEN_CHANNEL_WEIGHT[match.channel]);
+function featureProximityScore(feature: CandidateFeaturePayload): number {
+  let score = 0;
+  for (const match of feature.proximity) {
+    score += match.score;
   }
-  return best;
+  return score;
 }
 
-function bestFeatureProximity(feature: CandidateFeaturePayload): number {
-  let best = 0;
-  for (const match of feature.proximity) {
-    best = Math.max(best, match.score * fieldWeight(match.field) * SEARCH_TOKEN_CHANNEL_WEIGHT[match.channel]);
+function featureLexicalScore(feature: CandidateFeaturePayload): number {
+  let score = 0;
+  for (const term of canonicalBm25Order(feature.bm25)) {
+    score += term.score * SEARCH_TOKEN_CHANNEL_WEIGHT[term.channel] * SEARCH_FIELD_CHANNEL_BOOST[term.channel][term.field];
   }
-  return best;
+  return score;
+}
+
+// Sole purpose: pin the float-summation order so the lexical score is deterministic
+// across shard topologies. Do NOT reuse for output ordering — use compareByteStrings.
+function canonicalBm25Order(terms: readonly CandidateBm25Feature[]): CandidateBm25Feature[] {
+  return [...terms].sort(compareCanonicalBm25Terms);
 }
 
 function rankSignalsFromFeatures(
   features: readonly CandidateFeaturePayload[],
-  analysis: SearchTextAnalysis
+  exactLambda: number
 ): Map<string, CandidateRankSignals> {
   const signals = new Map<string, CandidateRankSignals>();
-  const useBodyScore = shouldUseBodyRankSignal(analysis);
-  const rawBodyScores = new Map<string, number>();
-  let maxBodyScore = 0;
-  if (useBodyScore) {
-    for (const feature of features) {
-      const path = feature.candidate.path;
-      if (!path) continue;
-      const bodyScore = featureBodyScore(feature);
-      rawBodyScores.set(path, bodyScore);
-      if (bodyScore > maxBodyScore) maxBodyScore = bodyScore;
-    }
-  }
   for (const feature of features) {
     const path = feature.candidate.path;
     if (!path) continue;
+    const exactPriority = feature.identity.exactPriority ?? Number.POSITIVE_INFINITY;
+    const metadataPhrasePriority = feature.identity.phrasePriority ?? Number.POSITIVE_INFINITY;
     signals.set(path, {
-      rarityScore: feature.rarity.score,
-      proximityScore: bestFeatureProximity(feature),
-      bodyScore: maxBodyScore > 0 ? (rawBodyScores.get(path) ?? 0) / maxBodyScore : 0,
-      phrasePriority: bestFeatureBodyPhrasePriority(feature, analysis)
+      exactPriority,
+      phrasePriority: metadataPhrasePriority,
+      coverageTerms: feature.coverage.terms,
+      coverageFieldScore: feature.coverage.fieldScore,
+      lexicalScore: featureLexicalScore(feature),
+      identityScore: identityScoreFromExactPriority(exactPriority),
+      exactLambda,
+      denseAgreement: 0,
+      rarityScore: 0,
+      proximityScore: featureProximityScore(feature),
+      bodyScore: 0
     });
   }
   return signals;
 }
 
-function bestFeatureBodyPhrasePriority(feature: CandidateFeaturePayload, analysis: SearchTextAnalysis): number | undefined {
-  if (feature.phrasePositions.some((match) => match.field === "body")) return PHRASE_PRIORITY.body;
-  const compactRaw = compactBodyPhrase(analysis.raw);
-  if (compactRaw.length > 1 && feature.snippetScoringInputs.some((input) => compactBodyPhrase(input.text).includes(compactRaw))) {
-    return PHRASE_PRIORITY.body;
+function exactDominanceBoundForQuery(snapshot: SearchSnapshot, query: RetrievalQuery) {
+  return exactDominanceLambda({
+    channelTermCounts: queryChannelTermCounts(query.analysis.channels),
+    fields: query.fields ?? [...SEARCH_PROPERTIES],
+    bm25SingleTermBounds: snapshotBm25SingleTermBounds(snapshot)
+  });
+}
+
+function queryChannelTermCounts(channels: SearchTokenChannelTerms): Partial<Record<SearchTokenChannel, number>> {
+  const counts: Partial<Record<SearchTokenChannel, number>> = {};
+  for (const channel of SEARCH_TOKEN_CHANNELS) counts[channel] = new Set(channels[channel]).size;
+  return counts;
+}
+
+function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<string, number> {
+  const cached = bm25SingleTermBoundCache.get(snapshot);
+  if (cached) return cached;
+
+  const bounds = new Map<string, number>();
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    for (const field of SEARCH_PROPERTIES) bounds.set(bm25BoundKey(channel, field), 0);
   }
-  const surfaceTerms = analysis.channels.surface;
-  if (surfaceTerms.length === 0) return undefined;
-  return feature.snippetScoringInputs.some((input) => containsTokenSequence(input.channels.surface, surfaceTerms))
-    ? PHRASE_PRIORITY.body
-    : undefined;
-}
 
-function compactBodyPhrase(value: string): string {
-  return value.normalize("NFKC").toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
-}
-
-function containsTokenSequence(tokens: readonly string[], sequence: readonly string[]): boolean {
-  if (sequence.length === 0 || sequence.length > tokens.length) return false;
-  for (let start = 0; start <= tokens.length - sequence.length; start += 1) {
-    let matched = true;
-    for (let offset = 0; offset < sequence.length; offset += 1) {
-      if (tokens[start + offset] !== sequence[offset]) {
-        matched = false;
-        break;
+  for (const row of snapshot.bm25Stats.rows) {
+    const field = POSITIONAL_FIELD_BY_ID[row.fieldId];
+    if (!field) continue;
+    const key = bm25BoundKey(row.channel, field);
+    let maxScore = bounds.get(key) ?? 0;
+    for (const segment of snapshot.segments) {
+      for (const posting of segment.postings.postingsForTerm(canonicalPostingTerm(row.channel, row.term))) {
+        if (posting.fieldId !== row.fieldId) continue;
+        const fieldLength = segment.projection.fieldLength(posting.docId, row.channel, row.fieldId);
+        const score = bm25TermScoreFromGlobalStats(
+          snapshot.bm25Stats,
+          row.channel,
+          row.term,
+          row.fieldId,
+          posting.positions.length,
+          fieldLength
+        );
+        if (!Number.isFinite(score) || score < 0) {
+          throw new Error(`invalid BM25 bound observation for ${row.channel}/${field}/${row.term}`);
+        }
+        if (score > maxScore) maxScore = score;
       }
     }
-    if (matched) return true;
+    bounds.set(key, maxScore);
   }
-  return false;
+
+  bm25SingleTermBoundCache.set(snapshot, bounds);
+  return bounds;
 }
 
-function shouldUseBodyRankSignal(analysis: SearchTextAnalysis): boolean {
-  if (/[\uac00-\ud7af]/u.test(analysis.raw)) return false;
-  let asciiTerms = 0;
-  for (const term of analysis.channels.surface) {
-    if (!/[a-z]/i.test(term)) continue;
-    asciiTerms += 1;
-    if (asciiTerms >= 4) return true;
-  }
-  return false;
+function canonicalPostingTerm(channel: SearchTokenChannel, term: string): string {
+  return `${channel}\u0000${term.normalize("NFC").trim()}`;
 }
 
-function featureBodyScore(feature: CandidateFeaturePayload): number {
-  let score = 0;
-  for (const term of feature.bm25) {
-    if (term.field !== "body") continue;
-    score += term.score * SEARCH_TOKEN_CHANNEL_WEIGHT[term.channel];
-  }
-  return score;
+type RankedHitEntry<T extends { candidate: RetrievalCandidate }> = {
+  hit: T;
+  rank: RankedCandidate;
+};
+
+function deterministicRankedHits<T extends { candidate: RetrievalCandidate }>(
+  hits: readonly T[],
+  ranked: readonly RankedCandidate[]
+): Array<RankedHitEntry<T>> {
+  const rankByPath = new Map(ranked.map((rank) => [rank.path, rank]));
+  return hits
+    .map((hit) => {
+      const rank = rankByPath.get(hit.candidate.path ?? "");
+      if (!rank) return undefined;
+      return { hit, rank };
+    })
+    .filter((entry): entry is RankedHitEntry<T> => Boolean(entry))
+    .sort((left, right) => compareRankedHitEntries(left, right));
 }
 
-function candidateSetForHits(candidateSet: CandidateSet, hits: readonly PositionalHit[]): CandidateSet {
+export function sortedSearchShardFinalists(finalists: readonly SearchShardFinalist[]): SearchShardFinalist[] {
+  return [...finalists].sort((left, right) => compareRankedHitEntries(
+    { hit: left, rank: left.rank },
+    { hit: right, rank: right.rank }
+  ));
+}
+
+function compareRankedHitEntries<T extends { candidate: RetrievalCandidate }>(
+  left: RankedHitEntry<T>,
+  right: RankedHitEntry<T>
+): number {
+  if (right.rank.score !== left.rank.score) return right.rank.score - left.rank.score;
+  if (right.rank.identityScore !== left.rank.identityScore) return right.rank.identityScore - left.rank.identityScore;
+  const documentOrder = compareByteStrings(left.hit.candidate.documentId, right.hit.candidate.documentId);
+  if (documentOrder !== 0) return documentOrder;
+  const segmentOrder = compareByteStrings(left.hit.candidate.shardDocRef.segmentId, right.hit.candidate.shardDocRef.segmentId);
+  if (segmentOrder !== 0) return segmentOrder;
+  return left.hit.candidate.shardDocRef.localDocId - right.hit.candidate.shardDocRef.localDocId;
+}
+
+function compareByteStrings(left: string, right: string): number {
+  const leftBytes = utf8(left.normalize("NFC"));
+  const rightBytes = utf8(right.normalize("NFC"));
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function utf8(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function candidateSetForHits(candidateSet: CandidateSet, hits: readonly { candidate: RetrievalCandidate }[]): CandidateSet {
   const candidateIds = new Set(hits.map((hit) => hit.candidate.candidateId));
   return {
     ...candidateSet,
@@ -672,16 +1062,17 @@ function candidateSetForHits(candidateSet: CandidateSet, hits: readonly Position
 
 function explainTrace(input: {
   candidateSet: CandidateSet;
+  exactBound: ReturnType<typeof exactDominanceBoundForQuery>;
   featurePayloads: readonly CandidateFeaturePayload[];
   queryAnalysis: SearchTextAnalysis;
   ranked: readonly RankedCandidate[];
 }): ExplainTrace {
-  const rankingConfig = rankingConfigTrace();
+  const rankingConfig = rankingConfigTrace(input.exactBound);
   const rankedOutput = rankedOutputFromRanked(input.ranked);
   return {
     schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
-    rankingAlgorithmId: "rrf-metadata-v1",
-    frozenReplayFormulaVersion: "rrf-metadata-v1/offline-2",
+    rankingAlgorithmId: "unified-scalar-ac4-v1",
+    frozenReplayFormulaVersion: "unified-scalar-ac4-v1/offline-1",
     rankingConfig,
     inputs: {
       candidateSet: input.candidateSet,
@@ -703,17 +1094,19 @@ function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
     phrasePriority: nullableRankPriority(candidate.phrasePriority),
     coverageTerms: candidate.coverageTerms,
     coverageFieldScore: candidate.coverageFieldScore,
+    lexicalScore: candidate.lexicalScore,
+    identityScore: candidate.identityScore,
+    exactLambda: candidate.exactLambda,
+    denseAgreement: candidate.denseAgreement,
     rarityScore: candidate.rarityScore,
     proximityScore: candidate.proximityScore,
     bodyScore: candidate.bodyScore
   }));
 }
 
-function rankingConfigTrace() {
+function rankingConfigTrace(exactBound: ReturnType<typeof exactDominanceBoundForQuery>) {
   return {
-    rrfK: RRF_K,
-    weights: RRF_WEIGHTS,
-    signalWeights: RANK_SIGNAL_WEIGHTS,
+    exactDominanceBound: exactBound,
     constants: RANKING_CONSTANTS
   };
 }
@@ -729,15 +1122,6 @@ function canonicalJson(value: unknown): string {
     return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
-}
-
-function fieldWeight(field: SearchField): number {
-  return SEARCH_BOOST[field] / SEARCH_BOOST.title;
-}
-
-function rarityWeight(documentCount: number, frequency: number): number {
-  if (frequency <= 0) return 0;
-  return Math.log1p(documentCount / frequency);
 }
 
 function rawSearchLimit(documentCount: number, search: NormalizedSearchParams): number {
@@ -757,6 +1141,15 @@ function positionalCandidateLimit(
   if (!search.query) return perChannelLimit;
   const channelCount = SEARCH_TOKEN_CHANNELS.filter((channel) => channels[channel].length > 0).length || 1;
   return Math.min(documentCount, perChannelLimit * channelCount);
+}
+
+function exhaustiveCandidateLimit(
+  documentCount: number,
+  search: NormalizedSearchParams,
+  _channels: SearchTokenChannelTerms
+): number {
+  if (search.query) return documentCount;
+  return rawSearchLimit(documentCount, search);
 }
 
 function snippetsForDocument(record: PersistedDocumentRecord, queryChannels: SearchTokenChannelTerms) {
@@ -824,11 +1217,12 @@ function searchResult(
   search: NormalizedSearchParams,
   candidates: number,
   channels: SearchTokenChannelTerms = emptySearchTokenChannels()
-): SearchResult {
+): SearchResult & { snapshotId: string } {
   return {
     ok: true,
     command: "search",
     matches,
+    snapshotId,
     ...(search.debug
       ? {
           debug: {
@@ -851,7 +1245,7 @@ function searchResult(
             analyzer: analyzerDebugInfo(analyzer),
             candidates,
             snapshotId,
-            ...(search.query ? { reranker: "rrf-metadata-v1" as const } : {})
+            ...(search.query ? { reranker: "unified-scalar-ac4-v1" as const } : {})
           }
         }
       : {})
@@ -859,7 +1253,15 @@ function searchResult(
 }
 
 function matchDebug(input: {
-  hit: PositionalHit;
+  hit: {
+    source: "persisted";
+    queryTerms: string[];
+    queryChannels: SearchTokenChannelTerms;
+    matchedChannels: SearchTokenChannel[];
+    channelScores: Partial<Record<SearchTokenChannel, number>>;
+    score: number;
+    candidate: RetrievalCandidate;
+  };
   rank: ReturnType<typeof rerankCandidatesWithSignals>[number];
   snapshotId: string;
   analyzer: SearchAnalyzerIdentity;
@@ -881,6 +1283,10 @@ function matchDebug(input: {
     phrasePriority: nullableRankPriority(input.rank.phrasePriority),
     coverageTerms: input.rank.coverageTerms,
     coverageFieldScore: input.rank.coverageFieldScore,
+    lexicalScore: input.rank.lexicalScore,
+    identityScore: input.rank.identityScore,
+    exactLambda: input.rank.exactLambda,
+    denseAgreement: input.rank.denseAgreement,
     rarityScore: input.rank.rarityScore,
     proximityScore: input.rank.proximityScore,
     bodyScore: input.rank.bodyScore,

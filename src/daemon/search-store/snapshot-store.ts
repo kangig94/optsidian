@@ -2,12 +2,16 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer, type SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
+import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../core/search/analysis/index.js";
 import {
+  canonicalBm25GlobalStatsHash,
   decodeCanonicalSegment,
   canonicalValueBytes,
+  reduceCanonicalBm25GlobalStats,
   snapshotIdFromManifest,
-  type CanonicalSegment
+  type CanonicalBm25FieldStats
 } from "../../core/search/segments/index.js";
+import type { PositionalBm25GlobalStats } from "../../core/search/retrieval/positional/index.js";
 import type { PinnedSnapshot, SnapshotManifestView, SnapshotStore, SnapshotView } from "../../core/search/contracts.js";
 import { recordVaultAccess, recentVaultAccessRoots } from "../../core/vault-access.js";
 import { vaultRelative, walkFiles } from "../../core/path.js";
@@ -88,6 +92,7 @@ type LoadedSnapshot = {
   documentsByDocumentId: Map<string, PersistedDocumentRecord>;
   documentBytes: Uint8Array;
   segmentBytes: Map<string, Uint8Array>;
+  bm25Stats: PositionalBm25GlobalStats;
   byteLength: number;
   refCount: number;
   pinTokens: Set<string>;
@@ -280,8 +285,17 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return {
       snapshotId: snapshot.snapshotId,
       pinToken: pin.pinToken,
+      bm25Stats: snapshot.bm25Stats,
       documents: sharedHandle(snapshot.documentBytes),
-      segments: [...snapshot.segmentBytes.entries()].map(([segmentId, bytes]) => ({ segmentId, bytes: sharedHandle(bytes) }))
+      segments: envelopePartitionsBySegmentId(snapshot.envelope).map((partition) => {
+        const bytes = snapshot.segmentBytes.get(partition.segmentHash);
+        if (!bytes) throw new Error(`loaded snapshot is missing segment bytes for ${partition.segmentHash}`);
+        return {
+          segmentId: partition.segmentHash,
+          partitionId: partition.partitionId,
+          bytes: sharedHandle(bytes)
+        };
+      })
     };
   }
 
@@ -310,8 +324,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
     await this.recoverVault(paths);
     const active = this.readActivePointer(paths);
     if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
-      this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
-      return active.snapshotId;
+      try {
+        await this.ensureLoaded(paths, active.snapshotId);
+        this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
+        return active.snapshotId;
+      } catch {
+        this.loaded.delete(loadedKey(paths.vaultStateHash, active.snapshotId));
+      }
     }
     return this.publishFreshSnapshot(vaultRoot, context);
   }
@@ -426,6 +445,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private loadEnvelope(paths: SearchStoreCachePaths, envelope: SnapshotEnvelope): LoadedSnapshot {
     const documentsByDocumentId = new Map(envelope.diagnostics.documents.map((document) => [document.documentId, document]));
     const segmentBytes = new Map<string, Uint8Array>();
+    const segmentStats: Array<readonly CanonicalBm25FieldStats[]> = [];
     const documentBytes = sharedBytes(new TextEncoder().encode(JSON.stringify([...documentsByDocumentId.values()])));
     let byteLength = 0;
     byteLength += documentBytes.byteLength;
@@ -435,10 +455,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
       const bytes = fs.readFileSync(segmentPath);
       const actualHash = sha256(bytes);
       if (actualHash !== partition.segmentHash) throw new Error(`segment hash mismatch for ${partition.segmentHash}`);
+      const decoded = decodeCanonicalSegment(bytes);
+      segmentStats.push(decoded.bm25 ?? []);
       const shared = sharedBytes(bytes);
       byteLength += shared.byteLength;
       segmentBytes.set(partition.segmentHash, shared);
     }
+    const bm25Stats = verifyBm25StatsFromVerifiedSegments(envelope.manifest, segmentStats);
     const view = this.createSnapshotView(envelope, segmentBytes, documentsByDocumentId);
     return {
       vaultRoot: paths.vaultRoot,
@@ -449,6 +472,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       documentsByDocumentId,
       documentBytes,
       segmentBytes,
+      bm25Stats,
       byteLength,
       refCount: 0,
       pinTokens: new Set(),
@@ -655,6 +679,10 @@ function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
   };
 }
 
+function envelopePartitionsBySegmentId(envelope: SnapshotEnvelope): SnapshotEnvelope["manifest"]["partitions"] {
+  return [...envelope.manifest.partitions].sort((left, right) => left.partitionId - right.partitionId || compareCodePoint(left.segmentHash, right.segmentHash));
+}
+
 function sharedBytes(bytes: Uint8Array): Uint8Array {
   const shared = new SharedArrayBuffer(bytes.byteLength);
   const view = new Uint8Array(shared);
@@ -669,6 +697,53 @@ function sharedHandle(bytes: Uint8Array): SharedBytesHandle {
     byteOffset: bytes.byteOffset,
     byteLength: bytes.byteLength
   };
+}
+
+function verifyBm25StatsFromVerifiedSegments(
+  manifest: SnapshotEnvelope["manifest"],
+  segmentStats: readonly (readonly CanonicalBm25FieldStats[])[]
+): PositionalBm25GlobalStats {
+  const persistedStats = {
+    bm25StatsSchemaId: manifest.bm25StatsSchemaId,
+    corpusStats: manifest.corpusStats,
+    bm25GlobalStatsRows: manifest.bm25GlobalStatsRows
+  };
+  const persistedHash = canonicalBm25GlobalStatsHash(persistedStats);
+  if (persistedHash !== manifest.bm25GlobalStatsHash) {
+    throw new Error("BM25 global stats hash mismatch in snapshot manifest");
+  }
+  const recomputed = reduceCanonicalBm25GlobalStats(segmentStats, SEARCH_TOKEN_CHANNELS);
+  if (recomputed.bm25GlobalStatsHash !== manifest.bm25GlobalStatsHash) {
+    throw new Error("BM25 global stats mismatch between manifest and verified segment bytes");
+  }
+  return positionalBm25GlobalStatsFromManifest(manifest);
+}
+
+function positionalBm25GlobalStatsFromManifest(manifest: SnapshotEnvelope["manifest"]): PositionalBm25GlobalStats {
+  return {
+    schemaId: manifest.bm25StatsSchemaId,
+    corpusStats: manifest.corpusStats.map((entry) => ({
+      channel: searchTokenChannel(entry.channel, "BM25 corpus stats channel"),
+      fieldId: entry.fieldId,
+      documentCount: entry.documentCount,
+      totalFieldLength: entry.totalFieldLength,
+      averageFieldLength: entry.documentCount > 0 ? entry.totalFieldLength / entry.documentCount : 0
+    })),
+    rows: manifest.bm25GlobalStatsRows.map((row) => ({
+      channel: searchTokenChannel(row[0], "BM25 global stats row channel"),
+      fieldId: row[1],
+      term: row[2],
+      documentFrequency: row[3]
+    })),
+    hash: manifest.bm25GlobalStatsHash
+  };
+}
+
+function searchTokenChannel(value: string, label: string): SearchTokenChannel {
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    if (channel === value) return channel;
+  }
+  throw new Error(`${label} is unsupported: ${value}`);
 }
 
 function loadedKey(vaultKey: string, snapshotId: string): string {

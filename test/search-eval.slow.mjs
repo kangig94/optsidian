@@ -59,6 +59,26 @@ function sharedHandle(bytes) {
   };
 }
 
+function bm25StatsFromManifest(manifest) {
+  return {
+    schemaId: manifest.bm25StatsSchemaId,
+    corpusStats: manifest.corpusStats.map((entry) => ({
+      channel: entry.channel,
+      fieldId: entry.fieldId,
+      documentCount: entry.documentCount,
+      totalFieldLength: entry.totalFieldLength,
+      averageFieldLength: entry.documentCount > 0 ? entry.totalFieldLength / entry.documentCount : 0
+    })),
+    rows: manifest.bm25GlobalStatsRows.map((row) => ({
+      channel: row[0],
+      fieldId: row[1],
+      term: row[2],
+      documentFrequency: row[3]
+    })),
+    hash: manifest.bm25GlobalStatsHash
+  };
+}
+
 function assertOkSpawn(result, label) {
   assert.equal(result.status, 0, `${label} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
 }
@@ -82,9 +102,11 @@ test("search:eval offline explain trace replay validates mutations deterministic
   const snapshot = {
     snapshotId: built.snapshotId,
     pinToken: "pin-search-eval-slow",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
+      partitionId: segment.partitionId,
       bytes: sharedHandle(segment.bytes)
     }))
   };
@@ -134,11 +156,17 @@ test("search:eval offline explain trace replay validates mutations deterministic
   assert.equal(replayAgain.stdout, replay.stdout);
   const replayed = JSON.parse(replay.stdout);
   assert.equal(replayed.outputHash, trace.expectedOutputHash);
-  assert.ok(replayed.rankedOutput.some((candidate) => candidate.bodyScore > 0));
+  assert.ok(replayed.rankedOutput.some((candidate) => candidate.lexicalScore > 0));
 
   const mutations = [
     ["rankingAlgorithmId", "different-ranker"],
-    ["rankingConfig", { ...trace.rankingConfig, rrfK: trace.rankingConfig.rrfK + 1 }],
+    ["rankingConfig", {
+      ...trace.rankingConfig,
+      exactDominanceBound: {
+        ...trace.rankingConfig.exactDominanceBound,
+        lambdaExact: trace.rankingConfig.exactDominanceBound.lambdaExact + 1
+      }
+    }],
     ["inputs", { ...trace.inputs, candidateSet: { ...trace.inputs.candidateSet, candidates: [] } }],
     ["expectedOutputHash", "0".repeat(64)]
   ];

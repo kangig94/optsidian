@@ -3,5 +3,7 @@ export * from "./engine.js";
 export * from "./postings.js";
 export * from "./proximity.js";
 export * from "./retriever.js";
+export * from "./segment-projection-reader.js";
+export * from "./segment-postings-reader.js";
 export * from "./snapshot.js";
 export * from "./types.js";

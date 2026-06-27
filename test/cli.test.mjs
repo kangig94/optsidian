@@ -1228,7 +1228,7 @@ test("search ranks notes and renders CLI output", async () => {
   assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
   assert.deepEqual(Object.keys(payload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
   assert.deepEqual(payload.debug.query.terms, ["project", "alpha"]);
-  assert.equal(payload.debug.reranker, "rrf-metadata-v1");
+  assert.equal(payload.debug.reranker, "unified-scalar-ac4-v1");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
   assert.equal(payload.matches[0].title, "Alpha");
   assert.deepEqual(payload.matches[0].tags.sort(), ["alpha", "project"]);

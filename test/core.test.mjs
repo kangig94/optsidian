@@ -468,7 +468,7 @@ test("reranker keeps English polarity terms eligible for metadata coverage", asy
   assert.notEqual(rankBucketName(ranked[0].bucket), "base");
 });
 
-test("reranker uses body signal to break comparable metadata coverage ties", async () => {
+test("reranker ignores legacy body signal as a separate scoring bonus", async () => {
   const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, "src/core/search/ranking/index.ts"));
   const weakBody = searchDocument({
     path: "SciFact/weak-body.md",
@@ -493,8 +493,9 @@ test("reranker uses body signal to break comparable metadata coverage ties", asy
     ])
   );
 
-  assert.equal(ranked[0].path, "SciFact/strong-body.md");
-  assert.equal(ranked[0].bodyScore, 1);
+  assert.equal(ranked[0].path, "SciFact/weak-body.md");
+  assert.equal(ranked[1].path, "SciFact/strong-body.md");
+  assert.equal(ranked[1].bodyScore, 1);
 });
 
 test("intl search analyzer segments CJK text for lexical search", async () => {

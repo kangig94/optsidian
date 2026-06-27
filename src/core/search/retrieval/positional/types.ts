@@ -1,5 +1,6 @@
 import type { SearchTextAnalysis, SearchTokenChannel } from "../../analysis/index.js";
 import { SEARCH_PROPERTIES } from "../../schema.js";
+import type { ShardDocRef } from "../../contracts.js";
 import type { SearchField } from "../../../types.js";
 
 export type PositionalDocId = number;
@@ -34,7 +35,7 @@ export type PositionalDocumentInput = {
 };
 
 export type PositionalDocumentRecord = {
-  docId: PositionalDocId;
+  shardDocRef: ShardDocRef;
   documentId: string;
   documentKey: string;
   path?: string;

@@ -1,32 +1,83 @@
 import type { SearchDocument } from "../markdown.js";
 import type { SearchField, SearchMatch } from "../../types.js";
-import { COVERAGE_BUCKET_MIN_TERMS, RANK_BUCKET, RANK_SIGNAL_WEIGHTS, RRF_WEIGHTS } from "../constants.js";
+import {
+  COVERAGE_BUCKET_MIN_TERMS,
+  EXACT_DOMINANCE_EPSILON,
+  MAX_SEARCH_QUERY_TERMS_PER_CHANNEL,
+  RANK_BUCKET,
+  SEARCH_SCORING_LAMBDAS,
+  SEARCH_TOKEN_CHANNEL_WEIGHT
+} from "../constants.js";
 import type { QueryContext, RankedCandidate } from "../internal-types.js";
-import { SEARCH_PROPERTIES } from "../schema.js";
+import { SEARCH_FIELD_CHANNEL_BOOST, SEARCH_PROPERTIES } from "../schema.js";
 import {
   emptySearchTokenChannels,
   SEARCH_TOKEN_CHANNELS,
   uniqueSearchTerms,
+  type SearchTokenChannel,
   type SearchTokenChannelTerms
 } from "../analysis/index.js";
 import { metadataCoverage } from "./coverage.js";
-import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates } from "./identity.js";
-import { rankMap, rrfContribution } from "./rrf.js";
+import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates, identityScoreFromExactPriority } from "./identity.js";
+
+export { identityScoreFromExactPriority } from "./identity.js";
 
 export type CandidateRankSignals = {
+  exactPriority?: number;
+  phrasePriority?: number;
+  coverageTerms?: number;
+  coverageFieldScore?: number;
+  lexicalScore?: number;
+  identityScore?: number;
+  exactLambda?: number;
+  denseAgreement?: number;
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;
-  phrasePriority?: number;
 };
 
 export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
+  lexicalScore: 0,
+  identityScore: 0,
+  exactLambda: SEARCH_SCORING_LAMBDAS.exact,
+  denseAgreement: 0,
   rarityScore: 0,
   proximityScore: 0,
   bodyScore: 0
 };
 
-const BODY_SCORE_COMPARE_EPSILON = 0.02;
+export type ExactDominanceBound = {
+  lexicalBound: number;
+  proximityBound: number;
+  lambdaExact: number;
+};
+
+export type ExactDominanceBoundInput = {
+  channelTermCounts: Partial<Record<SearchTokenChannel, number>>;
+  fields: readonly SearchField[];
+  bm25SingleTermBounds: ReadonlyMap<string, number>;
+  lambdaPhrase?: number;
+  epsilon?: number;
+};
+
+export function bm25BoundKey(channel: SearchTokenChannel, field: SearchField): string {
+  return `${channel}\u0000${field}`;
+}
+
+// Canonical summation order for the lexical BM25 score: pins the float-addition
+// order so the score is deterministic regardless of how terms were collected
+// (e.g. across shard topologies). Intended for summation order only, NOT output
+// ordering.
+export function compareCanonicalBm25Terms(
+  left: { channel: SearchTokenChannel; fieldId: number; term: string },
+  right: { channel: SearchTokenChannel; fieldId: number; term: string }
+): number {
+  return (
+    SEARCH_TOKEN_CHANNELS.indexOf(left.channel) - SEARCH_TOKEN_CHANNELS.indexOf(right.channel) ||
+    left.fieldId - right.fieldId ||
+    left.term.localeCompare(right.term)
+  );
+}
 
 export function rerankCandidates(
   query: string,
@@ -57,22 +108,13 @@ function rerankCandidatesWithContext(
 ): RankedCandidate[] {
   const signals = signalOverride ?? new Map<string, CandidateRankSignals>();
   const candidates = hits.map((hit, index) =>
-    rankedCandidate(hit.document, index + 1, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
-  );
-  const identityRanks = rankMap(candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.exact), compareIdentityRank);
-  const phraseRanks = rankMap(
-    candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.phrase),
-    comparePhraseRank
-  );
-  const coverageRanks = rankMap(
-    candidates.filter((candidate) => candidate.bucket === RANK_BUCKET.phrase || candidate.bucket === RANK_BUCKET.coverage),
-    compareCoverageRank
+    rankedCandidate(hit.document, index + 1, hit.score, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
   );
 
   return candidates
     .map((candidate) => ({
       ...candidate,
-      score: rerankScore(candidate, identityRanks, phraseRanks, coverageRanks)
+      score: rerankScore(candidate)
     }))
     .sort(compareRankedMatches);
 }
@@ -118,12 +160,16 @@ function queryContext(
 function rankedCandidate(
   doc: SearchDocument,
   baseRank: number,
+  baseScore: number,
   context: QueryContext,
   signals: CandidateRankSignals
 ): RankedCandidate {
-  const exactPriority = bestExactPriority(doc, context);
-  const phrasePriority = Math.min(bestPhrasePriority(doc, context), signals.phrasePriority ?? Number.POSITIVE_INFINITY);
-  const coverage = metadataCoverage(doc, context);
+  const exactPriority = signals.exactPriority ?? bestExactPriority(doc, context);
+  const phrasePriority = signals.phrasePriority ?? bestPhrasePriority(doc, context);
+  const coverage = {
+    terms: signals.coverageTerms ?? metadataCoverage(doc, context).terms,
+    fieldScore: signals.coverageFieldScore ?? metadataCoverage(doc, context).fieldScore
+  };
   return {
     path: doc.path,
     title: doc.title,
@@ -135,24 +181,19 @@ function rankedCandidate(
     phrasePriority,
     coverageTerms: coverage.terms,
     coverageFieldScore: coverage.fieldScore,
-    rarityScore: signals.rarityScore,
-    proximityScore: signals.proximityScore,
-    bodyScore: signals.bodyScore ?? 0
+    lexicalScore: finiteNumber(signals.lexicalScore ?? baseScore),
+    identityScore: finiteNumber(signals.identityScore ?? identityScoreFromExactPriority(exactPriority)),
+    exactLambda: finiteNumber(signals.exactLambda ?? SEARCH_SCORING_LAMBDAS.exact),
+    denseAgreement: finiteNumber(signals.denseAgreement ?? 0),
+    rarityScore: finiteNumber(signals.rarityScore ?? 0),
+    proximityScore: finiteNumber(signals.proximityScore ?? 0),
+    bodyScore: finiteNumber(signals.bodyScore ?? 0)
   };
 }
 
 function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): number {
-  if (left.bucket !== right.bucket) return left.bucket - right.bucket;
-  const priorityCompare = compareBucketPriority(left, right);
-  if (priorityCompare !== 0) return priorityCompare;
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
-}
-
-function compareBucketPriority(left: RankedCandidate, right: RankedCandidate): number {
-  if (left.bucket === RANK_BUCKET.exact) return left.exactPriority - right.exactPriority;
-  if (left.bucket === RANK_BUCKET.phrase) return left.phrasePriority - right.phrasePriority;
-  return 0;
 }
 
 function searchFields(fields: SearchField[] | undefined): SearchField[] {
@@ -189,61 +230,45 @@ function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms
   return RANK_BUCKET.base;
 }
 
-function rerankScore(
-  candidate: RankedCandidate,
-  identityRanks: Map<string, number>,
-  phraseRanks: Map<string, number>,
-  coverageRanks: Map<string, number>
-): number {
-  let score = rrfContribution(candidate.baseRank, RRF_WEIGHTS.base);
-  if (candidate.bucket === RANK_BUCKET.exact) {
-    const rank = identityRanks.get(candidate.path);
-    if (rank) score += rrfContribution(rank, RRF_WEIGHTS.identity);
-  } else if (candidate.bucket === RANK_BUCKET.phrase) {
-    const phraseRank = phraseRanks.get(candidate.path);
-    if (phraseRank) score += rrfContribution(phraseRank, RRF_WEIGHTS.phrase);
-    const coverageRank = coverageRanks.get(candidate.path);
-    if (coverageRank) score += rrfContribution(coverageRank, RRF_WEIGHTS.coverage);
-  } else if (candidate.bucket === RANK_BUCKET.coverage) {
-    const coverageRank = coverageRanks.get(candidate.path);
-    if (coverageRank) score += rrfContribution(coverageRank, RRF_WEIGHTS.coverage);
+export function rerankScore(candidate: Pick<RankedCandidate, "lexicalScore" | "proximityScore" | "identityScore" | "exactLambda" | "denseAgreement">): number {
+  return finiteNumber(candidate.lexicalScore) +
+    SEARCH_SCORING_LAMBDAS.phrase * finiteNumber(candidate.proximityScore) +
+    finiteNumber(candidate.exactLambda) * finiteNumber(candidate.identityScore) +
+    SEARCH_SCORING_LAMBDAS.dense * finiteNumber(candidate.denseAgreement);
+}
+
+export function exactDominanceLambda(input: ExactDominanceBoundInput): ExactDominanceBound {
+  const lambdaPhrase = input.lambdaPhrase ?? SEARCH_SCORING_LAMBDAS.phrase;
+  const epsilon = input.epsilon ?? EXACT_DOMINANCE_EPSILON;
+  let lexicalBound = 0;
+  let searchedChannels = 0;
+
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    const termCount = Math.min(input.channelTermCounts[channel] ?? 0, MAX_SEARCH_QUERY_TERMS_PER_CHANNEL);
+    if (termCount <= 0) continue;
+    searchedChannels += 1;
+    let channelFieldBound = 0;
+    for (const field of input.fields) {
+      const key = bm25BoundKey(channel, field);
+      if (!input.bm25SingleTermBounds.has(key)) throw new Error(`missing BM25 bound for ${channel}/${field}`);
+      const bm25Bound = input.bm25SingleTermBounds.get(key) ?? 0;
+      assertFiniteNonNegative(bm25Bound, `BM25 bound for ${channel}/${field}`);
+      channelFieldBound += Math.abs(SEARCH_TOKEN_CHANNEL_WEIGHT[channel] * SEARCH_FIELD_CHANNEL_BOOST[channel][field]) * bm25Bound;
+    }
+    lexicalBound += termCount * channelFieldBound;
   }
-  score += candidate.rarityScore * RANK_SIGNAL_WEIGHTS.rarity;
-  score += candidate.proximityScore * RANK_SIGNAL_WEIGHTS.proximity;
-  score += candidate.bodyScore * RANK_SIGNAL_WEIGHTS.body;
-  return score;
+
+  const proximityBound = searchedChannels * input.fields.length;
+  const dominanceBound = lexicalBound + Math.abs(lambdaPhrase) * proximityBound;
+  const lambdaExact = dominanceBound + epsilon;
+  assertFiniteNonNegative(lambdaExact, "lambdaExact");
+  return { lexicalBound, proximityBound, lambdaExact };
 }
 
-function compareIdentityRank(left: RankedCandidate, right: RankedCandidate): number {
-  if (left.exactPriority !== right.exactPriority) return left.exactPriority - right.exactPriority;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
-  return left.path.localeCompare(right.path);
+function assertFiniteNonNegative(value: number, label: string): void {
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${label} must be a finite non-negative number`);
 }
 
-function comparePhraseRank(left: RankedCandidate, right: RankedCandidate): number {
-  if (left.phrasePriority !== right.phrasePriority) return left.phrasePriority - right.phrasePriority;
-  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
-  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  const bodyScoreCompare = compareDescendingWithEpsilon(left.bodyScore, right.bodyScore, BODY_SCORE_COMPARE_EPSILON);
-  if (bodyScoreCompare !== 0) return bodyScoreCompare;
-  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
-  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
-  return left.path.localeCompare(right.path);
-}
-
-function compareCoverageRank(left: RankedCandidate, right: RankedCandidate): number {
-  if (right.coverageTerms !== left.coverageTerms) return right.coverageTerms - left.coverageTerms;
-  if (right.coverageFieldScore !== left.coverageFieldScore) return right.coverageFieldScore - left.coverageFieldScore;
-  const bodyScoreCompare = compareDescendingWithEpsilon(left.bodyScore, right.bodyScore, BODY_SCORE_COMPARE_EPSILON);
-  if (bodyScoreCompare !== 0) return bodyScoreCompare;
-  if (right.proximityScore !== left.proximityScore) return right.proximityScore - left.proximityScore;
-  if (right.rarityScore !== left.rarityScore) return right.rarityScore - left.rarityScore;
-  if (left.baseRank !== right.baseRank) return left.baseRank - right.baseRank;
-  return left.path.localeCompare(right.path);
-}
-
-function compareDescendingWithEpsilon(left: number, right: number, epsilon: number): number {
-  const delta = right - left;
-  return Math.abs(delta) > epsilon ? delta : 0;
+function finiteNumber(value: number): number {
+  return Number.isFinite(value) ? value : 0;
 }
