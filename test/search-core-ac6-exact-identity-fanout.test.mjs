@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -145,6 +146,29 @@ async function createFanoutPool(workers, assignment) {
   return createDaemonPools(env, {});
 }
 
+test("AC6 exact dominance bound computation reuses cached snapshot state by snapshotId", async () => {
+  const {
+    exactDominanceBoundForSearchHandle,
+    searchExecutionCacheStats
+  } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
+  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { built } = await buildIdentitySnapshot(4);
+  const search = normalizeSearchParams({ query: "alpha", limit: 10 });
+  const analysis = testQueryAnalysis("alpha");
+  const snapshot = snapshotHandle(built, "pin-bound-cache");
+  const before = searchExecutionCacheStats();
+
+  const first = exactDominanceBoundForSearchHandle({ search, snapshot, analysis });
+  const middle = searchExecutionCacheStats();
+  const second = exactDominanceBoundForSearchHandle({ search, snapshot, analysis });
+  const after = searchExecutionCacheStats();
+
+  assert.deepEqual(second, first);
+  assert.equal(after.hits, middle.hits + 1);
+  assert.equal(after.misses + after.hits, before.misses + before.hits + 2);
+  assert.ok(after.snapshotIds.includes(snapshot.snapshotId));
+});
+
 test("AC6 fan-out is byte-identical to monolithic for exact-identity queries across topologies", { timeout: 240_000 }, async () => {
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
   const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
@@ -161,6 +185,7 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
   const workerCounts = [1, 2, 4];
   const assignments = ["identity", "reverse"];
   const baselines = new Map();
+  let explainReplayChecked = false;
 
   for (const queryCase of queryCases) {
     const search = normalizeSearchParams({ ...queryCase, debug: true });
@@ -187,6 +212,7 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
         const coordinator = new QueryCoordinator(pools.searchExecution);
         for (const queryCase of queryCases) {
           const search = normalizeSearchParams({ ...queryCase, debug: true });
+          const explain = !explainReplayChecked && workers === 2 && assignment === "reverse" && queryCase.query === "alpha";
           const result = await coordinator.execute({
             vault,
             search,
@@ -194,13 +220,31 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
             analyzerIdentity: analyzer.identity,
             snapshot: snapshotHandle(built, `pin-${workers}-${assignment}-${queryCase.query}`),
             deadline: Date.now() + 120_000,
-            cancellationId: `ac6-identity-${workers}-${assignment}-${crypto.randomUUID()}`
+            cancellationId: `ac6-identity-${workers}-${assignment}-${crypto.randomUUID()}`,
+            explain
           });
           assert.deepEqual(
             normalizeScorePayload(result),
             baselines.get(queryCase.query),
             `query=${queryCase.query} workers=${workers} assignment=${assignment}`
           );
+          if (explain) {
+            assert.ok(result.explainTrace, "fan-out explain should include a trace");
+            const tracePath = path.join(tempRoot("optsidian-ac6-explain-"), "trace.json");
+            fs.writeFileSync(tracePath, `${JSON.stringify(result.explainTrace, null, 2)}\n`);
+            const replay = spawnSync(process.execPath, [
+              "--import",
+              "tsx",
+              path.join(repoRoot, "scripts/search-eval.mjs"),
+              "--offline-explain-trace",
+              tracePath,
+              "--format=json"
+            ], { cwd: repoRoot, encoding: "utf8" });
+            assert.equal(replay.status, 0, `offline replay failed\nstdout:\n${replay.stdout}\nstderr:\n${replay.stderr}`);
+            const replayed = JSON.parse(replay.stdout);
+            assert.equal(replayed.outputHash, result.explainTrace.expectedOutputHash);
+            explainReplayChecked = true;
+          }
         }
       } finally {
         await pools.close();
@@ -208,5 +252,6 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
     }
   }
 
+  assert.equal(explainReplayChecked, true);
   console.log(`AC6 exact-identity byte-identity: workers=${workerCounts.join("/")} assignments=${assignments.join("/")} queries=${queryCases.length}`);
 });

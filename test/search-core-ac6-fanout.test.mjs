@@ -144,6 +144,58 @@ async function createFanoutPool(workers, assignment) {
   return createDaemonPools(env, {});
 }
 
+test("AC6 shard finalist equal-score tie-break follows path order", async () => {
+  const { sortedSearchShardFinalists } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
+  const finalist = ({ path: relPath, documentId, identityScore = 0 }) => ({
+    documentId,
+    path: relPath,
+    shardDocRef: { segmentId: "segment", localDocId: 0 },
+    score: 1,
+    queryTerms: ["needle"],
+    queryChannels: { morph: ["needle"], surface: [], ngram: [] },
+    matchedChannels: ["morph"],
+    channelScores: { morph: 1 },
+    source: "persisted",
+    candidate: {
+      candidateId: documentId,
+      documentId,
+      path: relPath,
+      shardDocRef: { segmentId: "segment", localDocId: 0 },
+      retrievalScore: 1,
+      channels: [],
+      phraseMatches: [],
+      proximityMatches: []
+    },
+    rank: {
+      path: relPath,
+      title: relPath,
+      tags: [],
+      bucket: 3,
+      score: 10,
+      baseRank: 1,
+      exactPriority: Number.POSITIVE_INFINITY,
+      phrasePriority: Number.POSITIVE_INFINITY,
+      coverageTerms: 0,
+      coverageFieldScore: 0,
+      lexicalScore: 10,
+      identityScore,
+      exactLambda: 0,
+      denseAgreement: 0,
+      rarityScore: 0,
+      proximityScore: 0,
+      bodyScore: 0
+    },
+    feature: { candidate: { candidateId: documentId, documentId, path: relPath, shardDocRef: { segmentId: "segment", localDocId: 0 } } }
+  });
+
+  const sorted = sortedSearchShardFinalists([
+    finalist({ path: "b.md", documentId: "0000", identityScore: 1 }),
+    finalist({ path: "a.md", documentId: "ffff" })
+  ]);
+
+  assert.deepEqual(sorted.map((entry) => entry.path), ["a.md", "b.md"]);
+});
+
 test("AC6 fan-out results are byte-identical to monolithic across worker counts and partition assignments", { timeout: 240_000 }, async () => {
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
   const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));

@@ -423,6 +423,7 @@ export class DaemonWorkerPool {
       this.clearDeadline(item);
       if (item.crashAttempts < this.options.maxCrashRetries && Date.now() < item.options.deadline) {
         item.crashAttempts += 1;
+        if (item.targetSlotId === slot.id) delete item.targetSlotId;
         this.armDeadline(item);
         this.queue.unshift(item);
       } else {
@@ -433,6 +434,7 @@ export class DaemonWorkerPool {
   }
 
   private restartSlot(slot: WorkerSlot, error?: Error, readyCallbacks?: ReadyCallbacks, reason?: string): void {
+    const previousSlotId = slot.id;
     const restartError = error ?? poolError("INTERNAL", `${this.options.name} worker restart failed`);
     if (this.closed) {
       readyCallbacks?.rejectReady(restartError);
@@ -449,6 +451,7 @@ export class DaemonWorkerPool {
     this.lastRestartReason = restartReason;
     this.lastRestartAt = restartedAt;
     if (!plan) {
+      this.retargetQueuedItems(previousSlotId);
       void slot.worker.terminate().catch(() => 0).finally(() => {
         const index = this.slots.indexOf(slot);
         if (index >= 0) this.slots.splice(index, 1);
@@ -466,6 +469,7 @@ export class DaemonWorkerPool {
           }
           const replacement = this.createSlot(plan.restartAttempts);
           this.slots[index] = replacement;
+          this.retargetQueuedItems(previousSlotId, replacement.id);
           if (readyCallbacks) void replacement.ready.then(readyCallbacks.resolveReady, readyCallbacks.rejectReady);
           void replacement.ready.then(() => this.drain(), () => {});
         }, plan.delayMs);
@@ -474,6 +478,14 @@ export class DaemonWorkerPool {
         readyCallbacks?.rejectReady(restartError);
       }
     });
+  }
+
+  private retargetQueuedItems(previousSlotId: number, nextSlotId?: number): void {
+    for (const item of this.queue) {
+      if (item.targetSlotId !== previousSlotId) continue;
+      if (nextSlotId === undefined) delete item.targetSlotId;
+      else item.targetSlotId = nextSlotId;
+    }
   }
 
   private drain(): void {

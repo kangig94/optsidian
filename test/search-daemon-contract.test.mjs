@@ -661,6 +661,58 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("worker pool retargets a targeted retry after the assigned worker crashes", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "targeted-retry-crash-once.mjs");
+  const crashMarker = path.join(root, "crashed.marker");
+  const jobLog = path.join(root, "jobs.log");
+  fs.writeFileSync(jobLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const crashMarker = ${JSON.stringify(crashMarker)};
+const jobLog = ${JSON.stringify(jobLog)};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  if (!fs.existsSync(crashMarker)) {
+    fs.writeFileSync(crashMarker, "crashed");
+    process.exit(1);
+  }
+  fs.appendFileSync(jobLog, "retried\\n");
+  parentPort.postMessage({ id: message.id, ok: true, result: { retried: true }, memoryRss: process.memoryUsage().rss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "targeted-retry",
+    kind: "search",
+    size: 1,
+    workerScript,
+    maxCrashRetries: 1,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    const [originalSlotId] = pool.readySlotIds();
+    const result = await pool.runOnSlot({ type: "search" }, {
+      deadline: Date.now() + 10_000,
+      cancellationId: "targeted-retry"
+    }, originalSlotId);
+
+    assert.deepEqual(result, { retried: true });
+    assert.equal(fs.readFileSync(crashMarker, "utf8"), "crashed");
+    assert.equal(fs.readFileSync(jobLog, "utf8"), "retried\n");
+    assert.notEqual(pool.readySlotIds()[0], originalSlotId);
+  } finally {
+    await pool.close();
+  }
+});
+
 test("daemon pools defer latency analyzer warmup until query analysis", async () => {
   const { createDaemonPools } = await futureImport("src/daemon/pools.ts");
   const pools = await createDaemonPools({

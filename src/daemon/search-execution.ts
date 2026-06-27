@@ -104,7 +104,7 @@ type SearchExecutionState = {
 
 const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt("OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
 const searchExecutionStateCache = new Map<string, SearchExecutionState>();
-const bm25SingleTermBoundCache = new WeakMap<SearchSnapshot, ReadonlyMap<string, number>>();
+const bm25SingleTermBoundCache = new Map<string, ReadonlyMap<string, number>>();
 const searchExecutionStateCacheCounters = {
   hits: 0,
   misses: 0,
@@ -312,7 +312,7 @@ export function exactDominanceBoundForSearchHandle(input: {
   snapshot: SearchExecutionSnapshotHandle;
   analysis: SearchTextAnalysis;
 }): ExactDominanceBound {
-  const snapshot = stateFromHandle(input.snapshot).snapshot;
+  const snapshot = cachedStateFromHandle(input.snapshot).state.snapshot;
   return exactDominanceBoundForQuery(snapshot, {
     rawQuery: input.search.query ?? "",
     analysis: input.analysis,
@@ -368,16 +368,17 @@ export function hydrateSearchShardFinalists(input: {
   );
   if (input.explain) {
     if (!input.exactBound) throw Object.assign(new Error("explain requires shard exact-bound evidence"), { code: "INTERNAL" });
+    const traceFinalists = finalistsInBaseRankOrder(input.finalists);
     result.explainTrace = explainTrace({
       candidateSet: {
         schemaVersion: 1,
         snapshotId: input.snapshot.snapshotId,
         retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
         complete: true,
-        candidates: rankedAll.map((finalist) => finalist.candidate)
+        candidates: traceFinalists.map((finalist) => finalist.candidate)
       },
       exactBound: input.exactBound,
-      featurePayloads: rankedAll.map((finalist) => finalist.feature),
+      featurePayloads: traceFinalists.map((finalist) => finalist.feature),
       queryAnalysis: input.analysis,
       ranked: rankedAll.map((finalist) => finalist.rank)
     });
@@ -956,8 +957,12 @@ function queryChannelTermCounts(channels: SearchTokenChannelTerms): Partial<Reco
 }
 
 function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<string, number> {
-  const cached = bm25SingleTermBoundCache.get(snapshot);
-  if (cached) return cached;
+  const cached = bm25SingleTermBoundCache.get(snapshot.snapshotId);
+  if (cached) {
+    bm25SingleTermBoundCache.delete(snapshot.snapshotId);
+    bm25SingleTermBoundCache.set(snapshot.snapshotId, cached);
+    return cached;
+  }
 
   const bounds = new Map<string, number>();
   for (const channel of SEARCH_TOKEN_CHANNELS) {
@@ -990,7 +995,12 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
     bounds.set(key, maxScore);
   }
 
-  bm25SingleTermBoundCache.set(snapshot, bounds);
+  bm25SingleTermBoundCache.set(snapshot.snapshotId, bounds);
+  while (bm25SingleTermBoundCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
+    const oldest = bm25SingleTermBoundCache.keys().next().value;
+    if (oldest === undefined) break;
+    bm25SingleTermBoundCache.delete(oldest);
+  }
   return bounds;
 }
 
@@ -1025,14 +1035,21 @@ export function sortedSearchShardFinalists(finalists: readonly SearchShardFinali
   ));
 }
 
+function finalistsInBaseRankOrder(finalists: readonly SearchShardFinalist[]): SearchShardFinalist[] {
+  return [...finalists].sort((left, right) =>
+    left.rank.baseRank - right.rank.baseRank ||
+    compareByteStrings(left.rank.path, right.rank.path) ||
+    compareByteStrings(left.candidate.candidateId, right.candidate.candidateId)
+  );
+}
+
 function compareRankedHitEntries<T extends { candidate: RetrievalCandidate }>(
   left: RankedHitEntry<T>,
   right: RankedHitEntry<T>
 ): number {
   if (right.rank.score !== left.rank.score) return right.rank.score - left.rank.score;
-  if (right.rank.identityScore !== left.rank.identityScore) return right.rank.identityScore - left.rank.identityScore;
-  const documentOrder = compareByteStrings(left.hit.candidate.documentId, right.hit.candidate.documentId);
-  if (documentOrder !== 0) return documentOrder;
+  const pathOrder = compareByteStrings(left.rank.path, right.rank.path);
+  if (pathOrder !== 0) return pathOrder;
   const segmentOrder = compareByteStrings(left.hit.candidate.shardDocRef.segmentId, right.hit.candidate.shardDocRef.segmentId);
   if (segmentOrder !== 0) return segmentOrder;
   return left.hit.candidate.shardDocRef.localDocId - right.hit.candidate.shardDocRef.localDocId;
@@ -1068,7 +1085,7 @@ function explainTrace(input: {
   ranked: readonly RankedCandidate[];
 }): ExplainTrace {
   const rankingConfig = rankingConfigTrace(input.exactBound);
-  const rankedOutput = rankedOutputFromRanked(input.ranked);
+  const rankedOutput = rankedOutputFromRanked(normalizeTraceBaseRanks(input.ranked, input.candidateSet));
   return {
     schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
     rankingAlgorithmId: "unified-scalar-ac4-v1",
@@ -1082,6 +1099,19 @@ function explainTrace(input: {
     },
     expectedOutputHash: hashRankedOutput(rankedOutput)
   };
+}
+
+function normalizeTraceBaseRanks(ranked: readonly RankedCandidate[], candidateSet: CandidateSet): RankedCandidate[] {
+  const baseRankByPath = new Map<string, number>();
+  for (const [index, candidate] of candidateSet.candidates.entries()) {
+    const path = candidate.path;
+    if (!path || baseRankByPath.has(path)) continue;
+    baseRankByPath.set(path, index + 1);
+  }
+  return ranked.map((candidate) => {
+    const baseRank = baseRankByPath.get(candidate.path);
+    return baseRank === undefined || baseRank === candidate.baseRank ? candidate : { ...candidate, baseRank };
+  });
 }
 
 function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
