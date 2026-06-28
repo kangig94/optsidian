@@ -98,7 +98,7 @@ async function runMain(argv: string[]): Promise<void> {
       runRead(args, vaultRoot);
       return;
     case "grep":
-      runGrep(args, vaultRoot);
+      await runGrep(args, vaultRoot);
       return;
     case "frontmatter":
       runFrontmatter(args, vaultRoot);
@@ -110,7 +110,7 @@ async function runMain(argv: string[]): Promise<void> {
       await runIndex(args, vaultRoot);
       return;
     case "edit":
-      runEdit(args, vaultRoot);
+      await runEdit(args, vaultRoot);
       return;
     case "write":
       runWrite(args, vaultRoot);

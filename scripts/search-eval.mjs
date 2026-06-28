@@ -12,7 +12,7 @@ const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
   gate: "opt-in benchmark outside npm test",
   corpus: "IR qrels fixture",
   envelope: {
-    node: ">=20",
+    node: ">=24.15.0",
     storage: "local SSD",
     minLogicalCpu: 4,
     snapshot: "warm pinned snapshot",

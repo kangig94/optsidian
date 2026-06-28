@@ -7,7 +7,7 @@ import { applyVaultPatch, editVaultFile, writeVaultFile } from "../core/index.js
 import type { EditParams, EditSelector, LineRange } from "../core/index.js";
 import { usagePayload } from "../cli/help.js";
 import { UsageError } from "../errors.js";
-import { runTool, type ToolPayload } from "./result.js";
+import { runAsyncTool, runTool, type ToolPayload } from "./result.js";
 
 const usageArgsSchema = z.object({});
 
@@ -58,7 +58,7 @@ export type OptsidianToolHandlers = {
   command_map(args: UsageToolArgs): CallToolResult;
   command_run(args: CommandRunToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;
-  edit(args: EditToolArgs): CallToolResult;
+  edit(args: EditToolArgs): Promise<CallToolResult>;
   apply_patch(args: PatchToolArgs): CallToolResult;
 };
 
@@ -78,8 +78,8 @@ export function createToolHandlers(resolveVaultRoot: () => string, onToolCall?: 
       afterTool();
       return result;
     }),
-    edit: (args) => runTool(() => {
-      const result = editVaultFile(resolveVaultRoot(), editArgsToParams(args));
+    edit: (args) => runAsyncTool(async () => {
+      const result = await editVaultFile(resolveVaultRoot(), editArgsToParams(args));
       afterTool();
       return result;
     }),

@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/ins
 ```
 
 The installer does not invoke the native `obsidian` CLI. Native vault resolution and any Linux GUI env recovery still happen later when `optsidian` or `optsidian-mcp` actually run.
-It requires Node.js 20 or newer plus `curl`. Default install/update verification also requires GitHub CLI (`gh`) for release attestation checks. Official Optsidian release downloads do not send GitHub credentials, and HTTP responses are capped at 50MB. Set `OPTSIDIAN_RELEASE_VERIFY=checksum` only as an explicit checksum-only fallback.
+It requires Node.js 24.15.0 or newer plus `curl`. Default install/update verification also requires GitHub CLI (`gh`) for release attestation checks. Official Optsidian release downloads do not send GitHub credentials, and HTTP responses are capped at 50MB. Set `OPTSIDIAN_RELEASE_VERIFY=checksum` only as an explicit checksum-only fallback.
 
 Check or apply managed updates:
 
@@ -196,6 +196,8 @@ optsidian grep query=needle include-hidden
 optsidian grep query=needle format=json
 ```
 
+Regex mode uses a pinned RE2 wasm runtime cached under `~/.cache/optsidian`. Optsidian downloads the small runtime tarball without credentials on first regex use, verifies embedded hashes, and then loads it from the private cache.
+
 ## Frontmatter
 
 `frontmatter` reads and mutates top-level YAML frontmatter keys in Markdown files.
@@ -227,6 +229,8 @@ Regex replacement:
 ```bash
 optsidian edit path=note.md regex="^status: .*$" with="status: done"
 ```
+
+Regex selectors use RE2 rather than JavaScript `RegExp`; backreferences and lookaround assertions are rejected. Replacement text is literal, so `$1` stays `$1`.
 
 Line and range replacement:
 

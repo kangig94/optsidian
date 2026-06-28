@@ -1140,7 +1140,7 @@ test("install.sh rejects downloads over the 50MB cap before parsing", async () =
   }
 });
 
-test("install.sh rejects Node.js versions older than 20", async () => {
+test("install.sh rejects Node.js versions older than 24.15.0", async () => {
   const dir = tempRoot();
   const home = path.join(dir, "home");
   const cache = path.join(dir, "cache");
@@ -1152,7 +1152,7 @@ test("install.sh rejects Node.js versions older than 20", async () => {
     PATH: toolBin
   });
   assert.equal(result.status, 1);
-  assert.match(result.stdout, /Node\.js 20 or newer is required/);
+  assert.match(result.stdout, /Node\.js 24\.15\.0 or newer is required/);
 });
 
 test("install.sh rejects release assets whose embedded version does not match the release tag", async () => {

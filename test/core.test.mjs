@@ -1313,16 +1313,16 @@ test("read edit and direct grep reject vault files over the byte cap", async () 
     () => readVaultFile(vault, { path: "large.md", head: 1 }),
     /File large\.md is too large \(26MB\); maximum supported file size is 25MB/
   );
-  assert.throws(
+  await assert.rejects(
     () => editVaultFile(vault, { path: "large.md", selector: { kind: "replace", value: "a" }, replacement: "b" }),
     /maximum supported file size is 25MB/
   );
-  assert.throws(
+  await assert.rejects(
     () => grepVault(vault, { path: "large.md", query: "needle" }),
     /maximum supported file size is 25MB/
   );
 
-  const result = grepVault(vault, { query: "needle" });
+  const result = await grepVault(vault, { query: "needle" });
   assert.equal(result.count, 1);
   assert.equal(result.matches[0].path, "small.md");
 });
@@ -1456,7 +1456,7 @@ test("core write/read preserves shell-sensitive raw payloads", async () => {
   assert.match(read.numberedText, /\$\(echo hacked\)/);
   assert.match(read.numberedText, /`uname -a`/);
 
-  const grep = grepVault(vault, { query: "$(whoami)" });
+  const grep = await grepVault(vault, { query: "$(whoami)" });
   assert.equal(grep.count, 1);
   assert.equal(grep.matches[0].text, "echo \"$HOME\" && echo $(whoami)");
 });
@@ -1528,7 +1528,7 @@ test("core edit treats replacement and selectors as literal data", async () => {
   const { editVaultFile, writeVaultFile } = await core();
   writeVaultFile(vault, { path: "note.md", content: "alpha $HOME\nbeta\n" });
 
-  const edit = editVaultFile(vault, {
+  const edit = await editVaultFile(vault, {
     path: "note.md",
     selector: { kind: "replace", value: "alpha $HOME" },
     replacement: "literal $(date) and `id`"
@@ -1569,8 +1569,8 @@ test("core validates adapter-independent numeric parameters", async () => {
 
   assert.throws(() => readVaultFile(vault, { path: "note.md", head: 0 }), /head must be a positive integer/);
   assert.throws(() => readVaultFile(vault, { path: "note.md", lines: { start: 3, end: 2 } }), /lines\.end must be >= lines\.start/);
-  assert.throws(() => grepVault(vault, { query: "one", context: -1 }), /context must be a non-negative integer/);
-  assert.throws(
+  await assert.rejects(() => grepVault(vault, { query: "one", context: -1 }), /context must be a non-negative integer/);
+  await assert.rejects(
     () => editVaultFile(vault, { path: "note.md", selector: { kind: "range", value: { start: 2, end: 1 } }, replacement: "x" }),
     /range\.end must be >= range\.start/
   );

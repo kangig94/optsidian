@@ -122,7 +122,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "all", description: "Include non-Markdown files" },
       { name: "include-hidden", description: "Include hidden directories except protected internals" },
       { name: "format=text|json", description: "Output format (default: text)" }
-    ]
+    ],
+    notes: ["regex uses RE2 via a pinned wasm runtime cached under ~/.cache/optsidian."]
   },
   frontmatter: {
     summary: "Read or mutate YAML frontmatter in Markdown files",
@@ -163,7 +164,10 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "all", description: "Replace all exact/regex matches" },
       { name: "dry-run", description: "Return a diff without writing" }
     ],
-    notes: ["Use exactly one of replace=, regex=, line=, or range=."]
+    notes: [
+      "Use exactly one of replace=, regex=, line=, or range=.",
+      "regex uses RE2; backreferences and lookaround assertions are rejected."
+    ]
   },
   apply_patch: {
     summary: "Codex-compatible patch application",

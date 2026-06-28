@@ -16,7 +16,7 @@ function bundle(entryPoint, outfile) {
       outfile,
       bundle: true,
       platform: "node",
-      target: "node20",
+      target: "node24",
       format: "esm",
       packages: "bundle",
       banner: {

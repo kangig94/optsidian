@@ -239,11 +239,11 @@ test("mcp edit uses flat fields and validates selector count", async () => {
   const tools = createToolHandlers(() => vault);
   tools.write({ path: "note.md", content: "alpha\nbeta\n" });
 
-  let result = tools.edit({ path: "note.md", replace: "alpha", with: "literal $(date)" });
+  let result = await tools.edit({ path: "note.md", replace: "alpha", with: "literal $(date)" });
   assert.equal(payload(result).command, "edit");
   assert.equal(fs.readFileSync(path.join(vault, "note.md"), "utf8"), "literal $(date)\nbeta\n");
 
-  result = tools.edit({ path: "note.md", replace: "beta", line: 2, with: "x" });
+  result = await tools.edit({ path: "note.md", replace: "beta", line: 2, with: "x" });
   assert.equal(result.isError, true);
   assert.equal(payload(result).errorType, "usage");
   assert.match(payload(result).message, /exactly one/);

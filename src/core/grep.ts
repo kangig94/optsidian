@@ -1,13 +1,28 @@
 import fs from "node:fs";
-import { UsageError } from "../errors.js";
 import { assertVaultFileWithinByteLimit, vaultFileExceedsByteLimit } from "./file-size.js";
 import { resolveVaultPath, vaultRelative, walkFiles } from "./path.js";
 import { decodeUtf8, splitText } from "./text.js";
 import type { GrepLine, GrepParams, GrepResult } from "./types.js";
+import { compileUserRegex, ensureUserRegexRuntime } from "./user-regex.js";
 import { assertOptionalNonNegativeInteger, assertOptionalPositiveInteger } from "./validation.js";
 
-export function grepVault(vaultRoot: string, params: GrepParams): GrepResult {
+export async function grepVault(
+  vaultRoot: string,
+  params: GrepParams,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<GrepResult> {
   validateGrepParams(params);
+  if (params.regex) {
+    await ensureUserRegexRuntime(env);
+  }
+  return grepVaultValidated(vaultRoot, params, env);
+}
+
+function grepVaultValidated(
+  vaultRoot: string,
+  params: GrepParams,
+  env: NodeJS.ProcessEnv = process.env
+): GrepResult {
   const start = resolveVaultPath(vaultRoot, params.path ?? ".", { mustExist: true });
   const context = params.context ?? 0;
   const limit = params.limit ?? 50;
@@ -22,7 +37,7 @@ export function grepVault(vaultRoot: string, params: GrepParams): GrepResult {
   const matcher = buildMatcher(params.query, {
     regexMode: Boolean(params.regex),
     caseSensitive: Boolean(params.caseSensitive)
-  });
+  }, env);
 
   for (const file of files) {
     if (matches.length >= limit) break;
@@ -59,14 +74,13 @@ function validateGrepParams(params: GrepParams): void {
   assertOptionalPositiveInteger(params.limit, "limit");
 }
 
-function buildMatcher(query: string, options: { regexMode: boolean; caseSensitive: boolean }): (line: string) => boolean {
+function buildMatcher(
+  query: string,
+  options: { regexMode: boolean; caseSensitive: boolean },
+  env: NodeJS.ProcessEnv
+): (line: string) => boolean {
   if (options.regexMode) {
-    let regex: RegExp;
-    try {
-      regex = new RegExp(query, options.caseSensitive ? "" : "i");
-    } catch (error) {
-      throw new UsageError(`Invalid regex: ${(error as Error).message}`);
-    }
+    const regex = compileUserRegex(query, options.caseSensitive ? "" : "i", "regex", env);
     return (line) => regex.test(line);
   }
   const needle = options.caseSensitive ? query : query.toLowerCase();

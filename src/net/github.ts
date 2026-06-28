@@ -33,7 +33,7 @@ export async function downloadFile(
   url: string,
   targetPath: string,
   env: NodeJS.ProcessEnv,
-  options: Pick<FetchOptions, "sendAuth" | "timeoutMs"> = {}
+  options: Pick<FetchOptions, "sendAuth" | "timeoutMs" | "maxBytes"> = {}
 ): Promise<void> {
   const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT, ...options });
   writePrivateFileAtomicSync(targetPath, response.body, "Optsidian download file");

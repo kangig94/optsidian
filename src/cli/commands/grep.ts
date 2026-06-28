@@ -2,10 +2,10 @@ import { getValue, hasFlag, parsePositiveInt, requireValue, type ParsedArgs } fr
 import { grepVault } from "../../core/grep.js";
 import { parseFormat, renderGrep } from "../render.js";
 
-export function runGrep(args: ParsedArgs, vaultRoot: string): void {
+export async function runGrep(args: ParsedArgs, vaultRoot: string): Promise<void> {
   const context = parsePositiveInt(getValue(args, "context"), "context") ?? 0;
   const limit = parsePositiveInt(getValue(args, "limit"), "limit") ?? 50;
-  const result = grepVault(vaultRoot, {
+  const result = await grepVault(vaultRoot, {
     query: requireValue(args, "query"),
     path: getValue(args, "path"),
     context,

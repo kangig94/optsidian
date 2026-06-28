@@ -5,14 +5,30 @@ import { resolveVaultPath } from "./path.js";
 import { joinText, simpleDiff, splitText } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
 import type { EditParams, MutationResult } from "./types.js";
+import { collectRegexMatches, compileUserRegex, ensureUserRegexRuntime } from "./user-regex.js";
 import { assertLineRange, assertPositiveInteger } from "./validation.js";
 
-export function editVaultFile(vaultRoot: string, params: EditParams): MutationResult {
+export async function editVaultFile(
+  vaultRoot: string,
+  params: EditParams,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<MutationResult> {
   validateEditParams(params);
+  if (params.selector.kind === "regex") {
+    await ensureUserRegexRuntime(env);
+  }
+  return editVaultFileValidated(vaultRoot, params, env);
+}
+
+function editVaultFileValidated(
+  vaultRoot: string,
+  params: EditParams,
+  env: NodeJS.ProcessEnv = process.env
+): MutationResult {
   const target = resolveVaultPath(vaultRoot, params.path, { mustExist: true });
   assertVaultFileWithinByteLimit(target.abs, target.rel);
   const before = fs.readFileSync(target.abs, "utf8");
-  const after = applyEdit(before, params);
+  const after = applyEdit(before, params, env);
   if (before === after) {
     throw new UsageError("Edit produced no changes");
   }
@@ -35,7 +51,7 @@ function validateEditParams(params: EditParams): void {
   }
 }
 
-function applyEdit(before: string, params: EditParams): string {
+function applyEdit(before: string, params: EditParams, env: NodeJS.ProcessEnv): string {
   switch (params.selector.kind) {
     case "replace": {
       const needle = params.selector.value;
@@ -45,18 +61,13 @@ function applyEdit(before: string, params: EditParams): string {
       return params.all ? before.split(needle).join(params.replacement) : replaceFirstLiteral(before, needle, params.replacement);
     }
     case "regex": {
-      let regex: RegExp;
-      try {
-        regex = new RegExp(params.selector.value, "g");
-      } catch (error) {
-        throw new UsageError(`Invalid regex: ${(error as Error).message}`);
-      }
-      const matches = [...before.matchAll(regex)];
+      const regex = compileUserRegex(params.selector.value, "g", "regex", env);
+      const matches = collectRegexMatches(regex, before);
       if (matches.length === 0) throw new UsageError("regex did not match");
       if (matches.length > 1 && !params.all) throw new UsageError(`regex matched ${matches.length} times; pass all to replace all`);
-      if (params.all) return before.replace(regex, () => params.replacement);
+      if (params.all) return replaceRegexMatches(before, matches, params.replacement);
       const first = matches[0];
-      return `${before.slice(0, first.index)}${params.replacement}${before.slice((first.index ?? 0) + first[0].length)}`;
+      return `${before.slice(0, first.index)}${params.replacement}${before.slice(first.index + first.text.length)}`;
     }
     case "line": {
       const line = params.selector.value;
@@ -74,6 +85,17 @@ function applyEdit(before: string, params: EditParams): string {
       return joinText(parts);
     }
   }
+}
+
+function replaceRegexMatches(text: string, matches: Array<{ index: number; text: string }>, replacement: string): string {
+  let result = "";
+  let cursor = 0;
+  for (const match of matches) {
+    result += text.slice(cursor, match.index);
+    result += replacement;
+    cursor = match.index + match.text.length;
+  }
+  return result + text.slice(cursor);
 }
 
 function replaceFirstLiteral(text: string, needle: string, replacement: string): string {

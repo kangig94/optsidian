@@ -4,10 +4,10 @@ import type { EditSelector } from "../../core/types.js";
 import { UsageError } from "../../errors.js";
 import { renderMutation } from "../render.js";
 
-export function runEdit(args: ParsedArgs, vaultRoot: string): void {
+export async function runEdit(args: ParsedArgs, vaultRoot: string): Promise<void> {
   const replacementRaw = getValue(args, "with");
   if (replacementRaw === undefined) throw new UsageError("Missing required argument: with=<text>|with=@<file>");
-  const result = editVaultFile(vaultRoot, {
+  const result = await editVaultFile(vaultRoot, {
     path: requireValue(args, "path"),
     selector: parseSelector(args),
     replacement: readValueOrFile(replacementRaw),

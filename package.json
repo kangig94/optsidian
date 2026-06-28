@@ -21,7 +21,7 @@
     "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24.15.0"
   },
   "devDependencies": {
     "@types/node": "^25.0.0",

@@ -6,7 +6,7 @@ It follows a native-first policy: commands that Obsidian already handles well ar
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 24.15.0 or newer
 - `curl` for the release installer
 - GitHub CLI (`gh`) for default release attestation verification
 - Codex CLI and Claude Code are optional; detected clients are registered automatically
@@ -43,7 +43,7 @@ Install the latest published release from the canonical script:
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-The script downloads the latest stable GitHub release assets without GitHub credentials, verifies downloaded checksums and GitHub release attestations, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 20 or newer and does not invoke the native `obsidian` CLI during installation. For constrained environments, `OPTSIDIAN_RELEASE_VERIFY=checksum` is available as an explicit checksum-only fallback.
+The script downloads the latest stable GitHub release assets without GitHub credentials, verifies downloaded checksums and GitHub release attestations, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 24.15.0 or newer and does not invoke the native `obsidian` CLI during installation. For constrained environments, `OPTSIDIAN_RELEASE_VERIFY=checksum` is available as an explicit checksum-only fallback.
 
 If you want MCP to stay pinned to one vault regardless of the active GUI vault, install with a fixed vault path:
 
@@ -261,7 +261,7 @@ optsidian grep query="status: active" path=Projects
 optsidian grep query="foo\\d+" regex case format=json
 ```
 
-By default, grep includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals.
+By default, grep includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals. Regex mode uses a pinned RE2 wasm runtime cached under `~/.cache/optsidian`; the runtime tarball is downloaded without credentials and verified by embedded hashes before use.
 
 ### `frontmatter`
 
@@ -290,7 +290,7 @@ optsidian edit path=note.md line=12 with="- [x] finished"
 optsidian edit path=note.md range=20:25 with=@section.md dry-run
 ```
 
-Replacement text is literal. Strings such as `$&` and `$1` are not interpreted as JavaScript replacement tokens.
+Replacement text is literal. Strings such as `$&` and `$1` are not interpreted as JavaScript replacement tokens. Regex selectors use RE2 rather than JavaScript `RegExp`; backreferences and lookaround assertions are rejected instead of falling back to an unsafe regex engine.
 
 ### `write`
 

@@ -152,10 +152,28 @@ case "${NODE_VERSION}" in
     exit 1
     ;;
 esac
-NODE_MAJOR="${NODE_VERSION#v}"
-NODE_MAJOR="${NODE_MAJOR%%.*}"
-if [ "${NODE_MAJOR}" -lt 20 ]; then
-  echo "ERROR: Node.js 20 or newer is required (found ${NODE_VERSION})"
+NODE_VERSION_BODY="${NODE_VERSION#v}"
+NODE_MAJOR="${NODE_VERSION_BODY%%.*}"
+NODE_TAIL="${NODE_VERSION_BODY#*.}"
+if [ "${NODE_TAIL}" = "${NODE_VERSION_BODY}" ]; then
+  echo "ERROR: failed to parse the installed Node.js version: ${NODE_VERSION}"
+  exit 1
+fi
+NODE_MINOR="${NODE_TAIL%%.*}"
+case "${NODE_MAJOR}" in
+  ''|*[!0-9]*)
+    echo "ERROR: failed to parse the installed Node.js version: ${NODE_VERSION}"
+    exit 1
+    ;;
+esac
+case "${NODE_MINOR}" in
+  ''|*[!0-9]*)
+    echo "ERROR: failed to parse the installed Node.js version: ${NODE_VERSION}"
+    exit 1
+    ;;
+esac
+if [ "${NODE_MAJOR}" -lt 24 ] || { [ "${NODE_MAJOR}" -eq 24 ] && [ "${NODE_MINOR}" -lt 15 ]; }; then
+  echo "ERROR: Node.js 24.15.0 or newer is required (found ${NODE_VERSION})"
   exit 1
 fi
 
