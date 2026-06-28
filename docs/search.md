@@ -4,6 +4,12 @@ This document records the current qrels-based benchmark fixtures used for Optsid
 Legacy KLUE/SciFact-specific eval generators and npm commands have been removed; the supported
 fixture path is `search:eval:ir-vault`.
 
+Legacy generated fixtures such as `KLUE100`, `KLUE300`, `English100`, `English300`, `Mixed200`,
+and `Mixed600` are no longer search-quality acceptance fixtures. Treat them only as historical or
+local continuity data if they still exist in a vault. Current search-quality evaluation fixtures
+must be regenerated from upstream qrels-backed datasets through `search:eval:ir-vault` and scored
+from the generated `SearchEval/*.queries.json` specs.
+
 ## IR Dataset Generation
 
 Upstream IR datasets do not provide Optsidian's generated Markdown vault or
