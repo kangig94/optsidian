@@ -1258,6 +1258,38 @@ test("search store persists cache directories and snapshot files privately", asy
   }
 });
 
+test("AC4 snapshot envelope stores runtime documents outside diagnostics", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
+  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+
+  const first = await store.loadVault(vault);
+  assert.equal(first.vaults[0].status, "ready");
+
+  const paths = searchStoreCachePaths(vault, env);
+  const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const manifestPath = path.join(paths.snapshotsDir, active.snapshotId);
+  const envelope = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(Array.isArray(envelope.documents), true);
+  assert.equal(envelope.documents.length, 1);
+  assert.equal("documents" in envelope.diagnostics, false);
+  assert.equal(envelope.diagnostics.analyzer.name, "test-analyzer");
+
+  const originalContentHash = envelope.documents[0].contentHash;
+  envelope.documents[0].contentHash = "0".repeat(64);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(envelope)}\n`);
+
+  const second = await store.loadVault(vault);
+  assert.equal(second.vaults[0].status, "ready");
+  const repairedEnvelope = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(repairedEnvelope.documents[0].contentHash, originalContentHash);
+  assert.equal("documents" in repairedEnvelope.diagnostics, false);
+});
+
 test("AC9 request scheduler caps remembered cancellations and detects post-task cancellation", async () => {
   const { createRequestScheduler } = await futureImport("src/daemon/scheduler.ts");
   const scheduler = createRequestScheduler();
@@ -1460,6 +1492,8 @@ test("snapshot build reports deterministic progress counts", async () => {
 test("snapshot build caps body ngram terms without capping metadata ngrams", async () => {
   const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
   const { BODY_NGRAM_SHORT_MAX_TERMS } = await futureImport("src/core/search/analysis/budget.ts");
+  const { decodeCanonicalSegment } = await futureImport("src/core/search/segments/canonical.ts");
+  const { POSITIONAL_FIELD_ID } = await futureImport("src/core/search/retrieval/positional/types.ts");
   const vault = tempRoot();
   const longHangul = Array.from({ length: BODY_NGRAM_SHORT_MAX_TERMS + 100 }, (_, index) =>
     String.fromCodePoint(0xac00 + index)
@@ -1472,16 +1506,22 @@ test("snapshot build caps body ngram terms without capping metadata ngrams", asy
     searchSettings: { ngram: true },
     partitionBits: 1
   });
-  const document = built.diagnostics.documents[0].searchDocument;
+  const decoded = decodeCanonicalSegment(built.segments[0].bytes);
+  const ngramFieldLength = (field) =>
+    decoded.bm25
+      .find((entry) => entry.channel === "ngram" && entry.fieldId === POSITIONAL_FIELD_ID[field])
+      ?.documentLengths[0]?.length ?? 0;
 
-  assert.equal(document.bodyNgramTokens.split(" ").length, BODY_NGRAM_SHORT_MAX_TERMS);
-  assert.ok(document.titleNgramTokens.split(" ").length > BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.equal(ngramFieldLength("body"), BODY_NGRAM_SHORT_MAX_TERMS);
+  assert.ok(ngramFieldLength("title") > BODY_NGRAM_SHORT_MAX_TERMS);
   assert.equal(built.identityTuple.analyzerIdentity.ngram.enabled, true);
   assert.equal(built.identityTuple.analyzerIdentity.ngram.bodyBudget.bodyNgramMaxTerms.short, BODY_NGRAM_SHORT_MAX_TERMS);
 });
 
 test("snapshot build disables ngram tokens and identity by default", async () => {
   const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { decodeCanonicalSegment } = await futureImport("src/core/search/segments/canonical.ts");
+  const { POSITIONAL_FIELD_ID } = await futureImport("src/core/search/retrieval/positional/types.ts");
   const vault = tempRoot();
   writeVaultFile(vault, "Alpha.md", "# 한국어검색\n\n한국어검색 본문\n");
 
@@ -1490,10 +1530,14 @@ test("snapshot build disables ngram tokens and identity by default", async () =>
     analyzer: testAnalyzer(),
     partitionBits: 1
   });
-  const document = built.diagnostics.documents[0].searchDocument;
+  const decoded = decodeCanonicalSegment(built.segments[0].bytes);
+  const ngramFieldLength = (field) =>
+    decoded.bm25
+      .find((entry) => entry.channel === "ngram" && entry.fieldId === POSITIONAL_FIELD_ID[field])
+      ?.documentLengths[0]?.length ?? 0;
 
-  assert.equal(document.titleNgramTokens, "");
-  assert.equal(document.bodyNgramTokens, "");
+  assert.equal(ngramFieldLength("title"), 0);
+  assert.equal(ngramFieldLength("body"), 0);
   assert.equal(built.identityTuple.analyzerIdentity.ngram.enabled, false);
 });
 
@@ -1513,7 +1557,7 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,
@@ -1556,7 +1600,7 @@ test("metadata-only search does not hydrate positional segments", async () => {
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
     segments: [{ segmentId: "broken", partitionId: 0, bytes: sharedHandle(Buffer.from("not-a-canonical-segment")) }]
   };
 
@@ -1585,7 +1629,7 @@ test("search execution preload materializes snapshot cache before search", async
     snapshotId: built.snapshotId,
     pinToken: "pin-a",
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,
@@ -2236,7 +2280,7 @@ test("AC4 snippets resolve from the pinned snapshot without rereading vault file
     payload.documents.byteOffset,
     payload.documents.byteLength
   )));
-  const snippetLines = payloadDocuments.flatMap((document) => document.snippetLines);
+  const snippetLines = payloadDocuments.flatMap((document) => document.snippetCorpus.lines);
   assert.ok(snippetLines.some((line) => line.segmentId && line.snippetId && line.byteEnd >= line.byteStart));
   assert.ok(snippetLines.some((line) => line.channels.morph.includes("needle")));
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nSHOULD NOT BE READ\n");
@@ -2350,7 +2394,7 @@ test("AC12 debug output explains channels, scores, rerank signals, snippet sourc
     assert.equal(typeof debug.rerankScore, "number");
     assert.equal(typeof debug.rarityScore, "number");
     assert.equal(typeof debug.proximityScore, "number");
-    assert.equal(debug.snippetSource, "snapshot-field-text");
+    assert.equal(debug.snippetSource, "snapshot-snippet-corpus");
   } finally {
     store.release(pin);
   }

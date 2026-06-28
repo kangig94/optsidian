@@ -9,12 +9,13 @@ import { uniqueSearchTerms } from "../src/core/search/analysis/channels.ts";
 import {
   CANDIDATE_LIMIT_MIN,
   CANDIDATE_LIMIT_MULTIPLIER,
-  SEARCH_TOKEN_CHANNEL_WEIGHT
+  COVERAGE_FIELD_WEIGHT,
+  SEARCH_TOKEN_CHANNEL_WEIGHT,
+  WEAK_METADATA_COVERAGE_TERMS
 } from "../src/core/search/constants.ts";
 import { decodeCanonicalSegment } from "../src/core/search/segments/canonical.ts";
 import { normalizeSearchParams } from "../src/core/search/params.ts";
 import { SEARCH_PROPERTIES } from "../src/core/search/schema.ts";
-import { metadataCoverage } from "../src/core/search/ranking/coverage.ts";
 import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates } from "../src/core/search/ranking/identity.ts";
 import { bm25BoundKey, compareCanonicalBm25Terms, exactDominanceLambda, identityScoreFromExactPriority, rerankCandidatesWithSignals } from "../src/core/search/ranking/score.ts";
 import { buildCanonicalSearchSnapshot } from "../src/daemon/search-store/builder.ts";
@@ -93,7 +94,7 @@ test("AC3 bytes-in-place monolithic path matches the pre-Batch-2 decoded monolit
     snapshotId: built.snapshotId,
     pinToken: "pin-parity",
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,
@@ -130,7 +131,12 @@ function legacyDecodedSearch(built, bm25Stats, search, analysis) {
       const record = state.recordsByDocumentId.get(candidate.documentId);
       if (!record) return undefined;
       return {
-        document: record.searchDocument,
+        document: {
+          id: record.documentId,
+          path: record.path,
+          title: record.title,
+          tags: record.tags
+        },
         score: candidate.retrievalScore,
         queryChannels: analysis.channels,
         candidate
@@ -147,8 +153,9 @@ function legacyDecodedSearch(built, bm25Stats, search, analysis) {
 }
 
 function legacyDecodedState(built) {
-  const recordsByDocumentId = new Map(built.diagnostics.documents.map((record) => [record.documentId, record]));
+  const recordsByDocumentId = new Map(built.documents.map((record) => [record.documentId, record]));
   const documents = [];
+  const fieldTextByDocId = new Map();
   const postingsByChannel = Object.fromEntries(SEARCH_TOKEN_CHANNELS.map((channel) => [channel, new Map()]));
   const lengthsByChannel = Object.fromEntries(SEARCH_TOKEN_CHANNELS.map((channel) => [channel, new Map()]));
   let nextDocId = 1;
@@ -164,6 +171,14 @@ function legacyDecodedState(built) {
         path: document.path,
         documentKey: document.path
       });
+    }
+    for (const fieldText of decoded.fieldTexts ?? []) {
+      const globalDocId = localToGlobal.get(fieldText.docId);
+      const field = POSITIONAL_FIELD_BY_ID[fieldText.fieldId];
+      if (!globalDocId || !field) continue;
+      const fields = fieldTextByDocId.get(globalDocId) ?? new Map();
+      fields.set(field, fieldText.text);
+      fieldTextByDocId.set(globalDocId, fields);
     }
     for (const fieldStats of decoded.bm25 ?? []) {
       const channelLengths = lengthsByChannel[fieldStats.channel] ?? new Map();
@@ -195,6 +210,7 @@ function legacyDecodedState(built) {
   return {
     recordsByDocumentId,
     documents: documents.sort((left, right) => left.docId - right.docId),
+    fieldTextByDocId,
     postingsByChannel,
     lengthsByChannel
   };
@@ -332,11 +348,12 @@ function legacyRankSignals(state, bm25Stats, candidateSet, hits, search, analysi
   const signals = new Map();
   for (const hit of hits) {
     const candidate = hit.candidate;
-    const coverage = metadataCoverage(hit.document, context);
-    const exactPriority = bestExactPriority(hit.document, context);
-    signals.set(hit.document.path, {
+    const identityDocument = legacyIdentityDocument(state, candidate, hit.document);
+    const coverage = legacyProjectionCoverage(state, candidate, context);
+    const exactPriority = bestExactPriority(identityDocument, context);
+    signals.set(hit.document.id, {
       exactPriority,
-      phrasePriority: bestPhrasePriority(hit.document, context),
+      phrasePriority: bestPhrasePriority(identityDocument, context),
       coverageTerms: coverage.terms,
       coverageFieldScore: coverage.fieldScore,
       lexicalScore: legacyFeatureLexicalScore(state, bm25Stats, candidate, fields),
@@ -350,6 +367,55 @@ function legacyRankSignals(state, bm25Stats, candidateSet, hits, search, analysi
   }
   void candidateSet;
   return signals;
+}
+
+const LEGACY_COVERAGE_FIELDS = ["title", "aliases", "tags", "headings", "path"];
+const WEAK_METADATA_COVERAGE_TERM_SET = new Set(WEAK_METADATA_COVERAGE_TERMS);
+
+function legacyProjectionCoverage(state, candidate, context) {
+  if (context.terms.length === 0 && SEARCH_TOKEN_CHANNELS.every((channel) => context.channels[channel].length === 0)) {
+    return { terms: 0, fieldScore: 0 };
+  }
+
+  let matchedTerms = 0;
+  let fieldScore = 0;
+  const surfaceTerms = new Set(context.channels.surface);
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    const terms = context.channels[channel];
+    if (terms.length === 0) continue;
+    const channelWeight = SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
+    for (const term of terms) {
+      if (WEAK_METADATA_COVERAGE_TERM_SET.has(term)) continue;
+      if (channel === "morph" && /[\uac00-\ud7af]/u.test(term) && !surfaceTerms.has(term)) continue;
+      let matched = false;
+      for (const field of LEGACY_COVERAGE_FIELDS) {
+        if (!context.allowed.has(field)) continue;
+        const fieldId = POSITIONAL_FIELD_ID[field];
+        const postings = state.postingsByChannel[channel].get(term) ?? [];
+        if (!postings.some((entry) => entry.docId === candidate.ordinalDocId && entry.fieldId === fieldId)) continue;
+        matched = true;
+        fieldScore += COVERAGE_FIELD_WEIGHT[field] * channelWeight;
+      }
+      if (matched) matchedTerms += channelWeight;
+    }
+  }
+
+  return { terms: matchedTerms, fieldScore };
+}
+
+function legacyIdentityDocument(state, candidate, document) {
+  const fields = state.fieldTextByDocId.get(candidate.ordinalDocId) ?? new Map();
+  return {
+    path: fields.get("path") ?? document.path,
+    title: fields.get("title") ?? document.title,
+    aliases: splitFieldLines(fields.get("aliases")),
+    headings: splitFieldLines(fields.get("headings")),
+    bodySurfaceTokens: ""
+  };
+}
+
+function splitFieldLines(value) {
+  return value ? value.split("\n").filter(Boolean) : [];
 }
 
 function legacyBm25TermScore(bm25Stats, state, channel, term, docId, fieldId, frequency) {

@@ -1279,7 +1279,7 @@ test("search ranks notes and renders CLI output", async () => {
   assert.deepEqual(payload.matches[0].debug.queryTerms, ["project", "alpha"]);
   assert.equal(typeof payload.matches[0].debug.candidateScore, "number");
   assert.equal(payload.matches[0].debug.snapshotId, payload.snapshotId);
-  assert.equal(payload.matches[0].debug.snippetSource, "snapshot-field-text");
+  assert.equal(payload.matches[0].debug.snippetSource, "snapshot-snippet-corpus");
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
   result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });

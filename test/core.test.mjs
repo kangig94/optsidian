@@ -44,32 +44,28 @@ function tarSingleFile(filePath, content) {
 }
 
 function searchDocument(overrides = {}) {
+  const relPath = overrides.path ?? "note.md";
   return {
-    id: overrides.path ?? "note.md",
-    path: overrides.path ?? "note.md",
+    id: overrides.id ?? relPath,
+    path: relPath,
     title: overrides.title ?? "Test Note",
-    aliases: overrides.aliases ?? [],
-    tags: overrides.tags ?? [],
-    headings: overrides.headings ?? [],
-    body: overrides.body ?? "",
-    pathTokens: "",
-    titleTokens: "",
-    aliasesTokens: "",
-    tagsTokens: "",
-    headingsTokens: "",
-    bodyTokens: "",
-    pathSurfaceTokens: "",
-    titleSurfaceTokens: "",
-    aliasesSurfaceTokens: "",
-    tagsSurfaceTokens: "",
-    headingsSurfaceTokens: "",
-    bodySurfaceTokens: "",
-    pathNgramTokens: "",
-    titleNgramTokens: "",
-    aliasesNgramTokens: "",
-    tagsNgramTokens: "",
-    headingsNgramTokens: "",
-    bodyNgramTokens: "",
+    tags: overrides.tags ?? []
+  };
+}
+
+function rankSignal(overrides = {}) {
+  return {
+    exactPriority: Number.POSITIVE_INFINITY,
+    phrasePriority: Number.POSITIVE_INFINITY,
+    coverageTerms: 0,
+    coverageFieldScore: 0,
+    lexicalScore: 0,
+    identityScore: 0,
+    exactLambda: 0,
+    denseAgreement: 0,
+    rarityScore: 0,
+    proximityScore: 0,
+    bodyScore: 0,
     ...overrides
   };
 }
@@ -297,7 +293,8 @@ test("reranker does not let weak metadata ngram coverage outrank stronger body r
     ],
     undefined,
     new Map([
-      ["STS/exact-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0, phrasePriority: 5 }]
+      ["STS/strong-body.md", rankSignal({ lexicalScore: 10 })],
+      ["WOS/weak-metadata.md", rankSignal({ lexicalScore: 9, coverageTerms: 0.3, coverageFieldScore: 0.3 })]
     ])
   );
 
@@ -334,7 +331,10 @@ test("reranker keeps exact body phrases ahead of weak Kiwi metadata coverage", a
       { document: weakMetadata, score: 9, queryChannels }
     ],
     undefined,
-    new Map()
+    new Map([
+      ["STS/exact-body.md", rankSignal({ lexicalScore: 10, phrasePriority: 5 })],
+      ["WOS/weak-metadata.md", rankSignal({ lexicalScore: 9, coverageTerms: 0.3, coverageFieldScore: 0.3 })]
+    ])
   );
 
   assert.equal(ranked[0].path, "STS/exact-body.md");
@@ -373,7 +373,10 @@ test("reranker keeps higher-priority phrase fields ahead of stronger retrieval s
       { document: titlePhrase, score: 1, queryChannels }
     ],
     undefined,
-    new Map()
+    new Map([
+      ["Calibration Alpha.md", rankSignal({ lexicalScore: 100, phrasePriority: 5 })],
+      ["Alpha Calibration Guide.md", rankSignal({ lexicalScore: 101, phrasePriority: 0 })]
+    ])
   );
 
   assert.equal(ranked[0].path, "Alpha Calibration Guide.md");
@@ -408,7 +411,8 @@ test("reranker does not promote one-character identity fragments to phrase match
     ],
     undefined,
     new Map([
-      ["WOS/exact-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0, phrasePriority: 5 }]
+      ["WOS/exact-body.md", rankSignal({ lexicalScore: 10, phrasePriority: 5 })],
+      ["MRC/noisy-title.md", rankSignal({ lexicalScore: 9 })]
     ])
   );
 
@@ -443,7 +447,10 @@ test("reranker ignores weak English function words for metadata coverage", async
       { document: weakMetadata, score: 9, queryChannels }
     ],
     undefined,
-    new Map()
+    new Map([
+      ["SciFact/strong-body.md", rankSignal({ lexicalScore: 10 })],
+      ["SciFact/weak-title.md", rankSignal({ lexicalScore: 9 })]
+    ])
   );
 
   assert.equal(ranked[0].path, "SciFact/strong-body.md");
@@ -468,7 +475,9 @@ test("reranker keeps English polarity terms eligible for metadata coverage", asy
     queryChannels.morph,
     [{ document: polarityMetadata, score: 1, queryChannels }],
     undefined,
-    new Map()
+    new Map([
+      ["SciFact/not-title.md", rankSignal({ lexicalScore: 1, coverageTerms: 1, coverageFieldScore: 1 })]
+    ])
   );
 
   assert.equal(ranked[0].coverageTerms, 1);
@@ -495,8 +504,8 @@ test("reranker ignores legacy body signal as a separate scoring bonus", async ()
     ],
     undefined,
     new Map([
-      ["SciFact/weak-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 0 }],
-      ["SciFact/strong-body.md", { rarityScore: 0, proximityScore: 0, bodyScore: 1 }]
+      ["SciFact/weak-body.md", rankSignal({ lexicalScore: 10 })],
+      ["SciFact/strong-body.md", rankSignal({ lexicalScore: 9, bodyScore: 1 })]
     ])
   );
 

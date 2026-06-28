@@ -1,6 +1,5 @@
 import type { SearchTextAnalysis, SearchTokenChannel, SearchTokenChannelTerms } from "./analysis/index.js";
-import type { SearchDocument } from "./markdown.js";
-import type { SearchField, SearchSnippet } from "../types.js";
+import type { SearchField } from "../types.js";
 
 export const SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION = 1;
 
@@ -158,7 +157,6 @@ export type CandidateFeaturePayload = {
 
 export interface FeatureStore {
   featuresFor(query: RetrievalQuery, candidates: CandidateSet): readonly CandidateFeaturePayload[] | Promise<readonly CandidateFeaturePayload[]>;
-  canonicalFieldText(candidate: CandidateRef, field: SearchField): readonly string[] | undefined;
 }
 
 export type SnapshotManifestView = {
@@ -169,19 +167,11 @@ export type SnapshotManifestView = {
   partitions: readonly unknown[];
 };
 
-export type SnapshotSnippetRequest = CandidateRef & {
-  maxSnippets?: number;
-};
-
 export interface SnapshotView {
   readonly snapshotId: SnapshotId;
   readonly manifest: SnapshotManifestView;
   segmentBytes(segmentId: SegmentId): Uint8Array | undefined | Promise<Uint8Array | undefined>;
   segmentManifest(segmentId: SegmentId): unknown | undefined | Promise<unknown | undefined>;
-  document(documentId: DocumentId): SearchDocument | undefined | Promise<SearchDocument | undefined>;
-  canonicalFieldText(documentId: DocumentId, field: SearchField): readonly string[] | undefined | Promise<readonly string[] | undefined>;
-  snippets(request: SnapshotSnippetRequest): readonly SearchSnippet[] | Promise<readonly SearchSnippet[]>;
-  snippetBytes(snippetId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
 }
 
 export type PinnedSnapshot = {

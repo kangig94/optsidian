@@ -10,7 +10,7 @@ export type ParsedMarkdownNote = {
   body: string;
 };
 
-export type SearchDocument = ParsedMarkdownNote & {
+export type SearchBuildDocument = ParsedMarkdownNote & {
   pathTokens: string;
   titleTokens: string;
   aliasesTokens: string;

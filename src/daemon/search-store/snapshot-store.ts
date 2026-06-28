@@ -444,7 +444,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private loadEnvelope(paths: SearchStoreCachePaths, envelope: SnapshotEnvelope): LoadedSnapshot {
-    const documentsByDocumentId = new Map(envelope.diagnostics.documents.map((document) => [document.documentId, document]));
+    const documentsByDocumentId = new Map(envelope.documents.map((document) => [document.documentId, document]));
     const segmentBytes = new Map<string, Uint8Array>();
     const segmentStats: Array<readonly CanonicalBm25FieldStats[]> = [];
     const documentBytes = sharedBytes(new TextEncoder().encode(JSON.stringify([...documentsByDocumentId.values()])));
@@ -463,7 +463,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       segmentBytes.set(partition.segmentHash, shared);
     }
     const bm25Stats = verifyBm25StatsFromVerifiedSegments(envelope.manifest, segmentStats);
-    const view = this.createSnapshotView(envelope, segmentBytes, documentsByDocumentId);
+    const view = this.createSnapshotView(envelope, segmentBytes);
     return {
       vaultRoot: paths.vaultRoot,
       vaultKey: paths.vaultStateHash,
@@ -483,8 +483,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private createSnapshotView(
     envelope: SnapshotEnvelope,
-    segmentBytes: Map<string, Uint8Array>,
-    documents: Map<string, PersistedDocumentRecord>
+    segmentBytes: Map<string, Uint8Array>
   ): SnapshotView {
     const manifest: SnapshotManifestView = {
       snapshotId: envelope.snapshotId,
@@ -500,22 +499,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
       segmentManifest: (segmentId) => {
         const bytes = segmentBytes.get(segmentId);
         return bytes ? decodeCanonicalSegment(bytes) : undefined;
-      },
-      document: (documentId) => documents.get(documentId)?.searchDocument,
-      canonicalFieldText: (documentId, field) => {
-        const document = documents.get(documentId)?.searchDocument;
-        if (!document) return undefined;
-        if (field === "path") return [document.path];
-        if (field === "title") return [document.title];
-        if (field === "aliases") return document.aliases;
-        if (field === "tags") return document.tags;
-        if (field === "headings") return document.headings;
-        return [document.body];
-      },
-      snippets: (request) => documents.get(request.documentId)?.lineSnippets.slice(0, request.maxSnippets ?? 3) ?? [],
-      snippetBytes: (snippetId) => {
-        const encoded = new TextEncoder().encode(snippetId);
-        return sharedBytes(encoded);
       }
     };
   }
@@ -619,8 +602,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const envelope = this.readSnapshotEnvelope(paths, snapshotId);
     if (!envelope) return false;
     const current = currentContentHashes(paths.vaultRoot);
-    if (current.size !== envelope.diagnostics.documents.length) return false;
-    for (const document of envelope.diagnostics.documents) {
+    if (current.size !== envelope.documents.length) return false;
+    for (const document of envelope.documents) {
       if (current.get(document.path) !== document.contentHash) return false;
     }
     return true;
@@ -680,6 +663,7 @@ function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
     snapshotId: built.snapshotId,
     manifest: built.manifest,
     canonicalManifestSha256: built.canonicalManifestSha256,
+    documents: built.documents,
     diagnostics: built.diagnostics
   };
 }
@@ -845,9 +829,10 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
     typeof value.snapshotId === "string" &&
     isRecord(value.manifest) &&
     typeof value.canonicalManifestSha256 === "string" &&
+    Array.isArray(value.documents) &&
     isRecord(value.diagnostics) &&
     value.diagnostics.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
-    Array.isArray(value.diagnostics.documents)
+    !("documents" in value.diagnostics)
   );
 }
 

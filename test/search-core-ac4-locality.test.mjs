@@ -5,32 +5,28 @@ import test from "node:test";
 const repoRoot = process.cwd();
 
 function searchDocument(overrides = {}) {
+  const relPath = overrides.path ?? "note.md";
   return {
-    id: overrides.path ?? "note.md",
-    path: overrides.path ?? "note.md",
+    id: overrides.id ?? relPath,
+    path: relPath,
     title: overrides.title ?? "Test Note",
-    aliases: overrides.aliases ?? [],
-    tags: overrides.tags ?? [],
-    headings: overrides.headings ?? [],
-    body: overrides.body ?? "",
-    pathTokens: "",
-    titleTokens: "",
-    aliasesTokens: "",
-    tagsTokens: "",
-    headingsTokens: "",
-    bodyTokens: "",
-    pathSurfaceTokens: "",
-    titleSurfaceTokens: "",
-    aliasesSurfaceTokens: "",
-    tagsSurfaceTokens: "",
-    headingsSurfaceTokens: "",
-    bodySurfaceTokens: "",
-    pathNgramTokens: "",
-    titleNgramTokens: "",
-    aliasesNgramTokens: "",
-    tagsNgramTokens: "",
-    headingsNgramTokens: "",
-    bodyNgramTokens: "",
+    tags: overrides.tags ?? []
+  };
+}
+
+function rankSignal(overrides = {}) {
+  return {
+    exactPriority: Number.POSITIVE_INFINITY,
+    phrasePriority: Number.POSITIVE_INFINITY,
+    coverageTerms: 0,
+    coverageFieldScore: 0,
+    lexicalScore: 0,
+    identityScore: 0,
+    exactLambda: 0,
+    denseAgreement: 0,
+    rarityScore: 0,
+    proximityScore: 0,
+    bodyScore: 0,
     ...overrides
   };
 }
@@ -42,21 +38,18 @@ test("AC4 score is bitwise-identical regardless of candidate set size or orderin
   const decoyA = searchDocument({ path: "Decoy-A.md", title: "Decoy A" });
   const decoyB = searchDocument({ path: "Decoy-B.md", title: "Decoy B" });
   const decoyC = searchDocument({ path: "Decoy-C.md", title: "Decoy C" });
-  const targetSignal = {
+  const targetSignal = rankSignal({
     lexicalScore: 12.5,
     identityScore: 1,
     exactPriority: 2,
     exactLambda: 100,
-    denseAgreement: 0,
-    rarityScore: 0,
-    proximityScore: 2,
-    bodyScore: 0
-  };
+    proximityScore: 2
+  });
   const signals = new Map([
     ["Target.md", targetSignal],
-    ["Decoy-A.md", { lexicalScore: 4, identityScore: 0, exactLambda: 100, denseAgreement: 0, rarityScore: 0, proximityScore: 0, bodyScore: 0 }],
-    ["Decoy-B.md", { lexicalScore: 8, identityScore: 0, exactLambda: 100, denseAgreement: 0, rarityScore: 0, proximityScore: 1, bodyScore: 0 }],
-    ["Decoy-C.md", { lexicalScore: 1, identityScore: 0, exactLambda: 100, denseAgreement: 0, rarityScore: 0, proximityScore: 0, bodyScore: 0 }]
+    ["Decoy-A.md", rankSignal({ lexicalScore: 4, exactLambda: 100 })],
+    ["Decoy-B.md", rankSignal({ lexicalScore: 8, exactLambda: 100, proximityScore: 1 })],
+    ["Decoy-C.md", rankSignal({ lexicalScore: 1, exactLambda: 100 })]
   ]);
 
   const scoreIn = (documents) => {
@@ -115,15 +108,10 @@ test("AC4 BM25Plus field score matches hand-computed vector and feeds unified le
     [{ document, score: 0, queryChannels: { morph: ["alpha"], surface: [], ngram: [] } }],
     ["title"],
     new Map([
-      ["Alpha.md", {
+      ["Alpha.md", rankSignal({
         lexicalScore,
-        identityScore: 0,
-        exactLambda: 0,
-        denseAgreement: 0,
-        rarityScore: 0,
-        proximityScore: 0,
-        bodyScore: 0
-      }]
+        exactLambda: 0
+      })]
     ])
   );
   assert.equal(ranked[0].score, lexicalScore);
@@ -162,12 +150,9 @@ test("AC4 exact-priority lambda dominates max-term multi-channel body stuffing",
   const exactAlias = searchDocument({ path: "Alias.md", aliases: ["Needle"] });
   const exactPath = searchDocument({ path: "Needle.md" });
   const stuffed = searchDocument({ path: "Stuffed.md", body: "max-term body stuffed fixture" });
-  const baseSignal = {
+  const baseSignal = rankSignal({
     exactLambda: bound.lambdaExact,
-    denseAgreement: 0,
-    rarityScore: 0,
-    bodyScore: 0
-  };
+  });
   const ranked = rerankCandidatesWithSignals(
     "needle",
     ["needle"],

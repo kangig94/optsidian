@@ -6,7 +6,7 @@ import type {
   CanonicalDocumentRecord,
   SnapshotIdentityTuple
 } from "../../core/search/segments/index.js";
-import type { SearchDocument } from "../../core/search/markdown.js";
+import type { SearchBuildDocument } from "../../core/search/markdown.js";
 import type { SearchField, SearchSnippet } from "../../core/types.js";
 
 // One persistence-format version gates every on-disk snapshot artifact (envelope
@@ -19,15 +19,14 @@ export type PersistedDocumentRecord = {
   path: string;
   contentHash: string;
   partitionId: number;
-  searchDocument: SearchDocument;
-  lineSnippets: SearchSnippet[];
-  snippetLines: SnapshotSnippetLine[];
+  title: string;
+  tags: string[];
+  snippetCorpus: SnapshotSnippetCorpus;
 };
 
 export type SnapshotDiagnostics = {
   schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
   analyzer: SearchAnalyzerIdentity;
-  documents: readonly PersistedDocumentRecord[];
   warnings?: readonly string[];
 };
 
@@ -36,6 +35,7 @@ export type SnapshotEnvelope = {
   snapshotId: string;
   manifest: CanonicalSnapshotManifest;
   canonicalManifestSha256: string;
+  documents: readonly PersistedDocumentRecord[];
   diagnostics: SnapshotDiagnostics;
 };
 
@@ -57,11 +57,10 @@ export type ParsedBuildDocument = {
   documentId: string;
   path: string;
   contentHash: string;
-  searchDocument: SearchDocument;
+  searchDocument: SearchBuildDocument;
   positionTokens: Record<"morph" | "surface" | "ngram", Record<SearchField, readonly string[]>>;
   canonicalRecord: CanonicalDocumentRecord;
-  lineSnippets: SearchSnippet[];
-  snippetLines: Omit<SnapshotSnippetLine, "segmentId">[];
+  snippetCorpus: ParsedSnippetCorpus;
   partitionId: number;
 };
 
@@ -72,12 +71,8 @@ export type BuiltSnapshot = {
   canonicalManifestBytes: Uint8Array;
   canonicalManifestSha256: string;
   segments: readonly BuiltSegment[];
+  documents: readonly PersistedDocumentRecord[];
   diagnostics: SnapshotDiagnostics;
-};
-
-export type SnapshotLineSnippet = SearchSnippet & {
-  source: "snapshot-field-text";
-  queryChannels?: SearchTokenChannelTerms;
 };
 
 export type SnapshotSnippetLine = SearchSnippet & {
@@ -87,4 +82,18 @@ export type SnapshotSnippetLine = SearchSnippet & {
   byteStart: number;
   byteEnd: number;
   channels: SearchTokenChannelTerms;
+};
+
+export type SnapshotSnippetFallback =
+  | { kind: "line"; snippetId: string }
+  | { kind: "title"; line: 1 };
+
+export type SnapshotSnippetCorpus = {
+  bodyStartLine: number;
+  lines: SnapshotSnippetLine[];
+  fallback: SnapshotSnippetFallback;
+};
+
+export type ParsedSnippetCorpus = Omit<SnapshotSnippetCorpus, "lines"> & {
+  lines: Omit<SnapshotSnippetLine, "segmentId">[];
 };

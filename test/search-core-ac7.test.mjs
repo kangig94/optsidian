@@ -65,7 +65,7 @@ function snapshotHandleForBuiltSnapshot(built, pinToken = "pin-ac7") {
     snapshotId: built.snapshotId,
     pinToken,
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(textEncoder.encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(textEncoder.encode(JSON.stringify(built.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,

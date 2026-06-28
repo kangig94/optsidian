@@ -67,6 +67,7 @@ test("canonical segment codec round-trips to byte-identical canonical bytes", ()
     ["alpha", 1, 1, [0, 4]],
     ["beta", 0, 2, [1, 3, 5]]
   ]);
+  assert.equal(decoded.fieldTexts?.some((fieldText) => fieldText.fieldId === POSITIONAL_FIELD_ID.body), false);
 });
 
 test("canonical segment content hash is deterministic for identical logical content", () => {

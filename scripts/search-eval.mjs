@@ -32,6 +32,7 @@ const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
   }
 });
 const INDEX_BENCHMARK_ACTIONS = new Set(["load", "rebuild", "clear", "clear-load", "clear-rebuild"]);
+const SEARCH_TOKEN_CHANNELS = ["morph", "surface", "ngram"];
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -898,12 +899,22 @@ function normalizeRankingConfig(config) {
 
 function featureLexicalScore(feature, config) {
   let score = 0;
-  for (const term of feature?.bm25 ?? []) {
+  for (const term of canonicalBm25Order(feature?.bm25 ?? [])) {
     score += numberOrZero(term.score) *
       numberOrZero(config.tokenChannelWeights[term.channel]) *
       numberOrZero(config.fieldChannelBoosts[term.channel]?.[term.field]);
   }
   return score;
+}
+
+function canonicalBm25Order(terms) {
+  return [...terms].sort(compareCanonicalBm25Terms);
+}
+
+function compareCanonicalBm25Terms(left, right) {
+  return SEARCH_TOKEN_CHANNELS.indexOf(left.channel) - SEARCH_TOKEN_CHANNELS.indexOf(right.channel) ||
+    numberOrZero(left.fieldId) - numberOrZero(right.fieldId) ||
+    String(left.term ?? "").localeCompare(String(right.term ?? ""));
 }
 
 function featureProximityScore(feature) {

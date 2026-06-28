@@ -1,10 +1,17 @@
 import path from "node:path";
-import type { SearchDocument } from "../markdown.js";
 import { surfaceSearchTerms } from "../analysis/channels.js";
 import { EXACT_PRIORITY, PHRASE_PRIORITY } from "../constants.js";
 import type { QueryContext } from "../internal-types.js";
 
-export function bestExactPriority(doc: SearchDocument, context: QueryContext): number {
+export type IdentityDocument = {
+  path: string;
+  title: string;
+  aliases: readonly string[];
+  headings: readonly string[];
+  bodySurfaceTokens: string;
+};
+
+export function bestExactPriority(doc: IdentityDocument, context: QueryContext): number {
   const priorities: number[] = [];
   if (context.allowed.has("title") && hasExactIdentityPhrase(doc.title, context.phrases)) priorities.push(EXACT_PRIORITY.title);
   if (context.allowed.has("aliases") && doc.aliases.some((alias) => hasExactIdentityPhrase(alias, context.phrases))) {
@@ -23,7 +30,7 @@ export function identityScoreFromExactPriority(priority: number | null | undefin
   return 0;
 }
 
-export function bestPhrasePriority(doc: SearchDocument, context: QueryContext): number {
+export function bestPhrasePriority(doc: IdentityDocument, context: QueryContext): number {
   if (context.phrases.length === 0) return Number.POSITIVE_INFINITY;
   const priorities: number[] = [];
   if (context.allowed.has("title") && containsAnyIdentityPhrase(doc.title, context.phrases)) priorities.push(PHRASE_PRIORITY.title);

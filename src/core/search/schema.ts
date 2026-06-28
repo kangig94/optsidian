@@ -1,37 +1,40 @@
 import crypto from "node:crypto";
-import type { SearchDocument } from "./markdown.js";
+import type { SearchBuildDocument } from "./markdown.js";
 import type { SearchField } from "../types.js";
 import type { SearchTokenChannel } from "./analysis/index.js";
 
 export const SEARCH_PROPERTIES = ["title", "aliases", "tags", "headings", "path", "body"] as const satisfies readonly SearchField[];
 export const SEARCH_DB_SCHEMA = {
-  path: "string",
-  title: "string",
-  aliases: "string[]",
-  tags: "string[]",
-  headings: "string[]",
-  body: "string",
-  pathTokens: "string",
-  titleTokens: "string",
-  aliasesTokens: "string",
-  tagsTokens: "string",
-  headingsTokens: "string",
-  bodyTokens: "string",
-  pathSurfaceTokens: "string",
-  titleSurfaceTokens: "string",
-  aliasesSurfaceTokens: "string",
-  tagsSurfaceTokens: "string",
-  headingsSurfaceTokens: "string",
-  bodySurfaceTokens: "string",
-  pathNgramTokens: "string",
-  titleNgramTokens: "string",
-  aliasesNgramTokens: "string",
-  tagsNgramTokens: "string",
-  headingsNgramTokens: "string",
-  bodyNgramTokens: "string"
+  persistedDocument: {
+    fields: ["documentId", "path", "contentHash", "partitionId", "title", "tags"]
+  },
+  indexedPostings: {
+    fields: ["title", "aliases", "tags", "headings", "path", "body"],
+    channels: ["morph", "surface", "ngram"]
+  },
+  indexedTokenProperties: {
+    morph: ["titleTokens", "aliasesTokens", "tagsTokens", "headingsTokens", "pathTokens", "bodyTokens"],
+    surface: ["titleSurfaceTokens", "aliasesSurfaceTokens", "tagsSurfaceTokens", "headingsSurfaceTokens", "pathSurfaceTokens", "bodySurfaceTokens"],
+    ngram: ["titleNgramTokens", "aliasesNgramTokens", "tagsNgramTokens", "headingsNgramTokens", "pathNgramTokens", "bodyNgramTokens"]
+  },
+  segmentFieldTexts: {
+    fields: ["title", "aliases", "tags", "headings", "path"]
+  },
+  snippetCorpus: {
+    name: "single-snippet-corpus",
+    version: 2,
+    fields: {
+      bodyStartLine: "number",
+      lines: ["snippetId", "segmentId", "documentId", "line", "text", "byteStart", "byteEnd", "channels"],
+      fallback: {
+        line: ["kind", "snippetId"],
+        title: ["kind", "line"]
+      }
+    }
+  }
 } as const;
 export const SEARCH_SCHEMA_DIGEST = crypto.createHash("sha256").update(JSON.stringify(SEARCH_DB_SCHEMA)).digest("hex");
-export const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchDocument> = {
+export const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchBuildDocument> = {
   title: "titleTokens",
   aliases: "aliasesTokens",
   tags: "tagsTokens",
@@ -39,7 +42,7 @@ export const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchDocume
   path: "pathTokens",
   body: "bodyTokens"
 };
-export const SEARCH_FIELD_CHANNEL_INDEX_PROPERTY: Record<SearchTokenChannel, Record<SearchField, keyof SearchDocument>> = {
+export const SEARCH_FIELD_CHANNEL_INDEX_PROPERTY: Record<SearchTokenChannel, Record<SearchField, keyof SearchBuildDocument>> = {
   morph: SEARCH_FIELD_INDEX_PROPERTY,
   surface: {
     title: "titleSurfaceTokens",

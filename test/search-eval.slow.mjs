@@ -103,7 +103,7 @@ test("search:eval offline explain trace replay validates mutations deterministic
     snapshotId: built.snapshotId,
     pinToken: "pin-search-eval-slow",
     bm25Stats: bm25StatsFromManifest(built.manifest),
-    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.diagnostics.documents))),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,

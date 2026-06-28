@@ -10,6 +10,7 @@ import {
   SNIPPET_LINE_NGRAM_MAX_TERMS,
   SNIPPET_LINE_SURFACE_MAX_TERMS,
   bodyIndexBudgetForText,
+  emptySearchTokenChannels,
   searchFieldTokenTexts,
   type BodyIndexBudget,
   type SearchTokenChannel
@@ -22,7 +23,7 @@ import {
   normalizeIndexAffectingSearchSettings,
   type IndexAffectingSearchSettings
 } from "../../core/search/index-settings.js";
-import { parseMarkdownNote, type SearchDocument } from "../../core/search/markdown.js";
+import { parseMarkdownNote, type SearchBuildDocument } from "../../core/search/markdown.js";
 import {
   CANONICAL_BM25_STATS_SCHEMA_ID,
   CANONICAL_DOC_PROJECTION_SCHEMA_ID,
@@ -57,6 +58,7 @@ import {
   type BuiltSegment,
   type BuiltSnapshot,
   type ParsedBuildDocument,
+  type ParsedSnippetCorpus,
   type PersistedDocumentRecord,
   type SnapshotSnippetLine
 } from "./types.js";
@@ -173,12 +175,16 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
     path: document.path,
     contentHash: document.contentHash,
     partitionId: document.partitionId,
-    searchDocument: document.searchDocument,
-    lineSnippets: document.lineSnippets,
-    snippetLines: document.snippetLines.map((line) => ({
-      ...line,
-      segmentId: segmentByDocumentId.get(document.documentId) ?? ""
-    }))
+    title: document.searchDocument.title,
+    tags: document.searchDocument.tags,
+    snippetCorpus: {
+      bodyStartLine: document.snippetCorpus.bodyStartLine,
+      fallback: document.snippetCorpus.fallback,
+      lines: document.snippetCorpus.lines.map((line) => ({
+        ...line,
+        segmentId: segmentByDocumentId.get(document.documentId) ?? ""
+      }))
+    }
   }));
 
   return {
@@ -188,10 +194,10 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
     canonicalManifestBytes,
     canonicalManifestSha256: snapshotId,
     segments: builtSegments,
+    documents: persistedDocuments,
     diagnostics: {
       schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
-      analyzer: input.analyzerIdentity,
-      documents: persistedDocuments
+      analyzer: input.analyzerIdentity
     }
   };
 }
@@ -426,7 +432,7 @@ async function parseBuildDocument(
       ngramRaw: bodyBudget.bodyNgramText
     })
   };
-  const searchDocument: SearchDocument = {
+  const searchDocument: SearchBuildDocument = {
     ...note,
     pathTokens: fields.path.morph,
     titleTokens: fields.title.morph,
@@ -478,8 +484,11 @@ async function parseBuildDocument(
     positionTokens,
     canonicalRecord,
     partitionId,
-    lineSnippets: lineSpans.map((line) => ({ line: line.line, text: line.text })),
-    snippetLines: lineSnippetEntries(documentId, snippetLineInputs, tokenized.slice(6), searchSettings)
+    snippetCorpus: snippetCorpusEntries(
+      documentId,
+      lineSpans,
+      lineSnippetEntries(documentId, snippetLineInputs, tokenized.slice(6), searchSettings)
+    )
   };
 }
 
@@ -492,7 +501,7 @@ function buildSegment(partitionId: number, documents: readonly ParsedBuildDocume
   sorted.forEach((document, index) => {
     const docId = index + 1;
     canonicalDocuments.push(document.canonicalRecord);
-    for (const field of SEARCH_PROPERTIES) {
+    for (const field of SEGMENT_FIELD_TEXT_FIELDS) {
       fieldTexts.push({
         docId,
         fieldId: POSITIONAL_FIELD_ID[field],
@@ -611,6 +620,12 @@ type MutableBuildBm25Stats = {
   documentFrequencies: Map<string, number>;
 };
 
+type SegmentFieldTextField = Exclude<SearchField, "body">;
+
+const SEGMENT_FIELD_TEXT_FIELDS = SEARCH_PROPERTIES.filter(
+  (field): field is SegmentFieldTextField => field !== "body"
+);
+
 function recordBuildBm25Stats(
   stats: Map<string, MutableBuildBm25Stats>,
   channel: SearchTokenChannel,
@@ -658,27 +673,40 @@ function buildBm25StatsRows(stats: ReadonlyMap<string, MutableBuildBm25Stats>): 
     }));
 }
 
-function parsedFieldHashes(document: SearchDocument): Record<string, string> {
+function parsedFieldHashes(document: SearchBuildDocument): Record<string, string> {
   return Object.fromEntries(
-    SEARCH_PROPERTIES.map((field) => [field, sha256(utf8(canonicalFieldText(document, field)))])
+    SEARCH_PROPERTIES.map((field) => [field, sha256(utf8(parsedFieldHashText(document, field)))])
   );
 }
 
-function canonicalFieldText(document: SearchDocument, field: SearchField): string {
-  if (field === "path") return document.path;
-  if (field === "title") return document.title;
-  if (field === "aliases") return document.aliases.join("\n");
-  if (field === "tags") return document.tags.join("\n");
-  if (field === "headings") return document.headings.join("\n");
-  return document.body;
+function parsedFieldHashText(document: SearchBuildDocument, field: SearchField): string {
+  if (field === "body") return document.body;
+  return canonicalFieldText(document, field);
 }
 
-function tokenText(document: SearchDocument, channel: "surface" | "ngram", field: SearchField): string[] {
+function canonicalFieldText(document: SearchBuildDocument, field: SegmentFieldTextField): string {
+  switch (field) {
+    case "path":
+      return document.path;
+    case "title":
+      return document.title;
+    case "aliases":
+      return document.aliases.join("\n");
+    case "tags":
+      return document.tags.join("\n");
+    case "headings":
+      return document.headings.join("\n");
+  }
+  const exhaustive: never = field;
+  return exhaustive;
+}
+
+function tokenText(document: SearchBuildDocument, channel: "surface" | "ngram", field: SearchField): string[] {
   const value = document[SEARCH_FIELD_CHANNEL_INDEX_PROPERTY[channel][field]];
   return typeof value === "string" ? value.split(" ").filter(Boolean) : [];
 }
 
-function channelPositionTokens(document: SearchDocument, channel: "surface" | "ngram"): Record<SearchField, readonly string[]> {
+function channelPositionTokens(document: SearchBuildDocument, channel: "surface" | "ngram"): Record<SearchField, readonly string[]> {
   const output = {} as Record<SearchField, readonly string[]>;
   for (const field of SEARCH_PROPERTIES) output[field] = tokenText(document, channel, field);
   return output;
@@ -745,6 +773,69 @@ function lineSnippetEntries(
       }
     };
   });
+}
+
+function snippetCorpusEntries(
+  documentId: string,
+  fullLineSpans: readonly LineSpanEntry[],
+  analyzedLines: readonly Omit<SnapshotSnippetLine, "segmentId">[]
+): ParsedSnippetCorpus {
+  const bodyStartLine = snippetCorpusBodyStartLine(fullLineSpans);
+  const linesByNumber = new Map<number, Omit<SnapshotSnippetLine, "segmentId">>();
+  for (const line of analyzedLines) {
+    if (line.line <= bodyStartLine) continue;
+    if (!linesByNumber.has(line.line)) linesByNumber.set(line.line, line);
+  }
+
+  const fallbackLine = snippetCorpusFallbackLine(fullLineSpans, bodyStartLine);
+  if (!fallbackLine) {
+    return {
+      bodyStartLine,
+      lines: [...linesByNumber.values()].sort((left, right) => left.line - right.line),
+      fallback: { kind: "title", line: 1 }
+    };
+  }
+
+  const fallbackSnippetId = `${documentId}:${fallbackLine.line}`;
+  if (!linesByNumber.has(fallbackLine.line)) {
+    linesByNumber.set(fallbackLine.line, {
+      snippetId: fallbackSnippetId,
+      documentId,
+      line: fallbackLine.line,
+      text: fallbackLine.text,
+      byteStart: fallbackLine.byteStart,
+      byteEnd: fallbackLine.byteEnd,
+      channels: emptySearchTokenChannels()
+    });
+  }
+
+  return {
+    bodyStartLine,
+    lines: [...linesByNumber.values()].sort((left, right) => left.line - right.line),
+    fallback: { kind: "line", snippetId: fallbackSnippetId }
+  };
+}
+
+function snippetCorpusBodyStartLine(lines: readonly LineSpanEntry[]): number {
+  if (lines[0]?.text.trim() !== "---") return 0;
+  for (let index = 1; index < lines.length; index += 1) {
+    const trimmed = lines[index].text.trim();
+    if (trimmed === "---" || trimmed === "...") return lines[index].line;
+  }
+  return 0;
+}
+
+function snippetCorpusFallbackLine(
+  lines: readonly LineSpanEntry[],
+  bodyStartLine: number
+): LineSpanEntry | undefined {
+  let firstNonBlank: LineSpanEntry | undefined;
+  for (const line of lines) {
+    if (line.line <= bodyStartLine || line.text.trim().length === 0) continue;
+    firstNonBlank ??= line;
+    if (/^#{1,6}\s+/.test(line.text)) return line;
+  }
+  return firstNonBlank;
 }
 
 function snippetLineAnalysisInputs(

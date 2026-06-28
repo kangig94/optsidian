@@ -1,12 +1,40 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import { buildCanonicalSearchSnapshot } from "../src/daemon/search-store/builder.ts";
 import {
   decodeCanonicalSegment,
   encodeCanonicalSegment
 } from "../src/core/search/segments/canonical.ts";
 import { ProjectionReader } from "../src/core/search/retrieval/positional/segment-projection-reader.ts";
 import { POSITIONAL_FIELD_ID } from "../src/core/search/retrieval/positional/types.ts";
+
+function testAnalyzer() {
+  const tokenize = (text) =>
+    [...text.normalize("NFKC").toLowerCase().matchAll(/[\p{Letter}\p{Mark}\p{Number}]+/gu)].map((match) => match[0]);
+  return {
+    identity: {
+      name: "test-analyzer",
+      version: "1",
+      node: "test"
+    },
+    tokenize: async (text) => tokenize(text),
+    tokenizeBatch: async (texts) => texts.map((text) => tokenize(text))
+  };
+}
+
+function tempRoot() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-search-ac3-"));
+}
+
+function writeVaultFile(vault, rel, content) {
+  const file = path.join(vault, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+}
 
 test("AC3 docProjection reader exposes shard-local identity, tags, lengths, and offsets", () => {
   const bytes = encodeCanonicalSegment({
@@ -24,21 +52,31 @@ test("AC3 docProjection reader exposes shard-local identity, tags, lengths, and 
       { docId: 1, fieldId: POSITIONAL_FIELD_ID.aliases, text: "Project Alpha\nAP" },
       { docId: 1, fieldId: POSITIONAL_FIELD_ID.tags, text: "Focus\nSearch" },
       { docId: 1, fieldId: POSITIONAL_FIELD_ID.headings, text: "Implementation Notes" },
-      { docId: 1, fieldId: POSITIONAL_FIELD_ID.path, text: "Projects/Alpha Project.md" },
-      { docId: 1, fieldId: POSITIONAL_FIELD_ID.body, text: "alpha body" }
+      { docId: 1, fieldId: POSITIONAL_FIELD_ID.path, text: "Projects/Alpha Project.md" }
     ],
-    bm25: [{
-      channel: "morph",
-      fieldId: POSITIONAL_FIELD_ID.title,
-      documentCount: 1,
-      totalFieldLength: 2,
-      documentLengths: [{ docId: 1, length: 2 }],
-      documentFrequencies: [{ term: "alpha", frequency: 1 }]
-    }]
+    bm25: [
+      {
+        channel: "morph",
+        fieldId: POSITIONAL_FIELD_ID.title,
+        documentCount: 1,
+        totalFieldLength: 2,
+        documentLengths: [{ docId: 1, length: 2 }],
+        documentFrequencies: [{ term: "alpha", frequency: 1 }]
+      },
+      {
+        channel: "morph",
+        fieldId: POSITIONAL_FIELD_ID.body,
+        documentCount: 1,
+        totalFieldLength: 2,
+        documentLengths: [{ docId: 1, length: 2 }],
+        documentFrequencies: [{ term: "body", frequency: 1 }]
+      }
+    ]
   });
 
   const decoded = decodeCanonicalSegment(bytes);
   assert.equal(decoded.documents?.length, 1);
+  assert.equal(decoded.fieldTexts?.some((entry) => entry.fieldId === POSITIONAL_FIELD_ID.body), false);
 
   const projection = new ProjectionReader(bytes);
   assert.equal(projection.documentCount(), 1);
@@ -60,4 +98,50 @@ test("AC3 docProjection reader exposes shard-local identity, tags, lengths, and 
   const offsets = projection.offsets(1, "morph", POSITIONAL_FIELD_ID.title);
   assert.equal(offsets.length, 1);
   assert.ok(offsets[0].fieldTextByteLength > 0);
+
+  assert.equal(projection.fieldLength(1, "morph", POSITIONAL_FIELD_ID.body), 2);
+  const bodyOffsets = projection.offsets(1, "morph", POSITIONAL_FIELD_ID.body);
+  assert.equal(bodyOffsets.length, 1);
+  assert.equal(bodyOffsets[0].fieldTextOffset, 0);
+  assert.equal(bodyOffsets[0].fieldTextByteLength, 0);
+});
+
+test("AC3 canonical segment rejects body field text rows", () => {
+  assert.throws(
+    () => encodeCanonicalSegment({
+      postings: [],
+      fieldTexts: [{ docId: 1, fieldId: POSITIONAL_FIELD_ID.body, text: "alpha body" }]
+    }),
+    /body field text/
+  );
+});
+
+test("AC3 freshly built segment omits body field text while preserving body index data", async () => {
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nalpha body target\n");
+
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer: testAnalyzer(),
+    partitionBits: 1
+  });
+  const decoded = decodeCanonicalSegment(built.segments[0].bytes);
+  const bodyFieldId = POSITIONAL_FIELD_ID.body;
+
+  assert.equal(decoded.fieldTexts?.some((entry) => entry.fieldId === bodyFieldId), false);
+  assert.ok(decoded.postings.some((posting) => posting.fieldId === bodyFieldId && posting.positions.length > 0));
+
+  const bodyStats = decoded.bm25?.find((entry) => entry.channel === "morph" && entry.fieldId === bodyFieldId);
+  assert.ok(bodyStats);
+  assert.equal(bodyStats.documentCount, 1);
+  assert.ok(bodyStats.totalFieldLength > 0);
+  assert.equal(bodyStats.documentLengths.length, 1);
+  assert.ok(bodyStats.documentLengths[0].length > 0);
+
+  const projection = new ProjectionReader(built.segments[0].bytes);
+  assert.ok(projection.fieldLength(1, "morph", bodyFieldId) > 0);
+  const bodyOffsets = projection.offsets(1, "morph", bodyFieldId);
+  assert.equal(bodyOffsets.length, 1);
+  assert.equal(bodyOffsets[0].fieldTextOffset, 0);
+  assert.equal(bodyOffsets[0].fieldTextByteLength, 0);
 });

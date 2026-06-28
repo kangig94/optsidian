@@ -619,6 +619,7 @@ function normalizeFieldTexts(fieldTexts: readonly CanonicalFieldText[]): Canonic
   return fieldTexts.map((fieldText) => {
     assertSafeUnsignedInteger(fieldText.docId, "field text docId");
     assertSafeUnsignedInteger(fieldText.fieldId, "field text fieldId");
+    assertFieldTextIsEncodable(fieldText.fieldId);
     return {
       docId: fieldText.docId,
       fieldId: fieldText.fieldId,
@@ -628,6 +629,12 @@ function normalizeFieldTexts(fieldTexts: readonly CanonicalFieldText[]): Canonic
     if (left.docId !== right.docId) return left.docId - right.docId;
     return left.fieldId - right.fieldId;
   });
+}
+
+function assertFieldTextIsEncodable(fieldId: number): void {
+  if (fieldId === fieldIdForSearchField("body")) {
+    throw new Error("canonical fieldTexts cannot encode body field text");
+  }
 }
 
 function normalizeBm25Stats(stats: readonly CanonicalBm25FieldStats[]): CanonicalBm25FieldStats[] {
@@ -818,6 +825,7 @@ function encodeFieldTextsSectionWithOffsets(fieldTexts: readonly CanonicalFieldT
   const offsets = new Map<string, { offset: number; byteLength: number }>();
   writer.writeUnsigned(fieldTexts.length);
   for (const fieldText of fieldTexts) {
+    assertFieldTextIsEncodable(fieldText.fieldId);
     const offset = writer.byteLength();
     writer.writeUnsigned(fieldText.docId);
     writer.writeUnsigned(fieldText.fieldId);
@@ -1770,7 +1778,6 @@ function segmentForTestRecords(records: ReadonlyArray<CanonicalDocumentRecord & 
       snippetLineSpanHash: record.snippetLineSpanHash,
       deleted: false
     });
-    fieldTexts.push({ docId, fieldId: 5, text: record.content.normalize("NFKC") });
   });
   return {
     postings,

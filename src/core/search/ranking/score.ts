@@ -1,4 +1,3 @@
-import type { SearchDocument } from "../markdown.js";
 import type { SearchField, SearchMatch } from "../../types.js";
 import {
   COVERAGE_BUCKET_MIN_TERMS,
@@ -8,42 +7,35 @@ import {
   SEARCH_SCORING_LAMBDAS,
   SEARCH_TOKEN_CHANNEL_WEIGHT
 } from "../constants.js";
-import type { QueryContext, RankedCandidate } from "../internal-types.js";
-import { SEARCH_FIELD_CHANNEL_BOOST, SEARCH_PROPERTIES } from "../schema.js";
+import type { RankedCandidate } from "../internal-types.js";
+import { SEARCH_FIELD_CHANNEL_BOOST } from "../schema.js";
 import {
-  emptySearchTokenChannels,
   SEARCH_TOKEN_CHANNELS,
-  uniqueSearchTerms,
   type SearchTokenChannel,
-  type SearchTokenChannelTerms
 } from "../analysis/index.js";
-import { metadataCoverage } from "./coverage.js";
-import { bestExactPriority, bestPhrasePriority, identityPhraseCandidates, identityScoreFromExactPriority } from "./identity.js";
+import { identityScoreFromExactPriority } from "./identity.js";
 
 export { identityScoreFromExactPriority } from "./identity.js";
 
+export type RankDocument = {
+  id: string;
+  path: string;
+  title: string;
+  tags: string[];
+};
+
 export type CandidateRankSignals = {
-  exactPriority?: number;
-  phrasePriority?: number;
-  coverageTerms?: number;
-  coverageFieldScore?: number;
-  lexicalScore?: number;
-  identityScore?: number;
-  exactLambda?: number;
-  denseAgreement?: number;
+  exactPriority: number;
+  phrasePriority: number;
+  coverageTerms: number;
+  coverageFieldScore: number;
+  lexicalScore: number;
+  identityScore: number;
+  exactLambda: number;
+  denseAgreement: number;
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;
-};
-
-export const EMPTY_RANK_SIGNALS: CandidateRankSignals = {
-  lexicalScore: 0,
-  identityScore: 0,
-  exactLambda: SEARCH_SCORING_LAMBDAS.exact,
-  denseAgreement: 0,
-  rarityScore: 0,
-  proximityScore: 0,
-  bodyScore: 0
 };
 
 export type ExactDominanceBound = {
@@ -79,37 +71,24 @@ export function compareCanonicalBm25Terms(
   );
 }
 
-export function rerankCandidates(
-  query: string,
-  queryTerms: string[],
-  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
-  fields?: SearchField[]
-): RankedCandidate[] {
-  const context = queryContext(query, queryTerms, firstQueryChannels(hits), fields);
-  return rerankCandidatesWithContext(query, hits, context);
-}
-
 export function rerankCandidatesWithSignals(
-  query: string,
-  queryTerms: string[],
-  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
-  fields: SearchField[] | undefined,
+  _query: string,
+  _queryTerms: string[],
+  hits: Array<{ document: RankDocument; score: number }>,
+  _fields: SearchField[] | undefined,
   signals: Map<string, CandidateRankSignals>
 ): RankedCandidate[] {
-  const context = queryContext(query, queryTerms, firstQueryChannels(hits), fields);
-  return rerankCandidatesWithContext(query, hits, context, signals);
+  return rerankCandidates(hits, signals);
 }
 
-function rerankCandidatesWithContext(
-  _query: string,
-  hits: Array<{ document: SearchDocument; score: number; queryChannels?: SearchTokenChannelTerms }>,
-  context: QueryContext,
-  signalOverride?: Map<string, CandidateRankSignals>
+function rerankCandidates(
+  hits: Array<{ document: RankDocument; score: number }>,
+  signals: Map<string, CandidateRankSignals>
 ): RankedCandidate[] {
-  const signals = signalOverride ?? new Map<string, CandidateRankSignals>();
-  const candidates = hits.map((hit, index) =>
-    rankedCandidate(hit.document, index + 1, hit.score, context, signals.get(hit.document.path) ?? EMPTY_RANK_SIGNALS)
-  );
+  const candidates = hits.map((hit, index) => {
+    const signal = requiredRankSignals(hit.document, signals);
+    return rankedCandidate(hit.document, index + 1, signal);
+  });
 
   return candidates
     .map((candidate) => ({
@@ -117,6 +96,35 @@ function rerankCandidatesWithContext(
       score: rerankScore(candidate)
     }))
     .sort(compareRankedMatches);
+}
+
+const FINITE_RANK_SIGNAL_KEYS = [
+  "coverageTerms",
+  "coverageFieldScore",
+  "lexicalScore",
+  "identityScore",
+  "exactLambda",
+  "denseAgreement",
+  "rarityScore",
+  "proximityScore",
+  "bodyScore"
+] as const satisfies readonly (keyof CandidateRankSignals)[];
+
+function requiredRankSignals(doc: RankDocument, signals: ReadonlyMap<string, CandidateRankSignals>): CandidateRankSignals {
+  const signal = signals.get(doc.id);
+  if (!signal) throw new Error(`missing rank signals for document ${doc.id} (${doc.path})`);
+  if (!isRankPriority(signal.exactPriority)) throw new Error(`incomplete rank signals for document ${doc.id}: exactPriority`);
+  if (!isRankPriority(signal.phrasePriority)) throw new Error(`incomplete rank signals for document ${doc.id}: phrasePriority`);
+  for (const key of FINITE_RANK_SIGNAL_KEYS) {
+    if (typeof signal[key] !== "number" || !Number.isFinite(signal[key])) {
+      throw new Error(`incomplete rank signals for document ${doc.id}: ${key}`);
+    }
+  }
+  return signal;
+}
+
+function isRankPriority(value: unknown): value is number {
+  return typeof value === "number" && (Number.isFinite(value) || value === Number.POSITIVE_INFINITY);
 }
 
 export function isRankedCandidate(match: { path: string }): match is RankedCandidate {
@@ -138,37 +146,16 @@ export function compareTagOnlyMatches(left: { path: string }, right: { path: str
   return left.path.localeCompare(right.path);
 }
 
-function queryContext(
-  query: string,
-  queryTerms: string[],
-  queryChannels?: SearchTokenChannelTerms,
-  fields?: SearchField[]
-): QueryContext {
-  const phrases = uniquePhrases([
-    ...identityPhraseCandidates(query),
-    ...identityPhraseCandidates(queryTerms.join(" "))
-  ]);
-  return {
-    phrase: phrases[0] ?? "",
-    phrases,
-    terms: queryTerms,
-    channels: normalizedQueryChannels(queryTerms, queryChannels),
-    allowed: new Set(searchFields(fields))
-  };
-}
-
 function rankedCandidate(
-  doc: SearchDocument,
+  doc: RankDocument,
   baseRank: number,
-  baseScore: number,
-  context: QueryContext,
   signals: CandidateRankSignals
 ): RankedCandidate {
-  const exactPriority = signals.exactPriority ?? bestExactPriority(doc, context);
-  const phrasePriority = signals.phrasePriority ?? bestPhrasePriority(doc, context);
+  const exactPriority = signals.exactPriority;
+  const phrasePriority = signals.phrasePriority;
   const coverage = {
-    terms: signals.coverageTerms ?? metadataCoverage(doc, context).terms,
-    fieldScore: signals.coverageFieldScore ?? metadataCoverage(doc, context).fieldScore
+    terms: signals.coverageTerms,
+    fieldScore: signals.coverageFieldScore
   };
   return {
     path: doc.path,
@@ -181,46 +168,19 @@ function rankedCandidate(
     phrasePriority,
     coverageTerms: coverage.terms,
     coverageFieldScore: coverage.fieldScore,
-    lexicalScore: finiteNumber(signals.lexicalScore ?? baseScore),
-    identityScore: finiteNumber(signals.identityScore ?? identityScoreFromExactPriority(exactPriority)),
-    exactLambda: finiteNumber(signals.exactLambda ?? SEARCH_SCORING_LAMBDAS.exact),
-    denseAgreement: finiteNumber(signals.denseAgreement ?? 0),
-    rarityScore: finiteNumber(signals.rarityScore ?? 0),
-    proximityScore: finiteNumber(signals.proximityScore ?? 0),
-    bodyScore: finiteNumber(signals.bodyScore ?? 0)
+    lexicalScore: finiteNumber(signals.lexicalScore),
+    identityScore: finiteNumber(signals.identityScore),
+    exactLambda: finiteNumber(signals.exactLambda),
+    denseAgreement: finiteNumber(signals.denseAgreement),
+    rarityScore: finiteNumber(signals.rarityScore),
+    proximityScore: finiteNumber(signals.proximityScore),
+    bodyScore: finiteNumber(signals.bodyScore)
   };
 }
 
 function compareRankedMatches(left: RankedCandidate, right: RankedCandidate): number {
   if (right.score !== left.score) return right.score - left.score;
   return left.path.localeCompare(right.path);
-}
-
-function searchFields(fields: SearchField[] | undefined): SearchField[] {
-  return fields ?? [...SEARCH_PROPERTIES];
-}
-
-function uniquePhrases(phrases: readonly string[]): string[] {
-  return [...new Set(phrases.filter(Boolean))];
-}
-
-function firstQueryChannels(
-  hits: Array<{ queryChannels?: SearchTokenChannelTerms }>
-): SearchTokenChannelTerms | undefined {
-  return hits.find((hit) => hit.queryChannels)?.queryChannels;
-}
-
-function normalizedQueryChannels(
-  queryTerms: readonly string[],
-  queryChannels: SearchTokenChannelTerms | undefined
-): SearchTokenChannelTerms {
-  const channels = emptySearchTokenChannels();
-  for (const channel of SEARCH_TOKEN_CHANNELS) {
-    channels[channel] = uniqueSearchTerms(queryChannels?.[channel] ?? []);
-  }
-  if (SEARCH_TOKEN_CHANNELS.some((channel) => channels[channel].length > 0)) return channels;
-  channels.morph = uniqueSearchTerms(queryTerms);
-  return channels;
 }
 
 function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms: number): number {
