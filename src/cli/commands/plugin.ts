@@ -82,9 +82,10 @@ export async function runPluginInstall(args: ParsedArgs, output: OutputWriter = 
   const format = parseFormat(getValue(args, "format"));
   const vaultPath = resolveVaultRoot(args);
   const requestedSource = resolveInstallSource(args);
+  const releaseAuth = hasFlag(args, "auth");
   let tempRoot: string | undefined;
   try {
-    const materialized = await materializeSource(requestedSource);
+    const materialized = await materializeSource(requestedSource, { releaseAuth });
     tempRoot = materialized.tempRoot;
     const source = materialized.source;
     const plugin = loadPluginManifest(materialized.pluginRoot);
@@ -125,10 +126,12 @@ function resolveInstallSource(args: ParsedArgs): RequestedPluginInstallSource {
   const urlValue = getValue(args, "url");
   const ref = optionalValue(args, "ref");
   const dir = optionalValue(args, "dir");
+  const auth = hasFlag(args, "auth");
   if (pathValue !== undefined) {
     if (pathValue.length === 0) throw new UsageError("path=<plugin-dir> requires a value");
     if (ref) throw new UsageError("ref=<git-ref> only applies to url=<git-url> plugin installs");
     if (dir) throw new UsageError("dir=<subdir> only applies to url=<git-url> plugin installs");
+    if (auth) throw new UsageError("auth=true only applies to url=<git-url> private release installs");
     return { type: "local", path: resolveExistingDirectory(pathValue, "Plugin path") };
   }
   if (urlValue === undefined || urlValue.length === 0) {
@@ -159,7 +162,7 @@ export function normalizeGitSource(input: string): string {
   return input;
 }
 
-async function materializeSource(requested: RequestedPluginInstallSource): Promise<{
+async function materializeSource(requested: RequestedPluginInstallSource, options: { releaseAuth?: boolean } = {}): Promise<{
   source: PluginInstallSource;
   pluginRoot: string;
   tempRoot?: string;
@@ -177,6 +180,7 @@ async function materializeSource(requested: RequestedPluginInstallSource): Promi
       host: repo.host,
       apiProtocol: repo.apiProtocol,
       env: process.env,
+      auth: options.releaseAuth === true,
       ...(requested.ref ? { tag: requested.ref } : {})
     });
     if (release) {

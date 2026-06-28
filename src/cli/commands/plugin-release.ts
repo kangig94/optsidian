@@ -37,7 +37,8 @@ export function parseGithubRepo(url: string): GithubRepo | undefined {
 
 type ReleasePlugin = { tag: string; dir: string };
 
-// Tries to install from a published GitHub release. Returns the temp dir holding the
+// Tries to install from a published GitHub release. Auth is opt-in because url=
+// accepts GitHub-compatible hosts. Returns the temp dir holding the
 // downloaded plugin assets (caller owns cleanup), or null when no usable release exists
 // — a missing release, a draft, or absent required assets — so the caller falls back to
 // the git clone. A release that exists but whose asset download fails is a hard error.
@@ -47,9 +48,11 @@ export async function fetchReleasePlugin(options: {
   repo: string;
   apiProtocol: "http" | "https";
   tag?: string;
+  auth?: boolean;
   env: NodeJS.ProcessEnv;
 }): Promise<ReleasePlugin | null> {
   const { host, owner, repo, apiProtocol, tag, env } = options;
+  const sendAuth = options.auth === true;
   const base = githubApiBase(env, { host, apiProtocol });
   const repoPath = `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   const endpoint = tag
@@ -58,7 +61,7 @@ export async function fetchReleasePlugin(options: {
 
   let payload: unknown;
   try {
-    payload = await fetchJson(endpoint, env);
+    payload = await fetchJson(endpoint, env, { sendAuth });
   } catch {
     // No published release (404), network failure, or invalid payload: fall back to the
     // git clone, which finds the plugin at the repo root (or dir=).
@@ -78,7 +81,9 @@ export async function fetchReleasePlugin(options: {
     for (const name of PLUGIN_ASSET_NAMES) {
       const downloadUrl = assets.get(name);
       if (downloadUrl) {
-        await downloadFile(downloadUrl, path.join(dir, name), env);
+        await downloadFile(downloadUrl, path.join(dir, name), env, {
+          sendAuth: shouldAuthenticateAssetDownload(endpoint, downloadUrl, sendAuth)
+        });
       }
     }
     return { tag: releaseTag, dir };
@@ -125,6 +130,22 @@ function stripGitSuffix(input: string): string {
 
 function isGithubDotCom(host: string): boolean {
   return host.toLowerCase() === "github.com" || host.toLowerCase() === "www.github.com";
+}
+
+function shouldAuthenticateAssetDownload(endpoint: string, downloadUrl: string, sendAuth: boolean): boolean {
+  if (!sendAuth) return false;
+  try {
+    const endpointUrl = new URL(endpoint);
+    const assetUrl = new URL(downloadUrl, endpointUrl);
+    return credentialHostForReleaseUrl(assetUrl) === credentialHostForReleaseUrl(endpointUrl);
+  } catch {
+    return false;
+  }
+}
+
+function credentialHostForReleaseUrl(url: URL): string {
+  if (url.hostname.toLowerCase() === "api.github.com") return "github.com";
+  return url.host || url.hostname;
 }
 
 function readReleaseAssets(release: Record<string, unknown>): Map<string, string> {

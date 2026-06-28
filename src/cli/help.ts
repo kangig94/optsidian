@@ -240,7 +240,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     summary: "Install marketplace or custom Obsidian plugins",
     usage: [
       "optsidian plugin:install id=<plugin-id> [enable]",
-      "optsidian plugin:install url=<git-url> [ref=<git-ref>] [dir=<subdir>] [vault-path=<path>] [enable] [format=text|json]",
+      "optsidian plugin:install url=<git-url> [ref=<git-ref>] [dir=<subdir>] [auth=true] [vault-path=<path>] [enable] [format=text|json]",
       "optsidian plugin:install path=<plugin-dir> [vault-path=<path>] [enable] [format=text|json]"
     ],
     options: [
@@ -248,6 +248,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "url=<git-url>", description: "GitHub/GitHub Enterprise repo shorthand or git URL; prefers a published release, falls back to cloning" },
       { name: "path=<plugin-dir>", description: "Local directory containing manifest.json and main.js" },
       { name: "ref=<git-ref>", description: "Release tag (preferred) or git branch/commit for url= installs" },
+      { name: "auth=true", description: "Allow GitHub credentials when probing/downloading a private release; off by default for url= installs" },
       { name: "dir=<subdir>", description: "Plugin subdirectory inside the git source (forces a clone)" },
       { name: "enable", description: "Add the plugin id to community-plugins.json for custom installs" },
       { name: "format=text|json", description: "Output format for custom installs (default: text)" }
@@ -255,7 +256,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     notes: [
       "id=<plugin-id> is native passthrough.",
       "url= and path= are Optsidian custom-source extensions.",
-      "GitHub-compatible url= installs prefer the latest published release; without one (or with dir=) they clone the repo.",
+      "GitHub-compatible url= installs prefer the latest published release without credentials; pass auth=true for private releases.",
+      "Without a usable release (or with dir=), url= installs clone the repo.",
       "Custom installs try a best-effort native refresh when the target vault is active.",
       "plugin:enable, plugin:disable, plugin:reload, and plugin:uninstall remain native commands."
     ]

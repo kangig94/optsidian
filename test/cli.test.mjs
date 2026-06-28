@@ -234,6 +234,7 @@ async function startGithubReleaseServer(options = {}) {
     const url = new URL(req.url, "http://127.0.0.1");
     const base = `http://127.0.0.1:${server.address().port}`;
     if (url.pathname.includes("/releases/")) {
+      requests.push({ path: url.pathname, accept: req.headers.accept, authorization: req.headers.authorization });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -241,7 +242,7 @@ async function startGithubReleaseServer(options = {}) {
           assets: Object.keys(assets).map((name) => ({
             name,
             // API asset URL (preferred; works for private repos) + the public download URL.
-            url: `${base}/assets/${encodeURIComponent(name)}`,
+            url: `${options.assetUrlBase ?? base}/assets/${encodeURIComponent(name)}`,
             browser_download_url: `${base}/download/${encodeURIComponent(name)}`
           }))
         })
@@ -719,6 +720,10 @@ test("plugin:install url installs from a published GitHub release instead of clo
     assert.equal(fs.existsSync(path.join(pluginDir, "manifest.json")), true);
     assert.equal(fs.existsSync(path.join(pluginDir, "main.js")), true);
     assert.equal(fs.existsSync(path.join(pluginDir, "styles.css")), true);
+    assert.ok(
+      server.requests.every((entry) => !entry.authorization),
+      "custom plugin release lookup must not send GITHUB_TOKEN unless auth=true is explicit"
+    );
   } finally {
     await server.close();
   }
@@ -746,12 +751,16 @@ test("plugin:install url installs from a GitHub Enterprise-style release API", a
     assert.equal(payload.source.tag, "3.0.0");
     assert.equal(payload.plugin.id, "enterprise-plugin");
     assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "enterprise-plugin", "main.js")), true);
+    assert.ok(
+      server.requests.every((entry) => !entry.authorization),
+      "GitHub Enterprise-style release lookup must not send GITHUB_TOKEN unless auth=true is explicit"
+    );
   } finally {
     await server.close();
   }
 });
 
-test("plugin:install authenticates the asset API URL but drops auth on a cross-host CDN redirect", async () => {
+test("plugin:install auth=true authenticates the asset API URL but drops auth on a cross-host CDN redirect", async () => {
   const { vault, env } = setup();
   const assets = {
     "manifest.json": JSON.stringify({ id: "private-plugin", name: "Private", version: "2.0.0" }),
@@ -761,7 +770,7 @@ test("plugin:install authenticates the asset API URL but drops auth on a cross-h
   const api = await startGithubReleaseServer({ tag: "2.0.0", assets, assetRedirectBase: cdn.apiBase });
   try {
     const result = await runPluginInstallDirect(
-      ["url=https://github.com/acme/private", `vault-path=${vault}`, "enable", "format=json"],
+      ["url=https://github.com/acme/private", "auth=true", `vault-path=${vault}`, "enable", "format=json"],
       { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: api.apiBase, GITHUB_TOKEN: "secret-token" } }
     );
     assert.equal(result.status, 0, result.stderr);
@@ -780,6 +789,36 @@ test("plugin:install authenticates the asset API URL but drops auth on a cross-h
   } finally {
     await api.close();
     await cdn.close();
+  }
+});
+
+test("plugin:install auth=true does not authenticate cross-host asset API URLs", async () => {
+  const { vault, env } = setup();
+  const assets = {
+    "manifest.json": JSON.stringify({ id: "cross-host-plugin", name: "Cross Host", version: "2.1.0" }),
+    "main.js": "module.exports = { ok: true };\n"
+  };
+  const assetHost = await startGithubReleaseServer({ assets });
+  const api = await startGithubReleaseServer({ tag: "2.1.0", assets, assetUrlBase: assetHost.apiBase });
+  try {
+    const result = await runPluginInstallDirect(
+      ["url=https://github.com/acme/cross-host", "auth=true", `vault-path=${vault}`, "enable", "format=json"],
+      { env: { ...env, ...NO_PROXY_ENV, OPTSIDIAN_GITHUB_API_BASE: api.apiBase, GITHUB_TOKEN: "secret-token" } }
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(
+      api.requests.some((entry) => entry.authorization === "Bearer secret-token"),
+      "release metadata request should carry the bearer token"
+    );
+    assert.ok(assetHost.requests.length > 0, "external asset host should receive downloads");
+    assert.ok(
+      assetHost.requests.every((entry) => !entry.authorization),
+      "cross-host asset API URL must not carry the bearer token"
+    );
+    assert.equal(fs.existsSync(path.join(vault, ".obsidian", "plugins", "cross-host-plugin", "main.js")), true);
+  } finally {
+    await api.close();
+    await assetHost.close();
   }
 });
 
@@ -856,6 +895,10 @@ test("plugin:install rejects git-only options for local path installs", () => {
   result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "dir=dist"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /dir=<subdir> only applies/);
+
+  result = run(["plugin:install", `path=${pluginRoot}`, `vault-path=${vault}`, "auth=true"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /auth=true only applies/);
 });
 
 test("plugin:install rejects combining native ids with custom sources", () => {

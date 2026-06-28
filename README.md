@@ -147,10 +147,11 @@ Optsidian extends `plugin:install` for custom plugin sources that are not availa
 optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable
 optsidian plugin:install url=user/my-plugin vault-path=/path/to/vault
 optsidian plugin:install url=github.company.com/user/my-plugin vault-path=/path/to/vault
+optsidian plugin:install url=github.company.com/user/private-plugin auth=true vault-path=/path/to/vault
 optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
 ```
 
-Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. `url=user/repo` resolves to GitHub.com; scheme-less hosts such as `github.company.com/user/repo` try a GitHub Enterprise-style release lookup before cloning. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
+Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. `url=user/repo` resolves to GitHub.com; scheme-less hosts such as `github.company.com/user/repo` try a GitHub Enterprise-style release lookup before cloning. Release probing and asset downloads do not send GitHub credentials by default; pass `auth=true` only for private releases you trust. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
 
 ## Native-First Policy
 

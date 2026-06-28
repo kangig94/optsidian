@@ -2,14 +2,14 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import path from "node:path";
 import { RuntimeError } from "../errors.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
 // Shared GitHub HTTP layer: a small GET that tolerates redirects and proxy environments
-// (curl fallback) and carries a GitHub Accept header + a token resolved from GITHUB_TOKEN or
-// the user's local `gh`/`git` login. Used by the self-updater and custom plugin release
-// installs, including PRIVATE repos.
+// (curl fallback) and carries a GitHub Accept header. Callers opt into auth when they need
+// a token resolved from GITHUB_TOKEN or the user's local `gh`/`git` login.
 
 const JSON_ACCEPT = "application/vnd.github+json";
 // Release-asset bytes must be fetched from the API asset endpoint with an octet-stream Accept;
@@ -27,8 +27,13 @@ export async function fetchJson(url: string, env: NodeJS.ProcessEnv, options: Fe
   }
 }
 
-export async function downloadFile(url: string, targetPath: string, env: NodeJS.ProcessEnv): Promise<void> {
-  const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT });
+export async function downloadFile(
+  url: string,
+  targetPath: string,
+  env: NodeJS.ProcessEnv,
+  options: Pick<FetchOptions, "sendAuth" | "timeoutMs"> = {}
+): Promise<void> {
+  const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT, ...options });
   const tmpPath = `${targetPath}.download-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tmpPath, response.body);
   fs.renameSync(tmpPath, targetPath);
@@ -48,7 +53,7 @@ export async function requestBuffer(
     }
     // curl -fsSL drops Authorization on a cross-host redirect by default, so an asset's
     // signed CDN URL is reached without our token.
-    return requestBufferWithCurl(url, env, accept, sendAuth, options.timeoutMs);
+    return requestBufferWithCurl(url, env, accept, sendAuth, redirects, options.timeoutMs);
   }
   return requestBufferDirect(url, env, { accept, redirects, sendAuth, timeoutMs: options.timeoutMs });
 }
@@ -129,31 +134,73 @@ async function requestBufferWithCurl(
   env: NodeJS.ProcessEnv,
   accept: string,
   sendAuth: boolean,
+  redirects: number,
   timeoutMs?: number
 ): Promise<{ statusCode: number; body: Buffer }> {
-  const args = ["-fsSL", "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
-  if (timeoutMs !== undefined) {
-    args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
+  if (redirects > 5) {
+    throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
-  const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(new URL(url))) : undefined;
-  if (token) {
-    args.push("-H", `Authorization: Bearer ${token}`);
+  const headerPath = path.join(os.tmpdir(), `optsidian-curl-headers-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const bodyPath = path.join(os.tmpdir(), `optsidian-curl-body-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  try {
+    const args = ["-sS", "-D", headerPath, "-o", bodyPath, "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
+    if (timeoutMs !== undefined) {
+      args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
+    }
+    const target = new URL(url);
+    const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(target)) : undefined;
+    if (token) {
+      args.push("-H", `Authorization: Bearer ${token}`);
+    }
+    args.push(url);
+    const result = spawnSync("curl", args, { env });
+    if (result.error) {
+      throw new RuntimeError(`Failed to execute curl: ${result.error.message}`);
+    }
+    if ((result.status ?? 1) !== 0) {
+      const message = (result.stderr || result.stdout || Buffer.from("curl failed")).toString("utf8").trim();
+      throw new RuntimeError(message || `Failed to fetch ${url}`);
+    }
+
+    const headers = fs.existsSync(headerPath) ? fs.readFileSync(headerPath, "utf8") : "";
+    const statusCode = curlStatusCode(headers);
+    if ([301, 302, 303, 307, 308].includes(statusCode)) {
+      const location = curlLocation(headers);
+      if (!location) {
+        throw new RuntimeError(`Redirect response from ${url} did not include a location header`);
+      }
+      const nextUrl = new URL(location, target);
+      return requestBuffer(nextUrl.toString(), env, {
+        accept,
+        redirects: redirects + 1,
+        sendAuth: sendAuth && nextUrl.host === target.host,
+        timeoutMs
+      });
+    }
+    if (statusCode < 200 || statusCode >= 300) {
+      throw new RuntimeError(`Failed to fetch ${url} (${statusCode})`);
+    }
+    return {
+      statusCode,
+      body: fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath) : Buffer.alloc(0)
+    };
+  } finally {
+    fs.rmSync(headerPath, { force: true });
+    fs.rmSync(bodyPath, { force: true });
   }
-  args.push(url);
-  const result = spawnSync("curl", args, {
-    env
-  });
-  if (result.error) {
-    throw new RuntimeError(`Failed to execute curl: ${result.error.message}`);
-  }
-  if ((result.status ?? 1) !== 0) {
-    const message = (result.stderr || result.stdout || Buffer.from("curl failed")).toString("utf8").trim();
-    throw new RuntimeError(message || `Failed to fetch ${url}`);
-  }
-  return {
-    statusCode: 200,
-    body: Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout)
-  };
+}
+
+function curlStatusCode(headers: string): number {
+  const matches = [...headers.matchAll(/^HTTP\/\S+\s+(\d{3})\b/gim)];
+  const last = matches.at(-1)?.[1];
+  return last ? Number(last) : 0;
+}
+
+function curlLocation(headers: string): string | undefined {
+  const blocks = headers.split(/\r?\n\r?\n/).filter((block) => /^HTTP\/\S+\s+\d{3}\b/im.test(block));
+  const last = blocks.at(-1) ?? headers;
+  const match = /^location:\s*(.+)$/im.exec(last);
+  return match?.[1]?.trim();
 }
 
 function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean, credentialHost: string): Record<string, string> {
@@ -170,8 +217,7 @@ function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean
 }
 
 // Explicit GITHUB_TOKEN wins; otherwise fall back to the user's local login via `gh auth
-// token` or `git credential fill`, so a private-repo release install works without manually
-// exporting a token. The local lookup runs at most once per host per process.
+// token` or `git credential fill`. The local lookup runs at most once per host per process.
 const cachedLocalTokens = new Map<string, string | null>();
 
 function resolveGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | undefined {
