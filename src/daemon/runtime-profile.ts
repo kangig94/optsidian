@@ -3,6 +3,7 @@ import os from "node:os";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
 import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
+import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 2;
 
@@ -74,7 +75,7 @@ export function effectiveSearchRuntimeProfile(
       indexMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH") ?? 128
     },
     cache: {
-      queryAnalysisEntries: positiveIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE") ?? settings.search?.queryCacheSize ?? 512,
+      queryAnalysisEntries: nonNegativeIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE") ?? settings.search?.queryCacheSize ?? DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES,
       snapshotRetention: positiveIntEnv(env, "OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT") ?? settings.search?.snapshotRetentionCount ?? 2,
       executionSnapshots: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2
     },

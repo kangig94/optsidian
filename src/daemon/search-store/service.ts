@@ -13,6 +13,7 @@ import type { SearchIndexMutationResult, SearchResult } from "../../core/types.j
 import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
+import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "../query-analysis-cache-defaults.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import { executeMetadataSearchFromSnapshotHandle, type SearchExecutionSnapshotHandle } from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
@@ -54,7 +55,9 @@ export class DaemonSearchStoreService {
     this.queryCoordinator = new QueryCoordinator(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
-    this.queryAnalysisCache = new QueryAnalysisCache(options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? 512);
+    this.queryAnalysisCache = new QueryAnalysisCache(
+      options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES
+    );
   }
 
   async loadVault(vault: string, context: DaemonRequestContext, options: LoadVaultOptions = {}) {

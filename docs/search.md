@@ -77,8 +77,9 @@ checked-in virtual environments, or conda environments for benchmark generation 
 The search daemon owns the hot search path:
 
 - Load and keep immutable positional snapshots in memory.
-- Tokenize each query once, cache query analysis by analyzer identity and raw query text, and reuse
-  it across repeated CLI/MCP searches.
+- Tokenize each query once, cache query analysis only in daemon memory by analyzer identity and raw
+  query text, and reuse it across repeated CLI/MCP searches. Query history is never persisted; the
+  in-memory cache defaults to 64 entries and `search.queryCacheSize=0` disables it.
 - Keep analyzer workers isolated. A single Kiwi instance should process one request at a time.
   Parallelism comes from query and index worker pools with isolated analyzer instances.
 - Persist line-level snippet data during indexing so search does not reread and retokenize matched

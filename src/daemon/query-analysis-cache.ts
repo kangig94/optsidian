@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { SearchTextAnalysis } from "../core/search/analysis/index.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import type { SearchField } from "../core/types.js";
+import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
 import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./search-store/builder.js";
 
 export type QueryAnalysisCacheKeyInput = {
@@ -24,8 +25,9 @@ export class QueryAnalysisCache {
   private misses = 0;
   private evictions = 0;
 
-  constructor(maxEntries = 512) {
-    this.maxEntries = Math.max(0, maxEntries);
+  constructor(maxEntries = DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES) {
+    const normalized = Number(maxEntries);
+    this.maxEntries = Number.isFinite(normalized) ? Math.max(0, Math.floor(normalized)) : 0;
   }
 
   get(input: QueryAnalysisCacheKeyInput): SearchTextAnalysis | undefined {

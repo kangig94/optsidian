@@ -1878,6 +1878,17 @@ test("runtime profile canonicalizes extra language payloads", async () => {
   assert.equal(searchRuntimeProfileHash(messy), searchRuntimeProfileHash(canonical));
 });
 
+test("runtime profile defaults query-analysis cache to 64 and allows disabling it", async () => {
+  const { effectiveSearchRuntimeProfile } = await futureImport("src/daemon/runtime-profile.ts");
+
+  assert.equal(effectiveSearchRuntimeProfile(repoRoot, {}, {}).cache.queryAnalysisEntries, 64);
+  assert.equal(
+    effectiveSearchRuntimeProfile(repoRoot, { OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE: "0" }, {}).cache.queryAnalysisEntries,
+    0
+  );
+  assert.equal(effectiveSearchRuntimeProfile(repoRoot, {}, { search: { queryCacheSize: 0 } }).cache.queryAnalysisEntries, 0);
+});
+
 test("runtime profile maps single worker setting to search execution only", async () => {
   const {
     effectiveSearchRuntimeProfile,
@@ -2442,6 +2453,7 @@ test("refresh after mutation makes new files visible and removed files disappear
 
 test("query-analysis cache key is deterministic and does not become result identity", async () => {
   const { QueryAnalysisCache, queryAnalysisCacheKey } = await futureImport("src/daemon/query-analysis-cache.ts");
+  const { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } = await futureImport("src/daemon/query-analysis-cache-defaults.ts");
   const analyzerIdentity = { name: "test-analyzer", version: "1", node: "test" };
   const input = {
     analyzerIdentity,
@@ -2460,6 +2472,9 @@ test("query-analysis cache key is deterministic and does not become result ident
   assert.notEqual(queryAnalysisCacheKey(input), queryAnalysisCacheKey({ ...input, rawQuery: "Other" }));
   assert.notEqual(queryAnalysisCacheKey(input), queryAnalysisCacheKey({ ...input, analyzerIdentity: { ...analyzerIdentity, version: "2" } }));
   assert.notEqual(queryAnalysisCacheKey(input), queryAnalysisCacheKey({ ...input, searchSettingsHash: "settings-b" }));
+  assert.equal(DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES, 64);
+  assert.equal(new QueryAnalysisCache().stats().maxEntries, DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES);
+  assert.equal(new QueryAnalysisCache(Number.NaN).stats().maxEntries, 0);
 
   const cache = new QueryAnalysisCache(2);
   assert.equal(cache.get(input), undefined);
