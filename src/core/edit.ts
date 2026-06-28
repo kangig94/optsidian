@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { UsageError } from "../errors.js";
+import { assertVaultFileWithinByteLimit } from "./file-size.js";
 import { resolveVaultPath } from "./path.js";
 import { joinText, simpleDiff, splitText } from "./text.js";
 import { atomicWriteFile } from "./write-file.js";
@@ -9,6 +10,7 @@ import { assertLineRange, assertPositiveInteger } from "./validation.js";
 export function editVaultFile(vaultRoot: string, params: EditParams): MutationResult {
   validateEditParams(params);
   const target = resolveVaultPath(vaultRoot, params.path, { mustExist: true });
+  assertVaultFileWithinByteLimit(target.abs, target.rel);
   const before = fs.readFileSync(target.abs, "utf8");
   const after = applyEdit(before, params);
   if (before === after) {

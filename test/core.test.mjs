@@ -1295,6 +1295,31 @@ test("read caps by lines and pages without gaps", async () => {
   assert.equal(rest.truncated, false);
 });
 
+test("read edit and direct grep reject vault files over the byte cap", async () => {
+  const vault = tempVault();
+  const { DEFAULT_VAULT_FILE_MAX_BYTES } = await import(path.join(repoRoot, "src/limits.ts"));
+  const { editVaultFile, grepVault, readVaultFile, writeVaultFile } = await core();
+  fs.writeFileSync(path.join(vault, "large.md"), Buffer.alloc(DEFAULT_VAULT_FILE_MAX_BYTES + 1, 0x61));
+  writeVaultFile(vault, { path: "small.md", content: "needle\n" });
+
+  assert.throws(
+    () => readVaultFile(vault, { path: "large.md", head: 1 }),
+    /File large\.md is too large \(26MB\); maximum supported file size is 25MB/
+  );
+  assert.throws(
+    () => editVaultFile(vault, { path: "large.md", selector: { kind: "replace", value: "a" }, replacement: "b" }),
+    /maximum supported file size is 25MB/
+  );
+  assert.throws(
+    () => grepVault(vault, { path: "large.md", query: "needle" }),
+    /maximum supported file size is 25MB/
+  );
+
+  const result = grepVault(vault, { query: "needle" });
+  assert.equal(result.count, 1);
+  assert.equal(result.matches[0].path, "small.md");
+});
+
 test("vault access registry keeps recent realpaths only", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-access-"));
   const cache = path.join(dir, "cache");

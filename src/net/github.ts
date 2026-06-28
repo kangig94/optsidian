@@ -5,6 +5,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { RuntimeError } from "../errors.js";
+import { DEFAULT_HTTP_RESPONSE_MAX_BYTES, formatByteSize } from "../limits.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
 // Shared GitHub HTTP layer: a small GET that tolerates redirects and proxy environments
@@ -16,7 +17,7 @@ const JSON_ACCEPT = "application/vnd.github+json";
 // that is the only form that works for a PRIVATE repo (browser_download_url 404s there).
 const ASSET_ACCEPT = "application/octet-stream";
 
-type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean; timeoutMs?: number };
+type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean; timeoutMs?: number; maxBytes?: number };
 
 export async function fetchJson(url: string, env: NodeJS.ProcessEnv, options: FetchOptions = {}): Promise<unknown> {
   const response = await requestBuffer(url, env, options);
@@ -47,15 +48,16 @@ export async function requestBuffer(
   const accept = options.accept ?? JSON_ACCEPT;
   const redirects = options.redirects ?? 0;
   const sendAuth = options.sendAuth ?? true;
+  const maxBytes = options.maxBytes ?? DEFAULT_HTTP_RESPONSE_MAX_BYTES;
   if (hasProxyEnv(env)) {
     if (!hasCommand("curl", env)) {
       throw new RuntimeError("Proxy environment detected, but curl is not available for optsidian network access.");
     }
     // curl -fsSL drops Authorization on a cross-host redirect by default, so an asset's
     // signed CDN URL is reached without our token.
-    return requestBufferWithCurl(url, env, accept, sendAuth, redirects, options.timeoutMs);
+    return requestBufferWithCurl(url, env, accept, sendAuth, redirects, maxBytes, options.timeoutMs);
   }
-  return requestBufferDirect(url, env, { accept, redirects, sendAuth, timeoutMs: options.timeoutMs });
+  return requestBufferDirect(url, env, { accept, redirects, sendAuth, maxBytes, timeoutMs: options.timeoutMs });
 }
 
 async function requestBufferDirect(
@@ -63,7 +65,7 @@ async function requestBufferDirect(
   env: NodeJS.ProcessEnv,
   options: Required<Omit<FetchOptions, "timeoutMs">> & { timeoutMs?: number }
 ): Promise<{ statusCode: number; body: Buffer }> {
-  const { accept, redirects, sendAuth, timeoutMs } = options;
+  const { accept, redirects, sendAuth, maxBytes, timeoutMs } = options;
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
@@ -80,16 +82,46 @@ async function requestBufferDirect(
           agent: false
         },
         (res) => {
+          let settled = false;
+          let totalBytes = 0;
           const chunks: Buffer[] = [];
-          res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          const contentLength = parseContentLength(res.headers);
+          if (contentLength !== undefined && contentLength > maxBytes) {
+            const error = responseTooLargeError(url, maxBytes, contentLength);
+            settled = true;
+            res.resume();
+            request.destroy(error);
+            reject(error);
+            return;
+          }
+          res.on("data", (chunk) => {
+            if (settled) return;
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            totalBytes += buffer.length;
+            if (totalBytes > maxBytes) {
+              const error = responseTooLargeError(url, maxBytes, totalBytes);
+              settled = true;
+              res.destroy(error);
+              request.destroy(error);
+              reject(error);
+              return;
+            }
+            chunks.push(buffer);
+          });
           res.on("end", () => {
+            if (settled) return;
+            settled = true;
             resolve({
               statusCode: res.statusCode ?? 0,
               headers: res.headers,
               body: Buffer.concat(chunks)
             });
           });
-          res.on("error", reject);
+          res.on("error", (error) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+          });
         }
       );
       if (timeoutMs !== undefined) {
@@ -115,6 +147,7 @@ async function requestBufferDirect(
       accept,
       redirects: redirects + 1,
       sendAuth: sendAuth && nextUrl.host === target.host,
+      maxBytes,
       timeoutMs
     });
   }
@@ -135,6 +168,7 @@ async function requestBufferWithCurl(
   accept: string,
   sendAuth: boolean,
   redirects: number,
+  maxBytes: number,
   timeoutMs?: number
 ): Promise<{ statusCode: number; body: Buffer }> {
   if (redirects > 5) {
@@ -143,7 +177,19 @@ async function requestBufferWithCurl(
   const headerPath = path.join(os.tmpdir(), `optsidian-curl-headers-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const bodyPath = path.join(os.tmpdir(), `optsidian-curl-body-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   try {
-    const args = ["-sS", "-D", headerPath, "-o", bodyPath, "-H", `Accept: ${accept}`, "-H", `User-Agent: optsidian/${OPTSIDIAN_VERSION}`];
+    const args = [
+      "-sS",
+      "-D",
+      headerPath,
+      "-o",
+      bodyPath,
+      "--max-filesize",
+      String(maxBytes),
+      "-H",
+      `Accept: ${accept}`,
+      "-H",
+      `User-Agent: optsidian/${OPTSIDIAN_VERSION}`
+    ];
     if (timeoutMs !== undefined) {
       args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
     }
@@ -158,6 +204,9 @@ async function requestBufferWithCurl(
       throw new RuntimeError(`Failed to execute curl: ${result.error.message}`);
     }
     if ((result.status ?? 1) !== 0) {
+      if (result.status === 63) {
+        throw responseTooLargeError(url, maxBytes);
+      }
       const message = (result.stderr || result.stdout || Buffer.from("curl failed")).toString("utf8").trim();
       throw new RuntimeError(message || `Failed to fetch ${url}`);
     }
@@ -174,6 +223,7 @@ async function requestBufferWithCurl(
         accept,
         redirects: redirects + 1,
         sendAuth: sendAuth && nextUrl.host === target.host,
+        maxBytes,
         timeoutMs
       });
     }
@@ -182,12 +232,34 @@ async function requestBufferWithCurl(
     }
     return {
       statusCode,
-      body: fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath) : Buffer.alloc(0)
+      body: readDownloadedBody(bodyPath, url, maxBytes)
     };
   } finally {
     fs.rmSync(headerPath, { force: true });
     fs.rmSync(bodyPath, { force: true });
   }
+}
+
+function readDownloadedBody(bodyPath: string, url: string, maxBytes: number): Buffer {
+  if (!fs.existsSync(bodyPath)) return Buffer.alloc(0);
+  const stat = fs.statSync(bodyPath);
+  if (stat.size > maxBytes) {
+    throw responseTooLargeError(url, maxBytes, stat.size);
+  }
+  return fs.readFileSync(bodyPath);
+}
+
+function parseContentLength(headers: http.IncomingHttpHeaders): number | undefined {
+  const raw = headers["content-length"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function responseTooLargeError(url: string, maxBytes: number, actualBytes?: number): RuntimeError {
+  const actual = actualBytes === undefined ? "" : ` (${formatByteSize(actualBytes)})`;
+  return new RuntimeError(`Response from ${url} exceeded ${formatByteSize(maxBytes)} limit${actual}`);
 }
 
 function curlStatusCode(headers: string): number {

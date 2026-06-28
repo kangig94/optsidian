@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { UsageError } from "../errors.js";
+import { assertVaultFileWithinByteLimit, vaultFileExceedsByteLimit } from "./file-size.js";
 import { resolveVaultPath, vaultRelative, walkFiles } from "./path.js";
 import { decodeUtf8, splitText } from "./text.js";
 import type { GrepLine, GrepParams, GrepResult } from "./types.js";
@@ -11,6 +12,9 @@ export function grepVault(vaultRoot: string, params: GrepParams): GrepResult {
   const context = params.context ?? 0;
   const limit = params.limit ?? 50;
   const stat = fs.statSync(start.abs);
+  if (!stat.isDirectory()) {
+    assertVaultFileWithinByteLimit(start.abs, start.rel, stat);
+  }
   const files = stat.isDirectory()
     ? walkFiles(vaultRoot, start.abs, { includeHidden: Boolean(params.includeHidden), all: Boolean(params.all) })
     : [start.abs];
@@ -22,6 +26,11 @@ export function grepVault(vaultRoot: string, params: GrepParams): GrepResult {
 
   for (const file of files) {
     if (matches.length >= limit) break;
+    try {
+      if (vaultFileExceedsByteLimit(file)) continue;
+    } catch {
+      continue;
+    }
     let text: string;
     try {
       text = decodeUtf8(fs.readFileSync(file), vaultRelative(vaultRoot, file));

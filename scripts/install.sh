@@ -17,6 +17,7 @@ RELEASE_SIGNER_WORKFLOW="kangig94/optsidian/.github/workflows/release.yml"
 FIRST_ATTESTED_RELEASE="v0.3.0"
 MIN_SUPPORTED_INSTALL_TAG="v0.3.0"
 RELEASE_VERIFY="${OPTSIDIAN_RELEASE_VERIFY:-required}"
+HTTP_RESPONSE_MAX_BYTES=$((50 * 1024 * 1024))
 MCP_NAME="optsidian"
 BIN_DIR="${OPTSIDIAN_BIN_DIR:-${HOME}/.local/bin}"
 STATE_BASE="${OPTSIDIAN_STATE_BASE:-${XDG_CACHE_HOME:-${HOME}/.cache}/optsidian}"
@@ -59,6 +60,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+assert_download_size() {
+  local file="$1"
+  local label="$2"
+  local bytes
+  bytes="$(wc -c < "${file}")"
+  bytes="${bytes//[[:space:]]/}"
+  if [ "${bytes}" -gt "${HTTP_RESPONSE_MAX_BYTES}" ]; then
+    echo "ERROR: ${label} exceeded 50MB download limit (${bytes} bytes)."
+    exit 1
+  fi
+}
+
 case "$(uname -s)" in
   Linux|Darwin)
     ;;
@@ -71,6 +84,7 @@ esac
 echo "==> Checking prerequisites"
 command -v curl >/dev/null || { echo "ERROR: curl is required"; exit 1; }
 command -v node >/dev/null || { echo "ERROR: node is required"; exit 1; }
+command -v wc >/dev/null || { echo "ERROR: wc is required"; exit 1; }
 NODE_VERSION="$(node --version 2>/dev/null || true)"
 case "${NODE_VERSION}" in
   v[0-9]*)
@@ -111,6 +125,7 @@ case "${RELEASE_VERIFY}" in
     ;;
 esac
 
+CURL_ARGS=(--max-filesize "${HTTP_RESPONSE_MAX_BYTES}")
 CURL_HEADERS=(-H "Accept: application/vnd.github+json" -H "User-Agent: optsidian-install")
 
 WORK_DIR="$(mktemp -d)"
@@ -118,7 +133,8 @@ RELEASE_JSON="${WORK_DIR}/release.json"
 mkdir -p "${BIN_DIR}" "${STATE_BASE}" "${RELEASE_DIR}"
 
 echo "==> Resolving latest stable release"
-curl -fsSL "${CURL_HEADERS[@]}" "${RELEASE_API_BASE}/latest" > "${RELEASE_JSON}"
+curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${RELEASE_API_BASE}/latest" > "${RELEASE_JSON}"
+assert_download_size "${RELEASE_JSON}" "release metadata"
 
 eval "$(
   node - "${RELEASE_JSON}" "${MIN_SUPPORTED_INSTALL_TAG}" "${FIRST_ATTESTED_RELEASE}" "${RELEASE_VERIFY}" <<'NODE'
@@ -205,11 +221,14 @@ CHECKSUMS_ASSET_PATH="${RELEASE_CACHE_DIR}/${CHECKSUMS_ASSET_NAME}"
 ATTESTATION_ASSET_PATH="${RELEASE_CACHE_DIR}/${ATTESTATION_ASSET_NAME}"
 
 echo "==> Downloading ${CHECKSUMS_ASSET_NAME}"
-curl -fsSL "${CURL_HEADERS[@]}" "${CHECKSUMS_ASSET_URL}" -o "${CHECKSUMS_ASSET_PATH}"
+curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${CHECKSUMS_ASSET_URL}" -o "${CHECKSUMS_ASSET_PATH}"
+assert_download_size "${CHECKSUMS_ASSET_PATH}" "${CHECKSUMS_ASSET_NAME}"
 echo "==> Downloading ${OPTSIDIAN_ASSET_NAME}"
-curl -fsSL "${CURL_HEADERS[@]}" "${OPTSIDIAN_ASSET_URL}" -o "${OPTSIDIAN_ASSET_PATH}"
+curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${OPTSIDIAN_ASSET_URL}" -o "${OPTSIDIAN_ASSET_PATH}"
+assert_download_size "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}"
 echo "==> Downloading ${OPTSIDIAN_MCP_ASSET_NAME}"
-curl -fsSL "${CURL_HEADERS[@]}" "${OPTSIDIAN_MCP_ASSET_URL}" -o "${OPTSIDIAN_MCP_ASSET_PATH}"
+curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${OPTSIDIAN_MCP_ASSET_URL}" -o "${OPTSIDIAN_MCP_ASSET_PATH}"
+assert_download_size "${OPTSIDIAN_MCP_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}"
 
 echo "==> Verifying downloaded checksums"
 node - "${CHECKSUMS_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}" "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}" "${OPTSIDIAN_MCP_ASSET_PATH}" <<'NODE'
@@ -273,7 +292,8 @@ if [ "${SHOULD_VERIFY_ATTESTATION}" = "1" ]; then
     echo "WARN: gh is not available; continuing because OPTSIDIAN_RELEASE_VERIFY=${RELEASE_VERIFY}"
   else
     echo "==> Downloading ${ATTESTATION_ASSET_NAME}"
-    curl -fsSL "${CURL_HEADERS[@]}" "${ATTESTATION_ASSET_URL}" -o "${ATTESTATION_ASSET_PATH}"
+    curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${ATTESTATION_ASSET_URL}" -o "${ATTESTATION_ASSET_PATH}"
+    assert_download_size "${ATTESTATION_ASSET_PATH}" "${ATTESTATION_ASSET_NAME}"
     echo "==> Verifying release attestations"
     GH_CONFIG_DIR="${WORK_DIR}/gh-config"
     mkdir -p "${GH_CONFIG_DIR}"

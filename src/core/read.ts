@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { UsageError } from "../errors.js";
+import { assertVaultFileWithinByteLimit } from "./file-size.js";
 import { resolveVaultPath } from "./path.js";
 import { decodeUtf8, lineNumbered, splitText } from "./text.js";
 import type { ReadParams, ReadResult } from "./types.js";
@@ -10,6 +11,7 @@ export const DEFAULT_READ_MAX_LINES = 2_000;
 export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult {
   validateReadParams(params);
   const target = resolveVaultPath(vaultRoot, params.path, { mustExist: true });
+  assertVaultFileWithinByteLimit(target.abs, target.rel);
   const text = decodeUtf8(fs.readFileSync(target.abs), target.rel);
   const { lines } = splitText(text);
 

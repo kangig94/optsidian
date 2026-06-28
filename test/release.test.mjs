@@ -14,7 +14,7 @@ const uninstallScript = path.resolve("scripts/uninstall.sh");
 const packageVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
 const newerVersion = nextPatchVersion(packageVersion);
 const UPDATE_TOOLS = ["gh"];
-const INSTALL_TOOLS = ["curl", "cp", "chmod", "mv", "uname", "mktemp", "mkdir", "rm", "head", "env", "gh"];
+const INSTALL_TOOLS = ["curl", "cp", "chmod", "mv", "uname", "mktemp", "mkdir", "rm", "head", "env", "gh", "wc"];
 const NO_PROXY_ENV = {
   HTTPS_PROXY: "",
   https_proxy: "",
@@ -87,6 +87,33 @@ const result = spawnSync(${JSON.stringify(realCurl)}, args, {
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 process.exit(result.status ?? 1);
+`;
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+}
+
+function writeStaticCurl(binDir, body) {
+  const file = path.join(binDir, "curl");
+  const script = `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const headerPath = args[args.indexOf("-D") + 1];
+const bodyPath = args[args.indexOf("-o") + 1];
+fs.writeFileSync(headerPath, "HTTP/1.1 200 OK\\r\\ncontent-length: ${Buffer.byteLength(body)}\\r\\n\\r\\n");
+fs.writeFileSync(bodyPath, ${JSON.stringify(body)});
+process.exit(0);
+`;
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+}
+
+function writeFakeWc(binDir, bytes) {
+  const file = path.join(binDir, "wc");
+  const script = `#!${process.execPath}
+process.stdin.resume();
+process.stdin.on("end", () => {
+  console.log(${JSON.stringify(String(bytes))});
+});
 `;
   fs.writeFileSync(file, script);
   fs.chmodSync(file, 0o755);
@@ -382,6 +409,34 @@ async function startReleaseServer(releases, latestTag) {
   };
 }
 
+async function startBodyServer(options = {}) {
+  const body = options.body ?? Buffer.from("ok");
+  const contentLength = options.contentLength ?? body.length;
+  let baseUrl = "";
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/body") {
+      res.statusCode = 404;
+      res.end("missing");
+      return;
+    }
+    res.setHeader("content-type", "application/octet-stream");
+    if (contentLength !== false) {
+      res.setHeader("content-length", String(contentLength));
+    }
+    res.end(body);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  baseUrl = `http://127.0.0.1:${address.port}`;
+  return {
+    url: `${baseUrl}/body`,
+    async close() {
+      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  };
+}
+
 function releasePayload(baseUrl, release) {
   return {
     tag_name: release.tag,
@@ -587,6 +642,52 @@ test("automatic update notice skips failed lookups and still caches the attempt"
   const second = await runCliAsync(["config", "path"], env);
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stderr, "");
+});
+
+test("network requests reject direct responses over the byte cap", async () => {
+  const { DEFAULT_HTTP_RESPONSE_MAX_BYTES } = await import(path.resolve("src/limits.ts"));
+  const { requestBuffer } = await import(path.resolve("src/net/github.ts"));
+  const server = await startBodyServer({ body: Buffer.from("abcd") });
+
+  try {
+    assert.equal(DEFAULT_HTTP_RESPONSE_MAX_BYTES, 50 * 1024 * 1024);
+    await assert.rejects(
+      () => requestBuffer(server.url, { ...NO_PROXY_ENV }, { maxBytes: 3 }),
+      /exceeded 3B limit \(4B\)/
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("network requests reject direct streamed responses over the byte cap", async () => {
+  const { requestBuffer } = await import(path.resolve("src/net/github.ts"));
+  const server = await startBodyServer({ body: Buffer.from("abcd"), contentLength: false });
+
+  try {
+    await assert.rejects(
+      () => requestBuffer(server.url, { ...NO_PROXY_ENV }, { maxBytes: 3 }),
+      /exceeded 3B limit \(4B\)/
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("network requests reject curl fallback responses over the byte cap", async () => {
+  const { requestBuffer } = await import(path.resolve("src/net/github.ts"));
+  const dir = tempRoot();
+  const binDir = path.join(dir, "network-cap-curl-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeStaticCurl(binDir, "abcd");
+
+  await assert.rejects(
+    () => requestBuffer("https://example.test/body", {
+      PATH: binDir,
+      HTTPS_PROXY: "http://127.0.0.1:9"
+    }, { maxBytes: 3, sendAuth: false }),
+    /exceeded 3B limit \(4B\)/
+  );
 });
 
 test("update installs a requested release into the managed bin dir and refreshes available MCP clients", async () => {
@@ -929,6 +1030,10 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
 
     const curlCalls = fs.readFileSync(curlLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(curlCalls.some((args) => args.some((arg) => /^Authorization:/i.test(arg))), false);
+    assert.equal(curlCalls.every((args) => {
+      const index = args.indexOf("--max-filesize");
+      return index !== -1 && args[index + 1] === "52428800";
+    }), true);
 
     const ghCalls = fs.readFileSync(ghLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(ghCalls.length, 2);
@@ -955,6 +1060,30 @@ test("install.sh installs actual packaged release assets", async () => {
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`Installed v${packageVersion.replace(/\./g, "\\.")}\\.`));
+  } finally {
+    await server.close();
+  }
+});
+
+test("install.sh rejects downloads over the 50MB cap before parsing", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makeReleaseBundle(dir, newerVersion);
+  const server = await startReleaseServer([release], release.tag);
+  const toolBin = createToolBin(dir, { name: "install-download-cap-bin", tools: INSTALL_TOOLS });
+  fs.rmSync(path.join(toolBin, "wc"), { force: true });
+  writeFakeWc(toolBin, 50 * 1024 * 1024 + 1);
+
+  try {
+    const result = await runBashAsync(installScript, {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      PATH: toolBin
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /release metadata exceeded 50MB download limit/);
   } finally {
     await server.close();
   }
