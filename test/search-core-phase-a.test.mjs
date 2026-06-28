@@ -328,5 +328,4 @@ test("AC6 body phrase matches keep phrase priority without persisted full body t
   assert.ok(strongBody);
   assert.equal(strongBody.debug?.bucket, "phrase");
   assert.equal(strongBody.debug?.phrasePriority, 5);
-  assert.equal(strongBody.debug?.snippetSource, "snapshot-snippet-corpus");
 });

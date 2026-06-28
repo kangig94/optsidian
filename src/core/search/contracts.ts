@@ -1,4 +1,4 @@
-import type { SearchTextAnalysis, SearchTokenChannel, SearchTokenChannelTerms } from "./analysis/index.js";
+import type { SearchTextAnalysis, SearchTokenChannel } from "./analysis/index.js";
 import type { SearchField } from "../types.js";
 
 export const SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION = 1;
@@ -128,19 +128,6 @@ export type CandidateCoverageFeature = {
 export type CandidateIdentityFeature = {
   exactPriority: number | null;
   phrasePriority: number | null;
-  canonicalFieldText: Partial<Record<SearchField, readonly string[]>>;
-};
-
-export type SnippetScoringInput = {
-  snippetId: string;
-  line: number;
-  text: string;
-  field?: SearchField;
-  channels: SearchTokenChannelTerms;
-  byteSpan?: {
-    start: number;
-    end: number;
-  };
 };
 
 export type CandidateFeaturePayload = {
@@ -152,7 +139,6 @@ export type CandidateFeaturePayload = {
   coverage: CandidateCoverageFeature;
   identity: CandidateIdentityFeature;
   tags: readonly string[];
-  snippetScoringInputs: readonly SnippetScoringInput[];
 };
 
 export interface FeatureStore {

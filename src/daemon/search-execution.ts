@@ -233,7 +233,7 @@ function querySearch(
 ): SearchExecutionResult {
   const query = search.query ?? "";
   if (analysis.primaryTerms.length === 0) return searchResult([], snapshot.snapshotId, analyzerIdentity, search, 0);
-  const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot, documents));
+  const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot));
   const retrievalQuery: RetrievalQuery = {
     rawQuery: query,
     analysis,
@@ -276,8 +276,7 @@ function querySearch(
               hit,
               rank,
               snapshotId: snapshot.snapshotId,
-              analyzer: analyzerIdentity,
-              snippetSource: "snapshot-snippet-corpus"
+              analyzer: analyzerIdentity
             })
           }
       : {})
@@ -349,8 +348,7 @@ export function hydrateSearchShardFinalists(input: {
               hit: finalist,
               rank: finalist.rank,
               snapshotId: input.snapshot.snapshotId,
-              analyzer: input.analyzerIdentity,
-              snippetSource: "snapshot-snippet-corpus"
+              analyzer: input.analyzerIdentity
             })
           }
         : {})
@@ -387,7 +385,7 @@ export function hydrateSearchShardFinalists(input: {
 function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot): SearchShardExecutionResult {
   const search = job.search;
   const query = search.query ?? "";
-  const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot, new Map()));
+  const engine = createSearchEngine(snapshot, createPositionalRetriever(snapshot), createSnapshotFeatureStore(snapshot));
   const retrievalQuery: RetrievalQuery = {
     rawQuery: query,
     analysis: job.analysis,
@@ -576,13 +574,12 @@ function rankDocumentFromRecord(record: PersistedDocumentRecord): RankDocument {
   };
 }
 
-function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: ReadonlyMap<string, PersistedDocumentRecord>): FeatureStore {
+function createSnapshotFeatureStore(snapshot: SearchSnapshot): FeatureStore {
   return {
     featuresFor: (query, candidateSet) => {
       const allowedFields = query.fields ?? [...SEARCH_PROPERTIES];
       const terms = weightedQueryTerms(query.analysis.channels);
       return candidateSet.candidates.map((candidate) => {
-        const record = documents.get(candidate.documentId);
         const context = featureQueryContext(query);
         const coverage = projectionCoverage(snapshot, candidate, context);
         const exactPriority = nullableRankPriority(projectionExactPriority(snapshot, candidate, context));
@@ -604,22 +601,9 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot, documents: Readonl
           },
           identity: {
             exactPriority,
-            phrasePriority,
-            canonicalFieldText: {}
+            phrasePriority
           },
-          tags: candidateTags(snapshot, candidate),
-          snippetScoringInputs: (record?.snippetCorpus.lines ?? [])
-            .filter(snippetLineHasChannels)
-            .map((line) => ({
-              snippetId: line.snippetId,
-              line: line.line,
-              text: line.text,
-              channels: line.channels,
-              byteSpan: {
-                start: line.byteStart,
-                end: line.byteEnd
-              }
-            }))
+          tags: candidateTags(snapshot, candidate)
         } satisfies CandidateFeaturePayload;
       });
     },
@@ -1268,7 +1252,6 @@ function matchDebug(input: {
   rank: ReturnType<typeof rerankCandidatesWithSignals>[number];
   snapshotId: string;
   analyzer: SearchAnalyzerIdentity;
-  snippetSource: "snapshot-snippet-corpus";
 }): NonNullable<SearchMatch["debug"]> {
   return {
     source: input.hit.source,
@@ -1293,7 +1276,6 @@ function matchDebug(input: {
     rarityScore: input.rank.rarityScore,
     proximityScore: input.rank.proximityScore,
     bodyScore: input.rank.bodyScore,
-    snippetSource: input.snippetSource,
     snapshotId: input.snapshotId
   };
 }

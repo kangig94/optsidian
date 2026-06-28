@@ -2350,7 +2350,7 @@ test("AC6 concurrent scoring order equals sequential scoring order on one pinned
   }
 });
 
-test("AC12 debug output explains channels, scores, rerank signals, snippet source, analyzer identity, and snapshot id", async () => {
+test("AC12 debug output explains channels, scores, rerank signals, analyzer identity, and snapshot id", async () => {
   const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
   const { executeSearchJob } = await futureImport("src/daemon/search-execution.ts");
   const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
@@ -2394,7 +2394,6 @@ test("AC12 debug output explains channels, scores, rerank signals, snippet sourc
     assert.equal(typeof debug.rerankScore, "number");
     assert.equal(typeof debug.rarityScore, "number");
     assert.equal(typeof debug.proximityScore, "number");
-    assert.equal(debug.snippetSource, "snapshot-snippet-corpus");
   } finally {
     store.release(pin);
   }
