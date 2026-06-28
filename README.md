@@ -1,80 +1,44 @@
 # optsidian
 
-`optsidian` is an LLM-optimized wrapper around the Obsidian CLI.
+`optsidian` connects LLM tools to your Obsidian vault.
 
-It follows a native-first policy: commands that Obsidian already handles well are delegated unchanged, while `optsidian` adds Codex-style CLI tools for bounded reads, ranked note search, exact grep output, structured frontmatter edits, safe edits, and patch application inside the active vault. `optsidian-mcp` stays small and exposes only shell-safe mutation tools plus a routing helper.
+It is not a second Obsidian UI. It is a small CLI and MCP bridge that lets
+agents resolve your vault, search notes, read bounded file slices, edit files,
+apply patches, and delegate native Obsidian or plugin commands when Obsidian is
+already the right tool.
 
-## Requirements
-
-- Node.js 24.15.0 or newer
-- `curl` for the release installer
-- GitHub CLI (`gh`) for default release attestation verification
-- Codex CLI and Claude Code are optional; detected clients are registered automatically
-- A working `obsidian` CLI on `PATH` for active vault resolution and native/plugin commands
-- Linux or macOS for managed install/update
-
-The real Obsidian binary can be overridden with:
-
-```bash
-OPTSIDIAN_OBSIDIAN_BIN=/path/to/obsidian optsidian read path=README.md head=20
-```
-
-For file-only Optsidian commands, a fixed vault path avoids native vault resolution:
-
-```bash
-optsidian read vault-path=/path/to/vault path=README.md head=20
-OPTSIDIAN_VAULT_PATH=/path/to/vault optsidian write path=note.md content="hello"
-```
-
-To launch Obsidian explicitly before native/plugin commands:
-
-```bash
-optsidian open-gui
-optsidian open-gui vault-path=/path/to/vault
-```
-
-`open-gui` waits up to 10 seconds for native vault resolution before returning. Opening a vault path can change the active vault seen by later native commands.
+This README is intentionally short. After installation, Codex and Claude can
+discover exact command syntax through MCP routing and `optsidian --help`.
 
 ## Install
 
-Install the latest published release from the canonical script:
+**Requirements:** Node.js 24.15.0+, `curl`, a working `obsidian` CLI on `PATH`,
+and Linux or macOS for the managed installer/update flow. GitHub CLI (`gh`) is
+required for the default release attestation check; use the explicit checksum
+fallback only in constrained environments.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-The script downloads the latest stable GitHub release assets without GitHub credentials, verifies downloaded checksums and GitHub release attestations, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 24.15.0 or newer and does not invoke the native `obsidian` CLI during installation. For constrained environments, `OPTSIDIAN_RELEASE_VERIFY=checksum` is available as an explicit checksum-only fallback.
+The installer downloads public release assets without GitHub credentials,
+verifies checksums and GitHub release attestations, installs `optsidian` and
+`optsidian-mcp` into `~/.local/bin`, writes managed install metadata under
+`~/.cache/optsidian`, and registers detected Codex/Claude clients.
 
-If you want MCP to stay pinned to one vault regardless of the active GUI vault, install with a fixed vault path:
+Pin MCP to one vault if you do not want it to follow the active Obsidian GUI
+vault:
 
 ```bash
 export OPTSIDIAN_VAULT_PATH=/path/to/vault
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-Then check:
-
-```bash
-optsidian --help
-optsidian search --help
-optsidian-mcp --help
-```
-
-Update an existing managed install:
+Update:
 
 ```bash
 optsidian update
 ```
-
-### Separate Claude config dirs (`CLAUDE_CONFIG_DIR`)
-
-`install.sh` registers the MCP only with the Claude config dir active during install (`~/.claude` by default). Claude Code stores MCP servers per config dir (in `<CLAUDE_CONFIG_DIR>/.claude.json`), so register once for each additional config dir:
-
-```bash
-CLAUDE_CONFIG_DIR=$HOME/.claude-work claude mcp add optsidian -s user -- ~/.local/bin/optsidian-mcp
-```
-
-Append `-e OPTSIDIAN_VAULT_PATH=/path/to/vault` to match a fixed-vault install. Codex keeps a single global config, so it needs no per-config-dir step. The entry points at the stable `~/.local/bin/optsidian-mcp` path, so `optsidian update` (which replaces that binary in place) reaches every registered config dir automatically — no re-registration needed.
 
 Uninstall:
 
@@ -82,15 +46,56 @@ Uninstall:
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/uninstall.sh | bash
 ```
 
-## MCP Server
+If release attestation verification is unavailable:
 
-`optsidian-mcp` runs a local MCP server over stdio. It always starts and exposes a small shell-independent JSON tool surface for command routing and vault mutation. Vault-dependent tools resolve the active vault through the native Obsidian CLI when they are called:
-
-```text
-command_map, command_run, write, edit, apply_patch
+```bash
+export OPTSIDIAN_RELEASE_VERIFY=checksum
+curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-Example MCP client config:
+Checksum-only verification exists for migration and constrained environments.
+Attestations are preferred, and checksum-only mode is planned to go away in a
+future breaking release.
+
+## Try It Now
+
+Restart Codex or Claude after installing, then ask the model to use optsidian:
+
+```text
+Search my Obsidian vault for notes about the Q3 plan and summarize the decisions.
+```
+
+For a quick local smoke test:
+
+```bash
+optsidian --help
+optsidian search "project notes"
+```
+
+## Vault Selection
+
+By default, optsidian asks the native Obsidian CLI which vault is active. This is
+convenient when the GUI is open.
+
+Set a fixed vault when Obsidian may be closed, automation should not depend on
+the GUI state, or MCP must always use the same vault:
+
+```bash
+export OPTSIDIAN_VAULT_PATH=/path/to/vault
+```
+
+For a non-standard Obsidian binary:
+
+```bash
+export OPTSIDIAN_OBSIDIAN_BIN=/path/to/obsidian
+```
+
+## MCP
+
+`optsidian-mcp` runs a local MCP server over stdio. The installer registers it
+for detected Codex/Claude clients automatically.
+
+Manual client config:
 
 ```json
 {
@@ -102,7 +107,7 @@ Example MCP client config:
 }
 ```
 
-On Linux, `optsidian` and `optsidian-mcp` try to recover the Obsidian GUI launch context at runtime when the current process is missing `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS`/`XDG_RUNTIME_DIR`. If Obsidian GUI may be closed when tools are called, add a fixed vault path. Without one, vault-dependent tools resolve the current active vault on every call. If no active vault is available, the MCP server still connects and vault-dependent tools return a runtime error telling the client to launch Obsidian GUI or configure a fixed vault path.
+Pinned-vault config:
 
 ```json
 {
@@ -117,236 +122,73 @@ On Linux, `optsidian` and `optsidian-mcp` try to recover the Obsidian GUI launch
 }
 ```
 
-For a non-default Obsidian binary:
-
-```json
-{
-  "mcpServers": {
-    "optsidian": {
-      "command": "optsidian-mcp",
-      "env": {
-        "OPTSIDIAN_OBSIDIAN_BIN": "/path/to/obsidian"
-      }
-    }
-  }
-}
-```
-
-MCP tool arguments are JSON, so content strings are passed directly without shell expansion. Use the `command_map` MCP tool for routing first when work goes beyond the MCP mutation tools; it returns the Optsidian CLI-only commands, exposed MCP tools, and the current native delegated command list, then points detailed syntax to `optsidian --help` or `optsidian <command> --help`.
-
-## Plugin Installs
-
-Obsidian marketplace plugin installs stay native:
+Claude Code stores MCP servers per config directory. If you use multiple Claude
+config dirs, register each one:
 
 ```bash
-optsidian plugin:install id=obsidian-git enable
+CLAUDE_CONFIG_DIR=$HOME/.claude-work claude mcp add optsidian -s user -- ~/.local/bin/optsidian-mcp
 ```
 
-Optsidian extends `plugin:install` for custom plugin sources that are not available through the native marketplace command:
+Add `-e OPTSIDIAN_VAULT_PATH=/path/to/vault` if that config should be pinned to
+one vault.
+
+## Search And Cache
+
+Search is served by a local daemon. It stores search indexes outside the vault
+under `$XDG_CACHE_HOME/optsidian` or `~/.cache/optsidian`.
+
+The cache is private (`0700` directories, `0600` files), stores the full index
+data needed for search quality, and does not persist search query history.
+Repeated query analysis is cached only in memory.
+
+Unused search stores can be pruned:
 
 ```bash
-optsidian plugin:install url=https://github.com/user/my-plugin.git ref=main dir=dist/obsidian-plugin vault-path=/path/to/vault enable
-optsidian plugin:install url=user/my-plugin vault-path=/path/to/vault
-optsidian plugin:install url=github.company.com/user/my-plugin vault-path=/path/to/vault
-optsidian plugin:install url=github.company.com/user/private-plugin auth=true vault-path=/path/to/vault
-optsidian plugin:install path=../my-plugin/dist/obsidian-plugin vault-path=/path/to/vault enable
+optsidian index prune --dry-run
+optsidian index prune unused-days=30
 ```
 
-Custom installs read `manifest.json`, install into `.obsidian/plugins/<manifest.id>`, and can update `community-plugins.json` with `enable`. `url=user/repo` resolves to GitHub.com; scheme-less hosts such as `github.company.com/user/repo` try a GitHub Enterprise-style release lookup before cloning. Release probing and asset downloads do not send GitHub credentials by default; pass `auth=true` only for private releases you trust. With `vault-path=<path>` or `OPTSIDIAN_VAULT_PATH`, this file install path works even when the Obsidian GUI is not running. After install, Optsidian tries a best-effort native refresh when the target vault is the active Obsidian vault. `plugin:reload` itself remains a native passthrough command.
+Pruning is based on when a vault cache was last used, not when the vault content
+last changed. Read-only vaults that are searched regularly are kept.
 
-## Native-First Policy
+Regex grep/edit uses a pinned RE2 wasm runtime. The wasm package is downloaded
+on demand without credentials, verified by embedded hashes, and cached under the
+optsidian cache root.
 
-`optsidian` does not reimplement Obsidian commands that are already sufficient for LLM/tool use. Those commands are delegated with the original arguments, stdout, stderr, and exit code preserved.
+## Native Commands And Plugins
 
-Examples that stay native:
+Optsidian delegates native Obsidian commands when Obsidian already handles them
+well. It adds LLM-friendly wrappers only where bounded output, structured edits,
+ranked search, or vault-constrained file mutation matter.
 
-```bash
-optsidian files
-optsidian file path=README.md
-optsidian delete path=old.md
-optsidian property:set path=note.md name=status value=active
-optsidian tasks todo
-```
+Marketplace plugin installs stay native. Custom URL/path plugin installs exist
+for trusted plugins that are not available through the marketplace, but they
+install JavaScript into Obsidian. Treat custom plugin sources as code execution.
+Release probing and asset downloads do not send GitHub credentials by default;
+private plugin releases require an explicit authenticated install.
 
-Use `raw` to force native execution:
+## Human CLI Reference
 
-```bash
-optsidian raw --help
-optsidian raw search query=foo format=json
-```
-
-## Optimized Commands
-
-Detailed syntax for any implemented command:
+Humans should not need the full command catalog in this README:
 
 ```bash
+optsidian --help
 optsidian <command> --help
 ```
 
-### `read`
+For agents, the MCP routing tool is the source of truth.
 
-Read vault files with line ranges and output caps.
+## Troubleshooting
 
-```bash
-optsidian read path=README.md head=40
-optsidian read path=README.md lines=20:60
-optsidian read path=README.md around="Native-First" context=5
-optsidian read path=README.md lines=1:20 format=json
-```
-
-Text output is line-numbered (tab-separated, like `cat -n`):
-
-```text
-path: README.md
-lines: 1-3/120
-truncated: false
-
-1	# optsidian
-2	
-3	`optsidian` is an LLM-optimized wrapper...
-```
-
-## Extended Commands
-
-### `search`
-
-Rank notes by title, tags, aliases, headings, path, and body.
-
-```bash
-optsidian search "alpha rollout"
-optsidian search "alpha rollout" limit=10
-optsidian search "alpha rollout" path=Projects
-optsidian search review field=body
-optsidian search rollout tag=project path=Projects
-optsidian search tag=project,alpha
-optsidian search "#project alpha" format=json
-```
-
-Search returns only note path, title, tags, and body-focused snippets. Frontmatter is indexed for ranking, but it is not shown as snippet evidence. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Search indexes analyzer tokens; the default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming for a zero-config multilingual baseline.
-
-The search daemon stores immutable positional snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with a durable active pointer. Each snapshot contains canonical field text, analyzer token channels, positional postings, term statistics, metadata features, and line snippet data. Search query history is not persisted. The daemon keeps only an in-memory query-analysis cache, capped at 64 entries by default, to avoid retokenizing repeated queries; set `search.queryCacheSize=0` or `OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE=0` to disable it. CLI and MCP searches are daemon RPC calls only: if the daemon cannot start or become ready, search fails clearly instead of falling back to in-process indexing. `index status` reports daemon readiness, request metrics, and loaded vault snapshot states; `index rebuild`, `index warm`, and `index clear` are daemon RPC mutations. `OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools; the Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. Korean 2/3-gram indexing is not part of the default search path and can be enabled for manual comparison with `OPTSIDIAN_SEARCH_NGRAM=true` or `search.ngram=true`. Tune worker pools and cache pressure with `search.queryWorkers`, `search.indexWorkers`, `search.snapshotRetentionCount`, `search.queryCacheSize`, `search.memoryBudgetCount`, `search.memoryBudgetBytes`, and `search.daemonIdleMs` or their matching `OPTSIDIAN_SEARCH_*` environment variables.
-
-Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
-
-```bash
-optsidian config set search.analyzer=intl
-optsidian config set search.extraLangs=ko
-optsidian config set search.ngram=false
-optsidian config set search.queryWorkers=2
-optsidian config set search.indexWorkers=2
-optsidian config set search.snapshotRetentionCount=8
-optsidian config set search.queryCacheSize=64
-optsidian config set search.memoryBudgetCount=8
-optsidian config set search.memoryBudgetBytes=268435456
-optsidian config set search.daemonIdleMs=300000
-optsidian config get search.extraLangs
-```
-
-```bash
-optsidian index status
-optsidian index rebuild
-optsidian index warm
-optsidian index clear
-```
-
-`index warm` loads or refreshes daemon snapshots for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
-
-### `grep`
-
-Find exact or regex line matches in vault text with compact output.
-
-```bash
-optsidian grep query=TODO context=2 limit=20
-optsidian grep query="status: active" path=Projects
-optsidian grep query="foo\\d+" regex case format=json
-```
-
-By default, grep includes Markdown files and skips `.obsidian`, `.git`, `.trash`, `node_modules`, and hidden directories. Use `all` for non-Markdown files and `include-hidden` for hidden directories other than protected internals. Regex mode uses a pinned RE2 wasm runtime cached under `~/.cache/optsidian`; the runtime tarball is downloaded without credentials and verified by embedded hashes before use.
-
-### `frontmatter`
-
-Read and mutate YAML frontmatter in Markdown files without editing raw text.
-
-```bash
-optsidian frontmatter read path=note.md
-optsidian frontmatter set path=note.md key=status value=active
-optsidian frontmatter set path=note.md key=priority value-json=3
-optsidian frontmatter add path=note.md key=tags value=project
-optsidian frontmatter remove path=note.md key=tags value=old
-optsidian frontmatter delete path=note.md key=status dry-run
-```
-
-`value=` is stored as a string. Use `value-json=` for numbers, booleans, arrays, objects, or null. Both value forms support `@file`. Frontmatter mutations preserve the Markdown body exactly and reject invalid YAML, duplicate keys, and non-mapping frontmatter roots.
-
-### `edit`
-
-Apply exact, regex, line, or range edits.
-
-```bash
-optsidian edit path=note.md replace="old text" with="new text"
-optsidian edit path=note.md replace="old" with="new" all
-optsidian edit path=note.md regex="^status: .*$" with="status: done"
-optsidian edit path=note.md line=12 with="- [x] finished"
-optsidian edit path=note.md range=20:25 with=@section.md dry-run
-```
-
-Replacement text is literal. Strings such as `$&` and `$1` are not interpreted as JavaScript replacement tokens. Regex selectors use RE2 rather than JavaScript `RegExp`; backreferences and lookaround assertions are rejected instead of falling back to an unsafe regex engine.
-
-### `write`
-
-Write a whole file with an overwrite guard.
-
-```bash
-optsidian write path=Inbox/new.md content="# New note"
-optsidian write path=Inbox/new.md content=@note.md overwrite
-optsidian write path=Inbox/new.md content=@note.md dry-run
-```
-
-### `apply_patch`
-
-Apply Codex-style patches inside the vault.
-
-```bash
-optsidian apply_patch patch=@change.patch
-```
-
-Or via stdin:
-
-```bash
-optsidian apply_patch <<'PATCH'
-*** Begin Patch
-*** Update File: README.md
-@@
--old
-+new
-*** End Patch
-PATCH
-```
-
-The patch grammar is compatible with Codex-style `Add File`, `Update File`, `Delete File`, and `Move to` hunks. Absolute paths are parsed, but rejected unless they resolve inside the active vault. `Add File` refuses existing files, and `Move to` refuses to overwrite an existing destination unless it is the same file.
-
-### `copy` and `mkdir`
-
-```bash
-optsidian mkdir path=Projects/New
-optsidian copy from=Templates/template_project.md to=Projects/New/New.md
-optsidian copy from=Templates to=Backups/Templates recursive
-```
-
-## Safety Model
-
-- Optimized and extended commands are constrained to the active vault root.
-- Relative paths resolve from the vault root, not the shell cwd.
-- Existing paths are checked with `realpath`.
-- New paths validate the nearest existing parent.
-- Symlink escapes outside the vault are rejected.
-- Mutating commands apply immediately unless `dry-run` is passed.
-- File writes are atomic per file.
-- Multi-file `apply_patch` is not transactional, matching Codex behavior.
-
-## Architecture
-
-`src/core/*` is the shell-independent command layer. It accepts raw strings and returns structured results, so MCP tools can call it directly without command-line quoting or stdout parsing. `src/cli/*` is only the CLI adapter: argument parsing, native Obsidian delegation, vault discovery, and text/json rendering. `src/daemon/*` is the L3 search-daemon peer that owns RPC transport, snapshot serving, worker pools, and vault search state. `src/cli/commands/plugin.ts` implements the custom-source `plugin:install` extension. `src/mcp/*` is the stdio MCP adapter.
+- MCP connects but vault tools fail: open Obsidian GUI or set
+  `OPTSIDIAN_VAULT_PATH`.
+- A separate Claude config dir does not see optsidian: register that
+  `CLAUDE_CONFIG_DIR` explicitly.
+- Permission errors under `~/.cache/optsidian`: optsidian may have been run with
+  `sudo` before; fix ownership or remove that cache path.
+- Attestation verification fails because `gh` is unavailable: install/update can
+  use explicit `OPTSIDIAN_RELEASE_VERIFY=checksum`, but attestations are the
+  default trust path.
 
 ## Development
 
@@ -354,16 +196,6 @@ optsidian copy from=Templates to=Backups/Templates recursive
 npm install
 npm run build
 npm test
-```
-
-Useful local checks:
-
-```bash
-dist/optsidian --help
-dist/optsidian-mcp --help
-dist/optsidian files total
-dist/optsidian read path=README.md head=10
-npm pack --dry-run
 ```
 
 ## Documentation
