@@ -11,6 +11,9 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -39,6 +42,17 @@ jobs:
       - name: Package release assets
         run: npm run package:release
 
+      - name: Generate release provenance attestation
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-checksums: release/checksums-${{ github.ref_name }}.txt
+
+      - name: Stage attestation bundle
+        run: |
+          cp "${{ steps.attest.outputs.bundle-path }}" \
+            "release/attestation-${GITHUB_REF_NAME}.json"
+
       - name: Verify curated GitHub release exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,6 +73,7 @@ jobs:
             "release/optsidian-${GITHUB_REF_NAME}" \
             "release/optsidian-mcp-${GITHUB_REF_NAME}" \
             "release/checksums-${GITHUB_REF_NAME}.txt" \
+            "release/attestation-${GITHUB_REF_NAME}.json" \
             --clobber
           gh release edit "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \

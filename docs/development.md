@@ -89,10 +89,17 @@ gh release create vX.Y.Z \
 
 The `release.yml` workflow validates that the pushed tag matches `package.json`,
 runs the full test suite, builds `dist/`, emits `release/optsidian-vX.Y.Z`,
-`release/optsidian-mcp-vX.Y.Z`, and `release/checksums-vX.Y.Z.txt`, and uploads
+`release/optsidian-mcp-vX.Y.Z`, and `release/checksums-vX.Y.Z.txt`, generates
+`release/attestation-vX.Y.Z.json` from the checksum subject list, and uploads
 those assets to the existing GitHub Release. The workflow intentionally fails if
 the release does not already exist, so create the curated release body manually
 and rerun the workflow if the tag workflow reached the upload step first.
+
+`v0.3.x` is the attestation migration bridge. It keeps checksum assets and the
+explicit `OPTSIDIAN_RELEASE_VERIFY=checksum` fallback so `v0.2.x` installs can
+update to `v0.3.0`. For `v0.4.0`, remove that bridge: drop checksum-only and
+best-effort verification modes, require attestations unconditionally, and stop
+publishing compatibility assets that old installers can consume.
 
 After the release is published, CI has uploaded assets, and a smoke test passes,
 clear `docs/CHANGELOG.md` back to its template in a follow-up commit:

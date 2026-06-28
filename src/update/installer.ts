@@ -9,6 +9,12 @@ import { resolveVaultPathInput } from "../native/obsidian.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
 
 const DEFAULT_RELEASE_API_BASE = "https://api.github.com/repos/kangig94/optsidian/releases";
+const RELEASE_REPOSITORY = "kangig94/optsidian";
+const RELEASE_SIGNER_WORKFLOW = "kangig94/optsidian/.github/workflows/release.yml";
+// v0.3.x is the one-release bridge that lets v0.2.x installs update forward.
+// TODO(v0.4.0): remove checksum/best-effort modes and require attestations only.
+const FIRST_ATTESTED_RELEASE = "v0.3.0";
+const MIN_SUPPORTED_INSTALL_TAG = "v0.3.0";
 const MCP_NAME = "optsidian";
 const UPDATE_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_NOTICE_NOTIFICATION_INTERVAL_MS = 3 * 60 * 60 * 1000;
@@ -70,6 +76,8 @@ type ReleaseInfo = {
   optsidianMcpDownloadUrl: string;
   checksumsAssetName: string;
   checksumsDownloadUrl: string;
+  attestationAssetName: string;
+  attestationDownloadUrl?: string;
 };
 
 type RegistrationResult = {
@@ -88,6 +96,9 @@ type UpdateNoticeState = {
   targetVersion?: string;
   lastError?: string;
 };
+
+// TODO(v0.4.0): delete this mode switch and always enforce attestation verification.
+type ReleaseVerifyMode = "required" | "best-effort" | "checksum";
 
 export function stateBaseDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.OPTSIDIAN_STATE_BASE) {
@@ -139,6 +150,10 @@ export function mcpAssetNameForTag(tag: string): string {
 
 export function checksumsAssetNameForTag(tag: string): string {
   return `checksums-${normalizeTag(tag)}.txt`;
+}
+
+export function attestationAssetNameForTag(tag: string): string {
+  return `attestation-${normalizeTag(tag)}.json`;
 }
 
 export function releaseApiBase(env: NodeJS.ProcessEnv = process.env): string {
@@ -326,13 +341,17 @@ export async function installRelease(options: { tag?: string; env?: NodeJS.Proce
   const optsidianMcpAssetPath = path.join(releaseDir, target.optsidianMcpAssetName);
   const checksumsPath = path.join(releaseDir, target.checksumsAssetName);
 
-  await downloadFile(target.checksumsDownloadUrl, checksumsPath, env);
-  await downloadFile(target.optsidianDownloadUrl, optsidianAssetPath, env);
-  await downloadFile(target.optsidianMcpDownloadUrl, optsidianMcpAssetPath, env);
+  await downloadFile(target.checksumsDownloadUrl, checksumsPath, env, { sendAuth: false });
+  await downloadFile(target.optsidianDownloadUrl, optsidianAssetPath, env, { sendAuth: false });
+  await downloadFile(target.optsidianMcpDownloadUrl, optsidianMcpAssetPath, env, { sendAuth: false });
   verifyDownloadedAssets(checksumsPath, [
     { name: target.optsidianAssetName, filePath: optsidianAssetPath },
     { name: target.optsidianMcpAssetName, filePath: optsidianMcpAssetPath }
   ]);
+  await verifyReleaseAttestation(target, [
+    { name: target.optsidianAssetName, filePath: optsidianAssetPath },
+    { name: target.optsidianMcpAssetName, filePath: optsidianMcpAssetPath }
+  ], releaseDir, env);
   verifyExecutableVersion(optsidianAssetPath, target.version, target.optsidianAssetName);
   verifyExecutableVersion(optsidianMcpAssetPath, target.version, target.optsidianMcpAssetName);
 
@@ -387,8 +406,10 @@ async function fetchReleaseInfo(options: { tag?: string; env?: NodeJS.ProcessEnv
   const env = options.env ?? process.env;
   const requestedTag = options.tag ? normalizeTag(options.tag) : undefined;
   const endpoint = requestedTag ? `${releaseApiBase(env)}/tags/${encodeURIComponent(requestedTag)}` : `${releaseApiBase(env)}/latest`;
-  const payload = await fetchJson(endpoint, env);
-  return parseReleaseInfo(payload, requestedTag);
+  const payload = await fetchJson(endpoint, env, { sendAuth: false });
+  const target = parseReleaseInfo(payload, requestedTag);
+  assertReleaseTargetPolicy(target, env);
+  return target;
 }
 
 async function fetchLatestReleaseVersion(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ tag: string; version: string }> {
@@ -401,6 +422,7 @@ async function fetchLatestReleaseVersion(env: NodeJS.ProcessEnv, timeoutMs: numb
   if (json.draft === true) {
     throw new RuntimeError(`Release ${tag} is still a draft`);
   }
+  assertSupportedReleaseTag(tag);
   return { tag, version: versionFromTag(tag) };
 }
 
@@ -419,6 +441,7 @@ function parseReleaseInfo(payload: unknown, requestedTag: string | undefined): R
   const optsidianAssetName = assetNameForTag(tag);
   const optsidianMcpAssetName = mcpAssetNameForTag(tag);
   const checksumsAssetName = checksumsAssetNameForTag(tag);
+  const attestationAssetName = attestationAssetNameForTag(tag);
   const assets = Array.isArray(json.assets) ? json.assets : [];
   const optsidianAsset = assets.find((item) => {
     if (!item || typeof item !== "object") return false;
@@ -431,6 +454,10 @@ function parseReleaseInfo(payload: unknown, requestedTag: string | undefined): R
   const checksumsAsset = assets.find((item) => {
     if (!item || typeof item !== "object") return false;
     return (item as Record<string, unknown>).name === checksumsAssetName;
+  }) as Record<string, unknown> | undefined;
+  const attestationAsset = assets.find((item) => {
+    if (!item || typeof item !== "object") return false;
+    return (item as Record<string, unknown>).name === attestationAssetName;
   }) as Record<string, unknown> | undefined;
   if (!optsidianAsset || typeof optsidianAsset.browser_download_url !== "string") {
     throw new RuntimeError(`Release ${tag} does not contain asset ${optsidianAssetName}`);
@@ -449,13 +476,89 @@ function parseReleaseInfo(payload: unknown, requestedTag: string | undefined): R
     optsidianMcpAssetName,
     optsidianMcpDownloadUrl: optsidianMcpAsset.browser_download_url,
     checksumsAssetName,
-    checksumsDownloadUrl: checksumsAsset.browser_download_url
+    checksumsDownloadUrl: checksumsAsset.browser_download_url,
+    attestationAssetName,
+    attestationDownloadUrl: typeof attestationAsset?.browser_download_url === "string"
+      ? attestationAsset.browser_download_url
+      : undefined
   };
 }
 
 async function fetchReleaseChecksums(target: ReleaseInfo, env: NodeJS.ProcessEnv): Promise<Map<string, string>> {
-  const response = await requestBuffer(target.checksumsDownloadUrl, env);
+  const response = await requestBuffer(target.checksumsDownloadUrl, env, { sendAuth: false });
   return parseChecksumsText(response.body.toString("utf8"));
+}
+
+async function verifyReleaseAttestation(
+  target: ReleaseInfo,
+  assets: Array<{ name: string; filePath: string }>,
+  releaseDir: string,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  const mode = releaseVerifyMode(env);
+  if (mode === "checksum" || compareVersions(target.version, versionFromTag(FIRST_ATTESTED_RELEASE)) < 0) return;
+
+  if (!target.attestationDownloadUrl) {
+    if (mode === "required") {
+      throw new RuntimeError(`Release ${target.tag} does not contain asset ${target.attestationAssetName}`);
+    }
+    return;
+  }
+
+  if (!hasCommand("gh", env)) {
+    if (mode === "required") {
+      throw new RuntimeError(`GitHub CLI (gh) is required to verify release attestations for ${target.tag}`);
+    }
+    return;
+  }
+
+  const bundlePath = path.join(releaseDir, target.attestationAssetName);
+  await downloadFile(target.attestationDownloadUrl, bundlePath, env, { sendAuth: false });
+  for (const asset of assets) {
+    verifyAssetAttestation(asset, bundlePath, env, mode);
+  }
+}
+
+function verifyAssetAttestation(
+  asset: { name: string; filePath: string },
+  bundlePath: string,
+  env: NodeJS.ProcessEnv,
+  mode: ReleaseVerifyMode
+): void {
+  const ghConfigDir = path.join(os.tmpdir(), `optsidian-gh-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  fs.mkdirSync(ghConfigDir, { recursive: true, mode: 0o700 });
+  try {
+    const result = spawnSync("gh", [
+      "attestation",
+      "verify",
+      asset.filePath,
+      "--repo",
+      RELEASE_REPOSITORY,
+      "--signer-workflow",
+      RELEASE_SIGNER_WORKFLOW,
+      "--deny-self-hosted-runners",
+      "--bundle",
+      bundlePath
+    ], {
+      encoding: "utf8",
+      env: unauthenticatedGhEnv(env, ghConfigDir)
+    });
+    if (result.error || (result.status ?? 1) !== 0) {
+      if (mode === "required") {
+        const detail = result.error?.message ?? (result.stderr || result.stdout || "gh attestation verify failed").trim();
+        throw new RuntimeError(`Release attestation verification failed for ${asset.name}: ${detail}`);
+      }
+    }
+  } finally {
+    fs.rmSync(ghConfigDir, { recursive: true, force: true });
+  }
+}
+
+function unauthenticatedGhEnv(env: NodeJS.ProcessEnv, ghConfigDir: string): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env, GH_CONFIG_DIR: ghConfigDir };
+  delete next.GITHUB_TOKEN;
+  delete next.GH_TOKEN;
+  return next;
 }
 
 function verifyDownloadedAssets(checksumsPath: string, assets: Array<{ name: string; filePath: string }>): void {
@@ -746,6 +849,33 @@ function positiveIntegerEnv(env: NodeJS.ProcessEnv, key: string, fallback: numbe
   if (raw === undefined || raw.trim() === "") return fallback;
   const value = Number(raw);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function assertReleaseTargetPolicy(target: ReleaseInfo, env: NodeJS.ProcessEnv): void {
+  assertSupportedReleaseTarget(target);
+  if (
+    releaseVerifyMode(env) === "required" &&
+    compareVersions(target.version, versionFromTag(FIRST_ATTESTED_RELEASE)) >= 0 &&
+    !target.attestationDownloadUrl
+  ) {
+    throw new RuntimeError(`Release ${target.tag} does not contain asset ${target.attestationAssetName}`);
+  }
+}
+
+function releaseVerifyMode(env: NodeJS.ProcessEnv): ReleaseVerifyMode {
+  const raw = env.OPTSIDIAN_RELEASE_VERIFY?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return "required";
+  if (raw === "required" || raw === "best-effort" || raw === "checksum") return raw;
+  throw new RuntimeError("OPTSIDIAN_RELEASE_VERIFY must be one of: required, best-effort, checksum");
+}
+
+function assertSupportedReleaseTarget(target: ReleaseInfo): void {
+  assertSupportedReleaseTag(target.tag);
+}
+
+function assertSupportedReleaseTag(tag: string): void {
+  if (compareVersions(versionFromTag(tag), versionFromTag(MIN_SUPPORTED_INSTALL_TAG)) >= 0) return;
+  throw new RuntimeError(`Optsidian releases before ${MIN_SUPPORTED_INSTALL_TAG} are no longer supported by this installer.`);
 }
 
 function compareVersions(left: string, right: string): number {

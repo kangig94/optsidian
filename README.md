@@ -8,6 +8,7 @@ It follows a native-first policy: commands that Obsidian already handles well ar
 
 - Node.js 20 or newer
 - `curl` for the release installer
+- GitHub CLI (`gh`) for default release attestation verification
 - Codex CLI and Claude Code are optional; detected clients are registered automatically
 - A working `obsidian` CLI on `PATH` for active vault resolution and native/plugin commands
 - Linux or macOS for managed install/update
@@ -42,7 +43,7 @@ Install the latest published release from the canonical script:
 curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/install.sh | bash
 ```
 
-The script downloads the latest stable GitHub release assets, verifies downloaded checksums, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 20 or newer and does not invoke the native `obsidian` CLI during installation.
+The script downloads the latest stable GitHub release assets without GitHub credentials, verifies downloaded checksums and GitHub release attestations, installs `optsidian` and `optsidian-mcp` into `~/.local/bin`, writes managed install metadata under `~/.cache/optsidian`, and registers `optsidian` with any detected Codex/Claude client. It requires Node.js 20 or newer and does not invoke the native `obsidian` CLI during installation. For constrained environments, `OPTSIDIAN_RELEASE_VERIFY=checksum` is available as an explicit checksum-only fallback.
 
 If you want MCP to stay pinned to one vault regardless of the active GUI vault, install with a fixed vault path:
 

@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/kangig94/optsidian/main/scripts/ins
 ```
 
 The installer does not invoke the native `obsidian` CLI. Native vault resolution and any Linux GUI env recovery still happen later when `optsidian` or `optsidian-mcp` actually run.
-It requires Node.js 20 or newer plus `curl`.
+It requires Node.js 20 or newer plus `curl`. Default install/update verification also requires GitHub CLI (`gh`) for release attestation checks. Official Optsidian release downloads do not send GitHub credentials. Set `OPTSIDIAN_RELEASE_VERIFY=checksum` only as an explicit checksum-only fallback.
 
 Check or apply managed updates:
 

@@ -2,6 +2,7 @@
 # Install Optsidian from the latest published GitHub release:
 #   - download the latest stable release assets
 #   - verify downloaded file checksums
+#   - verify GitHub release attestations for supported releases
 #   - install optsidian / optsidian-mcp into ~/.local/bin
 #   - write managed install metadata into ~/.cache/optsidian/install.json
 #   - register the optsidian MCP server with any detected Codex/Claude client
@@ -9,6 +10,13 @@
 set -euo pipefail
 
 RELEASE_API_BASE="${OPTSIDIAN_RELEASE_API_BASE:-https://api.github.com/repos/kangig94/optsidian/releases}"
+RELEASE_REPOSITORY="kangig94/optsidian"
+RELEASE_SIGNER_WORKFLOW="kangig94/optsidian/.github/workflows/release.yml"
+# v0.3.x is the one-release bridge that lets v0.2.x installs update forward.
+# TODO(v0.4.0): remove checksum/best-effort modes and require attestations only.
+FIRST_ATTESTED_RELEASE="v0.3.0"
+MIN_SUPPORTED_INSTALL_TAG="v0.3.0"
+RELEASE_VERIFY="${OPTSIDIAN_RELEASE_VERIFY:-required}"
 MCP_NAME="optsidian"
 BIN_DIR="${OPTSIDIAN_BIN_DIR:-${HOME}/.local/bin}"
 STATE_BASE="${OPTSIDIAN_STATE_BASE:-${XDG_CACHE_HOME:-${HOME}/.cache}/optsidian}"
@@ -25,6 +33,8 @@ Installs the latest stable Optsidian GitHub release on Linux or macOS.
 Optional environment:
   OPTSIDIAN_VAULT_PATH=/absolute/path/to/vault
     Fallback vault root used when native Obsidian CLI cannot resolve a vault.
+  OPTSIDIAN_RELEASE_VERIFY=required|best-effort|checksum
+    Release attestation verification mode. Default: required.
 EOF
 }
 
@@ -92,10 +102,16 @@ command -v codex >/dev/null && HAS_CODEX=1
 [ "${HAS_CLAUDE}" = "1" ] && echo "  - claude detected: $(claude --version 2>/dev/null | head -1)"
 [ "${HAS_CODEX}" = "1" ] && echo "  - codex  detected: $(codex --version 2>/dev/null | head -1)"
 
+case "${RELEASE_VERIFY}" in
+  required|best-effort|checksum)
+    ;;
+  *)
+    echo "ERROR: OPTSIDIAN_RELEASE_VERIFY must be one of: required, best-effort, checksum."
+    exit 1
+    ;;
+esac
+
 CURL_HEADERS=(-H "Accept: application/vnd.github+json" -H "User-Agent: optsidian-install")
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  CURL_HEADERS+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-fi
 
 WORK_DIR="$(mktemp -d)"
 RELEASE_JSON="${WORK_DIR}/release.json"
@@ -105,9 +121,12 @@ echo "==> Resolving latest stable release"
 curl -fsSL "${CURL_HEADERS[@]}" "${RELEASE_API_BASE}/latest" > "${RELEASE_JSON}"
 
 eval "$(
-  node - "${RELEASE_JSON}" <<'NODE'
+  node - "${RELEASE_JSON}" "${MIN_SUPPORTED_INSTALL_TAG}" "${FIRST_ATTESTED_RELEASE}" "${RELEASE_VERIFY}" <<'NODE'
 const fs = require("node:fs");
 const file = process.argv[2];
+const minSupportedTag = process.argv[3];
+const firstAttestedTag = process.argv[4];
+const releaseVerify = process.argv[5];
 const payload = JSON.parse(fs.readFileSync(file, "utf8"));
 const tag = String(payload.tag_name || "");
 if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
@@ -116,15 +135,33 @@ if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
 if (payload.draft) {
   throw new Error(`Release ${tag} is still a draft`);
 }
+function parseVersion(value) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) throw new Error(`Invalid version: ${value}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+function compareVersion(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+}
+if (compareVersion(tag, minSupportedTag) < 0) {
+  throw new Error(`Optsidian releases before ${minSupportedTag} are no longer supported by this installer.`);
+}
 const assetNames = {
   optsidian: `optsidian-${tag}`,
   optsidianMcp: `optsidian-mcp-${tag}`,
-  checksums: `checksums-${tag}.txt`
+  checksums: `checksums-${tag}.txt`,
+  attestation: `attestation-${tag}.json`
 };
 const assets = Array.isArray(payload.assets) ? payload.assets : [];
 const optsidianAsset = assets.find((entry) => entry && entry.name === assetNames.optsidian);
 const optsidianMcpAsset = assets.find((entry) => entry && entry.name === assetNames.optsidianMcp);
 const checksumsAsset = assets.find((entry) => entry && entry.name === assetNames.checksums);
+const attestationAsset = assets.find((entry) => entry && entry.name === assetNames.attestation);
 if (!optsidianAsset || typeof optsidianAsset.browser_download_url !== "string") {
   throw new Error(`Release ${tag} does not contain asset ${assetNames.optsidian}`);
 }
@@ -134,6 +171,13 @@ if (!optsidianMcpAsset || typeof optsidianMcpAsset.browser_download_url !== "str
 if (!checksumsAsset || typeof checksumsAsset.browser_download_url !== "string") {
   throw new Error(`Release ${tag} does not contain asset ${assetNames.checksums}`);
 }
+if (
+  releaseVerify === "required" &&
+  compareVersion(tag, firstAttestedTag) >= 0 &&
+  (!attestationAsset || typeof attestationAsset.browser_download_url !== "string")
+) {
+  throw new Error(`Release ${tag} does not contain asset ${assetNames.attestation}`);
+}
 const values = {
   RELEASE_TAG: tag,
   RELEASE_VERSION: tag.slice(1),
@@ -142,7 +186,9 @@ const values = {
   OPTSIDIAN_MCP_ASSET_NAME: assetNames.optsidianMcp,
   OPTSIDIAN_MCP_ASSET_URL: optsidianMcpAsset.browser_download_url,
   CHECKSUMS_ASSET_NAME: assetNames.checksums,
-  CHECKSUMS_ASSET_URL: checksumsAsset.browser_download_url
+  CHECKSUMS_ASSET_URL: checksumsAsset.browser_download_url,
+  ATTESTATION_ASSET_NAME: assetNames.attestation,
+  ATTESTATION_ASSET_URL: attestationAsset && typeof attestationAsset.browser_download_url === "string" ? attestationAsset.browser_download_url : ""
 };
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 for (const [key, value] of Object.entries(values)) {
@@ -156,6 +202,7 @@ mkdir -p "${RELEASE_CACHE_DIR}"
 OPTSIDIAN_ASSET_PATH="${RELEASE_CACHE_DIR}/${OPTSIDIAN_ASSET_NAME}"
 OPTSIDIAN_MCP_ASSET_PATH="${RELEASE_CACHE_DIR}/${OPTSIDIAN_MCP_ASSET_NAME}"
 CHECKSUMS_ASSET_PATH="${RELEASE_CACHE_DIR}/${CHECKSUMS_ASSET_NAME}"
+ATTESTATION_ASSET_PATH="${RELEASE_CACHE_DIR}/${ATTESTATION_ASSET_NAME}"
 
 echo "==> Downloading ${CHECKSUMS_ASSET_NAME}"
 curl -fsSL "${CURL_HEADERS[@]}" "${CHECKSUMS_ASSET_URL}" -o "${CHECKSUMS_ASSET_PATH}"
@@ -188,6 +235,64 @@ for (const asset of assets) {
   if (actual !== expected) throw new Error(`Checksum mismatch for ${asset.name}`);
 }
 NODE
+
+SHOULD_VERIFY_ATTESTATION="$(
+  node - "${RELEASE_TAG}" "${FIRST_ATTESTED_RELEASE}" "${RELEASE_VERIFY}" <<'NODE'
+function parseVersion(value) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) throw new Error(`Invalid version: ${value}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+function compareVersion(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] - b[index];
+  }
+  return 0;
+}
+const tag = process.argv[2];
+const firstAttested = process.argv[3];
+const mode = process.argv[4];
+process.stdout.write(mode !== "checksum" && compareVersion(tag, firstAttested) >= 0 ? "1" : "0");
+NODE
+)"
+
+if [ "${SHOULD_VERIFY_ATTESTATION}" = "1" ]; then
+  if [ -z "${ATTESTATION_ASSET_URL}" ]; then
+    if [ "${RELEASE_VERIFY}" = "required" ]; then
+      echo "ERROR: Release ${RELEASE_TAG} does not contain asset ${ATTESTATION_ASSET_NAME}."
+      exit 1
+    fi
+    echo "WARN: release attestation is missing; continuing because OPTSIDIAN_RELEASE_VERIFY=${RELEASE_VERIFY}"
+  elif ! command -v gh >/dev/null; then
+    if [ "${RELEASE_VERIFY}" = "required" ]; then
+      echo "ERROR: GitHub CLI (gh) is required to verify release attestations for ${RELEASE_TAG}."
+      exit 1
+    fi
+    echo "WARN: gh is not available; continuing because OPTSIDIAN_RELEASE_VERIFY=${RELEASE_VERIFY}"
+  else
+    echo "==> Downloading ${ATTESTATION_ASSET_NAME}"
+    curl -fsSL "${CURL_HEADERS[@]}" "${ATTESTATION_ASSET_URL}" -o "${ATTESTATION_ASSET_PATH}"
+    echo "==> Verifying release attestations"
+    GH_CONFIG_DIR="${WORK_DIR}/gh-config"
+    mkdir -p "${GH_CONFIG_DIR}"
+    chmod 0700 "${GH_CONFIG_DIR}"
+    for asset_path in "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_PATH}"; do
+      if ! env GH_CONFIG_DIR="${GH_CONFIG_DIR}" GITHUB_TOKEN="" GH_TOKEN="" gh attestation verify "${asset_path}" \
+        --repo "${RELEASE_REPOSITORY}" \
+        --signer-workflow "${RELEASE_SIGNER_WORKFLOW}" \
+        --deny-self-hosted-runners \
+        --bundle "${ATTESTATION_ASSET_PATH}"; then
+        if [ "${RELEASE_VERIFY}" = "required" ]; then
+          echo "ERROR: release attestation verification failed for ${asset_path}"
+          exit 1
+        fi
+        echo "WARN: release attestation verification failed for ${asset_path}; continuing because OPTSIDIAN_RELEASE_VERIFY=${RELEASE_VERIFY}"
+      fi
+    done
+  fi
+fi
 
 echo "==> Verifying downloaded asset versions"
 node - "${RELEASE_VERSION}" "${OPTSIDIAN_ASSET_NAME}" "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}" "${OPTSIDIAN_MCP_ASSET_PATH}" <<'NODE'

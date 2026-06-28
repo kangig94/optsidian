@@ -13,8 +13,8 @@ const installScript = path.resolve("scripts/install.sh");
 const uninstallScript = path.resolve("scripts/uninstall.sh");
 const packageVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
 const newerVersion = nextPatchVersion(packageVersion);
-const UPDATE_TOOLS = [];
-const INSTALL_TOOLS = ["curl", "cp", "chmod", "mv", "uname", "mktemp", "mkdir", "rm", "head"];
+const UPDATE_TOOLS = ["gh"];
+const INSTALL_TOOLS = ["curl", "cp", "chmod", "mv", "uname", "mktemp", "mkdir", "rm", "head", "env", "gh"];
 const NO_PROXY_ENV = {
   HTTPS_PROXY: "",
   https_proxy: "",
@@ -51,6 +51,10 @@ function createToolBin(dir, options = {}) {
       writeFakeCurl(binDir, options.curlLog);
       continue;
     }
+    if (tool === "gh") {
+      writeFakeGh(binDir, options.ghLog);
+      continue;
+    }
     linkCommand(binDir, tool, locateCommand(tool));
   }
   if (options.codexLog) {
@@ -72,8 +76,9 @@ function writeFakeCurl(binDir, logFile) {
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
-if (process.env.CURL_LOG_FILE) {
-  fs.appendFileSync(process.env.CURL_LOG_FILE, JSON.stringify(args) + "\\n");
+const logFile = ${JSON.stringify(logFile ?? "")};
+if (logFile) {
+  fs.appendFileSync(logFile, JSON.stringify(args) + "\\n");
 }
 const result = spawnSync(${JSON.stringify(realCurl)}, args, {
   stdio: ["ignore", "pipe", "pipe"],
@@ -82,6 +87,50 @@ const result = spawnSync(${JSON.stringify(realCurl)}, args, {
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 process.exit(result.status ?? 1);
+`;
+  fs.writeFileSync(file, script);
+  fs.chmodSync(file, 0o755);
+}
+
+function writeFakeGh(binDir, logFile) {
+  const file = path.join(binDir, "gh");
+  const script = `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const logFile = ${JSON.stringify(logFile ?? "")};
+if (args[0] === "--version") {
+  console.log("gh version 2.0.0");
+  process.exit(0);
+}
+if (logFile) {
+  fs.appendFileSync(logFile, JSON.stringify({
+    args,
+    githubToken: process.env.GITHUB_TOKEN || "",
+    ghToken: process.env.GH_TOKEN || "",
+    ghConfigDir: process.env.GH_CONFIG_DIR || ""
+  }) + "\\n");
+}
+if (args[0] === "attestation" && args[1] === "verify") {
+  const assetPath = args[2];
+  const bundleIndex = args.indexOf("--bundle");
+  const bundlePath = bundleIndex === -1 ? "" : args[bundleIndex + 1];
+  if (!assetPath || !fs.existsSync(assetPath)) {
+    console.error("missing attestation subject");
+    process.exit(1);
+  }
+  if (!bundlePath || !fs.existsSync(bundlePath)) {
+    console.error("missing attestation bundle");
+    process.exit(1);
+  }
+  if (process.env.FAKE_GH_FAIL === "1") {
+    console.error("forced gh attestation failure");
+    process.exit(1);
+  }
+  console.log("Verified signature");
+  process.exit(0);
+}
+console.error("unexpected fake gh invocation: " + args.join(" "));
+process.exit(99);
 `;
   fs.writeFileSync(file, script);
   fs.chmodSync(file, 0o755);
@@ -230,7 +279,12 @@ function makeReleaseBundle(dir, version, options = {}) {
     [optsidianAsset, optsidianMcpAsset].map((asset) => `${sha256(asset.filePath)}  ${asset.name}`).join("\n").concat("\n")
   );
 
-  return { tag, version, assets: [optsidianAsset, optsidianMcpAsset, checksumsAsset] };
+  const assets = [optsidianAsset, optsidianMcpAsset, checksumsAsset];
+  if (options.includeAttestation !== false) {
+    assets.push(writeAttestationAsset(dir, tag));
+  }
+
+  return { tag, version, assets };
 }
 
 function makePackagedReleaseBundle(dir) {
@@ -246,9 +300,16 @@ function makePackagedReleaseBundle(dir) {
     assets: [
       { name: `optsidian-${tag}`, filePath: path.join(outDir, `optsidian-${tag}`) },
       { name: `optsidian-mcp-${tag}`, filePath: path.join(outDir, `optsidian-mcp-${tag}`) },
-      { name: `checksums-${tag}.txt`, filePath: path.join(outDir, `checksums-${tag}.txt`) }
+      { name: `checksums-${tag}.txt`, filePath: path.join(outDir, `checksums-${tag}.txt`) },
+      writeAttestationAsset(outDir, tag)
     ]
   };
+}
+
+function writeAttestationAsset(dir, tag) {
+  const asset = { name: `attestation-${tag}.json`, filePath: path.join(dir, `attestation-${tag}.json`) };
+  fs.writeFileSync(asset.filePath, `${JSON.stringify({ mediaType: "application/vnd.dev.sigstore.bundle+json", tag }, null, 2)}\n`);
+  return asset;
 }
 
 function sha256(filePath) {
@@ -259,6 +320,7 @@ async function startReleaseServer(releases, latestTag) {
   const latest = latestTag ?? releases[0].tag;
   let baseUrl = "";
   const requests = [];
+  const requestRecords = [];
   const byTag = new Map(releases.map((release) => [release.tag, release]));
   const byAsset = new Map(
     releases.flatMap((release) => release.assets.map((asset) => [asset.name, asset.filePath]))
@@ -267,6 +329,7 @@ async function startReleaseServer(releases, latestTag) {
   const server = http.createServer((req, res) => {
     try {
       requests.push(req.url);
+      requestRecords.push({ url: req.url, authorization: req.headers.authorization });
       if (req.url === "/releases/latest") {
         const release = byTag.get(latest);
         res.setHeader("content-type", "application/json");
@@ -312,6 +375,7 @@ async function startReleaseServer(releases, latestTag) {
   return {
     apiBase: `${baseUrl}/releases`,
     requests,
+    requestRecords,
     async close() {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
@@ -562,6 +626,36 @@ test("update installs a requested release into the managed bin dir and refreshes
   }
 });
 
+test("official update release fetch and attestation verify do not use GitHub credentials", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makeReleaseBundle(dir, newerVersion);
+  const server = await startReleaseServer([release], release.tag);
+  const ghLog = path.join(dir, "gh.log");
+  writeManagedInstall(cache, home, packageVersion);
+
+  try {
+    const result = await runUpdateDirect([`version=v${newerVersion}`], {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      GITHUB_TOKEN: "official-release-token",
+      GH_TOKEN: "official-gh-token",
+      PATH: createToolBin(dir, { name: "update-no-auth-bin", tools: UPDATE_TOOLS, ghLog })
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(server.requestRecords.every((record) => record.authorization === undefined), true);
+
+    const ghCalls = fs.readFileSync(ghLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(ghCalls.length, 2);
+    assert.equal(ghCalls.every((call) => call.githubToken === "" && call.ghToken === ""), true);
+    assert.equal(ghCalls.every((call) => call.ghConfigDir), true);
+  } finally {
+    await server.close();
+  }
+});
+
 test("update installs actual packaged release assets", async () => {
   const dir = tempRoot();
   const home = path.join(dir, "home");
@@ -580,6 +674,74 @@ test("update installs actual packaged release assets", async () => {
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`Updated Optsidian to v${packageVersion.replace(/\./g, "\\.")}\\.`));
+  } finally {
+    await server.close();
+  }
+});
+
+test("update requires release attestations for v0.3.0 and newer by default", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makeReleaseBundle(dir, newerVersion, { includeAttestation: false });
+  const server = await startReleaseServer([release], release.tag);
+  writeManagedInstall(cache, home, packageVersion);
+
+  try {
+    const result = await runCliAsync([`update`, `version=v${newerVersion}`], {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      PATH: createToolBin(dir, { name: "update-missing-attestation-bin", tools: UPDATE_TOOLS })
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /does not contain asset attestation-v0\.3\.\d+\.json/);
+  } finally {
+    await server.close();
+  }
+});
+
+// Remove this v0.3.x bridge fallback when v0.4.0 drops legacy update support.
+test("update can explicitly use checksum-only verification during the v0.3 bridge", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makeReleaseBundle(dir, newerVersion, { includeAttestation: false });
+  const server = await startReleaseServer([release], release.tag);
+  writeManagedInstall(cache, home, packageVersion);
+
+  try {
+    const result = await runUpdateDirect([`version=v${newerVersion}`], {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      OPTSIDIAN_RELEASE_VERIFY: "checksum",
+      PATH: createToolBin(dir, { name: "update-checksum-only-bin", tools: UPDATE_TOOLS })
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`Updated Optsidian to v${newerVersion.replace(/\./g, "\\.")}\\.`));
+  } finally {
+    await server.close();
+  }
+});
+
+test("update refuses to install releases before v0.3.0", async () => {
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const release = makeReleaseBundle(dir, "0.2.9", { includeAttestation: false });
+  const server = await startReleaseServer([release], release.tag);
+  writeManagedInstall(cache, home, packageVersion);
+
+  try {
+    const result = await runCliAsync([`update`, `version=v0.2.9`], {
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
+      PATH: createToolBin(dir, { name: "update-unsupported-old-bin", tools: UPDATE_TOOLS })
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /releases before v0\.3\.0 are no longer supported/);
   } finally {
     await server.close();
   }
@@ -692,7 +854,7 @@ test("update uses curl transport when proxy environment is configured", async ()
       HOME: home,
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
-      PATH: createToolBin(dir, { name: "update-proxy-bin", tools: ["curl"], curlLog }),
+      PATH: createToolBin(dir, { name: "update-proxy-bin", tools: ["curl", "gh"], curlLog }),
       CURL_LOG_FILE: curlLog,
       HTTP_PROXY: "http://127.0.0.1:9",
       NO_PROXY: "127.0.0.1,localhost"
@@ -737,7 +899,9 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
   const release = makeReleaseBundle(dir, newerVersion);
   const server = await startReleaseServer([release], release.tag);
   const obsidianLog = path.join(dir, "obsidian.log");
-  const toolBin = createToolBin(dir, { name: "install-bin", tools: INSTALL_TOOLS, obsidianLog });
+  const curlLog = path.join(dir, "curl.log");
+  const ghLog = path.join(dir, "gh.log");
+  const toolBin = createToolBin(dir, { name: "install-bin", tools: INSTALL_TOOLS, obsidianLog, curlLog, ghLog });
 
   try {
     const result = await runBashAsync(installScript, {
@@ -745,7 +909,9 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
       XDG_CACHE_HOME: cache,
       OPTSIDIAN_RELEASE_API_BASE: server.apiBase,
       PATH: toolBin,
-      FAKE_OBSIDIAN_LOG: obsidianLog
+      FAKE_OBSIDIAN_LOG: obsidianLog,
+      GITHUB_TOKEN: "official-release-token",
+      GH_TOKEN: "official-gh-token"
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`Installed v${newerVersion.replace(/\./g, "\\.")}\\.`));
@@ -760,6 +926,13 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
     assert.equal(manifest.codexRegistered, false);
     assert.equal(manifest.claudeRegistered, false);
     assert.equal(fs.existsSync(obsidianLog), false);
+
+    const curlCalls = fs.readFileSync(curlLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(curlCalls.some((args) => args.some((arg) => /^Authorization:/i.test(arg))), false);
+
+    const ghCalls = fs.readFileSync(ghLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(ghCalls.length, 2);
+    assert.equal(ghCalls.every((call) => call.githubToken === "" && call.ghToken === ""), true);
   } finally {
     await server.close();
   }
