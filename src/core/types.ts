@@ -220,6 +220,30 @@ export type SearchIndexMutationResult = {
   snapshotId?: string;
 };
 
+export type SearchIndexPrunedStore = {
+  storeId: string;
+  lastUsedAtMs?: number;
+  lastIndexedAtMs?: number;
+  bytes: number;
+};
+
+export type SearchIndexPruneSkippedStore = {
+  storeId: string;
+  reason: string;
+};
+
+export type SearchIndexPruneResult = {
+  ok: true;
+  command: "index";
+  action: "prune";
+  dryRun: boolean;
+  unusedDays: number;
+  cutoffAt: string;
+  removedStores: SearchIndexPrunedStore[];
+  skippedStores: SearchIndexPruneSkippedStore[];
+  removedBytes: number;
+};
+
 export type FrontmatterValue = null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };
 
 export type FrontmatterReadParams = {

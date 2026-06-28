@@ -5,6 +5,7 @@ import type {
   MutationResult,
   ReadResult,
   SearchIndexMutationResult,
+  SearchIndexPruneResult,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
   SearchResult
@@ -87,7 +88,7 @@ export function renderFrontmatterRead(result: FrontmatterReadResult, format: Out
 }
 
 export function renderIndexResult(
-  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult,
+  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult,
   format: OutputFormat = "text"
 ): string {
   if (format === "json") {
@@ -143,11 +144,33 @@ export function renderIndexResult(
     }
     return `${lines.join("\n")}\n`;
   }
+  if (result.action === "prune") {
+    const count = result.removedStores.length;
+    const storeLabel = count === 1 ? "store" : "stores";
+    const skipped = result.skippedStores.length > 0 ? ` Skipped ${result.skippedStores.length}.` : "";
+    if (result.dryRun) {
+      return `Dry run. Would prune ${count} search cache ${storeLabel}, freeing ${formatBytes(result.removedBytes)}.${skipped}\n`;
+    }
+    return `Pruned ${count} search cache ${storeLabel}, freed ${formatBytes(result.removedBytes)}.${skipped}\n`;
+  }
   return "Index cleared.\n";
 }
 
-function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult): result is StatusResult {
+function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult): result is StatusResult {
   return "phase" in result && "metrics" in result && "vaults" in result;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = unit === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 1 : 2).replace(/\.0+$|(\.\d*[1-9])0+$/, "$1");
+  return `${rounded} ${units[unit]}`;
 }
 
 function renderIndexProgress(progress: NonNullable<StatusResult["vaults"][number]["progress"]>): string {

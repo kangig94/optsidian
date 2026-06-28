@@ -1,4 +1,5 @@
 export * from "./builder.js";
+export * from "./cache-catalog.js";
 export * from "./cache-paths.js";
 export * from "./publication.js";
 export * from "./service.js";

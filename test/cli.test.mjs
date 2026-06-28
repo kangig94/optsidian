@@ -1296,6 +1296,17 @@ test("index mutation rendering stays stable", async () => {
   assert.equal(renderIndexResult({ ok: true, command: "index", action: "clear" }), "Index cleared.\n");
   assert.equal(renderIndexResult({
     ok: true,
+    command: "index",
+    action: "prune",
+    dryRun: true,
+    unusedDays: 30,
+    cutoffAt: "2026-01-01T00:00:00.000Z",
+    removedStores: [{ storeId: "0123456789abcdef", lastUsedAtMs: 1, bytes: 1536 }],
+    skippedStores: [{ storeId: "fedcba9876543210", reason: "protected" }],
+    removedBytes: 1536
+  }), "Dry run. Would prune 1 search cache store, freeing 1.5 KiB. Skipped 1.\n");
+  assert.equal(renderIndexResult({
+    ok: true,
     ready: true,
     phase: "ready",
     nonce: "nonce",

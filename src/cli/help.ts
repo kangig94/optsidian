@@ -69,14 +69,20 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "optsidian index [status] [format=text|json]",
       "optsidian index rebuild [format=text|json]",
       "optsidian index warm [format=text|json]",
-      "optsidian index clear [format=text|json]"
+      "optsidian index clear [format=text|json]",
+      "optsidian index prune [unused-days=30] [--dry-run] [format=text|json]"
     ],
-    options: [{ name: "format=text|json", description: "Output format (default: text)" }],
+    options: [
+      { name: "unused-days=<n>", description: "Prune search cache stores unused for at least n days (default: 30)" },
+      { name: "--dry-run", description: "Report prune candidates without deleting cache stores" },
+      { name: "format=text|json", description: "Output format (default: text)" }
+    ],
     notes: [
       "The search cache lives outside the vault and is owned by the search daemon.",
       "warm discovers Obsidian's vault registry and sends one LoadVault request per vault.",
       "status reports daemon readiness, request metrics, and loaded vault states.",
-      "rebuild and clear are daemon RPC mutations for the selected vault."
+      "rebuild and clear are daemon RPC mutations for the selected vault.",
+      "prune deletes cache stores by last-used time, not by last-indexed time, so read-only vaults remain cached while they are searched."
     ]
   },
   config: {

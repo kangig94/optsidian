@@ -253,6 +253,8 @@ class SearchDaemon {
           }
         });
       }
+      case "Prune":
+        return this.profiles.pruneSearchCaches(request.payload);
       case "Shutdown":
         if (request.payload.nonce !== this.owner.nonce) {
           throw Object.assign(new Error("search daemon shutdown nonce authentication failed"), {

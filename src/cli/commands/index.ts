@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getValue, type ParsedArgs } from "../args.js";
+import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from "../args.js";
 import { parseFormat, renderIndexResult } from "../render.js";
 import { createSearchDaemonClient, type SearchDaemonClient } from "../../daemon/client.js";
 import { discoverObsidianVaultRoots, resolveVaultPathInput } from "../../native/obsidian.js";
@@ -34,8 +34,16 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
       if (!vaultRoot) throw new UsageError("index clear requires a vault");
       process.stdout.write(renderIndexResult(await client.clear({ vault: vaultRoot }), format));
       return;
+    case "prune": {
+      const unusedDays = parsePositiveInt(getValue(args, "unused-days"), "unused-days");
+      process.stdout.write(renderIndexResult(await client.prune({
+        ...(unusedDays === undefined ? {} : { unusedDays }),
+        dryRun: hasFlag(args, "dry-run")
+      }), format));
+      return;
+    }
     default:
-      throw new UsageError("index action must be status, rebuild, warm, or clear");
+      throw new UsageError("index action must be status, rebuild, warm, clear, or prune");
   }
 }
 

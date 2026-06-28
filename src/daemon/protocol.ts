@@ -1,6 +1,7 @@
 import { pack, unpack } from "msgpackr";
 import type {
   SearchIndexMutationResult,
+  SearchIndexPruneResult,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
   SearchParams,
@@ -31,6 +32,7 @@ export const SEARCH_DAEMON_METHODS = [
   "Refresh",
   "Compact",
   "Clear",
+  "Prune",
   "Shutdown"
 ] as const;
 
@@ -162,6 +164,11 @@ export type VaultRequestPayload = ProfiledPayload & {
   vault: string;
 };
 
+export type PruneRequestPayload = {
+  unusedDays?: number;
+  dryRun?: boolean;
+};
+
 export type StatusRequestPayload = {
   nonce?: string;
 };
@@ -179,6 +186,7 @@ export type SearchDaemonRequest =
   | SearchDaemonRequestBase<"Refresh", VaultRequestPayload>
   | SearchDaemonRequestBase<"Compact", VaultRequestPayload>
   | SearchDaemonRequestBase<"Clear", VaultRequestPayload>
+  | SearchDaemonRequestBase<"Prune", PruneRequestPayload>
   | SearchDaemonRequestBase<"Shutdown", ShutdownRequestPayload>;
 
 export type OwnerStatus = {
@@ -276,6 +284,7 @@ export type SearchDaemonResultByMethod = {
   Refresh: RefreshResult;
   Compact: CompactResult;
   Clear: SearchIndexMutationResult;
+  Prune: SearchIndexPruneResult;
   Shutdown: ShutdownResult;
 };
 

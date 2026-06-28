@@ -5,6 +5,7 @@ import type {
   CompactResult,
   ExplainRequestPayload,
   ExplainResult,
+  PruneRequestPayload,
   RefreshResult,
   SearchDaemonMethod,
   SearchDaemonRequest,
@@ -39,6 +40,7 @@ import {
 } from "./owner-registry.js";
 import type {
   SearchIndexMutationResult,
+  SearchIndexPruneResult,
   SearchIndexWarmResult,
   SearchResult
 } from "../core/types.js";
@@ -57,6 +59,7 @@ export type SearchDaemonClient = {
   refresh(request: VaultClientRequest): Promise<RefreshResult>;
   compact(request: VaultClientRequest): Promise<CompactResult>;
   clear(request: VaultClientRequest): Promise<SearchIndexMutationResult>;
+  prune(request?: PruneClientRequest): Promise<SearchIndexPruneResult>;
   shutdown(options?: ClientRequestOptions): Promise<ShutdownResult>;
 };
 
@@ -69,6 +72,7 @@ export type ClientRequestOptions = {
 export type SearchClientRequest = SearchRequestPayload & ClientRequestOptions;
 export type ExplainClientRequest = ExplainRequestPayload & ClientRequestOptions;
 export type VaultClientRequest = VaultRequestPayload & ClientRequestOptions;
+export type PruneClientRequest = PruneRequestPayload & ClientRequestOptions;
 
 export type SearchDaemonClientOptions = {
   runtimeDir?: string;
@@ -262,6 +266,10 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     clear(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
       return requestReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+    },
+    prune(request = {}) {
+      const { deadlineMs, cancellationId, traceId, ...payload } = request;
+      return requestReady("Prune", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexPruneResult>;
     },
     shutdown(options = {}) {
       return ensureReady().then((owner) => requestOnce(owner, "Shutdown", { nonce: owner.nonce }, options) as Promise<ShutdownResult>);

@@ -38,6 +38,8 @@ import {
   type PersistedDocumentRecord,
   type SnapshotEnvelope
 } from "./types.js";
+import { SearchCacheCatalog, type SearchCachePruneOptions } from "./cache-catalog.js";
+import type { SearchIndexPruneResult } from "../../core/types.js";
 
 export type DaemonSnapshotStoreOptions = {
   env?: NodeJS.ProcessEnv;
@@ -49,6 +51,7 @@ export type DaemonSnapshotStoreOptions = {
   searchSettings?: Partial<IndexAffectingSearchSettings>;
   snapshotBuilder?: (input: SnapshotBuilderInput) => Promise<BuiltSnapshot>;
   partitionBits?: number;
+  cacheCatalog?: SearchCacheCatalog;
   durableRenameSegment?: DurableRename;
   durableRenameManifest?: DurableRename;
   durableRenameActivePointer?: DurableRename;
@@ -120,12 +123,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly analyzerIdentity: SearchAnalyzerIdentity;
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly snapshotBuilder: ((input: SnapshotBuilderInput) => Promise<BuiltSnapshot>) | undefined;
+  private readonly cacheCatalog: SearchCacheCatalog;
   private readonly renameSegment: DurableRename;
   private readonly renameManifest: DurableRename;
   private readonly renameActive: DurableRename;
   private readonly loaded = new Map<string, LoadedSnapshot>();
   private readonly activeByVault = new Map<string, string>();
   private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
+  private readonly lifecycleStoreRefs = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
 
   constructor(options: DaemonSnapshotStoreOptions = {}) {
@@ -156,6 +161,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.analyzer = options.analyzer ?? (options.snapshotBuilder ? undefined : resolveSearchAnalyzer(this.env, settings, runtime));
     this.analyzerIdentity = options.analyzerIdentity ?? options.analyzer?.identity ?? this.analyzer?.identity ?? resolveSearchAnalyzer(this.env, settings, runtime).identity;
     this.snapshotBuilder = options.snapshotBuilder;
+    this.cacheCatalog = options.cacheCatalog ?? new SearchCacheCatalog({ env: this.env });
     this.renameSegment = options.durableRenameSegment ?? durableRename;
     this.renameManifest = options.durableRenameManifest ?? durableRename;
     this.renameActive = options.durableRenameActivePointer ?? durableRename;
@@ -167,12 +173,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   async loadVault(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<LoadVaultResult> {
     try {
-      const snapshotId = await this.ensureActiveSnapshot(vaultRoot, context);
+      const paths = this.paths(vaultRoot);
+      const snapshotId = await this.withLifecycleStore(paths, () => this.ensureActiveSnapshot(paths.vaultRoot, context));
       return {
         ok: true,
         command: "index",
         action: "warm",
-        vaults: [{ vaultRoot: this.paths(vaultRoot).vaultRoot, status: "ready" }],
+        vaults: [{ vaultRoot: paths.vaultRoot, status: "ready" }],
         snapshotId
       };
     } catch (error) {
@@ -186,7 +193,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   async rebuild(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<SnapshotMutationResult> {
-    const snapshotId = await this.publishFreshSnapshot(vaultRoot, context);
+    const paths = this.paths(vaultRoot);
+    const snapshotId = await this.withLifecycleStore(paths, () => this.publishFreshSnapshot(paths.vaultRoot, context));
     return {
       ok: true,
       command: "index",
@@ -196,8 +204,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   async refresh(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<{ ok: true; command: "index"; action: "refresh"; rebuilt: boolean; snapshotId?: string }> {
-    const before = this.readActivePointer(this.paths(vaultRoot))?.snapshotId;
-    const snapshotId = await this.publishFreshSnapshot(vaultRoot, context);
+    const paths = this.paths(vaultRoot);
+    const before = this.readActivePointer(paths)?.snapshotId;
+    const snapshotId = await this.withLifecycleStore(paths, () => this.publishFreshSnapshot(paths.vaultRoot, context));
     return {
       ok: true,
       command: "index",
@@ -208,10 +217,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   async compact(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<{ ok: true; command: "index"; action: "compact"; rebuilt: boolean; snapshotId?: string }> {
-    const snapshotId = await this.ensureActiveSnapshot(vaultRoot, context);
     const paths = this.paths(vaultRoot);
-    await this.recoverVault(paths);
-    this.markSweepGc(paths);
+    const snapshotId = await this.withLifecycleStore(paths, async () => {
+      const activeSnapshotId = await this.ensureActiveSnapshot(paths.vaultRoot, context);
+      await this.recoverVault(paths);
+      this.markSweepGc(paths);
+      return activeSnapshotId;
+    });
     return {
       ok: true,
       command: "index",
@@ -223,21 +235,24 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   async clear(vaultRoot: string): Promise<SnapshotMutationResult> {
     const paths = this.paths(vaultRoot);
-    await this.recoverVault(paths);
-    fs.rmSync(paths.activePointerPath, { force: true });
-    fsyncDirSync(paths.activeDir);
-    const pinned = new Set(
-      [...this.loaded.values()]
-        .filter((snapshot) => snapshot.vaultKey === paths.vaultStateHash && snapshot.refCount > 0)
-        .map((snapshot) => snapshot.snapshotId)
-    );
-    for (const file of safeReadDir(paths.snapshotsDir)) {
-      const snapshotId = file;
-      if (!isValidSnapshotId(snapshotId)) continue;
-      if (!pinned.has(snapshotId)) fs.rmSync(path.join(paths.snapshotsDir, file), { force: true });
-    }
-    this.activeByVault.delete(paths.vaultStateHash);
-    this.markSweepGc(paths);
+    await this.withLifecycleStore(paths, async () => {
+      await this.recoverVault(paths);
+      fs.rmSync(paths.activePointerPath, { force: true });
+      fsyncDirSync(paths.activeDir);
+      const pinned = new Set(
+        [...this.loaded.values()]
+          .filter((snapshot) => snapshot.vaultKey === paths.vaultStateHash && snapshot.refCount > 0)
+          .map((snapshot) => snapshot.snapshotId)
+      );
+      for (const file of safeReadDir(paths.snapshotsDir)) {
+        const snapshotId = file;
+        if (!isValidSnapshotId(snapshotId)) continue;
+        if (!pinned.has(snapshotId)) fs.rmSync(path.join(paths.snapshotsDir, file), { force: true });
+      }
+      this.activeByVault.delete(paths.vaultStateHash);
+      this.markSweepGc(paths);
+      this.cacheCatalog.recordCleared(paths);
+    });
     return {
       ok: true,
       command: "index",
@@ -245,22 +260,32 @@ export class DaemonSnapshotStore implements SnapshotStore {
     };
   }
 
+  async prune(options: SearchCachePruneOptions = {}): Promise<SearchIndexPruneResult> {
+    return this.cacheCatalog.prune({
+      ...options,
+      protectedStoreIds: protectedStoreIdsForPrune(this.loaded, this.lifecycleStoreRefs, options.protectedStoreIds)
+    });
+  }
+
   async pin(vaultRoot: string, snapshotId?: string, context: SnapshotRequestContext = {}): Promise<PinnedSnapshot> {
     const paths = this.paths(vaultRoot);
     if (snapshotId !== undefined) assertValidSnapshotId(snapshotId);
-    const activeSnapshotId = snapshotId ?? await this.ensureActiveSnapshot(vaultRoot, context);
-    const loaded = await this.ensureLoaded(paths, activeSnapshotId);
-    loaded.refCount += 1;
-    loaded.lastAccessMs = Date.now();
-    this.vaultAccessMs.set(paths.vaultStateHash, loaded.lastAccessMs);
-    recordVaultAccess(paths.vaultRoot, { env: this.env, nowMs: loaded.lastAccessMs });
-    const pinToken = `${paths.vaultStateHash}:${activeSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-    loaded.pinTokens.add(pinToken);
+    const pinned = await this.withLifecycleStore(paths, async () => {
+      const activeSnapshotId = snapshotId ?? await this.ensureActiveSnapshot(paths.vaultRoot, context);
+      const loaded = await this.ensureLoaded(paths, activeSnapshotId);
+      loaded.refCount += 1;
+      loaded.lastAccessMs = Date.now();
+      this.vaultAccessMs.set(paths.vaultStateHash, loaded.lastAccessMs);
+      recordVaultAccess(paths.vaultRoot, { env: this.env, nowMs: loaded.lastAccessMs });
+      const pinToken = `${paths.vaultStateHash}:${activeSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+      loaded.pinTokens.add(pinToken);
+      return { activeSnapshotId, loaded, pinToken };
+    });
     this.enforceBudget();
     return {
-      snapshotId: activeSnapshotId,
-      view: loaded.view,
-      pinToken
+      snapshotId: pinned.activeSnapshotId,
+      view: pinned.loaded.view,
+      pinToken: pinned.pinToken
     };
   }
 
@@ -320,6 +345,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
     };
   }
 
+  protectedStoreIdsForPrune(): Set<string> {
+    return protectedStoreIdsForPrune(this.loaded, this.lifecycleStoreRefs);
+  }
+
   private async ensureActiveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
     const paths = this.paths(vaultRoot);
     await this.recoverVault(paths);
@@ -359,6 +388,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
       phase: "publishing",
       total: built.segments.length,
       completed: built.segments.length
+    });
+    this.cacheCatalog.recordIndexed(paths, {
+      snapshotId: built.snapshotId,
+      documentCount: built.documents.length
     });
     this.activeByVault.set(paths.vaultStateHash, built.snapshotId);
     this.enforceBudget();
@@ -434,12 +467,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const existing = this.loaded.get(key);
     if (existing) {
       existing.lastAccessMs = Date.now();
+      this.cacheCatalog.touchUsed(paths, { snapshotId });
       return existing;
     }
     const envelope = this.readSnapshotEnvelope(paths, snapshotId);
     if (!envelope) throw new Error(`snapshot ${snapshotId} is not available for vault ${paths.vaultRoot}`);
     const loaded = this.loadEnvelope(paths, envelope);
     this.loaded.set(key, loaded);
+    this.cacheCatalog.touchUsed(paths, { snapshotId });
     return loaded;
   }
 
@@ -619,9 +654,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private ensureDirs(paths: SearchStoreCachePaths): void {
-    const vaultStateDir = path.dirname(paths.rootDir);
-    ensurePrivateDirSync(path.dirname(vaultStateDir), "Optsidian cache directory");
-    ensurePrivateDirSync(vaultStateDir, "Optsidian vault search cache directory");
+    ensurePrivateDirSync(paths.cacheRootDir, "Optsidian cache directory");
+    ensurePrivateDirSync(paths.searchRootDir, "Optsidian search cache directory");
+    ensurePrivateDirSync(paths.storesDir, "Optsidian search cache stores directory");
     ensurePrivateDirSync(paths.rootDir, "Optsidian search store directory");
     ensurePrivateDirSync(paths.segmentsDir, "Optsidian search segments directory");
     ensurePrivateDirSync(paths.snapshotsDir, "Optsidian search snapshots directory");
@@ -650,6 +685,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
         // Missing vault recency entries are ignored by eviction.
       }
     });
+  }
+
+  private async withLifecycleStore<T>(paths: SearchStoreCachePaths, fn: () => Promise<T>): Promise<T> {
+    retainLifecycleStore(this.lifecycleStoreRefs, paths.vaultStateHash);
+    try {
+      return await fn();
+    } finally {
+      releaseLifecycleStore(this.lifecycleStoreRefs, paths.vaultStateHash);
+    }
   }
 }
 
@@ -737,6 +781,28 @@ function searchTokenChannel(value: string, label: string): SearchTokenChannel {
 
 function loadedKey(vaultKey: string, snapshotId: string): string {
   return `${vaultKey}:${snapshotId}`;
+}
+
+function protectedStoreIdsForPrune(
+  loaded: ReadonlyMap<string, LoadedSnapshot>,
+  lifecycleStoreRefs: ReadonlyMap<string, number>,
+  extra: ReadonlySet<string> = new Set()
+): Set<string> {
+  return new Set([
+    ...[...loaded.values()].map((snapshot) => snapshot.vaultKey),
+    ...lifecycleStoreRefs.keys(),
+    ...extra
+  ]);
+}
+
+function retainLifecycleStore(refs: Map<string, number>, storeId: string): void {
+  refs.set(storeId, (refs.get(storeId) ?? 0) + 1);
+}
+
+function releaseLifecycleStore(refs: Map<string, number>, storeId: string): void {
+  const next = (refs.get(storeId) ?? 1) - 1;
+  if (next > 0) refs.set(storeId, next);
+  else refs.delete(storeId);
 }
 
 function accessTime(snapshot: LoadedSnapshot, vaultAccessMs: Map<string, number>): number {

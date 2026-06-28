@@ -1,6 +1,8 @@
 import { createDaemonPools, type DaemonPools } from "./pools.js";
-import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS } from "./protocol.js";
+import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from "./protocol.js";
 import { createDaemonSnapshotStore, DaemonSearchStoreService } from "./search-store/index.js";
+import { SearchCacheCatalog } from "./search-store/cache-catalog.js";
+import type { SearchIndexPruneResult } from "../core/types.js";
 import { VaultRegistry } from "./vault-registry.js";
 import {
   effectiveSearchRuntimeProfile,
@@ -199,8 +201,26 @@ export class ProfileManager {
     return Object.fromEntries(entries);
   }
 
+  pruneSearchCaches(payload: PruneRequestPayload): SearchIndexPruneResult {
+    return new SearchCacheCatalog({ env: this.baseEnv }).prune({
+      unusedDays: payload.unusedDays,
+      dryRun: payload.dryRun,
+      protectedStoreIds: this.protectedStoreIdsForPrune()
+    });
+  }
+
   listVaults(): ReturnType<VaultRegistry["list"]> {
     return [...this.runtimes.values()].flatMap((entry) => entry.runtime.vaults.list());
+  }
+
+  private protectedStoreIdsForPrune(): Set<string> {
+    const protectedStoreIds = new Set<string>();
+    for (const entry of this.runtimes.values()) {
+      for (const storeId of entry.runtime.searchStore.protectedStoreIdsForPrune()) {
+        protectedStoreIds.add(storeId);
+      }
+    }
+    return protectedStoreIds;
   }
 
   private retain(entry: ProfileRuntimeEntry): void {

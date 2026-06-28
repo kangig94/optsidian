@@ -101,6 +101,10 @@ export class DaemonSearchStoreService {
     return this.store.clear(vault);
   }
 
+  protectedStoreIdsForPrune(): Set<string> {
+    return this.store.protectedStoreIdsForPrune();
+  }
+
   async search(payload: SearchRequestPayload, context: DaemonRequestContext): Promise<SearchResult & { snapshotId: string }> {
     const result = await this.executeSearch(payload, context, false);
     const { explainTrace: _trace, ...search } = result;

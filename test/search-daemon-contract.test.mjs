@@ -65,6 +65,16 @@ function assertPrivateMode(filePath, expectedMode) {
   assert.equal(fs.statSync(filePath).mode & 0o777, expectedMode, `${filePath} mode`);
 }
 
+function ageSearchStore(paths, nowMs, days) {
+  const oldMs = nowMs - days * 24 * 60 * 60 * 1000;
+  const storeState = JSON.parse(fs.readFileSync(paths.storeStatePath, "utf8"));
+  storeState.lastUsedAtMs = oldMs;
+  fs.writeFileSync(paths.storeStatePath, `${JSON.stringify(storeState)}\n`, { mode: 0o600 });
+  const oldDate = new Date(oldMs);
+  fs.utimesSync(paths.storeStatePath, oldDate, oldDate);
+  fs.utimesSync(paths.rootDir, oldDate, oldDate);
+}
+
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1239,15 +1249,23 @@ test("search store persists cache directories and snapshot files privately", asy
   await store.loadVault(vault);
 
   const paths = searchStoreCachePaths(vault, env);
-  const vaultStateDir = path.dirname(paths.rootDir);
   assertPrivateMode(path.join(cacheRoot, "optsidian"), 0o700);
-  assertPrivateMode(vaultStateDir, 0o700);
+  assertPrivateMode(paths.searchRootDir, 0o700);
+  assertPrivateMode(paths.storesDir, 0o700);
   assertPrivateMode(paths.rootDir, 0o700);
+  assertPrivateMode(paths.storeStatePath, 0o600);
   assertPrivateMode(paths.segmentsDir, 0o700);
   assertPrivateMode(paths.snapshotsDir, 0o700);
   assertPrivateMode(paths.activeDir, 0o700);
   assertPrivateMode(paths.tmpDir, 0o700);
   assertPrivateMode(paths.activePointerPath, 0o600);
+
+  const storeState = JSON.parse(fs.readFileSync(paths.storeStatePath, "utf8"));
+  assert.equal(storeState.schemaVersion, 1);
+  assert.equal(storeState.storeId, paths.vaultStateHash);
+  assert.equal(storeState.kind, "search-store");
+  assert.equal(typeof storeState.lastUsedAtMs, "number");
+  assert.equal(typeof storeState.lastIndexedAtMs, "number");
 
   const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
   const manifestPath = path.join(paths.snapshotsDir, active.snapshotId);
@@ -1256,6 +1274,112 @@ test("search store persists cache directories and snapshot files privately", asy
   for (const partition of envelope.manifest.partitions) {
     assertPrivateMode(path.join(paths.segmentsDir, partition.segmentHash), 0o600);
   }
+});
+
+test("search cache catalog prunes stores by last-used time and skips loaded stores", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const oldVault = tempRoot();
+  const loadedVault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(oldVault, "Old.md", "# Old\n\nold cache\n");
+  writeVaultFile(loadedVault, "Loaded.md", "# Loaded\n\nloaded cache\n");
+  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+
+  await store.loadVault(oldVault);
+  await store.loadVault(loadedVault);
+  const loadedPin = await store.pin(loadedVault);
+  const nowMs = Date.now();
+  const oldPaths = searchStoreCachePaths(oldVault, env);
+  const loadedPaths = searchStoreCachePaths(loadedVault, env);
+  ageSearchStore(oldPaths, nowMs, 45);
+  ageSearchStore(loadedPaths, nowMs, 45);
+
+  const dryRun = await store.prune({ unusedDays: 30, dryRun: true, nowMs });
+  assert.equal(dryRun.dryRun, true);
+  assert.deepEqual(dryRun.removedStores.map((entry) => entry.storeId), [oldPaths.vaultStateHash]);
+  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === loadedPaths.vaultStateHash && entry.reason === "protected"), true);
+  assert.equal(fs.existsSync(oldPaths.rootDir), true);
+
+  const pruned = await store.prune({ unusedDays: 30, nowMs });
+  assert.equal(pruned.dryRun, false);
+  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [oldPaths.vaultStateHash]);
+  assert.equal(fs.existsSync(oldPaths.rootDir), false);
+  assert.equal(fs.existsSync(loadedPaths.rootDir), true);
+  store.release(loadedPin);
+});
+
+test("search cache prune skips stores with a lifecycle mutation in progress", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(vault, "Busy.md", "# Busy\n\ncache is rebuilding\n");
+  let blockBuild = false;
+  let buildStarted;
+  let releaseBuild;
+  const store = createDaemonSnapshotStore({
+    env,
+    analyzerIdentity: testAnalyzer().identity,
+    snapshotBuilder: async (input) => {
+      if (blockBuild) {
+        buildStarted();
+        await new Promise((resolve) => {
+          releaseBuild = resolve;
+        });
+      }
+      return buildCanonicalSearchSnapshot({
+        ...input,
+        analyzer: testAnalyzer()
+      });
+    }
+  });
+
+  await store.loadVault(vault);
+  const paths = searchStoreCachePaths(vault, env);
+  const nowMs = Date.now();
+  ageSearchStore(paths, nowMs, 45);
+  blockBuild = true;
+  const buildStartedPromise = new Promise((resolve) => {
+    buildStarted = resolve;
+  });
+  const rebuild = store.rebuild(vault);
+  await buildStartedPromise;
+
+  const dryRun = await store.prune({ unusedDays: 30, dryRun: true, nowMs });
+  assert.deepEqual(dryRun.removedStores, []);
+  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === paths.vaultStateHash && entry.reason === "protected"), true);
+  assert.equal(fs.existsSync(paths.rootDir), true);
+
+  releaseBuild();
+  await rebuild;
+});
+
+test("search cache prune falls back to mtimes when metadata JSON is corrupt", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(vault, "Corrupt.md", "# Corrupt\n\nmetadata fallback\n");
+  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+
+  await store.loadVault(vault);
+  const paths = searchStoreCachePaths(vault, env);
+  const nowMs = Date.now();
+  const oldMs = nowMs - 45 * 24 * 60 * 60 * 1000;
+  const oldDate = new Date(oldMs);
+  fs.writeFileSync(paths.storeStatePath, "{", { mode: 0o600 });
+  fs.writeFileSync(path.join(paths.searchRootDir, "catalog.json"), "{", { mode: 0o600 });
+  fs.utimesSync(paths.activePointerPath, oldDate, oldDate);
+  fs.utimesSync(paths.rootDir, oldDate, oldDate);
+
+  const pruned = await store.prune({ unusedDays: 30, nowMs });
+  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [paths.vaultStateHash]);
+  assert.equal(fs.existsSync(paths.rootDir), false);
 });
 
 test("AC4 snapshot envelope stores runtime documents outside diagnostics", async () => {
@@ -1371,6 +1495,7 @@ test("AC1 protocol method coverage includes Clear", async () => {
 
   assert.deepEqual([...SEARCH_DAEMON_METHODS].sort(), [...new Set(dispatchCases)].sort());
   assert.equal(SEARCH_DAEMON_METHODS.includes("Clear"), true);
+  assert.equal(SEARCH_DAEMON_METHODS.includes("Prune"), true);
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
   assert.ok(SEARCH_DAEMON_PROTOCOL_VERSION > 0);
 });
@@ -1464,6 +1589,45 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
   const searchRequest = requests.find((request) => request.method === "Search");
   assert.ok(searchRequest);
   assert.ok(searchRequest.deadline >= before + expected - 100);
+});
+
+test("daemon client sends prune as a global cache request", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const requests = [];
+  const client = createSearchDaemonClient({
+    runtimeDir: tempRoot(),
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    spawnDaemon: async () => ({ pid: 2200 }),
+    connect: async () => ({
+      request: async (request) => {
+        requests.push(request);
+        if (request.method === "Status") {
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, vaults: [] };
+        }
+        if (request.method === "Prune") {
+          return {
+            ok: true,
+            command: "index",
+            action: "prune",
+            dryRun: true,
+            unusedDays: 30,
+            cutoffAt: "2026-01-01T00:00:00.000Z",
+            removedStores: [],
+            skippedStores: [],
+            removedBytes: 0
+          };
+        }
+        throw new Error(`unexpected method ${request.method}`);
+      },
+      close: async () => {}
+    })
+  });
+
+  const result = await client.prune({ unusedDays: 30, dryRun: true });
+  assert.equal(result.action, "prune");
+  const pruneRequest = requests.find((request) => request.method === "Prune");
+  assert.ok(pruneRequest);
+  assert.deepEqual(pruneRequest.payload, { unusedDays: 30, dryRun: true });
 });
 
 test("snapshot build reports deterministic progress counts", async () => {
