@@ -1915,6 +1915,52 @@ test("daemon readiness handshake authenticates owner nonce over RPC integration"
   }
 });
 
+test("daemon Status without nonce returns public health only", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const runtimeDir = tempRoot();
+  const env = {
+    ...process.env,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "1000"
+  };
+  const client = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    readyTimeoutMs: 30000,
+    env
+  });
+
+  try {
+    const authenticated = await client.status({ deadlineMs: 5000 });
+    const response = await requestRawRpc(authenticated.owner.socketPath, encodeFrame, {
+      protocolVersion: 1,
+      requestId: "public-status",
+      method: "Status",
+      deadline: Date.now() + 1000,
+      payload: {}
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.result.ok, true);
+    assert.equal(response.result.ready, true);
+    assert.equal(response.result.phase, "ready");
+    assert.equal(response.result.protocolVersion, 1);
+    assert.equal("nonce" in response.result, false);
+    assert.equal("owner" in response.result, false);
+    assert.equal("metrics" in response.result, false);
+    assert.equal("pools" in response.result, false);
+    assert.equal("searchStore" in response.result, false);
+    assert.equal("profiles" in response.result, false);
+    assert.equal("vaults" in response.result, false);
+  } finally {
+    await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
+  }
+});
+
 test("AC1 import boundary forbids direct search/index execution outside daemon and pure tests", () => {
   const scannedRoots = ["src", "scripts"].map((root) => path.join(repoRoot, root));
   const files = scannedRoots.flatMap((root) =>

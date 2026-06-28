@@ -3,9 +3,11 @@ import {
   isSearchDaemonMethod,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type OwnerStatus,
+  type PublicStatusResult,
   type SearchIndexProgressUpdate,
   type SearchDaemonPhase,
-  type SearchDaemonRequest
+  type SearchDaemonRequest,
+  type StatusResult
 } from "./protocol.js";
 import { createRpcServer, type RpcServer } from "./transport.js";
 import { DaemonMetrics } from "./metrics.js";
@@ -302,15 +304,20 @@ class SearchDaemon {
     runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
   }
 
-  private async status(request: SearchDaemonRequest) {
-    const context = this.requestContext(request);
-    const profiles = await this.profiles.status(context);
-    return {
+  private async status(request: Extract<SearchDaemonRequest, { method: "Status" }>): Promise<PublicStatusResult | StatusResult> {
+    const publicStatus: PublicStatusResult = {
       ok: true,
       ready: this.phase === "ready",
       phase: this.phase,
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
+    };
+    if (!this.statusAuthenticated(request)) return publicStatus;
+
+    const context = this.requestContext(request);
+    const profiles = await this.profiles.status(context);
+    return {
+      ...publicStatus,
       nonce: this.owner.nonce,
-      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
       owner: this.owner satisfies OwnerStatus,
       metrics: this.metrics.snapshot(),
       pools: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.pools])),
@@ -318,6 +325,10 @@ class SearchDaemon {
       profiles,
       vaults: this.profiles.listVaults()
     };
+  }
+
+  private statusAuthenticated(request: Extract<SearchDaemonRequest, { method: "Status" }>): boolean {
+    return request.nonce === this.owner.nonce || request.payload.nonce === this.owner.nonce;
   }
 
   private async shutdown(): Promise<void> {

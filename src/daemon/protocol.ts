@@ -211,12 +211,15 @@ export type SearchIndexProgress = SearchIndexProgressUpdate & {
   updatedAt: string;
 };
 
-export type StatusResult = {
+export type PublicStatusResult = {
   ok: true;
   ready: boolean;
   phase: SearchDaemonPhase;
-  nonce: string;
   protocolVersion: number;
+};
+
+export type StatusResult = PublicStatusResult & {
+  nonce: string;
   owner: OwnerStatus;
   metrics: {
     requests: number;
@@ -267,7 +270,7 @@ export type ShutdownResult = {
 export type SearchDaemonResultByMethod = {
   Search: SearchResult & { snapshotId?: string };
   Explain: ExplainResult;
-  Status: StatusResult;
+  Status: PublicStatusResult | StatusResult;
   LoadVault: SearchIndexWarmResult;
   Rebuild: SearchIndexMutationResult;
   Refresh: RefreshResult;
