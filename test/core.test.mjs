@@ -16,6 +16,11 @@ function sha256(raw) {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
+function assertPrivateMode(filePath, expectedMode) {
+  if (process.platform === "win32") return;
+  assert.equal(fs.statSync(filePath).mode & 0o777, expectedMode, `${filePath} mode`);
+}
+
 function tarSingleFile(filePath, content) {
   const contentBuffer = Buffer.from(content);
   const header = Buffer.alloc(512, 0);
@@ -106,6 +111,8 @@ test("settings helpers normalize supported config keys and apply local overrides
     assert.deepEqual(result.value, expected);
     assert.deepEqual(getConfigValue(project, key, env).value, expected);
   }
+  assertPrivateMode(path.dirname(globalSettings), 0o700);
+  assertPrivateMode(globalSettings, 0o600);
 
   const expectedGlobalSearch = {
     analyzer: "kiwi",
@@ -1359,6 +1366,68 @@ test("vault access registry keeps recent realpaths only", async () => {
   assert.deepEqual(recentVaultAccessRoots({ env, nowMs: 8 * dayMs }), [thirdReal]);
   const state = JSON.parse(fs.readFileSync(vaultAccessPath(env), "utf8"));
   assert.deepEqual(state.vaults.map((entry) => entry.realpath), [thirdReal, secondReal]);
+  assertPrivateMode(path.join(cache, "optsidian"), 0o700);
+  assertPrivateMode(vaultAccessPath(env), 0o600);
+});
+
+test("private path helper tightens optsidian-owned cache modes", async () => {
+  const { ensurePrivateDirSync, writePrivateFileSync } = await import(path.join(repoRoot, "src/core/private-path.ts"));
+  const dir = path.join(tempVault(), "cache", "optsidian");
+  const file = path.join(dir, "state.json");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, "{}\n");
+  if (process.platform !== "win32") {
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(file, 0o644);
+  }
+
+  ensurePrivateDirSync(dir, "Optsidian test cache directory");
+  writePrivateFileSync(file, "{\"ok\":true}\n", "Optsidian test state file");
+
+  assertPrivateMode(dir, 0o700);
+  assertPrivateMode(file, 0o600);
+  assert.equal(fs.readFileSync(file, "utf8"), "{\"ok\":true}\n");
+});
+
+test("private path helper rejects symlinked private targets", async () => {
+  if (process.platform === "win32") return;
+  const { ensurePrivateDirSync, writePrivateFileSync } = await import(path.join(repoRoot, "src/core/private-path.ts"));
+  const root = tempVault();
+  const realDir = path.join(root, "real-dir");
+  const realFile = path.join(root, "real-file.json");
+  const linkedDir = path.join(root, "linked-dir");
+  const linkedFile = path.join(root, "linked-file.json");
+  fs.mkdirSync(realDir);
+  fs.writeFileSync(realFile, "{}\n");
+  fs.symlinkSync(realDir, linkedDir, "dir");
+  fs.symlinkSync(realFile, linkedFile);
+
+  assert.throws(
+    () => ensurePrivateDirSync(linkedDir, "Optsidian linked test directory"),
+    /must not be a symlink/
+  );
+  assert.throws(
+    () => writePrivateFileSync(linkedFile, "{\"ok\":true}\n", "Optsidian linked test file"),
+    /must not be a symlink/
+  );
+});
+
+test("vault access registry surfaces private path policy failures", async () => {
+  if (process.platform === "win32") return;
+  const root = tempVault();
+  const cache = path.join(root, "cache");
+  const realCache = path.join(root, "real-cache");
+  const vault = path.join(root, "vault");
+  fs.mkdirSync(cache);
+  fs.mkdirSync(realCache);
+  fs.mkdirSync(vault);
+  fs.symlinkSync(realCache, path.join(cache, "optsidian"), "dir");
+  const { recordVaultAccess } = await import(path.join(repoRoot, "src/core/vault-access.ts"));
+
+  assert.throws(
+    () => recordVaultAccess(vault, { env: { XDG_CACHE_HOME: cache } }),
+    /must not be a symlink/
+  );
 });
 
 test("core write/read preserves shell-sensitive raw payloads", async () => {

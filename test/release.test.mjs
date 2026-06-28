@@ -28,6 +28,11 @@ function tempRoot(prefix = "optsidian-release-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function assertPrivateMode(filePath, expectedMode) {
+  if (process.platform === "win32") return;
+  assert.equal(fs.statSync(filePath).mode & 0o777, expectedMode, `${filePath} mode`);
+}
+
 function locateCommand(name) {
   const result = spawnSync("/bin/sh", ["-lc", `command -v ${name}`], { encoding: "utf8" });
   assert.equal(result.status, 0, `Missing required test command: ${name}`);
@@ -589,6 +594,8 @@ test("automatic update notice compares versions only and caches release lookups"
     assert.equal(state.targetVersion, newerVersion);
     assert.equal(state.targetTag, `v${newerVersion}`);
     assert.equal(typeof state.lastNotifiedAt, "string");
+    assertPrivateMode(path.join(cache, "optsidian"), 0o700);
+    assertPrivateMode(statePath, 0o600);
 
     const second = await runCliAsync(["config", "path"], env);
     assert.equal(second.status, 0, second.stderr);
@@ -642,6 +649,36 @@ test("automatic update notice skips failed lookups and still caches the attempt"
   const second = await runCliAsync(["config", "path"], env);
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stderr, "");
+});
+
+test("automatic update notice reports private state write failures as diagnostics", async () => {
+  if (process.platform === "win32") return;
+  const { maybeCheckForUpdateNotice } = await import(path.resolve("src/update/installer.ts"));
+  const dir = tempRoot();
+  const home = path.join(dir, "home");
+  const cache = path.join(dir, "cache");
+  const realState = path.join(dir, "real-state");
+  fs.mkdirSync(cache, { recursive: true });
+  fs.mkdirSync(realState, { recursive: true });
+  fs.symlinkSync(realState, path.join(cache, "optsidian"), "dir");
+  const diagnostics = [];
+
+  const notice = await maybeCheckForUpdateNotice({
+    env: {
+      ...NO_PROXY_ENV,
+      HOME: home,
+      XDG_CACHE_HOME: cache,
+      OPTSIDIAN_RELEASE_API_BASE: "http://127.0.0.1:1/releases",
+      OPTSIDIAN_NO_UPDATE_CHECK: "0",
+      OPTSIDIAN_UPDATE_CHECK_TIMEOUT_MS: "100"
+    },
+    diagnostic: (message) => diagnostics.push(message)
+  });
+
+  assert.equal(notice, undefined);
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0], /Cannot save Optsidian update notice state/);
+  assert.match(diagnostics[0], /must not be a symlink/);
 });
 
 test("network requests reject direct responses over the byte cap", async () => {
@@ -718,6 +755,13 @@ test("update installs a requested release into the managed bin dir and refreshes
     assert.equal(manifest.version, newerVersion);
     assert.equal(manifest.codexRegistered, true);
     assert.equal(manifest.claudeRegistered, false);
+    assertPrivateMode(path.join(cache, "optsidian"), 0o700);
+    assertPrivateMode(path.join(cache, "optsidian", "install.json"), 0o600);
+    assertPrivateMode(path.join(cache, "optsidian", "releases"), 0o700);
+    assertPrivateMode(path.join(cache, "optsidian", "releases", release.tag), 0o700);
+    for (const asset of release.assets) {
+      assertPrivateMode(path.join(cache, "optsidian", "releases", release.tag, asset.name), 0o600);
+    }
 
     const calls = fs.readFileSync(codexLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls[0], ["mcp", "remove", "optsidian"]);
@@ -1027,6 +1071,13 @@ test("install.sh installs the latest release and succeeds without MCP clients", 
     assert.equal(manifest.codexRegistered, false);
     assert.equal(manifest.claudeRegistered, false);
     assert.equal(fs.existsSync(obsidianLog), false);
+    assertPrivateMode(path.join(cache, "optsidian"), 0o700);
+    assertPrivateMode(path.join(cache, "optsidian", "install.json"), 0o600);
+    assertPrivateMode(path.join(cache, "optsidian", "releases"), 0o700);
+    assertPrivateMode(path.join(cache, "optsidian", "releases", release.tag), 0o700);
+    for (const asset of release.assets) {
+      assertPrivateMode(path.join(cache, "optsidian", "releases", release.tag, asset.name), 0o600);
+    }
 
     const curlCalls = fs.readFileSync(curlLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(curlCalls.some((args) => args.some((arg) => /^Authorization:/i.test(arg))), false);

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirSync, writePrivateFileAtomicSync, writePrivateFileSync } from "../core/private-path.js";
 import {
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type OwnerStatus
@@ -60,7 +61,7 @@ const LOCK_STALE_MS = 20_000;
 
 export function createOwnerRegistry(options: CreateOwnerRegistryOptions = {}): OwnerRegistry {
   const runtimeDir = options.runtimeDir ?? defaultSearchDaemonRuntimeDir(options.env);
-  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  ensurePrivateDirSync(runtimeDir, "Optsidian search daemon runtime directory");
   const ownerPath = path.join(runtimeDir, OWNER_FILE);
   const lockPath = path.join(runtimeDir, LOCK_DIR);
   return {
@@ -131,7 +132,7 @@ export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIden
   const candidate = path.join(runtimeDir, name);
   if (candidate.length < 100) return candidate;
   const socketDir = path.join(os.tmpdir(), `od-${desired.uid}-${sha256(path.resolve(runtimeDir)).slice(0, 12)}`);
-  fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  ensurePrivateDirSync(socketDir, "Optsidian search daemon socket directory");
   return path.join(socketDir, name);
 }
 
@@ -254,10 +255,7 @@ function readOwnerFile(ownerPath: string): OwnerRecord | undefined {
 }
 
 function writeOwnerFile(ownerPath: string, record: OwnerRecord): void {
-  fs.mkdirSync(path.dirname(ownerPath), { recursive: true, mode: 0o700 });
-  const temp = `${ownerPath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temp, ownerPath);
+  writePrivateFileAtomicSync(ownerPath, `${JSON.stringify(record, null, 2)}\n`, "Optsidian search daemon owner file");
 }
 
 function removeOwnerFile(ownerPath: string, record?: OwnerRecord): void {
@@ -277,7 +275,8 @@ async function withDirectoryLock<T>(lockPath: string, deadlineMs: number, fn: ()
   while (true) {
     try {
       fs.mkdirSync(lockPath, { recursive: false, mode: 0o700 });
-      fs.writeFileSync(path.join(lockPath, "pid"), `${process.pid}\n`);
+      ensurePrivateDirSync(lockPath, "Optsidian search daemon lock directory");
+      writePrivateFileSync(path.join(lockPath, "pid"), `${process.pid}\n`, "Optsidian search daemon lock pid file");
       break;
     } catch (error) {
       if (!isAlreadyExistsError(error)) throw error;

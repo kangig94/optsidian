@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { ensurePrivateDirSync } from "../core/private-path.js";
 import {
   isSearchDaemonMethod,
   SEARCH_DAEMON_PROTOCOL_VERSION,
@@ -93,7 +94,7 @@ class SearchDaemon {
   static async start(options: StartOptions): Promise<SearchDaemon> {
     const owner = resolveOwnerFromEnv(options.env);
     const registry = createOwnerRegistry({ runtimeDir: options.env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR });
-    fs.mkdirSync(registry.runtimeDir, { recursive: true, mode: 0o700 });
+    ensurePrivateDirSync(registry.runtimeDir, "Optsidian search daemon runtime directory");
     removeOrphanSocket(owner.socketPath);
     try {
       registry.writeOwner(owner);

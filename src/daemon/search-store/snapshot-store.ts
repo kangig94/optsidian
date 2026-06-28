@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-path.js";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer, type SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../core/search/analysis/index.js";
 import {
@@ -393,7 +394,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
           fs.rmSync(target, { force: true });
         }
         const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.segment.tmp`);
-        fs.writeFileSync(tmp, segment.bytes);
+        writePrivateFileSync(tmp, segment.bytes, "Optsidian search segment");
         fsyncFileSync(tmp);
         fsyncDirSync(paths.tmpDir);
         const actual = sha256(fs.readFileSync(tmp));
@@ -404,7 +405,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
       const manifestPath = path.join(paths.snapshotsDir, built.snapshotId);
       const manifestTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.manifest.tmp`);
-      fs.writeFileSync(manifestTmp, `${JSON.stringify(envelope)}\n`);
+      writePrivateFileSync(manifestTmp, `${JSON.stringify(envelope)}\n`, "Optsidian search snapshot manifest");
       fsyncFileSync(manifestTmp);
       await this.renameManifest(manifestTmp, manifestPath);
       fsyncDirSync(paths.snapshotsDir);
@@ -415,7 +416,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         canonicalManifestSha256: built.canonicalManifestSha256
       };
       const activeTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.active.tmp`);
-      fs.writeFileSync(activeTmp, `${JSON.stringify(activePointer)}\n`);
+      writePrivateFileSync(activeTmp, `${JSON.stringify(activePointer)}\n`, "Optsidian search active pointer");
       fsyncFileSync(activeTmp);
       await this.renameActive(activeTmp, paths.activePointerPath);
       fsyncDirSync(paths.activeDir);
@@ -635,10 +636,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private ensureDirs(paths: SearchStoreCachePaths): void {
-    fs.mkdirSync(paths.segmentsDir, { recursive: true });
-    fs.mkdirSync(paths.snapshotsDir, { recursive: true });
-    fs.mkdirSync(paths.activeDir, { recursive: true });
-    fs.mkdirSync(paths.tmpDir, { recursive: true });
+    const vaultStateDir = path.dirname(paths.rootDir);
+    ensurePrivateDirSync(path.dirname(vaultStateDir), "Optsidian cache directory");
+    ensurePrivateDirSync(vaultStateDir, "Optsidian vault search cache directory");
+    ensurePrivateDirSync(paths.rootDir, "Optsidian search store directory");
+    ensurePrivateDirSync(paths.segmentsDir, "Optsidian search segments directory");
+    ensurePrivateDirSync(paths.snapshotsDir, "Optsidian search snapshots directory");
+    ensurePrivateDirSync(paths.activeDir, "Optsidian search active directory");
+    ensurePrivateDirSync(paths.tmpDir, "Optsidian search tmp directory");
   }
 
   private paths(vaultRoot: string): SearchStoreCachePaths {

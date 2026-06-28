@@ -60,6 +60,11 @@ function tempRoot(prefix = "optsidian-search-daemon-contract-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+function assertPrivateMode(filePath, expectedMode) {
+  if (process.platform === "win32") return;
+  assert.equal(fs.statSync(filePath).mode & 0o777, expectedMode, `${filePath} mode`);
+}
+
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1220,6 +1225,37 @@ test("AC8 snapshot tmp sweep removes only files aged at least five minutes", asy
 
   assert.equal(fs.existsSync(oldTmp), false);
   assert.equal(fs.existsSync(youngTmp), true);
+});
+
+test("search store persists cache directories and snapshot files privately", async () => {
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const cacheRoot = tempRoot();
+  const vault = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  writeVaultFile(vault, "Private.md", "# Private\n\ncache permissions\n");
+  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+
+  await store.loadVault(vault);
+
+  const paths = searchStoreCachePaths(vault, env);
+  const vaultStateDir = path.dirname(paths.rootDir);
+  assertPrivateMode(path.join(cacheRoot, "optsidian"), 0o700);
+  assertPrivateMode(vaultStateDir, 0o700);
+  assertPrivateMode(paths.rootDir, 0o700);
+  assertPrivateMode(paths.segmentsDir, 0o700);
+  assertPrivateMode(paths.snapshotsDir, 0o700);
+  assertPrivateMode(paths.activeDir, 0o700);
+  assertPrivateMode(paths.tmpDir, 0o700);
+  assertPrivateMode(paths.activePointerPath, 0o600);
+
+  const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const manifestPath = path.join(paths.snapshotsDir, active.snapshotId);
+  const envelope = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assertPrivateMode(manifestPath, 0o600);
+  for (const partition of envelope.manifest.partitions) {
+    assertPrivateMode(path.join(paths.segmentsDir, partition.segmentHash), 0o600);
+  }
 });
 
 test("AC9 request scheduler caps remembered cancellations and detects post-task cancellation", async () => {

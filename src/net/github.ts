@@ -4,6 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
+import { ensureExistingPrivateFileSync, ensurePrivateDirSync, writePrivateFileAtomicSync } from "../core/private-path.js";
 import { RuntimeError } from "../errors.js";
 import { DEFAULT_HTTP_RESPONSE_MAX_BYTES, formatByteSize } from "../limits.js";
 import { OPTSIDIAN_VERSION } from "../version.js";
@@ -35,9 +36,7 @@ export async function downloadFile(
   options: Pick<FetchOptions, "sendAuth" | "timeoutMs"> = {}
 ): Promise<void> {
   const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT, ...options });
-  const tmpPath = `${targetPath}.download-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmpPath, response.body);
-  fs.renameSync(tmpPath, targetPath);
+  writePrivateFileAtomicSync(targetPath, response.body, "Optsidian download file");
 }
 
 export async function requestBuffer(
@@ -174,8 +173,10 @@ async function requestBufferWithCurl(
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
-  const headerPath = path.join(os.tmpdir(), `optsidian-curl-headers-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  const bodyPath = path.join(os.tmpdir(), `optsidian-curl-body-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `optsidian-curl-${process.pid}-`));
+  ensurePrivateDirSync(tempDir, "Optsidian curl temp directory");
+  const headerPath = path.join(tempDir, "headers");
+  const bodyPath = path.join(tempDir, "body");
   try {
     const args = [
       "-sS",
@@ -211,7 +212,7 @@ async function requestBufferWithCurl(
       throw new RuntimeError(message || `Failed to fetch ${url}`);
     }
 
-    const headers = fs.existsSync(headerPath) ? fs.readFileSync(headerPath, "utf8") : "";
+    const headers = ensureExistingPrivateFileSync(headerPath, "Optsidian curl header file") ? fs.readFileSync(headerPath, "utf8") : "";
     const statusCode = curlStatusCode(headers);
     if ([301, 302, 303, 307, 308].includes(statusCode)) {
       const location = curlLocation(headers);
@@ -235,13 +236,12 @@ async function requestBufferWithCurl(
       body: readDownloadedBody(bodyPath, url, maxBytes)
     };
   } finally {
-    fs.rmSync(headerPath, { force: true });
-    fs.rmSync(bodyPath, { force: true });
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
 function readDownloadedBody(bodyPath: string, url: string, maxBytes: number): Buffer {
-  if (!fs.existsSync(bodyPath)) return Buffer.alloc(0);
+  if (!ensureExistingPrivateFileSync(bodyPath, "Optsidian curl body file")) return Buffer.alloc(0);
   const stat = fs.statSync(bodyPath);
   if (stat.size > maxBytes) {
     throw responseTooLargeError(url, maxBytes, stat.size);

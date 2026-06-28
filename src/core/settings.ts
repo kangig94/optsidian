@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { UsageError } from "../errors.js";
+import { writePrivateFileSync } from "./private-path.js";
 
 export type SearchSettings = {
   analyzer?: "intl" | "kiwi";
@@ -344,8 +345,7 @@ function normalizeNonNegativeInteger(value: unknown, key: string): number {
 }
 
 function writeSettingsFile(file: string, settings: OptsidianSettings): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
+  writePrivateFileSync(file, `${JSON.stringify(settings, null, 2)}\n`, "Optsidian settings file");
 }
 
 function pruneEmptyObjects(settings: OptsidianSettings): void {

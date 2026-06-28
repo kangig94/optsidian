@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { UsageError } from "../errors.js";
 import { optsidianCacheRoot } from "./cache-root.js";
+import { isPrivatePathError, writePrivateFileAtomicSync } from "./private-path.js";
 import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 import type { SearchIndexWarmAccessStatus } from "./types.js";
-import { atomicWriteFile } from "./write-file.js";
 
 export type VaultAccessEntry = {
   realpath: string;
@@ -49,7 +49,8 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
     });
     writeVaultAccessFile(statePath, [...entries.values()], nowMs, maxAgeMs);
     return realpath;
-  } catch {
+  } catch (error) {
+    if (isPrivatePathError(error)) throw error;
     return undefined;
   }
 }
@@ -126,12 +127,11 @@ function readVaultAccessFile(filePath: string): VaultAccessFile | undefined {
 }
 
 function writeVaultAccessFile(filePath: string, entries: readonly VaultAccessEntry[], nowMs: number, maxAgeMs: number): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const vaults = recentVaultEntries(entries, nowMs, maxAgeMs);
-  atomicWriteFile(filePath, `${JSON.stringify({
+  writePrivateFileAtomicSync(filePath, `${JSON.stringify({
     schemaVersion: VAULT_ACCESS_SCHEMA_VERSION,
     vaults
-  }, null, 2)}\n`);
+  }, null, 2)}\n`, "Optsidian vault access file");
 }
 
 function settingsForAccess(options: VaultAccessOptions, env: NodeJS.ProcessEnv): OptsidianSettings {

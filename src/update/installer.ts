@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ensureExistingPrivateFileSync, ensurePrivateDirSync, isPrivatePathError, writePrivateFileSync } from "../core/private-path.js";
 import { RuntimeError, UsageError } from "../errors.js";
 import { downloadFile, fetchJson, hasCommand, requestBuffer } from "../net/github.js";
 import { resolveVaultPathInput } from "../native/obsidian.js";
@@ -161,8 +162,9 @@ export function releaseApiBase(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): InstallManifest | undefined {
+  ensurePrivateDirSync(stateBaseDir(env), "Optsidian state directory");
   const file = manifestFilePath(env);
-  if (!fs.existsSync(file)) return undefined;
+  if (!ensureExistingPrivateFileSync(file, "Optsidian install manifest")) return undefined;
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<InstallManifest>;
   if (
     typeof parsed.version !== "string" ||
@@ -194,14 +196,14 @@ export function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): Insta
 
 export function saveInstallManifest(manifest: InstallManifest, env: NodeJS.ProcessEnv = process.env): void {
   const file = manifestFilePath(env);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
+  writePrivateFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, "Optsidian install manifest");
 }
 
 export async function maybeCheckForUpdateNotice(options: {
   env?: NodeJS.ProcessEnv;
   now?: Date;
   currentVersion?: string;
+  diagnostic?: (message: string) => void;
 } = {}): Promise<UpdateNotice | undefined> {
   const env = options.env ?? process.env;
   if (isAutoUpdateCheckDisabled(env)) return undefined;
@@ -238,12 +240,12 @@ export async function maybeCheckForUpdateNotice(options: {
 
   const notice = noticeFromCachedRelease(noticeState, currentVersion, now, updateNoticeNotificationIntervalMs(env));
   if (notice) {
-    writeUpdateNoticeState({ ...noticeState, currentVersion, lastNotifiedAt: now.toISOString() }, env);
+    writeUpdateNoticeState({ ...noticeState, currentVersion, lastNotifiedAt: now.toISOString() }, env, options.diagnostic);
     return notice;
   }
 
   if (shouldSaveState && noticeState) {
-    writeUpdateNoticeState(noticeState, env);
+    writeUpdateNoticeState(noticeState, env, options.diagnostic);
   }
   return undefined;
 }
@@ -334,9 +336,10 @@ export async function installRelease(options: { tag?: string; env?: NodeJS.Proce
     };
   }
 
-  fs.mkdirSync(releasesCacheDir(env), { recursive: true });
+  ensurePrivateDirSync(stateBaseDir(env), "Optsidian state directory");
+  ensurePrivateDirSync(releasesCacheDir(env), "Optsidian release cache directory");
   const releaseDir = path.join(releasesCacheDir(env), target.tag);
-  fs.mkdirSync(releaseDir, { recursive: true });
+  ensurePrivateDirSync(releaseDir, "Optsidian release cache directory");
   const optsidianAssetPath = path.join(releaseDir, target.optsidianAssetName);
   const optsidianMcpAssetPath = path.join(releaseDir, target.optsidianMcpAssetName);
   const checksumsPath = path.join(releaseDir, target.checksumsAssetName);
@@ -801,12 +804,14 @@ function readUpdateNoticeState(env: NodeJS.ProcessEnv): UpdateNoticeState | unde
   }
 }
 
-function writeUpdateNoticeState(state: UpdateNoticeState, env: NodeJS.ProcessEnv): void {
+function writeUpdateNoticeState(state: UpdateNoticeState, env: NodeJS.ProcessEnv, diagnostic?: (message: string) => void): void {
   try {
     const file = updateNoticeStatePath(env);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
-  } catch {
+    writePrivateFileSync(file, `${JSON.stringify(state, null, 2)}\n`, "Optsidian update notice state");
+  } catch (error) {
+    if (isPrivatePathError(error)) {
+      diagnostic?.(`Cannot save Optsidian update notice state: ${error.message}`);
+    }
     // Update notices are best-effort and must never affect the command that triggered them.
   }
 }

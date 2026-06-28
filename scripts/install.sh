@@ -8,6 +8,7 @@
 #   - register the optsidian MCP server with any detected Codex/Claude client
 
 set -euo pipefail
+umask 077
 
 RELEASE_API_BASE="${OPTSIDIAN_RELEASE_API_BASE:-https://api.github.com/repos/kangig94/optsidian/releases}"
 RELEASE_REPOSITORY="kangig94/optsidian"
@@ -72,6 +73,63 @@ assert_download_size() {
   fi
 }
 
+private_path_hint() {
+  echo "This often happens when optsidian was previously run with sudo or the path is owned by another user."
+  echo "Fix the ownership/permissions or remove the path, then retry."
+}
+
+ensure_private_dir() {
+  local dir="$1"
+  local label="$2"
+  if ! mkdir -p "${dir}"; then
+    echo "ERROR: cannot create ${label}: ${dir}"
+    private_path_hint
+    exit 1
+  fi
+  if [ ! -d "${dir}" ]; then
+    echo "ERROR: ${label} is not a directory: ${dir}"
+    exit 1
+  fi
+  if [ ! -O "${dir}" ]; then
+    echo "ERROR: ${label} is not owned by the current user: ${dir}"
+    private_path_hint
+    exit 1
+  fi
+  if ! chmod 0700 "${dir}"; then
+    echo "ERROR: cannot set ${label} to 0700: ${dir}"
+    private_path_hint
+    exit 1
+  fi
+}
+
+ensure_private_file_target() {
+  local file="$1"
+  local label="$2"
+  if [ ! -e "${file}" ]; then
+    return
+  fi
+  if [ ! -f "${file}" ]; then
+    echo "ERROR: ${label} is not a file: ${file}"
+    exit 1
+  fi
+  if [ ! -O "${file}" ]; then
+    echo "ERROR: ${label} is not owned by the current user: ${file}"
+    private_path_hint
+    exit 1
+  fi
+}
+
+ensure_private_file() {
+  local file="$1"
+  local label="$2"
+  ensure_private_file_target "${file}" "${label}"
+  if ! chmod 0600 "${file}"; then
+    echo "ERROR: cannot set ${label} to 0600: ${file}"
+    private_path_hint
+    exit 1
+  fi
+}
+
 case "$(uname -s)" in
   Linux|Darwin)
     ;;
@@ -130,7 +188,9 @@ CURL_HEADERS=(-H "Accept: application/vnd.github+json" -H "User-Agent: optsidian
 
 WORK_DIR="$(mktemp -d)"
 RELEASE_JSON="${WORK_DIR}/release.json"
-mkdir -p "${BIN_DIR}" "${STATE_BASE}" "${RELEASE_DIR}"
+mkdir -p "${BIN_DIR}"
+ensure_private_dir "${STATE_BASE}" "Optsidian state directory"
+ensure_private_dir "${RELEASE_DIR}" "Optsidian release cache directory"
 
 echo "==> Resolving latest stable release"
 curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${RELEASE_API_BASE}/latest" > "${RELEASE_JSON}"
@@ -214,21 +274,27 @@ NODE
 )"
 
 RELEASE_CACHE_DIR="${RELEASE_DIR}/${RELEASE_TAG}"
-mkdir -p "${RELEASE_CACHE_DIR}"
+ensure_private_dir "${RELEASE_CACHE_DIR}" "Optsidian release cache directory"
 OPTSIDIAN_ASSET_PATH="${RELEASE_CACHE_DIR}/${OPTSIDIAN_ASSET_NAME}"
 OPTSIDIAN_MCP_ASSET_PATH="${RELEASE_CACHE_DIR}/${OPTSIDIAN_MCP_ASSET_NAME}"
 CHECKSUMS_ASSET_PATH="${RELEASE_CACHE_DIR}/${CHECKSUMS_ASSET_NAME}"
 ATTESTATION_ASSET_PATH="${RELEASE_CACHE_DIR}/${ATTESTATION_ASSET_NAME}"
 
 echo "==> Downloading ${CHECKSUMS_ASSET_NAME}"
+ensure_private_file_target "${CHECKSUMS_ASSET_PATH}" "${CHECKSUMS_ASSET_NAME}"
 curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${CHECKSUMS_ASSET_URL}" -o "${CHECKSUMS_ASSET_PATH}"
 assert_download_size "${CHECKSUMS_ASSET_PATH}" "${CHECKSUMS_ASSET_NAME}"
+ensure_private_file "${CHECKSUMS_ASSET_PATH}" "${CHECKSUMS_ASSET_NAME}"
 echo "==> Downloading ${OPTSIDIAN_ASSET_NAME}"
+ensure_private_file_target "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}"
 curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${OPTSIDIAN_ASSET_URL}" -o "${OPTSIDIAN_ASSET_PATH}"
 assert_download_size "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}"
+ensure_private_file "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}"
 echo "==> Downloading ${OPTSIDIAN_MCP_ASSET_NAME}"
+ensure_private_file_target "${OPTSIDIAN_MCP_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}"
 curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${OPTSIDIAN_MCP_ASSET_URL}" -o "${OPTSIDIAN_MCP_ASSET_PATH}"
 assert_download_size "${OPTSIDIAN_MCP_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}"
+ensure_private_file "${OPTSIDIAN_MCP_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}"
 
 echo "==> Verifying downloaded checksums"
 node - "${CHECKSUMS_ASSET_PATH}" "${OPTSIDIAN_ASSET_NAME}" "${OPTSIDIAN_ASSET_PATH}" "${OPTSIDIAN_MCP_ASSET_NAME}" "${OPTSIDIAN_MCP_ASSET_PATH}" <<'NODE'
@@ -292,8 +358,10 @@ if [ "${SHOULD_VERIFY_ATTESTATION}" = "1" ]; then
     echo "WARN: gh is not available; continuing because OPTSIDIAN_RELEASE_VERIFY=${RELEASE_VERIFY}"
   else
     echo "==> Downloading ${ATTESTATION_ASSET_NAME}"
+    ensure_private_file_target "${ATTESTATION_ASSET_PATH}" "${ATTESTATION_ASSET_NAME}"
     curl -fsSL "${CURL_ARGS[@]}" "${CURL_HEADERS[@]}" "${ATTESTATION_ASSET_URL}" -o "${ATTESTATION_ASSET_PATH}"
     assert_download_size "${ATTESTATION_ASSET_PATH}" "${ATTESTATION_ASSET_NAME}"
+    ensure_private_file "${ATTESTATION_ASSET_PATH}" "${ATTESTATION_ASSET_NAME}"
     echo "==> Verifying release attestations"
     GH_CONFIG_DIR="${WORK_DIR}/gh-config"
     mkdir -p "${GH_CONFIG_DIR}"
@@ -420,6 +488,7 @@ export OPTSIDIAN_MANIFEST_MCP_PATH="${BIN_DIR}/optsidian-mcp"
 export OPTSIDIAN_MANIFEST_VAULT_PATH="${OPTSIDIAN_VAULT_PATH:-}"
 export OPTSIDIAN_MANIFEST_CODEX_REGISTERED="${CODEX_REGISTERED}"
 export OPTSIDIAN_MANIFEST_CLAUDE_REGISTERED="${CLAUDE_REGISTERED}"
+ensure_private_file_target "${MANIFEST_PATH}" "Optsidian install manifest"
 
 node <<'NODE'
 const fs = require("node:fs");
@@ -437,9 +506,20 @@ const manifest = {
   installedAt: new Date().toISOString()
 };
 
-fs.mkdirSync(path.dirname(process.env.OPTSIDIAN_MANIFEST_PATH), { recursive: true });
-fs.writeFileSync(process.env.OPTSIDIAN_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
+const manifestPath = process.env.OPTSIDIAN_MANIFEST_PATH;
+fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
+if (fs.existsSync(manifestPath)) {
+  const stat = fs.statSync(manifestPath);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (!stat.isFile()) throw new Error(`Optsidian install manifest is not a file: ${manifestPath}`);
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new Error(`Optsidian install manifest is owned by uid ${stat.uid}, but the current uid is ${uid}. This often happens when optsidian was previously run with sudo.`);
+  }
+}
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+fs.chmodSync(manifestPath, 0o600);
 NODE
+ensure_private_file "${MANIFEST_PATH}" "Optsidian install manifest"
 
 echo
 echo "Installed ${RELEASE_TAG}."

@@ -139,7 +139,10 @@ async function delegateToObsidianAndExit(args: string[], originalArgv: string[])
 
 async function writeUpdateNoticeIfNeeded(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (!shouldCheckForUpdateNotice(argv)) return;
-  const notice = await maybeCheckForUpdateNotice({ env });
+  const notice = await maybeCheckForUpdateNotice({
+    env,
+    diagnostic: (message) => process.stderr.write(`warning: ${message}\n`)
+  });
   if (notice) {
     process.stderr.write(`${notice.message}\n`);
   }

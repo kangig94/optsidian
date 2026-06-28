@@ -4,6 +4,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { RuntimeError } from "../../errors.js";
 import { optsidianCacheRoot } from "../cache-root.js";
+import { ensurePrivateDirSync, writePrivateFileSync } from "../private-path.js";
 
 export const KIWI_NLP_VERSION = "0.23.0";
 export const KIWI_MODEL_VERSION = "0.23.0";
@@ -231,7 +232,7 @@ export async function ensureKiwiModelArtifact(
   options: KiwiModelArtifactEnsureOptions = {}
 ): Promise<KiwiModelArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensureKiwiDataDir(env);
   let release: (() => void) | undefined;
   try {
     release = await acquireInstallLock(path.join(dataDir, "install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
@@ -263,7 +264,7 @@ export async function ensureKiwiWasmArtifact(
   options: KiwiWasmArtifactEnsureOptions = {}
 ): Promise<KiwiWasmArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
-  fs.mkdirSync(dataDir, { recursive: true });
+  ensureKiwiDataDir(env);
   let release: (() => void) | undefined;
   try {
     release = await acquireInstallLock(path.join(dataDir, "wasm-install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
@@ -528,13 +529,13 @@ function writeWasmFileAtomic(env: NodeJS.ProcessEnv, wasm: Buffer): void {
   const targetDir = kiwiWasmDir(env);
   const parentDir = path.dirname(targetDir);
   const stagingDir = path.join(parentDir, `.wasm-${process.pid}-${Date.now()}.part`);
-  fs.mkdirSync(parentDir, { recursive: true });
+  ensureKiwiArtifactParentDir(env, parentDir);
   fs.rmSync(stagingDir, { recursive: true, force: true });
-  fs.mkdirSync(stagingDir, { recursive: true });
+  ensurePrivateDirSync(stagingDir, "Optsidian Kiwi wasm staging directory");
 
   try {
-    fs.writeFileSync(path.join(stagingDir, KIWI_WASM_FILE_NAME), wasm);
-    fs.writeFileSync(path.join(stagingDir, KIWI_WASM_MANIFEST_FILE), `${JSON.stringify(createWasmManifest(), null, 2)}\n`);
+    writePrivateFileSync(path.join(stagingDir, KIWI_WASM_FILE_NAME), wasm, "Optsidian Kiwi wasm file");
+    writePrivateFileSync(path.join(stagingDir, KIWI_WASM_MANIFEST_FILE), `${JSON.stringify(createWasmManifest(), null, 2)}\n`, "Optsidian Kiwi wasm manifest");
     fs.rmSync(targetDir, { recursive: true, force: true });
     fs.renameSync(stagingDir, targetDir);
   } catch (error) {
@@ -547,17 +548,17 @@ function writeModelFilesAtomic(env: NodeJS.ProcessEnv, modelFiles: ReadonlyMap<K
   const targetDir = kiwiModelDir(env);
   const parentDir = path.dirname(targetDir);
   const stagingDir = path.join(parentDir, `.cong-base-${process.pid}-${Date.now()}.part`);
-  fs.mkdirSync(parentDir, { recursive: true });
+  ensureKiwiArtifactParentDir(env, parentDir);
   fs.rmSync(stagingDir, { recursive: true, force: true });
-  fs.mkdirSync(stagingDir, { recursive: true });
+  ensurePrivateDirSync(stagingDir, "Optsidian Kiwi model staging directory");
 
   try {
     for (const fileName of KIWI_MODEL_FILES) {
       const content = modelFiles.get(fileName);
       if (!content) throw new RuntimeError(`Kiwi model file ${fileName} was not extracted`);
-      fs.writeFileSync(path.join(stagingDir, fileName), content);
+      writePrivateFileSync(path.join(stagingDir, fileName), content, "Optsidian Kiwi model file");
     }
-    fs.writeFileSync(path.join(stagingDir, KIWI_MODEL_MANIFEST_FILE), `${JSON.stringify(createManifest(), null, 2)}\n`);
+    writePrivateFileSync(path.join(stagingDir, KIWI_MODEL_MANIFEST_FILE), `${JSON.stringify(createManifest(), null, 2)}\n`, "Optsidian Kiwi model manifest");
     fs.rmSync(targetDir, { recursive: true, force: true });
     fs.renameSync(stagingDir, targetDir);
   } catch (error) {
@@ -596,7 +597,8 @@ async function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<(
   const startedAt = Date.now();
   while (true) {
     try {
-      fs.mkdirSync(lockDir, { recursive: false });
+      fs.mkdirSync(lockDir, { recursive: false, mode: 0o700 });
+      ensurePrivateDirSync(lockDir, "Optsidian Kiwi install lock directory");
       writeInstallLockOwner(lockDir);
       return () => fs.rmSync(lockDir, { recursive: true, force: true });
     } catch (error) {
@@ -612,10 +614,10 @@ async function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<(
 
 function writeInstallLockOwner(lockDir: string): void {
   try {
-    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
+    writePrivateFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
       pid: process.pid,
       startedAt: new Date().toISOString()
-    }, null, 2)}\n`);
+    }, null, 2)}\n`, "Optsidian Kiwi install lock owner");
   } catch {
     // The lock itself is the directory; owner metadata is best-effort diagnostics.
   }
@@ -633,6 +635,23 @@ function removeStaleInstallLock(lockDir: string): boolean {
   if (Date.now() - stat.mtimeMs < kiwiInstallLockStaleMs) return false;
   fs.rmSync(lockDir, { recursive: true, force: true });
   return true;
+}
+
+function ensureKiwiDataDir(env: NodeJS.ProcessEnv): void {
+  ensurePrivateDirSync(optsidianCacheRoot(env), "Optsidian cache directory");
+  ensurePrivateDirSync(kiwiDataDir(env), "Optsidian Kiwi cache directory");
+}
+
+function ensureKiwiArtifactParentDir(env: NodeJS.ProcessEnv, parentDir: string): void {
+  ensureKiwiDataDir(env);
+  const kiwiRoot = kiwiDataDir(env);
+  let current = parentDir;
+  const stack: string[] = [];
+  while (current !== kiwiRoot && current.startsWith(`${kiwiRoot}${path.sep}`)) {
+    stack.push(current);
+    current = path.dirname(current);
+  }
+  for (const dir of stack.reverse()) ensurePrivateDirSync(dir, "Optsidian Kiwi artifact directory");
 }
 
 function sleep(ms: number): Promise<void> {
