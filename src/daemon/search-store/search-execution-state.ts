@@ -26,6 +26,11 @@ export type SearchExecutionPreloadResult = {
   cache: SearchExecutionCacheStats;
 };
 
+export type SearchExecutionWarmResult = {
+  snapshotId: string;
+  cacheHit: boolean;
+};
+
 export type SearchExecutionState = {
   snapshot: SearchSnapshot;
 };
@@ -99,11 +104,20 @@ export function searchExecutionStateFromShardHandle(handle: SearchExecutionSnaps
   };
 }
 
-export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
+export function warmSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionWarmResult {
   const result = cachedSearchExecutionStateFromHandle(handle);
-  searchExecutionStateCacheCounters.preloads += 1;
+  snapshotBm25SingleTermBounds(result.state.snapshot);
   return {
     snapshotId: result.state.snapshot.snapshotId,
+    cacheHit: result.cacheHit
+  };
+}
+
+export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
+  const result = warmSearchExecutionSnapshot(handle);
+  searchExecutionStateCacheCounters.preloads += 1;
+  return {
+    snapshotId: result.snapshotId,
     cacheHit: result.cacheHit,
     cache: searchExecutionCacheStats()
   };

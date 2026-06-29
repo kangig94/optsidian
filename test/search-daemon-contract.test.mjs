@@ -1097,6 +1097,67 @@ test("search store loadVault preloads the active snapshot into search workers", 
   ]);
 });
 
+test("search store loadVault warms exact-bound cache for the query planner", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const { exactDominanceBoundForSearchHandle } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const { CanonicalSegmentPostingsReader } = await futureImport("src/core/search/retrieval/positional/segment-postings-reader.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "PlannerWarm.md", "# Planner Warm\n\nplannerwarmunique target plannerwarmunique\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-planner-warm",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      partitionId: segment.partitionId,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  const pin = { snapshotId: snapshot.snapshotId, pinToken: snapshot.pinToken };
+  const fakeStore = {
+    loadVault: async () => ({ ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: snapshot.snapshotId }),
+    pin: async () => pin,
+    snapshotHandleForPin: () => snapshot,
+    release: () => {}
+  };
+  const fakeSearchExecution = {
+    preloadSnapshot: async () => [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }]
+  };
+  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+
+  await service.loadVault(vault, {
+    deadline: Date.now() + 10_000,
+    cancellationId: "planner-bound-warm",
+    requestId: "planner-bound-warm"
+  });
+
+  let calls = 0;
+  const originalPostingsForTerm = CanonicalSegmentPostingsReader.prototype.postingsForTerm;
+  CanonicalSegmentPostingsReader.prototype.postingsForTerm = function patchedPostingsForTerm(term) {
+    if (term.includes("plannerwarmunique")) calls += 1;
+    return originalPostingsForTerm.call(this, term);
+  };
+  try {
+    exactDominanceBoundForSearchHandle({
+      search: normalizeSearchParams({ query: "plannerwarmunique", limit: 10 }),
+      snapshot,
+      analysis: testQueryAnalysis("plannerwarmunique")
+    });
+    assert.equal(calls, 0);
+  } finally {
+    CanonicalSegmentPostingsReader.prototype.postingsForTerm = originalPostingsForTerm;
+  }
+});
+
 test("search store loadVault can skip search worker preload", async () => {
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
   const vault = tempRoot();
@@ -2129,6 +2190,53 @@ test("search execution preload materializes snapshot cache before search", async
     segments: []
   });
   assert.equal(second.cacheHit, true);
+});
+
+test("search execution preload warms exact-bound cache", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const {
+    exactDominanceBoundForSearchHandle,
+    preloadSearchExecutionSnapshot
+  } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const { CanonicalSegmentPostingsReader } = await futureImport("src/core/search/retrieval/positional/segment-postings-reader.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "BoundWarm.md", "# Bound Warm\n\npreloadboundunique target preloadboundunique\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-bound-warm",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      partitionId: segment.partitionId,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  preloadSearchExecutionSnapshot(snapshot);
+
+  let calls = 0;
+  const originalPostingsForTerm = CanonicalSegmentPostingsReader.prototype.postingsForTerm;
+  CanonicalSegmentPostingsReader.prototype.postingsForTerm = function patchedPostingsForTerm(term) {
+    if (term.includes("preloadboundunique")) calls += 1;
+    return originalPostingsForTerm.call(this, term);
+  };
+  try {
+    exactDominanceBoundForSearchHandle({
+      search: normalizeSearchParams({ query: "preloadboundunique", limit: 10 }),
+      snapshot,
+      analysis: testQueryAnalysis("preloadboundunique")
+    });
+    assert.equal(calls, 0);
+  } finally {
+    CanonicalSegmentPostingsReader.prototype.postingsForTerm = originalPostingsForTerm;
+  }
 });
 
 test("search shard execution reuses preloaded segment readers", async () => {

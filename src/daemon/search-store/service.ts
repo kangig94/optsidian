@@ -16,7 +16,11 @@ import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, S
 import { remainingDeadlineMs } from "../protocol.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "../query-analysis-cache-defaults.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
-import { executeMetadataSearchFromSnapshotHandle, type SearchExecutionSnapshotHandle } from "../search-execution.js";
+import {
+  executeMetadataSearchFromSnapshotHandle,
+  warmSearchExecutionSnapshot,
+  type SearchExecutionSnapshotHandle
+} from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
 import { SearchQueryScheduler } from "./query-scheduler.js";
@@ -202,6 +206,14 @@ export class DaemonSearchStoreService {
     context: DaemonRequestContext,
     options: SearchExecutionPreloadOptions = {}
   ): Promise<void> {
+    assertRemainingDeadline(context.deadline);
+    context.progress?.({
+      phase: "preloading",
+      completed: 0,
+      message: "warming search planner"
+    });
+    warmSearchExecutionSnapshot(snapshot);
+    assertRemainingDeadline(context.deadline);
     context.progress?.({
       phase: "preloading",
       completed: 0,

@@ -63,7 +63,9 @@ export {
   preloadSearchExecutionSnapshot,
   searchExecutionCacheStats,
   type SearchExecutionCacheStats,
-  type SearchExecutionPreloadResult
+  type SearchExecutionPreloadResult,
+  type SearchExecutionWarmResult,
+  warmSearchExecutionSnapshot
 } from "./search-store/search-execution-state.js";
 
 export type SearchExecutionJob = {
