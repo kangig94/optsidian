@@ -77,6 +77,28 @@ export function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHa
   return { snapshot };
 }
 
+export function searchExecutionStateFromShardHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
+  const cached = touchCachedState(handle.snapshotId);
+  if (!cached) return searchExecutionStateFromHandle(handle);
+
+  const cachedBySegment = new Map(cached.snapshot.segments.map((segment) => [snapshotSegmentKey(segment), segment]));
+  const segments = [];
+  for (const requested of handle.segments) {
+    const segment = cachedBySegment.get(snapshotSegmentKey(requested));
+    if (!segment) return searchExecutionStateFromHandle(handle);
+    segments.push(segment);
+  }
+
+  return {
+    snapshot: {
+      snapshotId: handle.snapshotId,
+      documentCount: segments.reduce((sum, segment) => sum + segment.projection.documentCount(), 0),
+      segments,
+      bm25Stats: cached.snapshot.bm25Stats
+    }
+  };
+}
+
 export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
   const result = cachedSearchExecutionStateFromHandle(handle);
   searchExecutionStateCacheCounters.preloads += 1;
@@ -170,6 +192,18 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
     bm25SingleTermBoundCache.delete(oldest);
   }
   return bounds;
+}
+
+function touchCachedState(snapshotId: string): SearchExecutionState | undefined {
+  const cached = searchExecutionStateCache.get(snapshotId);
+  if (!cached) return undefined;
+  searchExecutionStateCache.delete(snapshotId);
+  searchExecutionStateCache.set(snapshotId, cached);
+  return cached;
+}
+
+function snapshotSegmentKey(segment: { segmentId: string; partitionId: number }): string {
+  return `${segment.partitionId}\u0000${segment.segmentId}`;
 }
 
 function queryChannelTermCounts(channels: SearchTokenChannelTerms): Partial<Record<SearchTokenChannel, number>> {

@@ -34,7 +34,7 @@ import { compareRankedHitEntries, type RankedHitEntry } from "./search-store/fin
 import {
   cachedSearchExecutionStateFromHandle,
   exactDominanceBoundForSearchSnapshot,
-  searchExecutionStateFromHandle
+  searchExecutionStateFromShardHandle
 } from "./search-store/search-execution-state.js";
 import {
   documentsByPath,
@@ -141,7 +141,7 @@ export function executeSearchShardJob(job: SearchShardExecutionJob): SearchShard
       finalists: []
     };
   }
-  const state = searchExecutionStateFromHandle(job.snapshot);
+  const state = searchExecutionStateFromShardHandle(job.snapshot);
   const result = querySearchShard(job, state.snapshot);
   assertSearchShardDeadline(job);
   return result;

@@ -2077,6 +2077,64 @@ test("search execution preload materializes snapshot cache before search", async
   assert.equal(second.cacheHit, true);
 });
 
+test("search shard execution reuses preloaded segment readers", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const {
+    executeSearchShardJob,
+    preloadSearchExecutionSnapshot
+  } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Alpha.md", "# Alpha\n\nalpha target\n");
+  writeVaultFile(vault, "Beta.md", "# Beta\n\nalpha target beta\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-preloaded-shard",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      partitionId: segment.partitionId,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  preloadSearchExecutionSnapshot(snapshot);
+
+  const analysis = testQueryAnalysis("alpha");
+  const search = normalizeSearchParams({ query: "alpha", limit: 10 });
+  const exactBound = { lexicalBound: 0, proximityBound: 0, lambdaExact: 0 };
+  const corruptShardSnapshot = {
+    ...snapshot,
+    documents: sharedHandle(Buffer.from("[]")),
+    segments: snapshot.segments.map((segment) => ({
+      ...segment,
+      bytes: sharedHandle(Buffer.from("not-a-canonical-segment"))
+    }))
+  };
+
+  const result = executeSearchShardJob({
+    vault,
+    search,
+    analysis,
+    analyzerIdentity: analyzer.identity,
+    snapshot: corruptShardSnapshot,
+    exactBound,
+    requestedLimit: search.limit,
+    workEstimate: 1,
+    deadline: Date.now() + 10_000,
+    cancellationId: "preloaded-shard-reader"
+  });
+
+  assert.equal(result.snapshotId, built.snapshotId);
+  assert.ok(result.finalists.length > 0);
+});
+
 test("AC1 shared search-daemon client starts daemon, waits ready, and has no direct fallback", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const runtimeDir = tempRoot();
