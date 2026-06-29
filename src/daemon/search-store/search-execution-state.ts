@@ -5,6 +5,7 @@ import {
   bm25TermScoreFromStatsLookup,
   buildSearchSnapshotFromSegments,
   createPositionalBm25StatsLookup,
+  createSearchFieldLengthLookup,
   POSITIONAL_FIELD_BY_ID,
   type SearchSnapshot
 } from "../../core/search/retrieval/positional/index.js";
@@ -175,6 +176,7 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
   }
 
   const bm25StatsLookup = createPositionalBm25StatsLookup(snapshot.bm25Stats);
+  const fieldLengthLookup = createSearchFieldLengthLookup();
   for (const row of snapshot.bm25Stats.rows) {
     const field = POSITIONAL_FIELD_BY_ID[row.fieldId];
     if (!field) continue;
@@ -183,7 +185,7 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
     for (const segment of snapshot.segments) {
       for (const posting of segment.postings.postingsForTerm(canonicalPostingTerm(row.channel, row.term))) {
         if (posting.fieldId !== row.fieldId) continue;
-        const fieldLength = segment.projection.fieldLength(posting.docId, row.channel, row.fieldId);
+        const fieldLength = fieldLengthLookup(segment, posting.docId, row.channel, row.fieldId);
         const score = bm25TermScoreFromStatsLookup(
           bm25StatsLookup,
           row.channel,

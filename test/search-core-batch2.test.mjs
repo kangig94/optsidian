@@ -14,7 +14,8 @@ import {
   bm25TermScoreFromGlobalStats,
   bm25TermScoreFromStatsLookup,
   createPositionalBm25StatsLookup,
-  createPositionalRetriever
+  createPositionalRetriever,
+  createSearchFieldLengthLookup
 } from "../src/core/search/retrieval/positional/index.ts";
 import { ProjectionReader } from "../src/core/search/retrieval/positional/segment-projection-reader.ts";
 import { POSITIONAL_FIELD_ID } from "../src/core/search/retrieval/positional/types.ts";
@@ -253,4 +254,42 @@ test("BM25 stats lookup matches canonical linear stats helpers", () => {
     bm25TermScoreFromStatsLookup(lookup, "morph", "alpha", POSITIONAL_FIELD_ID.title, 3, 5),
     bm25TermScoreFromGlobalStats(stats, "morph", "alpha", POSITIONAL_FIELD_ID.title, 3, 5)
   );
+});
+
+test("field length lookup caches doc projection reads within one lookup instance", () => {
+  const calls = [];
+  const segment = {
+    projection: {
+      fieldLengths(localDocId) {
+        calls.push({ localDocId });
+        return [
+          { channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, length: localDocId + POSITIONAL_FIELD_ID.title },
+          { channel: "morph", fieldId: POSITIONAL_FIELD_ID.body, length: 0 },
+          { channel: "surface", fieldId: POSITIONAL_FIELD_ID.title, length: localDocId + POSITIONAL_FIELD_ID.title + 10 }
+        ];
+      }
+    }
+  };
+  const otherSegment = {
+    projection: {
+      fieldLengths(localDocId) {
+        calls.push({ localDocId, other: true });
+        assert.equal(localDocId, 3);
+        return [{ channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, length: 99 }];
+      }
+    }
+  };
+  const lookup = createSearchFieldLengthLookup();
+
+  assert.equal(lookup(segment, 3, "morph", POSITIONAL_FIELD_ID.title), 3 + POSITIONAL_FIELD_ID.title);
+  assert.equal(lookup(segment, 3, "morph", POSITIONAL_FIELD_ID.title), 3 + POSITIONAL_FIELD_ID.title);
+  assert.equal(lookup(segment, 3, "morph", POSITIONAL_FIELD_ID.body), 0);
+  assert.equal(lookup(segment, 3, "morph", POSITIONAL_FIELD_ID.body), 0);
+  assert.equal(lookup(segment, 3, "surface", POSITIONAL_FIELD_ID.title), 3 + POSITIONAL_FIELD_ID.title + 10);
+  assert.equal(lookup(segment, 3, "ngram", POSITIONAL_FIELD_ID.title), 0);
+  assert.equal(lookup(otherSegment, 3, "morph", POSITIONAL_FIELD_ID.title), 99);
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], { localDocId: 3 });
+  assert.deepEqual(calls[1], { localDocId: 3, other: true });
 });

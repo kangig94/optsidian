@@ -16,11 +16,13 @@ import {
   bm25TermScoreFromStatsLookup,
   createPositionalBm25StatsLookup,
   createQueryPostingsLookup,
+  createSearchFieldLengthLookup,
   createSearchEngine,
   createPositionalRetriever,
   POSITIONAL_FIELD_ID,
   type PositionalBm25StatsLookup,
   type QueryPostingsLookup,
+  type SearchFieldLengthLookup,
   type SearchSnapshot,
   type SearchSnapshotSegment
 } from "../core/search/retrieval/positional/index.js";
@@ -110,6 +112,7 @@ type PositionalHit = {
 type SearchExecutionLookupContext = {
   segmentByKey: ReadonlyMap<string, SearchSnapshotSegment>;
   bm25StatsLookup: PositionalBm25StatsLookup;
+  fieldLengthLookup: SearchFieldLengthLookup;
 };
 
 export type SearchShardExecutionResult = {
@@ -417,7 +420,8 @@ function rankDocumentFromRecord(record: PersistedDocumentRecord): RankDocument {
 function createSearchExecutionLookupContext(snapshot: SearchSnapshot): SearchExecutionLookupContext {
   return {
     segmentByKey: new Map(snapshot.segments.map((segment) => [searchSegmentKey(segment), segment])),
-    bm25StatsLookup: createPositionalBm25StatsLookup(snapshot.bm25Stats)
+    bm25StatsLookup: createPositionalBm25StatsLookup(snapshot.bm25Stats),
+    fieldLengthLookup: createSearchFieldLengthLookup()
   };
 }
 
@@ -569,7 +573,10 @@ function candidateFieldLength(
   fieldId: number,
   lookupContext?: SearchExecutionLookupContext
 ): number {
-  return segmentForCandidate(snapshot, candidate, lookupContext).projection.fieldLength(candidate.shardDocRef.localDocId, channel, fieldId);
+  const segment = segmentForCandidate(snapshot, candidate, lookupContext);
+  return lookupContext
+    ? lookupContext.fieldLengthLookup(segment, candidate.shardDocRef.localDocId, channel, fieldId)
+    : segment.projection.fieldLength(candidate.shardDocRef.localDocId, channel, fieldId);
 }
 
 function candidateTags(
