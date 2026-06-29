@@ -10,6 +10,7 @@ export type SearchSettings = {
   ngram?: boolean;
   queryWorkers?: number;
   indexWorkers?: number;
+  executionWorkers?: number;
   snapshotRetentionCount?: number;
   queryCacheSize?: number;
   memoryBudgetCount?: number;
@@ -177,6 +178,9 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     if (value.search.indexWorkers !== undefined) {
       settings.search.indexWorkers = normalizePositiveInteger(value.search.indexWorkers, "search.indexWorkers");
     }
+    if (value.search.executionWorkers !== undefined) {
+      settings.search.executionWorkers = normalizePositiveInteger(value.search.executionWorkers, "search.executionWorkers");
+    }
     if (value.search.snapshotRetentionCount !== undefined) {
       settings.search.snapshotRetentionCount = normalizePositiveInteger(value.search.snapshotRetentionCount, "search.snapshotRetentionCount");
     }
@@ -208,6 +212,8 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.queryWorkers;
     case "search.indexWorkers":
       return settings.search?.indexWorkers;
+    case "search.executionWorkers":
+      return settings.search?.executionWorkers;
     case "search.snapshotRetentionCount":
       return settings.search?.snapshotRetentionCount;
     case "search.queryCacheSize":
@@ -240,6 +246,9 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
       return;
     case "search.indexWorkers":
       settings.search.indexWorkers = normalizePositiveInteger(value, key);
+      return;
+    case "search.executionWorkers":
+      settings.search.executionWorkers = normalizePositiveInteger(value, key);
       return;
     case "search.snapshotRetentionCount":
       settings.search.snapshotRetentionCount = normalizePositiveInteger(value, key);
@@ -277,6 +286,9 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.indexWorkers":
       if (settings.search) delete settings.search.indexWorkers;
+      return;
+    case "search.executionWorkers":
+      if (settings.search) delete settings.search.executionWorkers;
       return;
     case "search.snapshotRetentionCount":
       if (settings.search) delete settings.search.snapshotRetentionCount;
@@ -353,7 +365,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.executionWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

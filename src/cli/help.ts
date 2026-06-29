@@ -106,6 +106,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.ngram=true|false", description: "Enable Korean 2/3-gram indexing and query expansion; default false" },
       { name: "search.queryWorkers=<n>", description: "Latency analyzer worker count" },
       { name: "search.indexWorkers=<n>", description: "Throughput analyzer worker count" },
+      { name: "search.executionWorkers=<n>", description: "Search execution worker count" },
       { name: "search.snapshotRetentionCount=<n>", description: "Retained persisted snapshot count per vault" },
       { name: "search.queryCacheSize=<n>", description: "In-memory query-analysis cache entry cap; default 64, 0 disables" },
       { name: "search.memoryBudgetCount=<n>", description: "Loaded snapshot count cap" },

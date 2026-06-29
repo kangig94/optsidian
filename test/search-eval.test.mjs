@@ -225,7 +225,7 @@ test("IR eval dev preset uses medium balanced sampled corpora", () => {
   assert.equal(summary.datasets[0].sampling.documents.mode, "stratified");
 });
 
-test("search eval workers option drives concurrency and daemon worker env", () => {
+test("search eval workers option drives daemon worker env without raising default concurrency", () => {
   const dir = tempRoot();
   const vault = path.join(dir, "vault");
   const specDir = path.join(vault, "SearchEval");
@@ -261,7 +261,7 @@ test("search eval workers option drives concurrency and daemon worker env", () =
   });
 
   assert.equal(result.status, 0, `search eval failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(result.stdout, /summary: mode=e2e concurrency=2 2\/2 passed/);
+  assert.match(result.stdout, /summary: mode=e2e concurrency=1 2\/2 passed/);
   const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(calls.length, 3);
   for (const call of calls) {

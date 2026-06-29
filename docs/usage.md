@@ -170,7 +170,7 @@ optsidian index clear
 
 `index warm` loads or refreshes daemon snapshots for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
-`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools. The Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. `search.analyzer=intl|kiwi` selects the analyzer policy, `search.ngram=true|false` controls the opt-in Korean ngram channel, `search.queryWorkers` and `search.indexWorkers` size the latency and indexing analyzer pools, and request timeouts are controlled at the daemon RPC/request layer. Search query history is not persisted. Repeated query analysis is cached only in daemon memory, capped at 64 entries by default, and can be disabled with `search.queryCacheSize=0` or `OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE=0`.
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools. The Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. `search.analyzer=intl|kiwi` selects the analyzer policy, `search.ngram=true|false` controls the opt-in Korean ngram channel, `search.queryWorkers` and `search.indexWorkers` size the latency and indexing analyzer pools, and `search.executionWorkers` sizes the search execution pool. Search execution defaults to one worker per four logical CPU cores, capped at 4 workers and never below 1. Request timeouts are controlled at the daemon RPC/request layer. Search query history is not persisted. Repeated query analysis is cached only in daemon memory, capped at 64 entries by default, and can be disabled with `search.queryCacheSize=0` or `OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE=0`.
 
 Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
 
@@ -180,6 +180,7 @@ optsidian config set search.extraLangs=ko
 optsidian config set search.ngram=false
 optsidian config set search.queryWorkers=2
 optsidian config set search.indexWorkers=2
+optsidian config set search.executionWorkers=4
 optsidian config set search.snapshotRetentionCount=8
 optsidian config set search.queryCacheSize=64
 optsidian config set search.memoryBudgetCount=8

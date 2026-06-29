@@ -207,14 +207,13 @@ The daemon reports lifecycle progress through `index status` and daemon `Status`
 completed count, total count when known, and current file. This progress output does not change
 stdout JSON/text results.
 
-By default, quality evaluation runs queries with the daemon search-execution worker count and prints
-score metrics only. Use `--workers=<n>` as the normal control: it sets
-`OPTSIDIAN_SEARCH_WORKERS`, `OPTSIDIAN_SEARCH_EXECUTION_WORKERS`, and eval concurrency to the same
-value. Query and index analyzer worker counts stay at 1 unless explicitly overridden, because the
-current analyzer path is not a useful concurrency target. Use `--concurrency=<n>` only when
-intentionally decoupling eval pressure from daemon worker count. Use `--measure-speed` when
-measuring latency or throughput; without it, CLI summaries do not print total time, QPS, average
-latency, or latency percentiles.
+By default, quality evaluation runs queries with concurrency 1 and prints score metrics only. Use
+`--workers=<n>` as the normal daemon worker control: it sets `OPTSIDIAN_SEARCH_WORKERS` and
+`OPTSIDIAN_SEARCH_EXECUTION_WORKERS`, while eval concurrency stays at 1 unless `--concurrency=<n>`
+is passed. Query and index analyzer worker counts stay at 1 unless explicitly overridden, because
+the current analyzer path is not a useful concurrency target. Use `--measure-speed` when measuring
+latency or throughput; without it, CLI summaries do not print total time, QPS, average latency, or
+latency percentiles.
 
 Progress is always rendered to stderr for quality evaluation unless `--no-progress` is explicitly
 passed. This applies to full, sampled, and judged-only fixtures. Warmup/index progress reports the

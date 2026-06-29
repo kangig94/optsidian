@@ -919,6 +919,40 @@ test("daemon pools treat OPTSIDIAN_SEARCH_WORKERS as search execution workers on
   }
 });
 
+test("default search execution worker count is one per four logical CPUs capped at four", async () => {
+  const { defaultSearchExecutionWorkerCount } = await futureImport("src/daemon/worker-pool.ts");
+
+  assert.equal(defaultSearchExecutionWorkerCount(1), 1);
+  assert.equal(defaultSearchExecutionWorkerCount(4), 1);
+  assert.equal(defaultSearchExecutionWorkerCount(8), 2);
+  assert.equal(defaultSearchExecutionWorkerCount(15), 3);
+  assert.equal(defaultSearchExecutionWorkerCount(16), 4);
+  assert.equal(defaultSearchExecutionWorkerCount(32), 4);
+});
+
+test("daemon pools use search.executionWorkers setting when worker env is unset", async () => {
+  const { createDaemonPools } = await futureImport("src/daemon/pools.ts");
+  const env = {
+    ...process.env,
+    OPTSIDIAN_SEARCH_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: undefined
+  };
+  const pools = await createDaemonPools(env, { search: { executionWorkers: 3 } });
+  try {
+    const stats = await pools.stats({
+      deadline: Date.now() + 1000,
+      cancellationId: "settings-execution-workers-stats"
+    });
+    assert.equal(stats.latencyAnalyzer.workers, 1);
+    assert.equal(stats.throughputAnalyzer.workers, 1);
+    assert.equal(stats.searchExecution.workers, 3);
+  } finally {
+    await pools.close();
+  }
+});
+
 test("worker pool memory restart guard ignores shared/native memory when heap is below limit", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
@@ -2319,6 +2353,22 @@ test("runtime profile maps single worker setting to search execution only", asyn
   assert.equal(projected.OPTSIDIAN_SEARCH_EXECUTION_WORKERS, "3");
   assert.equal(projected.OPTSIDIAN_SEARCH_QUERY_WORKERS, "1");
   assert.equal(projected.OPTSIDIAN_SEARCH_INDEX_WORKERS, "1");
+});
+
+test("runtime profile uses search.executionWorkers setting below worker env overrides", async () => {
+  const { effectiveSearchRuntimeProfile } = await futureImport("src/daemon/runtime-profile.ts");
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-execution-workers-config-"),
+    OPTSIDIAN_SEARCH_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: undefined,
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: undefined
+  };
+
+  assert.equal(effectiveSearchRuntimeProfile(repoRoot, env, { search: { executionWorkers: 8 } }).workers.searchExecution, 8);
+  assert.equal(effectiveSearchRuntimeProfile(repoRoot, { ...env, OPTSIDIAN_SEARCH_WORKERS: "6" }, { search: { executionWorkers: 8 } }).workers.searchExecution, 6);
+  assert.equal(effectiveSearchRuntimeProfile(repoRoot, { ...env, OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "7" }, { search: { executionWorkers: 8 } }).workers.searchExecution, 7);
 });
 
 test("runtime profile tracks ngram as an index-affecting setting", async () => {

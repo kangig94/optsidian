@@ -141,7 +141,7 @@ function parseOptions(argv) {
 async function runQualityBenchmark(options) {
   const mode = options.mode ?? "core";
   const measureSpeed = Boolean(options.measureSpeed);
-  const concurrency = options.concurrency ?? defaultQualityConcurrency({ measureSpeed, workers: effectiveEvalWorkers(options) });
+  const concurrency = options.concurrency ?? defaultQualityConcurrency();
   const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
 
   if (!vaultRoot) {
@@ -190,9 +190,8 @@ async function runQualityBenchmark(options) {
   return runs;
 }
 
-function defaultQualityConcurrency({ measureSpeed, workers }) {
-  if (measureSpeed) return 1;
-  return workers;
+function defaultQualityConcurrency() {
+  return 1;
 }
 
 async function runIndexBenchmark(options) {
@@ -1175,16 +1174,14 @@ function searchEvalEnv(options) {
 
 function effectiveEvalWorkers(options) {
   return options.workers ??
-    envPositiveInt(process.env.OPTSIDIAN_SEARCH_WORKERS) ??
     envPositiveInt(process.env.OPTSIDIAN_SEARCH_EXECUTION_WORKERS) ??
-    defaultSearchExecutionWorkers(process.env);
+    envPositiveInt(process.env.OPTSIDIAN_SEARCH_WORKERS) ??
+    defaultSearchExecutionWorkers();
 }
 
-function defaultSearchExecutionWorkers(env) {
+function defaultSearchExecutionWorkers() {
   const logicalBudget = Math.max(4, typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length);
-  const queryWorkers = envPositiveInt(env.OPTSIDIAN_SEARCH_QUERY_WORKERS) ?? 1;
-  const indexWorkers = envPositiveInt(env.OPTSIDIAN_SEARCH_INDEX_WORKERS) ?? 1;
-  return Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers));
+  return Math.max(1, Math.min(4, Math.floor(logicalBudget / 4)));
 }
 
 function envPositiveInt(raw) {

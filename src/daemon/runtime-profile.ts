@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
-import os from "node:os";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
 import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
+import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 2;
 
@@ -48,11 +48,9 @@ export function effectiveSearchRuntimeProfile(
   env: NodeJS.ProcessEnv = process.env,
   settings: OptsidianSettings = readOptsidianSettings(cwd, env)
 ): SearchRuntimeProfile {
-  const logicalBudget = logicalCpuWorkerBudget();
   const searchWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
   const queryWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (searchWorkers ? 1 : settings.search?.queryWorkers ?? 1);
   const indexWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (searchWorkers ? 1 : settings.search?.indexWorkers ?? 1);
-  const defaultSearchWorkers = Math.max(2, Math.min(4, logicalBudget - queryWorkers - indexWorkers));
   return normalizeSearchRuntimeProfile({
     schemaVersion: SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION,
     analyzer: {
@@ -70,7 +68,7 @@ export function effectiveSearchRuntimeProfile(
     workers: {
       query: queryWorkers,
       index: indexWorkers,
-      searchExecution: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? searchWorkers ?? defaultSearchWorkers,
+      searchExecution: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? searchWorkers ?? settings.search?.executionWorkers ?? defaultSearchExecutionWorkerCount(),
       analyzerMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH") ?? 16,
       indexMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH") ?? 128
     },
@@ -186,6 +184,7 @@ export function settingsForSearchRuntimeProfile(profile: SearchRuntimeProfile): 
     ngram: normalized.index.ngram,
     queryWorkers: normalized.workers.query,
     indexWorkers: normalized.workers.index,
+    executionWorkers: normalized.workers.searchExecution,
     snapshotRetentionCount: normalized.cache.snapshotRetention,
     queryCacheSize: normalized.cache.queryAnalysisEntries,
     daemonIdleMs: normalized.daemon.idleMs
@@ -211,10 +210,6 @@ function extraLangs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string
 function optionalRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === undefined || value === null) return {};
   return asRecord(value, label);
-}
-
-function logicalCpuWorkerBudget(): number {
-  return Math.max(4, os.availableParallelism?.() ?? os.cpus().length ?? 4);
 }
 
 function positiveIntEnv(env: NodeJS.ProcessEnv, key: string): number | undefined {

@@ -646,6 +646,10 @@ export function logicalCpuWorkerBudget(): number {
   return Math.max(4, os.availableParallelism?.() ?? os.cpus().length ?? 4);
 }
 
+export function defaultSearchExecutionWorkerCount(cpuCores = logicalCpuWorkerBudget()): number {
+  return Math.max(1, Math.min(4, Math.floor(cpuCores / 4)));
+}
+
 export function workerCountFromEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   return optionalWorkerCountFromEnv(env, key) ?? Math.max(1, fallback);
 }
