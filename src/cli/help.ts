@@ -16,7 +16,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = ["read", "search", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"] as const;
+export const CLI_ONLY_COMMANDS = ["read", "search", "similarity", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"] as const;
 export const MCP_TOOL_NAMES = ["command_map", "command_run", "write", "edit", "apply_patch"] as const;
 
 const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
@@ -67,6 +67,39 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "Search indexes analyzer tokens; default baseline is Intl.Segmenter plus Latin folding and ASCII stemming.",
       "Search is served through the search daemon RPC client.",
       "Search output returns note path, title, tags, and body snippets only."
+    ]
+  },
+  similarity: {
+    summary: "Vector similarity API contract for note and text comparisons",
+    usage: [
+      "optsidian similarity mode=global [frontmatter-key=<key> frontmatter-value=<value>] [path=<dir|file>] [field=<field,...>] [top-k=<n>] [min-score=<0..1>] [model=<id>] [format=text|json]",
+      "optsidian similarity mode=left left=<path>|left-text=<text|@file> [frontmatter-key=<key> frontmatter-value=<value>] [top-k=<n>] [format=text|json]",
+      "optsidian similarity mode=pair left=<path>|left-text=<text|@file> right=<path>|right-text=<text|@file> [format=text|json]",
+      "optsidian similarity request-json=<json|@file> [format=text|json]"
+    ],
+    options: [
+      { name: "mode=global|left|pair", description: "Comparison mode; global is the default" },
+      { name: "frontmatter-key=<key>", description: "Top-level frontmatter key used to filter candidate notes" },
+      { name: "frontmatter-value=<value>", description: "String frontmatter value for equality filtering" },
+      { name: "frontmatter-value-json=<json>", description: "Typed scalar frontmatter value, or @file" },
+      { name: "path=<dir|file>", description: "Vault-relative candidate scope" },
+      { name: "field=<field,...>", description: "Projection fields: title, body, aliases, headings, tags (default: title,body)" },
+      { name: "strip-frontmatter=true|false", description: "Exclude YAML frontmatter from body projection by default" },
+      { name: "markdown=plain|raw", description: "Projection markdown handling; plain is the default contract" },
+      { name: "left=<path>", description: "Left note path for left and pair modes" },
+      { name: "left-text=<text|@file>", description: "Inline left text instead of a note path" },
+      { name: "right=<path>", description: "Right note path for pair mode" },
+      { name: "right-text=<text|@file>", description: "Inline right text instead of a note path" },
+      { name: "top-k=<n>", description: "Nearest-neighbor result cap for global and left modes (default: 10)" },
+      { name: "min-score=<0..1>", description: "Minimum cosine similarity score threshold (default: 0)" },
+      { name: "model=<id>", description: "Requested embedding model id; default defers to provider" },
+      { name: "request-json=<json|@file>", description: "Full structured request object for future multi-filter contracts" },
+      { name: "format=text|json", description: "Output format (default: text)" }
+    ],
+    notes: [
+      "Similarity is CLI-only and currently returns available=false until an embedding provider is configured.",
+      "The default projection is title plus frontmatter-excluded body.",
+      "frontmatter filters select candidates but are not embedded as projection text."
     ]
   },
   index: {

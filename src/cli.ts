@@ -16,6 +16,7 @@ import { runMkdir } from "./cli/commands/mkdir.js";
 import { runOpenGui } from "./cli/commands/open-gui.js";
 import { runRead } from "./cli/commands/read.js";
 import { runSearch } from "./cli/commands/search.js";
+import { runSimilarity } from "./cli/commands/similarity.js";
 import { runConfig } from "./cli/commands/config.js";
 import { runUpdate } from "./cli/commands/update.js";
 import { runWrite } from "./cli/commands/write.js";
@@ -105,6 +106,9 @@ async function runMain(argv: string[]): Promise<void> {
       return;
     case "search":
       await runSearch(args, vaultRoot);
+      return;
+    case "similarity":
+      runSimilarity(args, vaultRoot);
       return;
     case "index":
       await runIndex(args, vaultRoot);

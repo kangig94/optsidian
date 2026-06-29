@@ -95,7 +95,7 @@ export function createToolHandlers(resolveVaultRoot: () => string, onToolCall?: 
 // optsidian CLI as a child process. The MCP server runs outside the host Bash sandbox,
 // so the child inherits that: native-delegated commands (para-zk:*, other plugin
 // commands) reach the running Obsidian over its unix socket, and CLI-only commands
-// (read/search/grep/frontmatter) read the vault — identically to the real CLI. This is
+// (read/search/similarity/grep/frontmatter) read the vault — identically to the real CLI. This is
 // the only tool that drives native/plugin commands; the file-mutation tools above do not.
 function runOptsidianCommand(args: CommandRunToolArgs): ToolPayload {
   const cliBin = fileURLToPath(new URL("optsidian", import.meta.url));
@@ -139,7 +139,7 @@ export function registerOptsidianTools(server: McpServer, resolveVaultRoot: () =
     "command_run",
     {
       description:
-        "Run any Optsidian command (CLI-only like read/search/grep/frontmatter, or native-delegated like para-zk:* and other plugin commands) and capture its output. Use this when you need a command beyond the file-mutation tools — it reaches the running Obsidian. Pass the command verb in `command` and key=value tokens in `args` (argv, no shell). Returns {ok, command, exit_code, stdout, stderr}.",
+        "Run any Optsidian command (CLI-only like read/search/similarity/grep/frontmatter, or native-delegated like para-zk:* and other plugin commands) and capture its output. Use this when you need a command beyond the file-mutation tools — it reaches the running Obsidian. Pass the command verb in `command` and key=value tokens in `args` (argv, no shell). Returns {ok, command, exit_code, stdout, stderr}.",
       inputSchema: commandRunArgsSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
     },

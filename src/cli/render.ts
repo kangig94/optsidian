@@ -8,7 +8,8 @@ import type {
   SearchIndexPruneResult,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
-  SearchResult
+  SearchResult,
+  SimilarityResult
 } from "../core/types.js";
 import type { StatusResult } from "../daemon/protocol.js";
 
@@ -73,6 +74,20 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
     out.push("");
   });
   return `${out.join("\n")}`;
+}
+
+export function renderSimilarity(result: SimilarityResult, format: OutputFormat): string {
+  if (format === "json") {
+    return `${JSON.stringify(result)}\n`;
+  }
+  return [
+    "Vector similarity provider unavailable.",
+    `mode: ${result.request.mode}`,
+    `projection: ${result.request.projection.fields.join(", ")} (${result.request.projection.markdown}, ${result.request.projection.stripFrontmatter ? "frontmatter excluded" : "frontmatter included"})`,
+    `model: ${result.model.requested}`,
+    `fallback: ${result.fallback.strategy}`,
+    ""
+  ].join("\n");
 }
 
 export function renderFrontmatterRead(result: FrontmatterReadResult, format: OutputFormat): string {

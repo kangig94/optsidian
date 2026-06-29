@@ -210,6 +210,51 @@ test("search text analysis keeps ngram disabled by default", async () => {
   assert.deepEqual(enabled.channels.ngram, ["한국", "국어", "어검", "검색", "한국어", "국어검", "어검색"]);
 });
 
+test("similarity contract normalizes vector request and unavailable fallback", async () => {
+  const { normalizeSimilarityParams, similarityUnavailableResult } = await core();
+  const vault = tempVault();
+
+  const normalized = normalizeSimilarityParams({
+    mode: "global",
+    scope: {
+      path: "Projects",
+      frontmatter: [{ key: " type ", op: "eq", value: "project" }]
+    },
+    projection: {
+      fields: ["title", "body", "title"],
+      markdown: "plain"
+    },
+    provider: { model: "bge-m3" },
+    topK: 5,
+    minScore: 0.55
+  });
+
+  assert.deepEqual(normalized.scope.frontmatter, [{ key: "type", op: "eq", value: "project" }]);
+  assert.deepEqual(normalized.projection.fields, ["title", "body"]);
+  assert.equal(normalized.projection.stripFrontmatter, true);
+  assert.equal(normalized.projection.version, "title-body-plain-strip-frontmatter-v1");
+  assert.equal(normalized.provider.model, "bge-m3");
+
+  const result = similarityUnavailableResult(vault, {
+    mode: "left",
+    left: { path: "Projects/Alpha.md" },
+    scope: { frontmatter: [{ key: "type", op: "eq", value: "project" }] }
+  });
+  assert.equal(result.command, "similarity");
+  assert.equal(result.available, false);
+  assert.equal(result.status, "provider-unavailable");
+  assert.equal(result.model.metric, "cosine");
+  assert.deepEqual(result.results, []);
+  assert.equal(result.fallback.strategy, "lexical");
+
+  assert.throws(() => normalizeSimilarityParams({ mode: "left" }), /mode=left requires left/);
+  assert.throws(() => normalizeSimilarityParams({ mode: "pair", left: { path: "a.md" } }), /mode=pair requires left and right/);
+  assert.throws(
+    () => normalizeSimilarityParams({ scope: { frontmatter: [{ key: "type", op: "eq", value: ["project"] }] } }),
+    /must be null, string, number, or boolean/
+  );
+});
+
 test("body ngram field text can be capped without changing other channels", async () => {
   const { BODY_NGRAM_SHORT_MAX_TERMS } = await import(path.join(repoRoot, "src/core/search/analysis/budget.ts"));
   const { searchFieldTokenTexts } = await import(path.join(repoRoot, "src/core/search/analysis/fields.ts"));

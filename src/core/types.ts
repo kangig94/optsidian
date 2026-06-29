@@ -154,6 +154,108 @@ export type SearchResult = {
   warnings?: string[];
 };
 
+export type SimilarityMode = "global" | "left" | "pair";
+
+export type SimilarityProjectionField = "title" | "body" | "aliases" | "headings" | "tags";
+
+export type SimilarityMarkdownProjection = "plain" | "raw";
+
+export type SimilarityFilterValue = null | string | number | boolean;
+
+export type SimilarityFrontmatterFilter = {
+  key: string;
+  op: "eq";
+  value: SimilarityFilterValue;
+};
+
+export type SimilarityScope = {
+  path?: string;
+  frontmatter?: SimilarityFrontmatterFilter[];
+};
+
+export type SimilarityProjection = {
+  fields?: SimilarityProjectionField[];
+  stripFrontmatter?: boolean;
+  markdown?: SimilarityMarkdownProjection;
+};
+
+export type SimilarityProviderParams = {
+  model?: string;
+};
+
+export type SimilarityReference = {
+  path?: string;
+  text?: string;
+  id?: string;
+};
+
+export type SimilarityParams = {
+  mode?: SimilarityMode;
+  scope?: SimilarityScope;
+  projection?: SimilarityProjection;
+  provider?: SimilarityProviderParams;
+  left?: SimilarityReference;
+  right?: SimilarityReference;
+  topK?: number;
+  minScore?: number;
+};
+
+export type NormalizedSimilarityParams = {
+  mode: SimilarityMode;
+  scope: {
+    path?: string;
+    frontmatter: SimilarityFrontmatterFilter[];
+  };
+  projection: {
+    fields: SimilarityProjectionField[];
+    stripFrontmatter: boolean;
+    markdown: SimilarityMarkdownProjection;
+    version: string;
+  };
+  provider: {
+    model: string;
+  };
+  left?: SimilarityReference;
+  right?: SimilarityReference;
+  topK: number;
+  minScore: number;
+};
+
+export type SimilarityPairResult = {
+  left: string;
+  right: string;
+  score: number;
+};
+
+export type SimilarityResult = {
+  ok: true;
+  command: "similarity";
+  schemaVersion: 1;
+  available: false;
+  status: "provider-unavailable";
+  request: NormalizedSimilarityParams;
+  model: {
+    requested: string;
+    resolved: null;
+    metric: "cosine";
+  };
+  provider: {
+    status: "unavailable";
+    reason: string;
+  };
+  results: SimilarityPairResult[];
+  cache: {
+    key: null;
+    hits: 0;
+    misses: 0;
+  };
+  fallback: {
+    available: true;
+    strategy: "lexical";
+    reason: string;
+  };
+};
+
 export type SearchIndexProjectionStatus = {
   key: string;
   tier: "intl" | "kiwi";

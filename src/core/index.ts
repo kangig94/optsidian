@@ -5,6 +5,7 @@ export { addFrontmatterValue, deleteFrontmatter, readFrontmatter, removeFrontmat
 export { grepVault } from "./grep.js";
 export { mkdirVaultPath } from "./mkdir.js";
 export { readVaultFile, DEFAULT_READ_MAX_LINES } from "./read.js";
+export { normalizeSimilarityParams, similarityUnavailableResult } from "./similarity.js";
 export { writeVaultFile } from "./write.js";
 export type {
   ChangeCode,
@@ -37,5 +38,16 @@ export type {
   SearchParams,
   SearchResult,
   SearchSnippet,
+  SimilarityFilterValue,
+  SimilarityFrontmatterFilter,
+  SimilarityMarkdownProjection,
+  SimilarityMode,
+  SimilarityParams,
+  SimilarityPairResult,
+  SimilarityProjection,
+  SimilarityProjectionField,
+  SimilarityProviderParams,
+  SimilarityReference,
+  SimilarityResult,
   WriteParams
 } from "./types.js";

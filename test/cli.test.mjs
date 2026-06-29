@@ -567,6 +567,7 @@ test("top-level and implemented command help stay local", async () => {
   assert.match(result.stdout, /optsidian <command> --help/);
   assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
   assert.match(result.stdout, /plugin:install\s+Install marketplace or custom Obsidian plugins/);
+  assert.match(result.stdout, /similarity\s+Vector similarity API contract/);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /files, links, version, dev:console/);
   assert.match(result.stdout, /MCP tools: command_map, command_run, write, edit, apply_patch/);
@@ -1357,6 +1358,64 @@ test("search ranks notes and renders CLI output", async () => {
   assert.match(result.stdout, /tags: project, alpha/);
   assert.doesNotMatch(result.stdout, /scope:|aliases:|matched:|score:/);
 
+});
+
+test("similarity command exposes vector contract with provider fallback", () => {
+  const { env } = setup();
+  const result = run([
+    "similarity",
+    "mode=global",
+    "frontmatter-key=type",
+    "frontmatter-value=project",
+    "field=title,body",
+    "top-k=5",
+    "min-score=0.55",
+    "model=bge-m3",
+    "format=json"
+  ], { env });
+  assert.equal(result.status, 0, result.stderr);
+
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.command, "similarity");
+  assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.available, false);
+  assert.equal(payload.status, "provider-unavailable");
+  assert.deepEqual(payload.request.scope.frontmatter, [{ key: "type", op: "eq", value: "project" }]);
+  assert.deepEqual(payload.request.projection.fields, ["title", "body"]);
+  assert.equal(payload.request.projection.version, "title-body-plain-strip-frontmatter-v1");
+  assert.equal(payload.request.topK, 5);
+  assert.equal(payload.request.minScore, 0.55);
+  assert.equal(payload.model.requested, "bge-m3");
+  assert.equal(payload.model.resolved, null);
+  assert.equal(payload.model.metric, "cosine");
+  assert.deepEqual(payload.results, []);
+  assert.equal(payload.fallback.strategy, "lexical");
+
+  const pair = run([
+    "similarity",
+    "mode=pair",
+    "left=Projects/A.md",
+    "right=Projects/B.md",
+    "format=json"
+  ], { env });
+  assert.equal(pair.status, 0, pair.stderr);
+  assert.equal(JSON.parse(pair.stdout).request.mode, "pair");
+
+  const requestJson = JSON.stringify({
+    mode: "left",
+    left: { text: "semantic project text", id: "ad-hoc-left" },
+    scope: { frontmatter: [{ key: "type", op: "eq", value: "project" }] },
+    projection: { fields: ["title"], stripFrontmatter: true },
+    topK: 3
+  });
+  const structured = run(["similarity", `request-json=${requestJson}`, "format=json"], { env });
+  assert.equal(structured.status, 0, structured.stderr);
+  assert.equal(JSON.parse(structured.stdout).request.left.id, "ad-hoc-left");
+  assert.deepEqual(JSON.parse(structured.stdout).request.projection.fields, ["title"]);
+
+  const invalid = run(["similarity", "mode=left", "format=json"], { env });
+  assert.equal(invalid.status, 2);
+  assert.match(invalid.stderr, /mode=left requires left/);
 });
 
 test("index mutation rendering stays stable", async () => {

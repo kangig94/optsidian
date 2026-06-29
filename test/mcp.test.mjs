@@ -215,7 +215,7 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
       ""
     ].join("\n");
 
-    assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
+    assert.deepEqual(payload(commandMap).routing.cliOnly, ["read", "search", "similarity", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
     assert.deepEqual(payload(commandMap).routing.mcpTools, ["command_map", "command_run", "write", "edit", "apply_patch"]);
     assert.deepEqual(payload(commandMap).routing.nativeCommands, ["files", "links", "version", "dev:console"]);
     assert.equal(payload(commandMap).routing.nativeCommandsError, undefined);
@@ -363,7 +363,7 @@ test("optsidian-mcp serves tools over stdio protocol", async () => {
       name: "command_map",
       arguments: {}
     });
-    assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
+    assert.deepEqual(commandMap.structuredContent?.routing?.cliOnly, ["read", "search", "similarity", "grep", "index", "config", "copy", "mkdir", "open-gui", "update", "frontmatter", "plugin:install"]);
     assert.deepEqual(commandMap.structuredContent?.routing?.mcpTools, ["command_map", "command_run", "write", "edit", "apply_patch"]);
     assert.deepEqual(commandMap.structuredContent?.routing?.nativeCommands, ["files", "links", "version", "dev:console"]);
     assert.equal(commandMap.structuredContent?.routing?.nativeCommandsError, undefined);
