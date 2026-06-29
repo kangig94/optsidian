@@ -249,7 +249,7 @@ export class SearchExecutionWorkerPool {
     options: WorkerPoolRunOptions
   ): Promise<Array<{ job: SearchShardExecutionJob; slotId: number; promise: Promise<SearchShardExecutionResult> }>> {
     if (jobs.length === 0) return [];
-    await this.pool.warmup(Math.min(jobs.length, this.pool.slotIds().length));
+    await this.pool.warmup(this.fanoutWarmupTarget(jobs.length));
     const readySlotIds = this.reserveFanoutSlotIds(this.orderedFanoutSlotIds(this.pool.readySlotIds()), jobs.length);
     if (readySlotIds.length === 0) {
       throw Object.assign(new Error("search execution pool has no ready workers"), { code: "SEARCH_DAEMON_NOT_READY" });
@@ -337,6 +337,12 @@ export class SearchExecutionWorkerPool {
     const reserved = [...ordered.slice(offset), ...ordered.slice(0, offset)];
     this.nextFanoutOffset = (this.nextFanoutOffset + Math.min(Math.max(1, jobCount), ordered.length)) % ordered.length;
     return reserved;
+  }
+
+  private fanoutWarmupTarget(jobCount: number): number {
+    const slotCount = this.pool.slotIds().length;
+    if (jobCount >= slotCount) return slotCount;
+    return Math.min(slotCount, Math.max(1, jobCount * 2));
   }
 }
 

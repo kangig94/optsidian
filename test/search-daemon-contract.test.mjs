@@ -2912,6 +2912,80 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("search-execution pool warms partner slots for partial fan-out rotation", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "partial-fanout-warmup.mjs");
+  const claimDir = path.join(root, "claims");
+  fs.mkdirSync(claimDir);
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import path from "node:path";
+import { parentPort } from "node:worker_threads";
+
+const claimDir = ${JSON.stringify(claimDir)};
+let workerIndex = 0;
+while (true) {
+  try {
+    fs.writeFileSync(path.join(claimDir, String(workerIndex)), "claimed", { flag: "wx" });
+    break;
+  } catch {
+    workerIndex += 1;
+  }
+}
+
+function shardResult() {
+  return {
+    snapshotId: "snap",
+    partitionIds: [],
+    requestedLimit: 0,
+    workEstimate: 0,
+    scoredCount: 0,
+    finalists: []
+  };
+}
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    const reply = () => parentPort.postMessage({
+      id: 0,
+      ok: true,
+      result: { workerIndex },
+      memoryRss: process.memoryUsage().rss
+    });
+    if (workerIndex < 2) reply();
+    else setTimeout(reply, 150);
+    return;
+  }
+  parentPort.postMessage({ id: message.id, ok: true, result: shardResult(), memoryRss: process.memoryUsage().rss });
+});
+`);
+  const workerPool = new DaemonWorkerPool({
+    name: "partial-fanout-warmup",
+    kind: "search",
+    size: 4,
+    workerScript,
+    autoWarmup: false,
+    env: { ...process.env }
+  });
+  const pool = new SearchExecutionWorkerPool(workerPool);
+  try {
+    const dispatched = await pool.dispatchSearchShards([{ label: "a1" }, { label: "a2" }], {
+      deadline: Date.now() + 10_000,
+      cancellationId: "fanout-warmup",
+      requestId: "fanout-warmup",
+      vault: "vault-a"
+    });
+
+    assert.equal(workerPool.stats().ready, 4);
+    assert.equal(dispatched.length, 2);
+    await Promise.all(dispatched.map((entry) => entry.promise));
+  } finally {
+    await workerPool.close();
+  }
+});
+
 test("AC3 analyzer-daemon socket client symbols are removed from analyzer construction", () => {
   const source = fs.readFileSync(path.join(repoRoot, "src/core/search/analyzer.ts"), "utf8");
   for (const symbol of [
