@@ -1171,6 +1171,84 @@ test("search store loadVault can warm the query analyzer alongside preload", asy
   ].sort());
 });
 
+test("search store service metadata path uses loaded documents for a pinned snapshot", async () => {
+  const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
+  const vault = tempRoot();
+  const analyzer = testAnalyzer();
+  const pin = { snapshotId: "snap-a", pinToken: "pin-a" };
+  const calls = [];
+  const document = {
+    documentId: "doc-a",
+    path: "Alpha.md",
+    contentHash: "a".repeat(64),
+    partitionId: 1,
+    title: "Alpha Loaded",
+    tags: ["alpha"],
+    snippetCorpus: {
+      bodyStartLine: 1,
+      lines: [
+        {
+          line: 2,
+          text: "Loaded document body",
+          snippetId: "snippet-a",
+          segmentId: "segment-a",
+          documentId: "doc-a",
+          byteStart: 0,
+          byteEnd: 20,
+          channels: { morph: ["loaded"], surface: [], ngram: [] }
+        }
+      ],
+      fallback: { kind: "line", snippetId: "snippet-a" }
+    }
+  };
+  const documents = new Map([[document.documentId, document]]);
+  const fakeStore = {
+    pin: async (inputVault, snapshotId) => {
+      calls.push(["pin", inputVault, snapshotId]);
+      return pin;
+    },
+    snapshotHandleForPin: (inputPin) => {
+      calls.push(["handle", inputPin.pinToken]);
+      return {
+        snapshotId: "snap-a",
+        pinToken: inputPin.pinToken,
+        bm25Stats: emptyBm25Stats(),
+        documents: sharedHandle(Buffer.from("{not-json")),
+        segments: []
+      };
+    },
+    documentsForPin: (inputPin) => {
+      calls.push(["documents", inputPin.pinToken]);
+      return documents;
+    },
+    release: (inputPin) => calls.push(["release", inputPin.pinToken]),
+    searchAnalyzerIdentity: () => analyzer.identity
+  };
+  const service = new DaemonSearchStoreService(fakeStore, {}, {}, { queryCacheSize: 1 });
+
+  const result = await service.search({
+    vault,
+    tags: ["alpha"],
+    limit: 1
+  }, {
+    deadline: Date.now() + 1000,
+    cancellationId: "loaded-documents",
+    requestId: "loaded-documents"
+  });
+
+  assert.equal(result.snapshotId, "snap-a");
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].path, "Alpha.md");
+  assert.equal(result.matches[0].title, "Alpha Loaded");
+  assert.equal(result.matches[0].snippets[0].text, "Loaded document body");
+  assert.deepEqual(calls, [
+    ["pin", vault, undefined],
+    ["handle", "pin-a"],
+    ["documents", "pin-a"],
+    ["release", "pin-a"]
+  ]);
+});
+
 test("search store service analyzes non-Hangul queries inline without warming Kiwi", async () => {
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
   const vault = tempRoot();
