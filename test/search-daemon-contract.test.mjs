@@ -1275,11 +1275,9 @@ test("search store service rejects excessive analyzed query terms per channel", 
 
 test("AC3 daemon rejects malformed deadlines and payload shapes without dying", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
-  const { createOwnerRegistry } = await futureImport("src/daemon/owner-registry.ts");
   const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
   const runtimeDir = tempRoot();
   const env = { ...process.env, OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir };
-  const registry = createOwnerRegistry({ runtimeDir, env });
   const client = createSearchDaemonClient({
     runtimeDir,
     binaryPath: path.join(repoRoot, "dist", "optsidian"),
@@ -1287,8 +1285,8 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
     readyTimeoutMs: 5000
   });
 
-  await client.status();
-  const owner = registry.readOwner();
+  const status = await client.status();
+  const owner = status.owner;
   assert.ok(owner);
 
   try {
@@ -1338,7 +1336,13 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
 
 test("AC10 owner registry treats a 20 second control lock age as the stale boundary", async () => {
   const { createOwnerRegistry } = await futureImport("src/daemon/owner-registry.ts");
-  const fresh = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-fresh-") });
+  const desired = {
+    uid: process.getuid?.() ?? 0,
+    runtimeHash: "runtime-lock",
+    binaryVersion: "binary-lock",
+    protocolVersion: 2
+  };
+  const fresh = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-fresh-"), desired });
   fs.mkdirSync(fresh.lockPath, { recursive: true });
   const nineteenSecondsAgo = new Date(Date.now() - 19_000);
   fs.utimesSync(fresh.lockPath, nineteenSecondsAgo, nineteenSecondsAgo);
@@ -1352,7 +1356,7 @@ test("AC10 owner registry treats a 20 second control lock age as the stale bound
   );
   assert.equal(fs.existsSync(fresh.lockPath), true);
 
-  const stale = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-stale-") });
+  const stale = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-stale-"), desired });
   fs.mkdirSync(stale.lockPath, { recursive: true });
   const twentyOneSecondsAgo = new Date(Date.now() - 21_000);
   fs.utimesSync(stale.lockPath, twentyOneSecondsAgo, twentyOneSecondsAgo);
@@ -3372,7 +3376,10 @@ test("AC18 owner registry records stable fields and converges stale starts to on
   const {
     OWNER_RECORD_FIELDS,
     convergeOnCompatibleDaemonForTests,
-    createOwnerRegistryForTests
+    createOwnerRecord,
+    createOwnerRegistry,
+    createOwnerRegistryForTests,
+    socketPathForOwner
   } = await futureImport("src/daemon/owner-registry.ts");
 
   assert.deepEqual(OWNER_RECORD_FIELDS, AC18_OWNER_FIELDS);
@@ -3383,8 +3390,22 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     binaryVersion: "binary-content-hash-b",
     protocolVersion: 2
   };
+  const scopeRuntimeDir = tempRoot("optsidian-owner-scope-");
+  const peerDesired = { ...desired, protocolVersion: desired.protocolVersion + 1 };
+  const desiredRegistry = createOwnerRegistry({ runtimeDir: scopeRuntimeDir, desired });
+  const peerRegistry = createOwnerRegistry({ runtimeDir: scopeRuntimeDir, desired: peerDesired });
+  assert.notEqual(desiredRegistry.ownerPath, peerRegistry.ownerPath);
+  assert.notEqual(desiredRegistry.lockPath, peerRegistry.lockPath);
+  peerRegistry.writeOwner(createOwnerRecord(peerDesired, path.join(scopeRuntimeDir, "peer.sock"), "peer", 999999));
+  assert.equal(desiredRegistry.readOwner(), undefined);
+  assert.equal(peerRegistry.compatibleOwners(peerDesired).length, 1);
+  const unsafeDesired = { ...desired, runtimeHash: "../../escape" };
+  const unsafeRegistry = createOwnerRegistry({ runtimeDir: scopeRuntimeDir, desired: unsafeDesired });
+  assert.equal(path.dirname(unsafeRegistry.ownerPath), scopeRuntimeDir);
+  assert.doesNotMatch(path.basename(unsafeRegistry.ownerPath), /\.\./);
+  assert.doesNotMatch(path.basename(socketPathForOwner(scopeRuntimeDir, unsafeDesired)), /\.\./);
+
   const scenarios = [
-    "protocol-mismatch",
     "binary-mismatch",
     "stale-pid-lock",
     "orphaned-socket"
@@ -3395,6 +3416,7 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     const result = await convergeOnCompatibleDaemonForTests(registry, desired);
     assert.equal(result.owner.binaryVersion, desired.binaryVersion, scenario);
     assert.equal(result.owner.protocolVersion, desired.protocolVersion, scenario);
+    assert.equal(result.replaced, scenario === "binary-mismatch", scenario);
     assert.equal(registry.compatibleOwners().length, 1, scenario);
   }
 

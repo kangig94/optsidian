@@ -43,6 +43,7 @@ export type OwnerRegistry = {
 export type CreateOwnerRegistryOptions = {
   runtimeDir?: string;
   env?: NodeJS.ProcessEnv;
+  desired: DesiredOwnerIdentity;
 };
 
 export class SearchDaemonOwnerError extends Error {
@@ -55,15 +56,15 @@ export class SearchDaemonOwnerError extends Error {
   }
 }
 
-const OWNER_FILE = "search-daemon.owner";
-const LOCK_DIR = "search-daemon.control.lock";
+const DAEMON_SCOPE_HASH_PREFIX_LENGTH = 24;
 const LOCK_STALE_MS = 20_000;
 
-export function createOwnerRegistry(options: CreateOwnerRegistryOptions = {}): OwnerRegistry {
+export function createOwnerRegistry(options: CreateOwnerRegistryOptions): OwnerRegistry {
   const runtimeDir = options.runtimeDir ?? defaultSearchDaemonRuntimeDir(options.env);
   ensurePrivateDirSync(runtimeDir, "Optsidian search daemon runtime directory");
-  const ownerPath = path.join(runtimeDir, OWNER_FILE);
-  const lockPath = path.join(runtimeDir, LOCK_DIR);
+  const stem = ownerRegistryStem(options.desired);
+  const ownerPath = path.join(runtimeDir, `${stem}.owner`);
+  const lockPath = path.join(runtimeDir, `${stem}.control.lock`);
   return {
     runtimeDir,
     ownerPath,
@@ -128,7 +129,7 @@ export function desiredOwnerIdentity(binaryPath: string): DesiredOwnerIdentity {
 }
 
 export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIdentity): string {
-  const name = `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${desired.runtimeHash.slice(0, 24)}.sock`;
+  const name = `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
   const candidate = path.join(runtimeDir, name);
   if (candidate.length < 100) return candidate;
   const socketDir = path.join(os.tmpdir(), `od-${desired.uid}-${sha256(path.resolve(runtimeDir)).slice(0, 12)}`);
@@ -156,9 +157,13 @@ export function createOwnerRecord(
 }
 
 export function ownerMatchesDesired(owner: OwnerRecord, desired: DesiredOwnerIdentity): boolean {
+  return ownerSharesDesiredSlot(owner, desired)
+    && owner.binaryVersion === desired.binaryVersion;
+}
+
+export function ownerSharesDesiredSlot(owner: OwnerRecord, desired: DesiredOwnerIdentity): boolean {
   return owner.uid === desired.uid
     && owner.runtimeHash === desired.runtimeHash
-    && owner.binaryVersion === desired.binaryVersion
     && owner.protocolVersion === desired.protocolVersion;
 }
 
@@ -213,16 +218,23 @@ export function createOwnerRegistryForTests(options: {
   desired: DesiredOwnerIdentity;
 }): OwnerRegistry {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-owner-registry-test-"));
-  const registry = createOwnerRegistry({ runtimeDir });
+  const registry = createOwnerRegistry({ runtimeDir, desired: options.desired });
   const incompatible = (overrides: Partial<OwnerRecord>): OwnerRecord => ({
     ...createOwnerRecord(options.desired, socketPathForOwner(runtimeDir, options.desired), "stale", 999999),
     ...overrides
   });
 
   switch (options.scenario) {
-    case "protocol-mismatch":
-      registry.writeOwner(incompatible({ protocolVersion: options.desired.protocolVersion + 1 }));
+    case "protocol-mismatch": {
+      const peerDesired = {
+        ...options.desired,
+        protocolVersion: options.desired.protocolVersion + 1
+      };
+      createOwnerRegistry({ runtimeDir, desired: peerDesired }).writeOwner(
+        createOwnerRecord(peerDesired, socketPathForOwner(runtimeDir, peerDesired), "stale", 999999)
+      );
       break;
+    }
     case "binary-mismatch":
       registry.writeOwner(incompatible({ binaryVersion: "old-binary-version" }));
       break;
@@ -241,6 +253,14 @@ export function createOwnerRegistryForTests(options: {
       throw new Error(`Unknown owner-registry test scenario: ${options.scenario}`);
   }
   return registry;
+}
+
+function ownerRegistryStem(desired: DesiredOwnerIdentity): string {
+  return `search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}`;
+}
+
+function daemonScopeHash(runtimeHash: string): string {
+  return sha256(runtimeHash).slice(0, DAEMON_SCOPE_HASH_PREFIX_LENGTH);
 }
 
 function readOwnerFile(ownerPath: string): OwnerRecord | undefined {

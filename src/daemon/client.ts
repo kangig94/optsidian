@@ -30,6 +30,7 @@ import {
   desiredOwnerIdentity,
   ownerMatchesDesired,
   ownerPidIsLive,
+  ownerSharesDesiredSlot,
   randomNonce,
   socketOwnershipMatches,
   socketPathForOwner,
@@ -89,8 +90,8 @@ export type SearchDaemonClientOptions = {
 export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}): SearchDaemonClient {
   const env = options.env ?? process.env;
   const binaryPath = options.binaryPath ?? defaultSearchDaemonBinaryPath(env);
-  const registry = options.registry ?? createOwnerRegistry({ runtimeDir: options.runtimeDir, env });
   const desired = desiredOwnerIdentity(binaryPath);
+  const registry = options.registry ?? createOwnerRegistry({ runtimeDir: options.runtimeDir, env, desired });
   const runtimeProfile = options.runtimeProfile ?? effectiveSearchRuntimeProfile(process.cwd(), env);
   const readyTimeoutMs = options.readyTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
   const ownerLockTimeoutMs = options.ownerLockTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
@@ -141,6 +142,10 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
 
   async function fenceOrRemoveOwner(owner: OwnerRecord): Promise<void> {
     if (!strictOwnerChecks) {
+      registry.removeOwner(owner);
+      return;
+    }
+    if (!ownerSharesDesiredSlot(owner, desired)) {
       registry.removeOwner(owner);
       return;
     }

@@ -440,8 +440,8 @@ async function shutdownSearchDaemonEnv(env) {
   if (!runtimeDir) return;
   try {
     const mergedEnv = { ...process.env, ...env };
-    const { createOwnerRegistry } = await import(path.resolve("src/daemon/owner-registry.ts"));
-    const registry = createOwnerRegistry({ runtimeDir, env: mergedEnv });
+    const { createOwnerRegistry, desiredOwnerIdentity } = await import(path.resolve("src/daemon/owner-registry.ts"));
+    const registry = createOwnerRegistry({ runtimeDir, env: mergedEnv, desired: desiredOwnerIdentity(cli) });
     const owner = registry.readOwner();
     if (!owner) return;
 

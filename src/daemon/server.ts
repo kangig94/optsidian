@@ -94,7 +94,10 @@ class SearchDaemon {
 
   static async start(options: StartOptions): Promise<SearchDaemon> {
     const owner = resolveOwnerFromEnv(options.env);
-    const registry = createOwnerRegistry({ runtimeDir: options.env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR });
+    const registry = createOwnerRegistry({
+      env: options.env,
+      desired: owner
+    });
     ensurePrivateDirSync(registry.runtimeDir, "Optsidian search daemon runtime directory");
     removeOrphanSocket(owner.socketPath);
     try {
@@ -437,8 +440,8 @@ export function searchRequestNeedsQueryAnalyzerWarmup(request: SearchDaemonReque
 }
 
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {
-  const runtimeDir = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR?.trim() || defaultSearchDaemonRuntimeDir(env);
-  const binaryPath = env.OPTSIDIAN_SEARCH_DAEMON_BINARY?.trim() || defaultSearchDaemonBinaryPath(env);
+  const runtimeDir = defaultSearchDaemonRuntimeDir(env);
+  const binaryPath = defaultSearchDaemonBinaryPath(env);
   const desired: DesiredOwnerIdentity = {
     uid: env.OPTSIDIAN_SEARCH_DAEMON_UID ? Number(env.OPTSIDIAN_SEARCH_DAEMON_UID) : currentUid(),
     runtimeHash: env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH?.trim() || computeRuntimeHash(binaryPath),
