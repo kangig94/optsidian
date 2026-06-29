@@ -28,6 +28,19 @@ export type PositionalBm25GlobalStats = {
   hash: string;
 };
 
+export type PositionalBm25CorpusStats = PositionalBm25GlobalStats["corpusStats"][number];
+
+export type Bm25TermScoreOptions = {
+  k1?: number;
+  b?: number;
+  d?: number;
+};
+
+export type PositionalBm25StatsLookup = {
+  corpusStats(channel: SearchTokenChannel, fieldId: number): PositionalBm25CorpusStats | undefined;
+  documentFrequency(channel: SearchTokenChannel, term: string, fieldId: number): number;
+};
+
 export function buildSearchSnapshotFromSegments(input: {
   snapshotId: string;
   segments: readonly PositionalSnapshotSegmentInput[];
@@ -82,6 +95,41 @@ export function bm25DocumentFrequency(
   )?.documentFrequency ?? 0;
 }
 
+export function createPositionalBm25StatsLookup(globalStats: PositionalBm25GlobalStats): PositionalBm25StatsLookup {
+  const corpusByKey = new Map<string, PositionalBm25CorpusStats>();
+  for (const entry of globalStats.corpusStats) {
+    const key = bm25CorpusStatsKey(entry.channel, entry.fieldId);
+    if (!corpusByKey.has(key)) corpusByKey.set(key, entry);
+  }
+  const documentFrequencyByKey = new Map<string, number>();
+  for (const row of globalStats.rows) {
+    const key = bm25DocumentFrequencyKey(row.channel, row.term, row.fieldId);
+    if (!documentFrequencyByKey.has(key)) documentFrequencyByKey.set(key, row.documentFrequency);
+  }
+  return {
+    corpusStats: (channel, fieldId) => corpusByKey.get(bm25CorpusStatsKey(channel, fieldId)),
+    documentFrequency: (channel, term, fieldId) =>
+      documentFrequencyByKey.get(bm25DocumentFrequencyKey(channel, term, fieldId)) ?? 0
+  };
+}
+
+export function bm25TermScoreFromStatsLookup(
+  lookup: PositionalBm25StatsLookup,
+  channel: SearchTokenChannel,
+  term: string,
+  fieldId: number,
+  frequency: number,
+  fieldLength: number,
+  options: Bm25TermScoreOptions = {}
+): number {
+  if (frequency <= 0 || fieldLength <= 0) return 0;
+  const corpus = lookup.corpusStats(channel, fieldId);
+  if (!corpus || corpus.documentCount <= 0 || corpus.averageFieldLength <= 0) return 0;
+  const documentFrequency = lookup.documentFrequency(channel, term, fieldId);
+  if (documentFrequency <= 0) return 0;
+  return bm25TermScoreFromObservedStats(corpus, documentFrequency, frequency, fieldLength, options);
+}
+
 export function bm25TermScoreFromGlobalStats(
   globalStats: PositionalBm25GlobalStats,
   channel: SearchTokenChannel,
@@ -100,10 +148,28 @@ export function bm25TermScoreFromGlobalStats(
   if (!corpus || corpus.documentCount <= 0 || corpus.averageFieldLength <= 0) return 0;
   const documentFrequency = bm25DocumentFrequency(globalStats, channel, term, fieldId);
   if (documentFrequency <= 0) return 0;
+  return bm25TermScoreFromObservedStats(corpus, documentFrequency, frequency, fieldLength, options);
+}
+
+function bm25TermScoreFromObservedStats(
+  corpus: PositionalBm25CorpusStats,
+  documentFrequency: number,
+  frequency: number,
+  fieldLength: number,
+  options: Bm25TermScoreOptions = {}
+): number {
   const k1 = options.k1 ?? SEARCH_BM25_K1;
   const b = options.b ?? SEARCH_BM25_B;
   const d = options.d ?? SEARCH_BM25_D;
   const idf = Math.log((corpus.documentCount - documentFrequency + 0.5) / (documentFrequency + 0.5) + 1);
   const tf = frequency / fieldLength;
   return (idf * (d + tf * (k1 + 1))) / (tf + k1 * (1 - b + (b * fieldLength) / corpus.averageFieldLength));
+}
+
+function bm25CorpusStatsKey(channel: SearchTokenChannel, fieldId: number): string {
+  return `${channel}\u0000${fieldId}`;
+}
+
+function bm25DocumentFrequencyKey(channel: SearchTokenChannel, term: string, fieldId: number): string {
+  return `${channel}\u0000${fieldId}\u0000${term.normalize("NFC").trim()}`;
 }

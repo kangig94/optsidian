@@ -2,8 +2,9 @@ import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis, type SearchTokenChannel
 import type { NormalizedSearchParams } from "../../core/search/internal-types.js";
 import { bm25BoundKey, exactDominanceLambda, type ExactDominanceBound } from "../../core/search/ranking/index.js";
 import {
-  bm25TermScoreFromGlobalStats,
+  bm25TermScoreFromStatsLookup,
   buildSearchSnapshotFromSegments,
+  createPositionalBm25StatsLookup,
   POSITIONAL_FIELD_BY_ID,
   type SearchSnapshot
 } from "../../core/search/retrieval/positional/index.js";
@@ -173,6 +174,7 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
     for (const field of SEARCH_PROPERTIES) bounds.set(bm25BoundKey(channel, field), 0);
   }
 
+  const bm25StatsLookup = createPositionalBm25StatsLookup(snapshot.bm25Stats);
   for (const row of snapshot.bm25Stats.rows) {
     const field = POSITIONAL_FIELD_BY_ID[row.fieldId];
     if (!field) continue;
@@ -182,8 +184,8 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
       for (const posting of segment.postings.postingsForTerm(canonicalPostingTerm(row.channel, row.term))) {
         if (posting.fieldId !== row.fieldId) continue;
         const fieldLength = segment.projection.fieldLength(posting.docId, row.channel, row.fieldId);
-        const score = bm25TermScoreFromGlobalStats(
-          snapshot.bm25Stats,
+        const score = bm25TermScoreFromStatsLookup(
+          bm25StatsLookup,
           row.channel,
           row.term,
           row.fieldId,

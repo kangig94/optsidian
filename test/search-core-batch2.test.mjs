@@ -9,7 +9,13 @@ import {
   decodeCanonicalSegment,
   encodeCanonicalSegment
 } from "../src/core/search/segments/canonical.ts";
-import { createPositionalRetriever } from "../src/core/search/retrieval/positional/index.ts";
+import {
+  bm25DocumentFrequency,
+  bm25TermScoreFromGlobalStats,
+  bm25TermScoreFromStatsLookup,
+  createPositionalBm25StatsLookup,
+  createPositionalRetriever
+} from "../src/core/search/retrieval/positional/index.ts";
 import { ProjectionReader } from "../src/core/search/retrieval/positional/segment-projection-reader.ts";
 import { POSITIONAL_FIELD_ID } from "../src/core/search/retrieval/positional/types.ts";
 
@@ -216,4 +222,35 @@ test("positional retriever reuses postings decode only within one retrieve call"
   });
   assert.equal(calls.get("morph\u0000alpha"), 2);
   assert.equal(calls.get("morph\u0000beta"), 2);
+});
+
+test("BM25 stats lookup matches canonical linear stats helpers", () => {
+  const stats = {
+    schemaId: 1,
+    corpusStats: [
+      { channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, documentCount: 10, totalFieldLength: 40, averageFieldLength: 4 },
+      { channel: "surface", fieldId: POSITIONAL_FIELD_ID.body, documentCount: 8, totalFieldLength: 80, averageFieldLength: 10 }
+    ],
+    rows: [
+      { channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, term: "alpha", documentFrequency: 2 },
+      { channel: "surface", fieldId: POSITIONAL_FIELD_ID.body, term: "beta", documentFrequency: 4 }
+    ],
+    hash: "bm25"
+  };
+  const lookup = createPositionalBm25StatsLookup(stats);
+
+  assert.equal(
+    lookup.documentFrequency("morph", "alpha", POSITIONAL_FIELD_ID.title),
+    bm25DocumentFrequency(stats, "morph", "alpha", POSITIONAL_FIELD_ID.title)
+  );
+  assert.equal(
+    lookup.documentFrequency("surface", "beta", POSITIONAL_FIELD_ID.body),
+    bm25DocumentFrequency(stats, "surface", "beta", POSITIONAL_FIELD_ID.body)
+  );
+  assert.equal(lookup.documentFrequency("morph", "missing", POSITIONAL_FIELD_ID.title), 0);
+  assert.deepEqual(lookup.corpusStats("morph", POSITIONAL_FIELD_ID.title), stats.corpusStats[0]);
+  assert.equal(
+    bm25TermScoreFromStatsLookup(lookup, "morph", "alpha", POSITIONAL_FIELD_ID.title, 3, 5),
+    bm25TermScoreFromGlobalStats(stats, "morph", "alpha", POSITIONAL_FIELD_ID.title, 3, 5)
+  );
 });

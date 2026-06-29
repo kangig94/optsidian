@@ -12,7 +12,11 @@ import type {
   ShardDocRef
 } from "../../contracts.js";
 import type { SearchField } from "../../../types.js";
-import { bm25TermScoreFromGlobalStats } from "./snapshot.js";
+import {
+  bm25TermScoreFromGlobalStats,
+  bm25TermScoreFromStatsLookup,
+  type PositionalBm25StatsLookup
+} from "./snapshot.js";
 import { fieldChannelBm25Boost, tokenChannelFusionWeight } from "./bm25.js";
 import type { SearchSnapshot, SearchSnapshotSegment } from "./engine.js";
 import { normalizeTerm, phraseStartPositions } from "./postings.js";
@@ -77,17 +81,22 @@ type SegmentProximityMatch = {
 
 export type QueryPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
 
-export function createPositionalRetriever(snapshot: SearchSnapshot, postingsLookup?: QueryPostingsLookup): Retriever {
+export function createPositionalRetriever(
+  snapshot: SearchSnapshot,
+  postingsLookup?: QueryPostingsLookup,
+  bm25StatsLookup?: PositionalBm25StatsLookup
+): Retriever {
   return {
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
-    retrieve: (query) => retrievePositionalCandidates(snapshot, query, postingsLookup)
+    retrieve: (query) => retrievePositionalCandidates(snapshot, query, postingsLookup, bm25StatsLookup)
   };
 }
 
 export function retrievePositionalCandidates(
   snapshot: SearchSnapshot,
   query: RetrievalQuery,
-  postingsLookup = createQueryPostingsLookup()
+  postingsLookup = createQueryPostingsLookup(),
+  bm25StatsLookup?: PositionalBm25StatsLookup
 ): CandidateSet {
   const fields = allowedFields(query.fields);
   const candidateBuilders = new Map<string, CandidateBuilder>();
@@ -99,7 +108,7 @@ export function retrievePositionalCandidates(
     searchedChannels.add(channel);
     const terms = query.analysis.channels[channel].map((term) => term.normalize("NFC").trim()).filter(Boolean);
     if (terms.length === 0) return;
-    const channelScores = scoreChannel(snapshot, channel, terms, fields, postingsLookup);
+    const channelScores = scoreChannel(snapshot, channel, terms, fields, postingsLookup, bm25StatsLookup);
     channelScores.forEach((scored, index) => {
       const rank = index + 1;
       const builder = candidateBuilder(scored.segment, candidateBuilders, scored.ref);
@@ -185,7 +194,8 @@ function scoreChannel(
   channel: SearchTokenChannel,
   terms: readonly string[],
   fields: readonly SearchField[],
-  postingsLookup: QueryPostingsLookup
+  postingsLookup: QueryPostingsLookup,
+  bm25StatsLookup?: PositionalBm25StatsLookup
 ): ChannelScoredDocument[] {
   const matchedByDocument = new Map<string, MatchedDocumentFields>();
   const allowedFieldIds = new Set(fields.map((field) => POSITIONAL_FIELD_ID[field]));
@@ -219,7 +229,7 @@ function scoreChannel(
       const rawScore = matchedTerms.reduce((sum, term) => {
         const frequency = fieldMatched?.get(term) ?? 0;
         const fieldLength = entry.segment.projection.fieldLength(entry.ref.localDocId, channel, fieldId);
-        return sum + bm25TermScoreFromGlobalStats(snapshot.bm25Stats, channel, term, fieldId, frequency, fieldLength);
+        return sum + bm25TermScore(snapshot, bm25StatsLookup, channel, term, fieldId, frequency, fieldLength);
       }, 0);
       if (rawScore <= 0) continue;
       const score = rawScore * fieldChannelBm25Boost(channel, field);
@@ -237,6 +247,20 @@ function scoreChannel(
     if (right.score !== left.score) return right.score - left.score;
     return documentKey(left.segment, left.ref.localDocId).localeCompare(documentKey(right.segment, right.ref.localDocId));
   });
+}
+
+function bm25TermScore(
+  snapshot: SearchSnapshot,
+  bm25StatsLookup: PositionalBm25StatsLookup | undefined,
+  channel: SearchTokenChannel,
+  term: string,
+  fieldId: number,
+  frequency: number,
+  fieldLength: number
+): number {
+  return bm25StatsLookup
+    ? bm25TermScoreFromStatsLookup(bm25StatsLookup, channel, term, fieldId, frequency, fieldLength)
+    : bm25TermScoreFromGlobalStats(snapshot.bm25Stats, channel, term, fieldId, frequency, fieldLength);
 }
 
 function findSegmentPhraseMatches(
