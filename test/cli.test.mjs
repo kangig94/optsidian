@@ -475,6 +475,75 @@ after(async () => {
   }
 });
 
+test("search CLI request payload carries explicit approximate mode and budgets", async () => {
+  const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
+  const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
+  const vault = "/tmp/optsidian-search-cli-contract";
+  const request = (tokens) => searchRequestFromArgs(parseArgs(["search", ...tokens]), vault);
+
+  const approximateFlag = request(["needle", "--approximate"]);
+  assert.equal(approximateFlag.query, "needle");
+  assert.equal(approximateFlag.mode, "approximate");
+  assert.equal("budget" in approximateFlag, false);
+
+  const approximateMode = request(["query=needle", "mode=approximate"]);
+  assert.equal(approximateMode.mode, "approximate");
+
+  const budgeted = request([
+    "needle",
+    "budget-work=20",
+    "budget-shards=3",
+    "budget-time-ms=40"
+  ]);
+  assert.equal(budgeted.mode, "approximate");
+  assert.deepEqual(budgeted.budget, { work: 20, shards: 3, timeMs: 40 });
+});
+
+test("search CLI rejects invalid mode and exhaustive budget combinations", async () => {
+  const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
+  const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
+  const vault = "/tmp/optsidian-search-cli-contract";
+  const request = (tokens) => searchRequestFromArgs(parseArgs(["search", ...tokens]), vault);
+
+  assert.throws(() => request(["needle", "mode=invalid"]), /mode must be exhaustive or approximate/);
+  for (const budgetFlag of ["budget-work=1", "budget-shards=1", "budget-time-ms=1"]) {
+    assert.throws(
+      () => request(["needle", "mode=exhaustive", budgetFlag]),
+      /approximate budgets require mode=approximate/
+    );
+  }
+});
+
+test("search CLI treats positional approximate as an exhaustive query term", async () => {
+  const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
+  const { normalizeSearchParams } = await import(path.resolve("src/core/search/params.ts"));
+  const { searchExecutionWarningLabels } = await import(path.resolve("src/core/search/internal-types.ts"));
+  const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
+
+  const payload = searchRequestFromArgs(
+    parseArgs(["search", "approximate"]),
+    "/tmp/optsidian-search-cli-contract"
+  );
+  const normalized = normalizeSearchParams(payload);
+
+  assert.equal(payload.query, "approximate");
+  assert.equal(payload.mode, undefined);
+  assert.equal(payload.budget, undefined);
+  assert.equal(normalized.mode, "exhaustive");
+  assert.deepEqual(searchExecutionWarningLabels(normalized), []);
+});
+
+test("search help documents approximate mode and budgets", async () => {
+  const { commandHelpText } = await import(path.resolve("src/cli/help.ts"));
+  const help = commandHelpText("search");
+
+  assert.match(help, /mode=exhaustive\|approximate/);
+  assert.match(help, /--approximate/);
+  assert.match(help, /budget-work=<n>/);
+  assert.match(help, /budget-shards=<n>/);
+  assert.match(help, /budget-time-ms=<n>/);
+});
+
 test("native-sufficient commands delegate unchanged", () => {
   const { env, log } = setup();
   const result = run(["files", "folder=Dashboard"], { env });
@@ -1310,7 +1379,7 @@ test("index mutation rendering stays stable", async () => {
     ready: true,
     phase: "ready",
     nonce: "nonce",
-    protocolVersion: 1,
+    protocolVersion: 2,
     owner: {},
     metrics: { requests: 3, failures: 0, activeRequests: 0, startedAt: "2026-01-01T00:00:00.000Z" },
     pools: {},

@@ -95,6 +95,7 @@ type WorkerSlot = {
   id: number;
   worker: Worker;
   busy: QueueItem<unknown> | undefined;
+  leased: boolean;
   restarting: boolean;
   ready: Promise<void>;
   readyState: boolean;
@@ -131,7 +132,6 @@ export class DaemonWorkerPool {
   private nextId = 1;
   private nextSlotId = 1;
   private lastVault: string | undefined;
-  private readonly lastTargetRequestGroupBySlot = new Map<number, string>();
   private closed = false;
   private restartCount = 0;
   private lastRestartReason: string | undefined;
@@ -232,6 +232,26 @@ export class DaemonWorkerPool {
     return this.readySlots().map((slot) => slot.id);
   }
 
+  idleReadySlotIds(): number[] {
+    return this.idleReadySlots().map((slot) => slot.id);
+  }
+
+  leaseIdleSlot(): number | undefined {
+    if (this.closed) return undefined;
+    const slot = this.idleSlot();
+    if (!slot) return undefined;
+    slot.leased = true;
+    return slot.id;
+  }
+
+  releaseIdleSlot(slotId: number): boolean {
+    const slot = this.slots.find((candidate) => candidate.id === slotId);
+    if (!slot?.leased || slot.busy || slot.restarting) return false;
+    slot.leased = false;
+    this.drain();
+    return true;
+  }
+
   private enqueue<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, targetSlotId?: number): Promise<T> {
     if (this.closed) return Promise.reject(poolError("INTERNAL", `${this.options.name} pool is closed`));
     if (Date.now() >= options.deadline) {
@@ -243,8 +263,9 @@ export class DaemonWorkerPool {
     if (this.queue.length >= this.options.maxQueueSize && this.idleSlot() === undefined) {
       return Promise.reject(poolError("BACKPRESSURE", `${this.options.name} queue is full`));
     }
+    let target: WorkerSlot | undefined;
     if (targetSlotId !== undefined) {
-      const target = this.slots.find((slot) => slot.id === targetSlotId);
+      target = this.slots.find((slot) => slot.id === targetSlotId);
       if (!target) return Promise.reject(poolError("INTERNAL", `${this.options.name} target worker is no longer available`));
       this.startWarmup(target);
     } else {
@@ -262,6 +283,12 @@ export class DaemonWorkerPool {
         targetSlotId
       };
       this.armDeadline(item);
+      if (target?.leased && target.readyState && !target.busy && !target.restarting) {
+        target.leased = false;
+        this.dispatchItem(target, item as QueueItem<unknown>);
+        if (!target.busy) this.drain();
+        return;
+      }
       this.queue.push(item as QueueItem<unknown>);
       this.drain();
     });
@@ -282,7 +309,7 @@ export class DaemonWorkerPool {
       kind: this.options.kind,
       workers: this.slots.length,
       queued: this.queue.length,
-      active: this.slots.filter((slot) => slot.busy).length,
+      active: this.slots.filter((slot) => this.slotOccupied(slot)).length,
       ready: this.readySlots().length,
       microbatchSize: this.options.microbatchSize,
       memoryLimitBytes: this.options.memoryLimitBytes,
@@ -297,7 +324,7 @@ export class DaemonWorkerPool {
         id: slot.id,
         ready: slot.readyState,
         warmupStarted: slot.warmupStarted,
-        busy: slot.busy !== undefined,
+        busy: this.slotOccupied(slot),
         restarting: slot.restarting,
         restartAttempts: slot.restartAttempts,
         completedJobs: slot.completedJobs,
@@ -332,6 +359,7 @@ export class DaemonWorkerPool {
       id,
       worker,
       busy: undefined,
+      leased: false,
       restarting: false,
       ready,
       readyState: false,
@@ -421,6 +449,7 @@ export class DaemonWorkerPool {
     if (!slot.readyState) this.lastReadyError = error;
     const item = slot.busy;
     slot.busy = undefined;
+    slot.leased = false;
     if (item) {
       this.clearDeadline(item);
       if (item.crashAttempts < this.options.maxCrashRetries && Date.now() < item.options.deadline) {
@@ -445,6 +474,7 @@ export class DaemonWorkerPool {
     if (slot.restarting) return;
     const plan = this.restartPlan(slot);
     slot.restarting = true;
+    slot.leased = false;
     const restartReason = reason ?? error?.message ?? "restart";
     const restartedAt = new Date().toISOString();
     slot.lastRestartReason = restartReason;
@@ -483,11 +513,6 @@ export class DaemonWorkerPool {
   }
 
   private retargetQueuedItems(previousSlotId: number, nextSlotId?: number): void {
-    const lastTargetRequestGroup = this.lastTargetRequestGroupBySlot.get(previousSlotId);
-    this.lastTargetRequestGroupBySlot.delete(previousSlotId);
-    if (nextSlotId !== undefined && lastTargetRequestGroup !== undefined) {
-      this.lastTargetRequestGroupBySlot.set(nextSlotId, lastTargetRequestGroup);
-    }
     for (const item of this.queue) {
       if (item.targetSlotId !== previousSlotId) continue;
       if (nextSlotId === undefined) delete item.targetSlotId;
@@ -498,20 +523,24 @@ export class DaemonWorkerPool {
   private drain(): void {
     if (this.closed) return;
     for (const slot of this.slots) {
-      if (!slot.readyState || slot.busy || slot.restarting) continue;
+      if (!slot.readyState || this.slotOccupied(slot) || slot.restarting) continue;
       const item = this.dequeueRunnable(slot);
       if (!item) continue;
-      if (Date.now() >= item.options.deadline) {
-        this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before execution`);
-        continue;
-      }
-      if (this.cancelled.has(item.options.cancellationId)) {
-        this.rejectItem(item, "CANCELLED", `${this.options.name} request was cancelled before execution`);
-        continue;
-      }
-      slot.busy = item;
-      this.postToWorker(slot, { id: item.id, request: item.request });
+      this.dispatchItem(slot, item);
     }
+  }
+
+  private dispatchItem(slot: WorkerSlot, item: QueueItem<unknown>): void {
+    if (Date.now() >= item.options.deadline) {
+      this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before execution`);
+      return;
+    }
+    if (this.cancelled.has(item.options.cancellationId)) {
+      this.rejectItem(item, "CANCELLED", `${this.options.name} request was cancelled before execution`);
+      return;
+    }
+    slot.busy = item;
+    this.postToWorker(slot, { id: item.id, request: item.request });
   }
 
   private postToWorker(slot: WorkerSlot, envelope: WorkerEnvelope): void {
@@ -542,27 +571,22 @@ export class DaemonWorkerPool {
   }
 
   private dequeueTargetedRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
-    const groups = [
-      ...new Set(this.queue
-        .filter((item) => item.targetSlotId === slot.id)
-        .map((item) => requestGroupKey(item)))
-    ];
-    if (groups.length === 0) return undefined;
-    const lastGroup = this.lastTargetRequestGroupBySlot.get(slot.id);
-    const start = lastGroup === undefined ? 0 : Math.max(0, groups.indexOf(lastGroup) + 1);
-    const orderedGroups = [...groups.slice(start), ...groups.slice(0, start)];
-    for (const group of orderedGroups) {
-      const index = this.queue.findIndex((item) => item.targetSlotId === slot.id && requestGroupKey(item) === group);
-      if (index < 0) continue;
-      const [item] = this.queue.splice(index, 1);
-      this.lastTargetRequestGroupBySlot.set(slot.id, group);
-      return item;
-    }
-    return undefined;
+    const index = this.queue.findIndex((item) => item.targetSlotId === slot.id);
+    if (index < 0) return undefined;
+    const [item] = this.queue.splice(index, 1);
+    return item;
   }
 
   private idleSlot(): WorkerSlot | undefined {
-    return this.slots.find((slot) => slot.readyState && !slot.busy && !slot.restarting);
+    return this.idleReadySlots()[0];
+  }
+
+  private idleReadySlots(): WorkerSlot[] {
+    return this.slots.filter((slot) => slot.readyState && !this.slotOccupied(slot) && !slot.restarting);
+  }
+
+  private slotOccupied(slot: WorkerSlot): boolean {
+    return slot.busy !== undefined || slot.leased;
   }
 
   private readySlots(): WorkerSlot[] {
@@ -680,10 +704,6 @@ function memoryRestartReason(
 
 function restartBackoffMs(attempts: number): number {
   return Math.min(SLOT_RESTART_BACKOFF_CAP_MS, SLOT_RESTART_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
-}
-
-function requestGroupKey(item: QueueItem<unknown>): string {
-  return JSON.stringify([item.options.vault ?? "", item.options.requestId ?? item.options.cancellationId]);
 }
 
 function delay(ms: number): Promise<void> {

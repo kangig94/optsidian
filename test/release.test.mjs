@@ -536,8 +536,8 @@ test("optsidian bundle exposes hidden search-daemon dispatch without a third pub
   });
   assert.equal(result.status, 0, result.stderr);
   const info = JSON.parse(result.stdout);
-  assert.equal(info.protocolVersion, 1);
-  assert.match(info.socketPath, /optsidian-search-daemon-v1-/);
+  assert.equal(info.protocolVersion, 2);
+  assert.match(info.socketPath, /optsidian-search-daemon-v2-/);
   const packageJson = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
   assert.deepEqual(Object.keys(packageJson.bin).sort(), ["optsidian", "optsidian-mcp"]);
 });

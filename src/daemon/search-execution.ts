@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { SEARCH_TOKEN_CHANNELS, emptySearchTokenChannels, type SearchTextAnalysis, type SearchTokenChannel, type SearchTokenChannelTerms } from "../core/search/analysis/index.js";
 import { uniqueSearchTerms } from "../core/search/analysis/channels.js";
 import type {
@@ -7,13 +6,11 @@ import type {
   CandidateFeaturePayload,
   CandidateRef,
   CandidateSet,
-  ExplainTrace,
   FeatureStore,
   RetrievalCandidate,
   RetrievalQuery
 } from "../core/search/contracts.js";
-import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from "../core/search/contracts.js";
-import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, COVERAGE_FIELD_WEIGHT, EXACT_PRIORITY, PHRASE_PRIORITY, RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT, WEAK_METADATA_COVERAGE_TERMS } from "../core/search/constants.js";
+import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, COVERAGE_FIELD_WEIGHT, EXACT_PRIORITY, PHRASE_PRIORITY, SEARCH_TOKEN_CHANNEL_WEIGHT, WEAK_METADATA_COVERAGE_TERMS } from "../core/search/constants.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import {
   bm25CorpusStats,
@@ -21,40 +18,51 @@ import {
   bm25TermScoreFromGlobalStats,
   createSearchEngine,
   createPositionalRetriever,
-  POSITIONAL_RETRIEVER_IDENTITY,
-  POSITIONAL_FIELD_BY_ID,
   POSITIONAL_FIELD_ID,
-  buildSearchSnapshotFromSegments,
-  type PositionalBm25GlobalStats,
   type SearchSnapshot,
   type SearchSnapshotSegment
 } from "../core/search/retrieval/positional/index.js";
 import { identityPhraseCandidates } from "../core/search/ranking/identity.js";
-import { bm25BoundKey, compareCanonicalBm25Terms, compareTagOnlyMatches, exactDominanceLambda, identityScoreFromExactPriority, nullableRankPriority, rankBucketName, rerankCandidatesWithSignals, type CandidateRankSignals, type ExactDominanceBound, type RankDocument } from "../core/search/ranking/index.js";
+import { compareCanonicalBm25Terms, compareTagOnlyMatches, identityScoreFromExactPriority, nullableRankPriority, rerankCandidatesWithSignals, type CandidateRankSignals, type ExactDominanceBound, type RankDocument } from "../core/search/ranking/index.js";
 import { matchesPathFilter, matchesTagFilter } from "../core/search/params.js";
 import { SEARCH_FIELD_CHANNEL_BOOST } from "../core/search/schema.js";
 import { SEARCH_PROPERTIES } from "../core/search/schema.js";
 import type { NormalizedSearchParams, PathFilter, QueryContext, RankedCandidate } from "../core/search/internal-types.js";
 import type { SearchField, SearchMatch, SearchResult } from "../core/types.js";
-import type { SnapshotEnvelope, PersistedDocumentRecord, SnapshotSnippetLine } from "./search-store/types.js";
+import { compareRankedHitEntries, type RankedHitEntry } from "./search-store/finalist-order.js";
+import {
+  cachedSearchExecutionStateFromHandle,
+  exactDominanceBoundForSearchSnapshot,
+  searchExecutionStateFromHandle
+} from "./search-store/search-execution-state.js";
+import {
+  documentsByPath,
+  documentsFromHandle,
+  explainTrace,
+  matchDebug,
+  searchResult,
+  snippetsForDocument,
+  type SearchExecutionResult,
+  type SearchExecutionSnapshotHandle,
+  type SearchHitEvidence,
+  type SearchShardFinalist
+} from "./search-store/result-shaping.js";
+import type { SnapshotEnvelope, PersistedDocumentRecord } from "./search-store/types.js";
 
-export type SharedBytesHandle = {
-  buffer: SharedArrayBuffer;
-  byteOffset: number;
-  byteLength: number;
-};
-
-export type SearchExecutionSnapshotHandle = {
-  snapshotId: string;
-  pinToken: string;
-  bm25Stats: PositionalBm25GlobalStats;
-  documents: SharedBytesHandle;
-  segments: Array<{
-    segmentId: string;
-    partitionId: number;
-    bytes: SharedBytesHandle;
-  }>;
-};
+export type {
+  SearchExecutionResult,
+  SearchExecutionSnapshotHandle,
+  SearchHitEvidence,
+  SearchShardFinalist,
+  SharedBytesHandle
+} from "./search-store/result-shaping.js";
+export {
+  exactDominanceBoundForSearchHandle,
+  preloadSearchExecutionSnapshot,
+  searchExecutionCacheStats,
+  type SearchExecutionCacheStats,
+  type SearchExecutionPreloadResult
+} from "./search-store/search-execution-state.js";
 
 export type SearchExecutionJob = {
   vault: string;
@@ -82,36 +90,6 @@ export type SearchShardExecutionJob = {
   explain?: boolean;
 };
 
-export type SearchExecutionCacheStats = {
-  entries: number;
-  limit: number;
-  hits: number;
-  misses: number;
-  evictions: number;
-  preloads: number;
-  snapshotIds: string[];
-};
-
-export type SearchExecutionPreloadResult = {
-  snapshotId: string;
-  cacheHit: boolean;
-  cache: SearchExecutionCacheStats;
-};
-
-type SearchExecutionState = {
-  snapshot: SearchSnapshot;
-};
-
-const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt("OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
-const searchExecutionStateCache = new Map<string, SearchExecutionState>();
-const bm25SingleTermBoundCache = new Map<string, ReadonlyMap<string, number>>();
-const searchExecutionStateCacheCounters = {
-  hits: 0,
-  misses: 0,
-  evictions: 0,
-  preloads: 0
-};
-const textDecoder = new TextDecoder();
 const WEAK_METADATA_COVERAGE_TERM_SET = new Set<string>(WEAK_METADATA_COVERAGE_TERMS);
 
 type PositionalHit = {
@@ -123,17 +101,6 @@ type PositionalHit = {
   channelScores: Partial<Record<SearchTokenChannel, number>>;
   candidate: RetrievalCandidate;
   source: "persisted";
-};
-
-export type SearchHitEvidence = Omit<PositionalHit, "document"> & {
-  documentId: string;
-  path: string;
-  shardDocRef: CandidateRef["shardDocRef"];
-};
-
-export type SearchShardFinalist = SearchHitEvidence & {
-  rank: RankedCandidate;
-  feature: CandidateFeaturePayload;
 };
 
 export type SearchShardExecutionResult = {
@@ -149,14 +116,12 @@ export type SearchShardExecutionResult = {
   };
 };
 
-export type SearchExecutionResult = SearchResult & { snapshotId: string; explainTrace?: ExplainTrace };
-
 export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult {
   if (!job.search.query || !job.analysis) {
     const documents = documentsFromHandle(job.snapshot);
     return metadataSearch(job.search, job.pathFilter, documents, job.snapshot.snapshotId, job.analyzerIdentity);
   }
-  const state = cachedStateFromHandle(job.snapshot).state;
+  const state = cachedSearchExecutionStateFromHandle(job.snapshot).state;
   const documents = documentsFromHandle(job.snapshot);
   return querySearch(job.search, job.pathFilter, state.snapshot, documents, job.analysis, job.analyzerIdentity, job.explain === true);
 }
@@ -173,53 +138,10 @@ export function executeSearchShardJob(job: SearchShardExecutionJob): SearchShard
       finalists: []
     };
   }
-  const state = stateFromHandle(job.snapshot);
+  const state = searchExecutionStateFromHandle(job.snapshot);
   const result = querySearchShard(job, state.snapshot);
   assertSearchShardDeadline(job);
   return result;
-}
-
-export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandle): SearchExecutionPreloadResult {
-  const result = cachedStateFromHandle(handle);
-  searchExecutionStateCacheCounters.preloads += 1;
-  return {
-    snapshotId: result.state.snapshot.snapshotId,
-    cacheHit: result.cacheHit,
-    cache: searchExecutionCacheStats()
-  };
-}
-
-export function searchExecutionCacheStats(): SearchExecutionCacheStats {
-  return {
-    entries: searchExecutionStateCache.size,
-    limit: SEARCH_EXECUTION_STATE_CACHE_LIMIT,
-    hits: searchExecutionStateCacheCounters.hits,
-    misses: searchExecutionStateCacheCounters.misses,
-    evictions: searchExecutionStateCacheCounters.evictions,
-    preloads: searchExecutionStateCacheCounters.preloads,
-    snapshotIds: [...searchExecutionStateCache.keys()]
-  };
-}
-
-function cachedStateFromHandle(handle: SearchExecutionSnapshotHandle): { state: SearchExecutionState; cacheHit: boolean } {
-  const cacheKey = handle.snapshotId;
-  const cached = searchExecutionStateCache.get(cacheKey);
-  if (cached) {
-    searchExecutionStateCacheCounters.hits += 1;
-    searchExecutionStateCache.delete(cacheKey);
-    searchExecutionStateCache.set(cacheKey, cached);
-    return { state: cached, cacheHit: true };
-  }
-  searchExecutionStateCacheCounters.misses += 1;
-  const state = stateFromHandle(handle);
-  searchExecutionStateCache.set(cacheKey, state);
-  while (searchExecutionStateCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
-    const oldest = searchExecutionStateCache.keys().next().value;
-    if (!oldest) break;
-    searchExecutionStateCache.delete(oldest);
-    searchExecutionStateCacheCounters.evictions += 1;
-  }
-  return { state, cacheHit: false };
 }
 
 function querySearch(
@@ -252,7 +174,7 @@ function querySearch(
     );
   const rerankCandidateSet = candidateSetForHits(candidateSet, hits);
   const featurePayloads = engine.featureStore.featuresFor(retrievalQuery, rerankCandidateSet) as readonly CandidateFeaturePayload[];
-  const exactBound = exactDominanceBoundForQuery(snapshot, retrievalQuery);
+  const exactBound = exactDominanceBoundForSearchSnapshot({ snapshot, analysis, search });
   const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
   const rankedAll = deterministicRankedHits(
     hits,
@@ -303,83 +225,6 @@ export function executeMetadataSearchFromSnapshotHandle(input: {
 }): SearchExecutionResult {
   const documents = documentsFromHandle(input.snapshot);
   return metadataSearch(input.search, input.pathFilter, documents, input.snapshot.snapshotId, input.analyzerIdentity);
-}
-
-export function exactDominanceBoundForSearchHandle(input: {
-  search: NormalizedSearchParams;
-  snapshot: SearchExecutionSnapshotHandle;
-  analysis: SearchTextAnalysis;
-}): ExactDominanceBound {
-  const snapshot = cachedStateFromHandle(input.snapshot).state.snapshot;
-  return exactDominanceBoundForQuery(snapshot, {
-    rawQuery: input.search.query ?? "",
-    analysis: input.analysis,
-    fields: input.search.fields,
-    tags: input.search.tags,
-    limit: exhaustiveCandidateLimit(snapshot.documentCount, input.search, input.analysis.channels),
-    snapshotId: snapshot.snapshotId
-  });
-}
-
-export function hydrateSearchShardFinalists(input: {
-  search: NormalizedSearchParams;
-  snapshot: SearchExecutionSnapshotHandle;
-  analysis: SearchTextAnalysis;
-  analyzerIdentity: SearchAnalyzerIdentity;
-  finalists: readonly SearchShardFinalist[];
-  scoredCount: number;
-  explain?: boolean;
-  exactBound?: ExactDominanceBound;
-}): SearchExecutionResult {
-  const documents = documentsFromHandle(input.snapshot);
-  const documentsByRelPath = documentsByPath(documents);
-  const rankedAll = sortedSearchShardFinalists(input.finalists);
-  const ranked = rankedAll.slice(0, input.search.limit);
-  const matches = ranked.map((finalist): SearchMatch => {
-    const record = documents.get(finalist.documentId) ?? documentsByRelPath.get(finalist.path);
-    return {
-      path: finalist.rank.path,
-      title: record?.title ?? finalist.rank.title,
-      tags: record?.tags ?? finalist.rank.tags,
-      snippets: record ? snippetsForDocument(record, input.analysis.channels) : [],
-      ...(input.search.debug
-        ? {
-            debug: matchDebug({
-              hit: finalist,
-              rank: finalist.rank,
-              snapshotId: input.snapshot.snapshotId,
-              analyzer: input.analyzerIdentity
-            })
-          }
-        : {})
-    };
-  });
-  const result: SearchExecutionResult = searchResult(
-    matches,
-    input.snapshot.snapshotId,
-    input.analyzerIdentity,
-    input.search,
-    input.scoredCount,
-    input.analysis.channels
-  );
-  if (input.explain) {
-    if (!input.exactBound) throw Object.assign(new Error("explain requires shard exact-bound evidence"), { code: "INTERNAL" });
-    const traceFinalists = finalistsInBaseRankOrder(input.finalists);
-    result.explainTrace = explainTrace({
-      candidateSet: {
-        schemaVersion: 1,
-        snapshotId: input.snapshot.snapshotId,
-        retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
-        complete: true,
-        candidates: traceFinalists.map((finalist) => finalist.candidate)
-      },
-      exactBound: input.exactBound,
-      featurePayloads: traceFinalists.map((finalist) => finalist.feature),
-      queryAnalysis: input.analysis,
-      ranked: rankedAll.map((finalist) => finalist.rank)
-    });
-  }
-  return result;
 }
 
 function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot): SearchShardExecutionResult {
@@ -466,28 +311,6 @@ function metadataSearch(
   return searchResult(matches, snapshotId, analyzerIdentity, search, matches.length);
 }
 
-function stateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
-  const snapshot = buildSearchSnapshotFromSegments({
-    snapshotId: handle.snapshotId,
-    segments: handle.segments.map((segment) => ({
-      segmentId: segment.segmentId,
-      partitionId: segment.partitionId,
-      bytes: sharedBytes(segment.bytes)
-    })),
-    bm25Stats: handle.bm25Stats
-  });
-  return { snapshot };
-}
-
-function documentsFromHandle(handle: SearchExecutionSnapshotHandle): Map<string, PersistedDocumentRecord> {
-  const records = JSON.parse(textDecoder.decode(sharedBytes(handle.documents))) as PersistedDocumentRecord[];
-  return new Map(records.map((document) => [document.documentId, document]));
-}
-
-function sharedBytes(handle: SharedBytesHandle): Uint8Array {
-  return new Uint8Array(handle.buffer, handle.byteOffset, handle.byteLength);
-}
-
 function sortedPartitionIds(handle: SearchExecutionSnapshotHandle): number[] {
   return [...new Set(handle.segments.map((segment) => segment.partitionId))].sort((left, right) => left - right);
 }
@@ -496,12 +319,6 @@ function assertSearchShardDeadline(job: SearchShardExecutionJob): void {
   if (Date.now() >= job.deadline) {
     throw Object.assign(new Error(`search shard ${sortedPartitionIds(job.snapshot).join(",")} deadline expired`), { code: "DEADLINE_EXCEEDED" });
   }
-}
-
-function envPositiveInt(key: string): number | undefined {
-  const raw = process.env[key]?.trim();
-  if (!raw || !/^\d+$/.test(raw)) return undefined;
-  return Math.max(1, Number(raw));
 }
 
 function hitFromCandidate(
@@ -913,76 +730,9 @@ function rankSignalsFromFeatures(
   return signals;
 }
 
-function exactDominanceBoundForQuery(snapshot: SearchSnapshot, query: RetrievalQuery) {
-  return exactDominanceLambda({
-    channelTermCounts: queryChannelTermCounts(query.analysis.channels),
-    fields: query.fields ?? [...SEARCH_PROPERTIES],
-    bm25SingleTermBounds: snapshotBm25SingleTermBounds(snapshot)
-  });
-}
-
-function queryChannelTermCounts(channels: SearchTokenChannelTerms): Partial<Record<SearchTokenChannel, number>> {
-  const counts: Partial<Record<SearchTokenChannel, number>> = {};
-  for (const channel of SEARCH_TOKEN_CHANNELS) counts[channel] = new Set(channels[channel]).size;
-  return counts;
-}
-
-function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<string, number> {
-  const cached = bm25SingleTermBoundCache.get(snapshot.snapshotId);
-  if (cached) {
-    bm25SingleTermBoundCache.delete(snapshot.snapshotId);
-    bm25SingleTermBoundCache.set(snapshot.snapshotId, cached);
-    return cached;
-  }
-
-  const bounds = new Map<string, number>();
-  for (const channel of SEARCH_TOKEN_CHANNELS) {
-    for (const field of SEARCH_PROPERTIES) bounds.set(bm25BoundKey(channel, field), 0);
-  }
-
-  for (const row of snapshot.bm25Stats.rows) {
-    const field = POSITIONAL_FIELD_BY_ID[row.fieldId];
-    if (!field) continue;
-    const key = bm25BoundKey(row.channel, field);
-    let maxScore = bounds.get(key) ?? 0;
-    for (const segment of snapshot.segments) {
-      for (const posting of segment.postings.postingsForTerm(canonicalPostingTerm(row.channel, row.term))) {
-        if (posting.fieldId !== row.fieldId) continue;
-        const fieldLength = segment.projection.fieldLength(posting.docId, row.channel, row.fieldId);
-        const score = bm25TermScoreFromGlobalStats(
-          snapshot.bm25Stats,
-          row.channel,
-          row.term,
-          row.fieldId,
-          posting.positions.length,
-          fieldLength
-        );
-        if (!Number.isFinite(score) || score < 0) {
-          throw new Error(`invalid BM25 bound observation for ${row.channel}/${field}/${row.term}`);
-        }
-        if (score > maxScore) maxScore = score;
-      }
-    }
-    bounds.set(key, maxScore);
-  }
-
-  bm25SingleTermBoundCache.set(snapshot.snapshotId, bounds);
-  while (bm25SingleTermBoundCache.size > SEARCH_EXECUTION_STATE_CACHE_LIMIT) {
-    const oldest = bm25SingleTermBoundCache.keys().next().value;
-    if (oldest === undefined) break;
-    bm25SingleTermBoundCache.delete(oldest);
-  }
-  return bounds;
-}
-
 function canonicalPostingTerm(channel: SearchTokenChannel, term: string): string {
   return `${channel}\u0000${term.normalize("NFC").trim()}`;
 }
-
-type RankedHitEntry<T extends { candidate: RetrievalCandidate }> = {
-  hit: T;
-  rank: RankedCandidate;
-};
 
 function deterministicRankedHits<T extends { candidate: RetrievalCandidate }>(
   hits: readonly T[],
@@ -999,130 +749,12 @@ function deterministicRankedHits<T extends { candidate: RetrievalCandidate }>(
     .sort((left, right) => compareRankedHitEntries(left, right));
 }
 
-export function sortedSearchShardFinalists(finalists: readonly SearchShardFinalist[]): SearchShardFinalist[] {
-  return [...finalists].sort((left, right) => compareRankedHitEntries(
-    { hit: left, rank: left.rank },
-    { hit: right, rank: right.rank }
-  ));
-}
-
-function finalistsInBaseRankOrder(finalists: readonly SearchShardFinalist[]): SearchShardFinalist[] {
-  return [...finalists].sort((left, right) =>
-    left.rank.baseRank - right.rank.baseRank ||
-    compareByteStrings(left.rank.path, right.rank.path) ||
-    compareByteStrings(left.candidate.candidateId, right.candidate.candidateId)
-  );
-}
-
-function compareRankedHitEntries<T extends { candidate: RetrievalCandidate }>(
-  left: RankedHitEntry<T>,
-  right: RankedHitEntry<T>
-): number {
-  if (right.rank.score !== left.rank.score) return right.rank.score - left.rank.score;
-  const pathOrder = compareByteStrings(left.rank.path, right.rank.path);
-  if (pathOrder !== 0) return pathOrder;
-  const segmentOrder = compareByteStrings(left.hit.candidate.shardDocRef.segmentId, right.hit.candidate.shardDocRef.segmentId);
-  if (segmentOrder !== 0) return segmentOrder;
-  return left.hit.candidate.shardDocRef.localDocId - right.hit.candidate.shardDocRef.localDocId;
-}
-
-function compareByteStrings(left: string, right: string): number {
-  const leftBytes = utf8(left.normalize("NFC"));
-  const rightBytes = utf8(right.normalize("NFC"));
-  const length = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index += 1) {
-    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
-  }
-  return leftBytes.length - rightBytes.length;
-}
-
-function utf8(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
 function candidateSetForHits(candidateSet: CandidateSet, hits: readonly { candidate: RetrievalCandidate }[]): CandidateSet {
   const candidateIds = new Set(hits.map((hit) => hit.candidate.candidateId));
   return {
     ...candidateSet,
     candidates: candidateSet.candidates.filter((candidate) => candidateIds.has(candidate.candidateId))
   };
-}
-
-function explainTrace(input: {
-  candidateSet: CandidateSet;
-  exactBound: ReturnType<typeof exactDominanceBoundForQuery>;
-  featurePayloads: readonly CandidateFeaturePayload[];
-  queryAnalysis: SearchTextAnalysis;
-  ranked: readonly RankedCandidate[];
-}): ExplainTrace {
-  const rankingConfig = rankingConfigTrace(input.exactBound);
-  const rankedOutput = rankedOutputFromRanked(normalizeTraceBaseRanks(input.ranked, input.candidateSet));
-  return {
-    schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
-    rankingAlgorithmId: "unified-scalar-ac4-v1",
-    frozenReplayFormulaVersion: "unified-scalar-ac4-v1/offline-1",
-    rankingConfig,
-    inputs: {
-      candidateSet: input.candidateSet,
-      featurePayloads: input.featurePayloads,
-      queryAnalysis: input.queryAnalysis,
-      rankingConfig
-    },
-    expectedOutputHash: hashRankedOutput(rankedOutput)
-  };
-}
-
-function normalizeTraceBaseRanks(ranked: readonly RankedCandidate[], candidateSet: CandidateSet): RankedCandidate[] {
-  const baseRankByPath = new Map<string, number>();
-  for (const [index, candidate] of candidateSet.candidates.entries()) {
-    const path = candidate.path;
-    if (!path || baseRankByPath.has(path)) continue;
-    baseRankByPath.set(path, index + 1);
-  }
-  return ranked.map((candidate) => {
-    const baseRank = baseRankByPath.get(candidate.path);
-    return baseRank === undefined || baseRank === candidate.baseRank ? candidate : { ...candidate, baseRank };
-  });
-}
-
-function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
-  return ranked.map((candidate) => ({
-    path: candidate.path,
-    bucket: rankBucketName(candidate.bucket),
-    score: candidate.score,
-    baseRank: candidate.baseRank,
-    exactPriority: nullableRankPriority(candidate.exactPriority),
-    phrasePriority: nullableRankPriority(candidate.phrasePriority),
-    coverageTerms: candidate.coverageTerms,
-    coverageFieldScore: candidate.coverageFieldScore,
-    lexicalScore: candidate.lexicalScore,
-    identityScore: candidate.identityScore,
-    exactLambda: candidate.exactLambda,
-    denseAgreement: candidate.denseAgreement,
-    rarityScore: candidate.rarityScore,
-    proximityScore: candidate.proximityScore,
-    bodyScore: candidate.bodyScore
-  }));
-}
-
-function rankingConfigTrace(exactBound: ReturnType<typeof exactDominanceBoundForQuery>) {
-  return {
-    exactDominanceBound: exactBound,
-    constants: RANKING_CONSTANTS
-  };
-}
-
-function hashRankedOutput(rankedOutput: unknown): string {
-  return crypto.createHash("sha256").update(canonicalJson(rankedOutput)).digest("hex");
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function rawSearchLimit(documentCount: number, search: NormalizedSearchParams): number {
@@ -1151,146 +783,4 @@ function exhaustiveCandidateLimit(
 ): number {
   if (search.query) return documentCount;
   return rawSearchLimit(documentCount, search);
-}
-
-function snippetsForDocument(record: PersistedDocumentRecord, queryChannels: SearchTokenChannelTerms) {
-  const corpus = record.snippetCorpus;
-  const candidates = corpus.lines.filter(
-    (line) => snippetLineHasChannels(line) && line.line > corpus.bodyStartLine && line.text.trim().length > 0
-  );
-  const scored = candidates
-    .map((line) => ({ line, score: snippetScore(line, queryChannels) }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score || left.line.line - right.line.line);
-  if (scored.length > 0) return uniqueSnippets(scored.map((entry) => entry.line)).slice(0, 3);
-  if (corpus.fallback.kind === "line") {
-    const fallbackSnippetId = corpus.fallback.snippetId;
-    const fallback = corpus.lines.find((line) => line.snippetId === fallbackSnippetId);
-    if (fallback) return [fallback];
-  }
-  return record.title ? [{ line: 1, text: record.title }] : [];
-}
-
-function snippetScore(line: SnapshotSnippetLine, queryChannels: SearchTokenChannelTerms): number {
-  let score = 0;
-  for (const channel of SEARCH_TOKEN_CHANNELS) {
-    const lineTerms = new Set(line.channels[channel]);
-    for (const term of queryChannels[channel]) {
-      if (lineTerms.has(term)) score += SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
-    }
-  }
-  return score;
-}
-
-function snippetLineHasChannels(line: SnapshotSnippetLine): boolean {
-  return SEARCH_TOKEN_CHANNELS.some((channel) => line.channels[channel].length > 0);
-}
-
-function uniqueSnippets<T extends { line: number }>(snippets: readonly T[]): T[] {
-  const seen = new Set<number>();
-  const output: T[] = [];
-  for (const snippet of snippets) {
-    if (seen.has(snippet.line)) continue;
-    seen.add(snippet.line);
-    output.push(snippet);
-  }
-  return output;
-}
-
-function searchResult(
-  matches: SearchMatch[],
-  snapshotId: string,
-  analyzer: SearchAnalyzerIdentity,
-  search: NormalizedSearchParams,
-  candidates: number,
-  channels: SearchTokenChannelTerms = emptySearchTokenChannels()
-): SearchResult & { snapshotId: string } {
-  return {
-    ok: true,
-    command: "search",
-    matches,
-    snapshotId,
-    ...(search.debug
-      ? {
-          debug: {
-            ...(search.query
-              ? {
-                  query: {
-                    raw: search.query,
-                    terms: channels.morph.length > 0 ? channels.morph : channels.surface,
-                    primaryChannel: channels.morph.length > 0 ? "morph" : channels.surface.length > 0 ? "surface" : "ngram",
-                    channels: Object.fromEntries(Object.entries(channels).filter(([, terms]) => terms.length > 0))
-                  }
-                }
-              : {}),
-            projection: {
-              source: matches.length > 0 ? "persisted" : "none",
-              tokenizerTier: (analyzer.activeAnalyzers ?? []).includes("ko") ? "kiwi" : "intl",
-              documents: candidates,
-              files: candidates
-            },
-            analyzer: analyzerDebugInfo(analyzer),
-            candidates,
-            snapshotId,
-            ...(search.query ? { reranker: "unified-scalar-ac4-v1" as const } : {})
-          }
-        }
-      : {})
-  };
-}
-
-function matchDebug(input: {
-  hit: {
-    source: "persisted";
-    queryTerms: string[];
-    queryChannels: SearchTokenChannelTerms;
-    matchedChannels: SearchTokenChannel[];
-    channelScores: Partial<Record<SearchTokenChannel, number>>;
-    score: number;
-    candidate: RetrievalCandidate;
-  };
-  rank: ReturnType<typeof rerankCandidatesWithSignals>[number];
-  snapshotId: string;
-  analyzer: SearchAnalyzerIdentity;
-}): NonNullable<SearchMatch["debug"]> {
-  return {
-    source: input.hit.source,
-    queryTerms: input.hit.queryTerms,
-    queryChannels: Object.fromEntries(Object.entries(input.hit.queryChannels).filter(([, terms]) => terms.length > 0)),
-    matchedChannels: input.hit.matchedChannels,
-    channelScores: Object.fromEntries(Object.entries(input.hit.channelScores).filter(([, score]) => score !== undefined)),
-    analyzer: analyzerDebugInfo(input.analyzer),
-    candidateScore: input.hit.score,
-    retrievalScore: input.hit.candidate.retrievalScore,
-    rerankScore: input.rank.score,
-    baseRank: input.rank.baseRank,
-    bucket: rankBucketName(input.rank.bucket),
-    exactPriority: nullableRankPriority(input.rank.exactPriority),
-    phrasePriority: nullableRankPriority(input.rank.phrasePriority),
-    coverageTerms: input.rank.coverageTerms,
-    coverageFieldScore: input.rank.coverageFieldScore,
-    lexicalScore: input.rank.lexicalScore,
-    identityScore: input.rank.identityScore,
-    exactLambda: input.rank.exactLambda,
-    denseAgreement: input.rank.denseAgreement,
-    rarityScore: input.rank.rarityScore,
-    proximityScore: input.rank.proximityScore,
-    bodyScore: input.rank.bodyScore,
-    snapshotId: input.snapshotId
-  };
-}
-
-function analyzerDebugInfo(identity: SearchAnalyzerIdentity) {
-  return {
-    name: identity.name,
-    version: identity.version,
-    ...(identity.runtime ? { runtime: identity.runtime } : {}),
-    ...(identity.model ? { model: identity.model } : {}),
-    ...(identity.declaredAnalyzers ? { declaredAnalyzers: [...identity.declaredAnalyzers] } : {}),
-    ...(identity.activeAnalyzers ? { activeAnalyzers: [...identity.activeAnalyzers] } : {})
-  };
-}
-
-function documentsByPath(documents: Map<string, PersistedDocumentRecord>): Map<string, PersistedDocumentRecord> {
-  return new Map([...documents.values()].map((record) => [record.path, record]));
 }

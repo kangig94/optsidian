@@ -1,5 +1,5 @@
 import { UsageError } from "../../errors.js";
-import type { SearchField, SearchParams } from "../types.js";
+import type { SearchExecutionBudget, SearchExecutionMode, SearchField, SearchParams } from "../types.js";
 import { assertOptionalPositiveInteger } from "../validation.js";
 import type { NormalizedSearchParams, PathFilter } from "./internal-types.js";
 import { SEARCH_PROPERTIES } from "./schema.js";
@@ -8,6 +8,11 @@ export const MAX_SEARCH_QUERY_LENGTH = 4096;
 
 export function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {
   assertOptionalPositiveInteger(params.limit, "limit");
+  const mode = normalizeSearchMode(params.mode);
+  const budget = normalizeSearchBudget(params.budget);
+  if (budget && mode !== "approximate") {
+    throw new UsageError("search budget requires mode=approximate");
+  }
   if (params.query !== undefined && params.query.length > MAX_SEARCH_QUERY_LENGTH) {
     throw new UsageError(`query must be ${MAX_SEARCH_QUERY_LENGTH} characters or fewer`);
   }
@@ -29,7 +34,9 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
     tags,
     fields,
     limit: params.limit ?? 10,
-    debug: params.debug === true
+    debug: params.debug === true,
+    mode,
+    ...(budget ? { budget } : {})
   };
 }
 
@@ -66,6 +73,27 @@ function normalizeSearchFields(fields: string[] | undefined): SearchField[] | un
     }
   }
   return normalized as SearchField[];
+}
+
+function normalizeSearchMode(mode: SearchParams["mode"]): SearchExecutionMode {
+  if (mode === undefined) return "exhaustive";
+  if (mode !== "exhaustive" && mode !== "approximate") {
+    throw new UsageError("mode must be exhaustive or approximate");
+  }
+  return mode;
+}
+
+function normalizeSearchBudget(budget: SearchParams["budget"]): SearchExecutionBudget | undefined {
+  if (budget === undefined) return undefined;
+  assertOptionalPositiveInteger(budget.work, "budget.work");
+  assertOptionalPositiveInteger(budget.shards, "budget.shards");
+  assertOptionalPositiveInteger(budget.timeMs, "budget.timeMs");
+  const normalized: SearchExecutionBudget = {
+    ...(budget.work !== undefined ? { work: budget.work } : {}),
+    ...(budget.shards !== undefined ? { shards: budget.shards } : {}),
+    ...(budget.timeMs !== undefined ? { timeMs: budget.timeMs } : {})
+  };
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function normalizeText(value: string): string {

@@ -22,7 +22,7 @@ import type {
 } from "./search-execution.js";
 import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
 
-export const SEARCH_DAEMON_PROTOCOL_VERSION = 1;
+export const SEARCH_DAEMON_PROTOCOL_VERSION = 2;
 export const SEARCH_DAEMON_METHODS = [
   "Search",
   "Explain",
@@ -254,6 +254,7 @@ export type ExplainResult = {
   snapshotId: string;
   search: SearchResult;
   trace: ExplainTrace;
+  warnings?: string[];
 };
 
 export type RefreshResult = {

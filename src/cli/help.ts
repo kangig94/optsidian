@@ -42,7 +42,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     usage: [
       "optsidian search <query> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
       "optsidian search query=<text> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
-      "optsidian search tag=<tag>[,<tag>...] [path=<dir|file>] [limit=<n>] [format=text|json]"
+      "optsidian search tag=<tag>[,<tag>...] [path=<dir|file>] [limit=<n>] [format=text|json]",
+      "optsidian search <query> --approximate [budget-work=<n>] [budget-shards=<n>] [budget-time-ms=<n>] [format=text|json]"
     ],
     options: [
       { name: "<query>", description: "Ranked note search query; multiple positional terms are joined with spaces" },
@@ -52,6 +53,11 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "field=<field,...>", description: "Restrict query matching to title, aliases, tags, headings, path, or body" },
       { name: "limit=<n>", description: "Maximum notes to return (default: 10)" },
       { name: "debug=true", description: "Include analyzer tokens and ranking diagnostics in JSON output" },
+      { name: "mode=exhaustive|approximate", description: "Execution mode; exhaustive is the default" },
+      { name: "--approximate", description: "Shortcut for mode=approximate" },
+      { name: "budget-work=<n>", description: "Approximate mode deterministic work-unit estimate budget" },
+      { name: "budget-shards=<n>", description: "Approximate mode deterministic shard-unit prefix budget" },
+      { name: "budget-time-ms=<n>", description: "Approximate mode best-effort time budget; marked non-reproducible" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [

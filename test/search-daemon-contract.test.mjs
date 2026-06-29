@@ -235,7 +235,7 @@ async function requestRawRpc(socketPath, encodeFrame, request) {
 
 function statusRequest(requestId) {
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     requestId,
     method: "Status",
     deadline: Date.now() + 1000,
@@ -728,7 +728,7 @@ parentPort.on("message", (message) => {
   }
 });
 
-test("worker pool round-robins targeted jobs by request group", async () => {
+test("worker pool routes targeted jobs FIFO without requestId rotation", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
   const workerScript = path.join(root, "targeted-request-fairness.mjs");
@@ -808,11 +808,72 @@ parentPort.on("message", (message) => {
 
     fs.writeFileSync(releasePath, "go");
     await Promise.all([blocker, a1, a2, b1]);
-    assert.equal(fs.readFileSync(jobLog, "utf8"), "block\na1\nb1\na2\n");
+    assert.equal(fs.readFileSync(jobLog, "utf8"), "block\na1\na2\nb1\n");
   } finally {
     fs.writeFileSync(releasePath, "go");
     await pool.close();
   }
+});
+
+test("worker pool leases idle-ready slots atomically before drain", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "idle-ready-lease.mjs");
+  const jobLog = path.join(root, "jobs.log");
+  fs.writeFileSync(jobLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const jobLog = ${JSON.stringify(jobLog)};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  const label = message.request?.payload?.label;
+  fs.appendFileSync(jobLog, label + "\\n");
+  parentPort.postMessage({ id: message.id, ok: true, result: { label }, memoryRss: process.memoryUsage().rss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "idle-ready-lease",
+    kind: "search",
+    size: 1,
+    workerScript,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    const leasedSlotId = pool.leaseIdleSlot();
+    assert.notEqual(leasedSlotId, undefined);
+    assert.deepEqual(pool.idleReadySlotIds(), []);
+    assert.equal(pool.leaseIdleSlot(), undefined);
+
+    const deadline = Date.now() + 10_000;
+    const generic = pool.run({ type: "search", payload: { label: "generic" } }, {
+      deadline,
+      cancellationId: "generic"
+    });
+    const leased = pool.runOnSlot({ type: "search", payload: { label: "leased" } }, {
+      deadline,
+      cancellationId: "leased"
+    }, leasedSlotId);
+
+    assert.deepEqual(await Promise.all([leased, generic]), [{ label: "leased" }, { label: "generic" }]);
+    assert.equal(fs.readFileSync(jobLog, "utf8"), "leased\ngeneric\n");
+    assert.deepEqual(pool.idleReadySlotIds(), [leasedSlotId]);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("AC3 worker pool source has no targeted requestId rotation", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "src/daemon/worker-pool.ts"), "utf8");
+  assert.doesNotMatch(source, /\blastTargetRequestGroupBySlot\b/);
+  assert.doesNotMatch(source, /\brequestGroupKey\b/);
+  assert.doesNotMatch(source, /requestId\s*\?\?/);
 });
 
 test("daemon pools defer latency analyzer warmup until query analysis", async () => {
@@ -1234,24 +1295,24 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
     const malformed = [
       {
         label: "deadline-string",
-        request: { protocolVersion: 1, requestId: "deadline-string", method: "Status", deadline: "nope", payload: {} }
+        request: { protocolVersion: 2, requestId: "deadline-string", method: "Status", deadline: "nope", payload: {} }
       },
       {
         label: "deadline-infinity",
-        request: { protocolVersion: 1, requestId: "deadline-infinity", method: "Status", deadline: Infinity, payload: {} }
+        request: { protocolVersion: 2, requestId: "deadline-infinity", method: "Status", deadline: Infinity, payload: {} }
       },
       {
         label: "payload-null",
-        request: { protocolVersion: 1, requestId: "payload-null", method: "Status", deadline: Date.now() + 1000, payload: null }
+        request: { protocolVersion: 2, requestId: "payload-null", method: "Status", deadline: Date.now() + 1000, payload: null }
       },
       {
         label: "payload-array",
-        request: { protocolVersion: 1, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
+        request: { protocolVersion: 2, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
       },
       {
         label: "search-primitive-payload",
         request: {
-          protocolVersion: 1,
+          protocolVersion: 2,
           requestId: "search-primitive-payload",
           method: "Search",
           nonce: owner.nonce,
@@ -1593,7 +1654,7 @@ test("search daemon preloads execution snapshots only for query searches", async
     searchRequestNeedsQueryAnalyzerWarmup
   } = await futureImport("src/daemon/server.ts");
   const base = {
-    protocolVersion: 1,
+    protocolVersion: 2,
     requestId: "preload-policy",
     deadline: Date.now() + 1000,
     nonce: "nonce"
@@ -1650,7 +1711,7 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, vaults: [] };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, vaults: [] };
         }
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
@@ -1689,7 +1750,7 @@ test("daemon client sends prune as a global cache request", async () => {
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, vaults: [] };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, vaults: [] };
         }
         if (request.method === "Prune") {
           return {
@@ -1907,7 +1968,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const spawns = [];
   const responses = [
     { method: "Status", result: { ready: false, phase: "starting" } },
-    { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: 1 } },
+    { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: 2 } },
     { method: "Search", result: { ok: true, snapshotId: "snap-a", matches: [{ path: "Alpha.md", snippets: [] }] } }
   ];
 
@@ -1972,7 +2033,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
       request: async (request) => {
         seen.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1, owner: { nonce: request.nonce } };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, owner: { nonce: request.nonce } };
         }
         assert.equal(request.method, "Search");
         assert.equal(typeof request.nonce, "string");
@@ -1991,7 +2052,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
     binaryPath: path.join(repoRoot, "dist", "optsidian"),
     spawnDaemon: async () => ({ pid: 2003 }),
     connect: async () => ({
-      request: async () => ({ ok: true, ready: true, phase: "ready", nonce: "wrong-owner-nonce", protocolVersion: 1 }),
+      request: async () => ({ ok: true, ready: true, phase: "ready", nonce: "wrong-owner-nonce", protocolVersion: 2 }),
       close: async () => {}
     })
   });
@@ -2025,7 +2086,7 @@ test("daemon client sends runtime profile per request even when owner is reused"
   const connect = async () => ({
     request: async (request) => {
       if (request.method === "Status") {
-        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 1 };
+        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2 };
       }
       assert.equal(request.method, "Search");
       searchRequests.push(request);
@@ -2105,6 +2166,53 @@ test("profile manager unloads idle runtimes after request release", async () => 
     await new Promise((resolve) => setTimeout(resolve, 120));
     const idle = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-status-idle" });
     assert.deepEqual(Object.keys(idle), []);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("profile runtime cancellation reaches query scheduler and worker pools", async () => {
+  const { ProfileRuntime } = await futureImport("src/daemon/profile-manager.ts");
+  const calls = [];
+  const runtime = Object.create(ProfileRuntime.prototype);
+  runtime.searchStore = {
+    cancel: (cancellationId) => calls.push(`searchStore:${cancellationId}`)
+  };
+  runtime.pools = {
+    cancel: (cancellationId) => calls.push(`pools:${cancellationId}`)
+  };
+
+  runtime.cancel("cancel-query");
+
+  assert.deepEqual(calls, ["searchStore:cancel-query", "pools:cancel-query"]);
+});
+
+test("profile manager rejects remembered cancellation before runtime acquisition", async () => {
+  const { ProfileManager } = await futureImport("src/daemon/profile-manager.ts");
+  const manager = new ProfileManager({
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-precancel-config-"),
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1"
+  });
+
+  try {
+    manager.cancel("cancel-before-runtime");
+    await assert.rejects(
+      manager.withRuntimeFor(
+        {},
+        async () => {
+          throw new Error("cancelled runtime acquisition should not run user work");
+        },
+        { cancellationId: "cancel-before-runtime" }
+      ),
+      (error) => {
+        assert.equal(error.code, "CANCELLED");
+        return true;
+      }
+    );
+    assert.deepEqual(await manager.status({ deadline: Date.now() + 1000, cancellationId: "status-after-precancel" }), {});
   } finally {
     await manager.close();
   }
@@ -2249,7 +2357,7 @@ test("daemon readiness handshake authenticates owner nonce over RPC integration"
 
     assert.equal(status.ok, true);
     assert.equal(status.ready, true);
-    assert.equal(status.protocolVersion, 1);
+    assert.equal(status.protocolVersion, 2);
     assert.equal(status.owner.nonce, status.nonce);
     assert.equal(status.owner.socketPath.endsWith(".sock"), true);
   } finally {
@@ -2279,7 +2387,7 @@ test("daemon Status without nonce returns public health only", async () => {
   try {
     const authenticated = await client.status({ deadlineMs: 5000 });
     const response = await requestRawRpc(authenticated.owner.socketPath, encodeFrame, {
-      protocolVersion: 1,
+      protocolVersion: 2,
       requestId: "public-status",
       method: "Status",
       deadline: Date.now() + 1000,
@@ -2290,7 +2398,7 @@ test("daemon Status without nonce returns public health only", async () => {
     assert.equal(response.result.ok, true);
     assert.equal(response.result.ready, true);
     assert.equal(response.result.phase, "ready");
-    assert.equal(response.result.protocolVersion, 1);
+    assert.equal(response.result.protocolVersion, 2);
     assert.equal("nonce" in response.result, false);
     assert.equal("owner" in response.result, false);
     assert.equal("metrics" in response.result, false);
@@ -2850,73 +2958,111 @@ parentPort.on("message", (message) => {
   }
 });
 
-test("search-execution pool rotates partial fan-out slot reservations", async () => {
+test("search-execution pool preload and cacheStats still route to targeted slots", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
   const root = tempRoot();
-  const workerScript = path.join(root, "partial-fanout-rotation.mjs");
+  const workerScript = path.join(root, "targeted-preload-stats.mjs");
+  const claimDir = path.join(root, "claims");
+  const logPath = path.join(root, "events.log");
+  fs.mkdirSync(claimDir);
+  fs.writeFileSync(logPath, "");
   fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import path from "node:path";
 import { parentPort } from "node:worker_threads";
+
+const claimDir = ${JSON.stringify(claimDir)};
+const logPath = ${JSON.stringify(logPath)};
+let workerIndex = 0;
+while (true) {
+  try {
+    fs.writeFileSync(path.join(claimDir, String(workerIndex)), "claimed", { flag: "wx" });
+    break;
+  } catch {
+    workerIndex += 1;
+  }
+}
+
+function cache(snapshotIds) {
+  return {
+    entries: snapshotIds.length,
+    limit: 16,
+    hits: 0,
+    misses: 0,
+    evictions: 0,
+    preloads: snapshotIds.length,
+    snapshotIds
+  };
+}
 
 parentPort.on("message", (message) => {
   if (message?.id === 0) {
-    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    parentPort.postMessage({ id: 0, ok: true, result: { workerIndex }, memoryRss: process.memoryUsage().rss });
     return;
   }
-  parentPort.postMessage({
-    id: message.id,
-    ok: true,
-    result: {
-      snapshotId: "snap",
-      partitionIds: [],
-      requestedLimit: 0,
-      workEstimate: 0,
-      scoredCount: 0,
-      finalists: []
-    },
-    memoryRss: process.memoryUsage().rss
-  });
+  if (message.request?.type === "preloadSnapshot") {
+    const snapshotId = message.request.payload?.snapshotId ?? "unknown";
+    fs.appendFileSync(logPath, "preload:" + workerIndex + ":" + snapshotId + "\\n");
+    parentPort.postMessage({
+      id: message.id,
+      ok: true,
+      result: { snapshotId, cacheHit: false, cache: cache(["preload-" + workerIndex]) },
+      memoryRss: process.memoryUsage().rss
+    });
+    return;
+  }
+  if (message.request?.type === "searchExecutionStats") {
+    fs.appendFileSync(logPath, "stats:" + workerIndex + "\\n");
+    parentPort.postMessage({
+      id: message.id,
+      ok: true,
+      result: cache(["stats-" + workerIndex]),
+      memoryRss: process.memoryUsage().rss
+    });
+  }
 });
 `);
   const pool = new SearchExecutionWorkerPool(new DaemonWorkerPool({
-    name: "partial-fanout-rotation",
+    name: "targeted-preload-stats",
     kind: "search",
-    size: 4,
+    size: 2,
     workerScript,
     env: { ...process.env }
   }));
   try {
     await pool.warmup();
-    const shardJob = (label) => ({ label });
-    const first = await pool.dispatchSearchShards([shardJob("a1"), shardJob("a2")], {
+    assert.equal(pool.idleReadySlotIds().length, 2);
+    const options = {
       deadline: Date.now() + 10_000,
-      cancellationId: "fanout-a",
-      requestId: "fanout-a",
+      cancellationId: "targeted-preload-stats",
+      requestId: "targeted-preload-stats",
       vault: "vault-a"
-    });
-    const second = await pool.dispatchSearchShards([shardJob("b1"), shardJob("b2")], {
-      deadline: Date.now() + 10_000,
-      cancellationId: "fanout-b",
-      requestId: "fanout-b",
-      vault: "vault-a"
-    });
-    const firstSlotIds = first.map((entry) => entry.slotId);
-    const secondSlotIds = second.map((entry) => entry.slotId);
+    };
 
-    assert.equal(new Set(firstSlotIds).size, 2);
-    assert.equal(new Set(secondSlotIds).size, 2);
-    assert.equal(new Set([...firstSlotIds, ...secondSlotIds]).size, 4);
-    await Promise.all([...first, ...second].map((entry) => entry.promise));
+    const preload = await pool.preloadSnapshot({ snapshotId: "snap-a" }, options, { minimumWorkers: 2 });
+    const stats = await pool.cacheStats(options);
+
+    assert.equal(preload.length, 2);
+    assert.equal(stats.length, 2);
+    assert.deepEqual(new Set(preload.map((result) => result.cache.snapshotIds[0])), new Set(["preload-0", "preload-1"]));
+    assert.deepEqual(new Set(stats.flatMap((result) => result.snapshotIds)), new Set(["stats-0", "stats-1"]));
+    assert.deepEqual(fs.readFileSync(logPath, "utf8").trim().split("\n").sort(), [
+      "preload:0:snap-a",
+      "preload:1:snap-a",
+      "stats:0",
+      "stats:1"
+    ].sort());
   } finally {
     await pool.close();
   }
 });
 
-test("search-execution pool warms partner slots for partial fan-out rotation", async () => {
+test("search-execution pool leases idle-ready slots atomically for targeted shard dispatch", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
   const root = tempRoot();
-  const workerScript = path.join(root, "partial-fanout-warmup.mjs");
+  const workerScript = path.join(root, "idle-ready-lease.mjs");
   const claimDir = path.join(root, "claims");
   fs.mkdirSync(claimDir);
   fs.writeFileSync(workerScript, `
@@ -2935,10 +3081,92 @@ while (true) {
   }
 }
 
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { workerIndex }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  parentPort.postMessage({
+    id: message.id,
+    ok: true,
+    result: {
+      snapshotId: message.request.payload?.label ?? "snap",
+      partitionIds: [workerIndex],
+      requestedLimit: 0,
+      workEstimate: 0,
+      scoredCount: 0,
+      finalists: []
+    },
+    memoryRss: process.memoryUsage().rss
+  });
+});
+`);
+  const pool = new SearchExecutionWorkerPool(new DaemonWorkerPool({
+    name: "idle-ready-lease",
+    kind: "search",
+    size: 3,
+    workerScript,
+    env: { ...process.env }
+  }));
+  try {
+    await pool.warmup(3);
+    assert.equal(pool.idleReadySlotIds().length, 3);
+    const firstSlot = pool.leaseIdleSlot();
+    const secondSlot = pool.leaseIdleSlot();
+    assert.equal(typeof firstSlot, "number");
+    assert.equal(typeof secondSlot, "number");
+    assert.notEqual(secondSlot, firstSlot);
+    assert.deepEqual(new Set(pool.idleReadySlotIds()).has(firstSlot), false);
+    assert.deepEqual(new Set(pool.idleReadySlotIds()).has(secondSlot), false);
+
+    const options = {
+      deadline: Date.now() + 10_000,
+      cancellationId: "lease-dispatch",
+      requestId: "lease-dispatch",
+      vault: "vault-a"
+    };
+    const first = pool.runOnSlot({ label: "first" }, options, firstSlot);
+    const second = pool.runOnSlot({ label: "second" }, options, secondSlot);
+    const results = await Promise.all([first, second]);
+
+    assert.deepEqual(results.map((result) => result.snapshotId).sort(), ["first", "second"]);
+    assert.equal(new Set(results.flatMap((result) => result.partitionIds)).size, 2);
+    await waitFor(() => pool.idleReadySlotIds().length === 3);
+  } finally {
+    await pool.close();
+  }
+});
+
+test("search-execution idle-ready lease excludes busy targeted slots", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "idle-ready-busy-exclusion.mjs");
+  const claimDir = path.join(root, "claims");
+  const logPath = path.join(root, "events.log");
+  fs.mkdirSync(claimDir);
+  fs.writeFileSync(logPath, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import path from "node:path";
+import { parentPort } from "node:worker_threads";
+
+const claimDir = ${JSON.stringify(claimDir)};
+const logPath = ${JSON.stringify(logPath)};
+let workerIndex = 0;
+while (true) {
+  try {
+    fs.writeFileSync(path.join(claimDir, String(workerIndex)), "claimed", { flag: "wx" });
+    break;
+  } catch {
+    workerIndex += 1;
+  }
+}
+
 function shardResult() {
   return {
     snapshotId: "snap",
-    partitionIds: [],
+    partitionIds: [workerIndex],
     requestedLimit: 0,
     workEstimate: 0,
     scoredCount: 0,
@@ -2948,39 +3176,60 @@ function shardResult() {
 
 parentPort.on("message", (message) => {
   if (message?.id === 0) {
-    const reply = () => parentPort.postMessage({
+    parentPort.postMessage({
       id: 0,
       ok: true,
       result: { workerIndex },
       memoryRss: process.memoryUsage().rss
     });
-    if (workerIndex < 2) reply();
-    else setTimeout(reply, 150);
+    return;
+  }
+  fs.appendFileSync(logPath, message.request.payload?.label + ":" + workerIndex + "\\n");
+  if (message.request.payload?.label === "hold") {
+    setInterval(() => {}, 1000);
     return;
   }
   parentPort.postMessage({ id: message.id, ok: true, result: shardResult(), memoryRss: process.memoryUsage().rss });
 });
 `);
   const workerPool = new DaemonWorkerPool({
-    name: "partial-fanout-warmup",
+    name: "idle-ready-busy-exclusion",
     kind: "search",
-    size: 4,
+    size: 2,
     workerScript,
-    autoWarmup: false,
     env: { ...process.env }
   });
   const pool = new SearchExecutionWorkerPool(workerPool);
   try {
-    const dispatched = await pool.dispatchSearchShards([{ label: "a1" }, { label: "a2" }], {
+    await pool.warmup(2);
+    const firstSlot = pool.leaseIdleSlot();
+    assert.equal(typeof firstSlot, "number");
+    const hold = pool.runOnSlot({ label: "hold" }, {
       deadline: Date.now() + 10_000,
-      cancellationId: "fanout-warmup",
-      requestId: "fanout-warmup",
+      cancellationId: "hold",
+      requestId: "hold",
       vault: "vault-a"
-    });
+    }, firstSlot);
+    await waitFor(() => fs.readFileSync(logPath, "utf8").includes("hold:"));
 
-    assert.equal(workerPool.stats().ready, 4);
-    assert.equal(dispatched.length, 2);
-    await Promise.all(dispatched.map((entry) => entry.promise));
+    assert.equal(pool.idleReadySlotIds().includes(firstSlot), false);
+    const secondSlot = pool.leaseIdleSlot();
+    assert.equal(typeof secondSlot, "number");
+    assert.notEqual(secondSlot, firstSlot);
+    const quick = await pool.runOnSlot({ label: "quick" }, {
+      deadline: Date.now() + 10_000,
+      cancellationId: "quick",
+      requestId: "quick",
+      vault: "vault-a"
+    }, secondSlot);
+
+    assert.equal(quick.snapshotId, "snap");
+    assert.deepEqual(new Set(quick.partitionIds).size, 1);
+    pool.cancel("hold");
+    await assert.rejects(hold, (error) => {
+      assert.equal(error.code, "CANCELLED");
+      return true;
+    });
   } finally {
     await workerPool.close();
   }
@@ -3132,7 +3381,7 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     uid: process.getuid?.() ?? 0,
     runtimeHash: "runtime-a",
     binaryVersion: "binary-content-hash-b",
-    protocolVersion: 1
+    protocolVersion: 2
   };
   const scenarios = [
     "protocol-mismatch",

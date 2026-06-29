@@ -112,12 +112,24 @@ The search subsystem spans `src/core/search/*` and `src/daemon/search-store/*`.
 - **MVCC, not read-time planning.** Search pins one immutable snapshot for each request. Index jobs
   build and publish new snapshots atomically, and active requests keep their pinned snapshot until
   release.
+- **Query pipeline.** Query search is planned by `SearchQueryPlanner`, scheduled by
+  `SearchQueryScheduler` / `SearchQuerySession`, merged by `ResultAggregator`, and hydrated by
+  `ResultHydrator`. The retained monolithic `executeSearchJob` / `querySearch` path is the test
+  determinism oracle (AC6 baseline), not dead code or the daemon query path.
 - **One lexical retrieval primitive.** V1 retrieval is positional postings over analyzer channels.
   Phrase, coverage, proximity, rarity, exact identity, snippets, and debug signals are sourced from
   snapshot-resident postings and feature payloads.
 - **Worker pools.** Query analyzer workers serve latency-sensitive query tokenization; index analyzer
   workers serve snapshot builds. Search execution runs in a dedicated pool with request deadlines and
   cancellation.
+- **Idle-ready search leases.** Query sessions lease only ready, idle search-execution slots. Leasing is
+  atomic, targeted `runOnSlot` consumes the lease, and busy/leased slots are excluded from later leases.
+  Scheduler fairness is single-source: active sessions share idle capacity first, then any otherwise
+  idle slots are relaxed to runnable sessions.
+- **Execution modes.** `exhaustive` is collect-all: all planned shard units are scheduled and the final
+  global ordering is independent of batch composition. `approximate` schedules a deterministic bounded
+  prefix for shard/work budgets and returns warning labels; time budgets are best-effort and marked
+  non-reproducible.
 - **Korean.** Hangul routes to Kiwi when enabled, with the model downloaded as a SHA256-pinned
   artifact on first use. Parallelism comes from isolated workers, not concurrent calls into one
   analyzer object.

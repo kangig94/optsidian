@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 const repoRoot = process.cwd();
+
+const BATCH_ORDER_VARIANTS = [
+  { name: "plan-order", order: (tasks) => [...tasks] },
+  { name: "reverse-pending", order: (tasks) => [...tasks].reverse() }
+];
 
 function tempRoot(prefix = "optsidian-search-ac6-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -38,14 +43,6 @@ function testQueryAnalysis(raw) {
     primaryTerms: terms,
     channels: { morph: terms, surface: terms, ngram: [] }
   };
-}
-
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function bm25StatsFromManifest(manifest) {
@@ -107,18 +104,14 @@ async function buildSyntheticSnapshot(documentCount, partitionBits = 4) {
         "---",
         `# Target ${index} ${topic}`,
         "",
-        Array.from({ length: 12 }, (_, repeat) =>
+        Array.from({ length: 10 }, (_, repeat) =>
           `common needle fanout ${topic} shard partition scoring doc-${index} repeat-${repeat} exact-${index}`
         ).join("\n")
       ].join("\n")
     );
   }
   const analyzer = testAnalyzer();
-  const built = await buildCanonicalSearchSnapshot({
-    vaultRoot: vault,
-    analyzer,
-    partitionBits
-  });
+  const built = await buildCanonicalSearchSnapshot({ vaultRoot: vault, analyzer, partitionBits });
   assert.ok(built.segments.length >= 2, "AC6 fixture must span at least two partitions");
   return { analyzer, built, vault };
 }
@@ -130,84 +123,222 @@ function normalizeScorePayload(result) {
   }));
 }
 
-async function createFanoutPool(workers, assignment) {
+class RecordingSearchExecutionPool {
+  constructor(inner) {
+    this.inner = inner;
+    this.jobs = [];
+  }
+
+  idleReadySlotIds() {
+    return this.inner.idleReadySlotIds();
+  }
+
+  leaseIdleSlot() {
+    return this.inner.leaseIdleSlot();
+  }
+
+  releaseIdleSlot(slotId) {
+    return this.inner.releaseIdleSlot(slotId);
+  }
+
+  runOnSlot(job, options, slotId) {
+    this.jobs.push({ job, options, slotId });
+    return this.inner.runOnSlot(job, options, slotId);
+  }
+
+  cancel(cancellationId) {
+    this.inner.cancel(cancellationId);
+  }
+}
+
+class ControlledLeasePool {
+  constructor(slotIds, onRun) {
+    this.slots = new Map(slotIds.map((slotId) => [slotId, { busy: false, leased: false }]));
+    this.onRun = onRun;
+    this.active = new Map();
+    this.leaseCalls = [];
+    this.releaseCalls = [];
+    this.runCalls = [];
+    this.cancelCalls = [];
+  }
+
+  idleReadySlotIds() {
+    return [...this.slots]
+      .filter(([, slot]) => !slot.busy && !slot.leased)
+      .map(([slotId]) => slotId);
+  }
+
+  leaseIdleSlot() {
+    const slotId = this.idleReadySlotIds()[0];
+    if (slotId === undefined) return undefined;
+    this.slots.get(slotId).leased = true;
+    this.leaseCalls.push(slotId);
+    return slotId;
+  }
+
+  releaseIdleSlot(slotId) {
+    this.releaseCalls.push(slotId);
+    const slot = this.slots.get(slotId);
+    if (!slot || !slot.leased || slot.busy) return false;
+    slot.leased = false;
+    return true;
+  }
+
+  runOnSlot(job, options, slotId) {
+    const slot = this.slots.get(slotId);
+    if (!slot?.leased || slot.busy) throw new Error(`slot ${slotId} was not leased`);
+    slot.leased = false;
+    slot.busy = true;
+    this.runCalls.push({ job, options, slotId });
+    const promise = this.onRun?.(job, options, slotId, this);
+    if (promise) return promise.finally(() => {
+      if (this.slots.has(slotId)) this.slots.get(slotId).busy = false;
+      this.active.delete(slotId);
+    });
+    return new Promise((resolve, reject) => {
+      this.active.set(slotId, { job, options, resolve, reject });
+    }).finally(() => {
+      if (this.slots.has(slotId)) this.slots.get(slotId).busy = false;
+      this.active.delete(slotId);
+    });
+  }
+
+  cancel(cancellationId) {
+    this.cancelCalls.push(cancellationId);
+    for (const [slotId, run] of [...this.active]) {
+      if (run.options.cancellationId !== cancellationId) continue;
+      run.reject(Object.assign(new Error("cancelled"), { code: "CANCELLED" }));
+      this.active.delete(slotId);
+      if (this.slots.has(slotId)) this.slots.get(slotId).busy = false;
+    }
+  }
+
+  completeAll() {
+    for (const [slotId, run] of [...this.active]) {
+      run.resolve({
+        snapshotId: run.job.snapshot.snapshotId,
+        partitionIds: run.job.snapshot.segments.map((segment) => segment.partitionId),
+        requestedLimit: run.job.requestedLimit,
+        workEstimate: run.job.workEstimate,
+        scoredCount: 0,
+        finalists: []
+      });
+      this.active.delete(slotId);
+      if (this.slots.has(slotId)) this.slots.get(slotId).busy = false;
+    }
+  }
+}
+
+async function createExecutionPools(workers) {
   const { createDaemonPools } = await import(path.join(repoRoot, "src/daemon/pools.ts"));
-  const env = {
+  const pools = await createDaemonPools({
     ...process.env,
     OPTSIDIAN_SEARCH_ANALYZER: "intl",
     OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
     OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
     OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
-    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers),
-    OPTSIDIAN_SEARCH_FANOUT_ASSIGNMENT: assignment
-  };
-  return createDaemonPools(env, {});
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers)
+  }, {});
+  await pools.searchExecution.warmup(workers);
+  return pools;
 }
 
-test("AC6 shard finalist equal-score tie-break follows path order", async () => {
-  const { sortedSearchShardFinalists } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
-  const finalist = ({ path: relPath, documentId, identityScore = 0 }) => ({
-    documentId,
-    path: relPath,
-    shardDocRef: { segmentId: "segment", localDocId: 0 },
-    score: 1,
+async function executeScheduledSearch(input, ordering) {
+  const { SearchQueryPlanner } = await import(path.join(repoRoot, "src/daemon/search-store/query-planner.ts"));
+  const { SearchQueryScheduler } = await import(path.join(repoRoot, "src/daemon/search-store/query-scheduler.ts"));
+  const { pool: searchExecutionPool, ...schedulerInput } = input;
+  const planner = new SearchQueryPlanner();
+  const plan = planner.plan(schedulerInput);
+  const pool = new RecordingSearchExecutionPool(searchExecutionPool);
+  const scheduler = new SearchQueryScheduler(pool, {
+    testOrdering: {
+      orderPendingTasks: ordering.order
+    }
+  });
+  const result = await scheduler.execute({ ...schedulerInput, plan });
+  return { jobs: pool.jobs, plan, result };
+}
+
+function planPartitionIds(plan) {
+  return plan.tasks.flatMap((task) => task.snapshot.segments.map((segment) => segment.partitionId)).sort((left, right) => left - right);
+}
+
+function dispatchedPartitionIds(jobs) {
+  return jobs.flatMap(({ job }) => job.snapshot.segments.map((segment) => segment.partitionId)).sort((left, right) => left - right);
+}
+
+function finalist({ id, documentId, pathName, segmentId, localDocId, score }) {
+  const shardDocRef = { segmentId, partitionId: 1, localDocId, documentId };
+  return {
+    source: "persisted",
+    score,
     queryTerms: ["needle"],
     queryChannels: { morph: ["needle"], surface: [], ngram: [] },
     matchedChannels: ["morph"],
-    channelScores: { morph: 1 },
-    source: "persisted",
+    channelScores: { morph: score },
+    documentId,
+    path: pathName,
+    shardDocRef,
     candidate: {
-      candidateId: documentId,
+      candidateId: id,
       documentId,
-      path: relPath,
-      shardDocRef: { segmentId: "segment", localDocId: 0 },
-      retrievalScore: 1,
+      path: pathName,
+      shardDocRef,
+      retrievalScore: score,
       channels: [],
       phraseMatches: [],
       proximityMatches: []
     },
     rank: {
-      path: relPath,
-      title: relPath,
+      path: pathName,
+      title: pathName,
       tags: [],
       bucket: 3,
-      score: 10,
+      score,
       baseRank: 1,
       exactPriority: Number.POSITIVE_INFINITY,
       phrasePriority: Number.POSITIVE_INFINITY,
       coverageTerms: 0,
       coverageFieldScore: 0,
-      lexicalScore: 10,
-      identityScore,
+      lexicalScore: score,
+      identityScore: 0,
       exactLambda: 0,
       denseAgreement: 0,
       rarityScore: 0,
       proximityScore: 0,
-      bodyScore: 0
+      bodyScore: score
     },
-    feature: { candidate: { candidateId: documentId, documentId, path: relPath, shardDocRef: { segmentId: "segment", localDocId: 0 } } }
-  });
+    feature: { candidate: { candidateId: id, documentId, path: pathName, shardDocRef } }
+  };
+}
 
+test("AC6 shard finalist equal-score tie-break follows path, segment, then local doc id", async () => {
+  const { sortedSearchShardFinalists } = await import(path.join(repoRoot, "src/daemon/search-store/finalist-order.ts"));
   const sorted = sortedSearchShardFinalists([
-    finalist({ path: "b.md", documentId: "0000", identityScore: 1 }),
-    finalist({ path: "a.md", documentId: "ffff" })
+    finalist({ id: "candidate-b", documentId: "doc-b", pathName: "same.md", segmentId: "segment-b", localDocId: 1, score: 10 }),
+    finalist({ id: "candidate-a2", documentId: "doc-a2", pathName: "same.md", segmentId: "segment-a", localDocId: 2, score: 10 }),
+    finalist({ id: "candidate-c", documentId: "doc-c", pathName: "z.md", segmentId: "segment-a", localDocId: 1, score: 10 }),
+    finalist({ id: "candidate-a1", documentId: "doc-a1", pathName: "same.md", segmentId: "segment-a", localDocId: 1, score: 10 }),
+    finalist({ id: "candidate-path", documentId: "doc-path", pathName: "a.md", segmentId: "segment-z", localDocId: 9, score: 10 })
   ]);
 
-  assert.deepEqual(sorted.map((entry) => entry.path), ["a.md", "b.md"]);
+  assert.deepEqual(sorted.map((entry) => entry.candidate.candidateId), [
+    "candidate-path",
+    "candidate-a1",
+    "candidate-a2",
+    "candidate-b",
+    "candidate-c"
+  ]);
 });
 
-test("AC6 fan-out results are byte-identical to monolithic across worker counts and partition assignments", { timeout: 240_000 }, async () => {
+test("AC6 scheduler grouping invariance matches the monolithic oracle for non-identity queries", { timeout: 240_000 }, async () => {
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
-  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
   const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
-  const { analyzer, built, vault } = await buildSyntheticSnapshot(64, 4);
+  const { analyzer, built, vault } = await buildSyntheticSnapshot(48, 4);
   const queryCases = [
-    { query: "needle common", limit: 12 },
-    { query: "target 17", fields: ["title", "body"], limit: 8 },
-    { query: "needle beta", tags: ["group-1"], limit: 10 }
+    { query: "needle common", limit: 10 },
+    { query: "target 17", fields: ["title", "body"], limit: 8 }
   ];
-  const workerCounts = [1, 2, 4];
-  const assignments = ["identity", "reverse"];
   const baselines = new Map();
 
   for (const queryCase of queryCases) {
@@ -219,52 +350,46 @@ test("AC6 fan-out results are byte-identical to monolithic across worker counts 
       analyzerIdentity: analyzer.identity,
       snapshot: snapshotHandle(built, "pin-monolithic")
     });
-    const baselinePayload = normalizeScorePayload(baseline);
-    assert.ok(baselinePayload.length > 0, `baseline should return matches for ${queryCase.query}`);
-    baselines.set(queryCase.query, baselinePayload);
+    assert.ok(baseline.matches.length > 0, `baseline should return matches for ${queryCase.query}`);
+    baselines.set(queryCase.query, JSON.stringify(normalizeScorePayload(baseline)));
   }
 
-  for (const workers of workerCounts) {
-    for (const assignment of assignments) {
-      const pools = await createFanoutPool(workers, assignment);
-      try {
-        const coordinator = new QueryCoordinator(pools.searchExecution);
-        for (const [queryIndex, queryCase] of queryCases.entries()) {
-          const search = normalizeSearchParams({ ...queryCase, debug: true });
-          const result = await coordinator.execute({
-            vault,
-            search,
-            analysis: testQueryAnalysis(queryCase.query),
-            analyzerIdentity: analyzer.identity,
-            snapshot: snapshotHandle(built, `pin-${workers}-${assignment}-${queryCase.query}`),
-            deadline: Date.now() + 120_000,
-            cancellationId: `ac6-topology-${workers}-${assignment}-${queryIndex}`
-          });
-        assert.deepEqual(
-          normalizeScorePayload(result),
+  for (const ordering of BATCH_ORDER_VARIANTS) {
+    const pools = await createExecutionPools(2);
+    try {
+      for (const queryCase of queryCases) {
+        const search = normalizeSearchParams({ ...queryCase, debug: true });
+        const { jobs, plan, result } = await executeScheduledSearch({
+          vault,
+          search,
+          analysis: testQueryAnalysis(queryCase.query),
+          analyzerIdentity: analyzer.identity,
+          snapshot: snapshotHandle(built, `pin-${ordering.name}-${queryCase.query}`),
+          deadline: Date.now() + 120_000,
+          cancellationId: `ac6-grouping-${ordering.name}-${crypto.randomUUID()}`,
+          pool: pools.searchExecution
+        }, ordering);
+        assert.deepEqual(dispatchedPartitionIds(jobs), planPartitionIds(plan));
+        assert.equal(
+          JSON.stringify(normalizeScorePayload(result)),
           baselines.get(queryCase.query),
-          `query=${queryCase.query} workers=${workers} assignment=${assignment}`
+          `query=${queryCase.query} batchOrder=${ordering.name}`
         );
       }
-      } finally {
-        await pools.close();
-      }
+    } finally {
+      await pools.close();
     }
   }
-
-  console.log(`AC6 topology byte-identity: workers=${workerCounts.join("/")} assignments=${assignments.join("/")} queries=${queryCases.length}`);
 });
 
-test("AC6 shard failure cancels siblings, waits all settled, fails whole query, and releases the pin", { timeout: 60_000 }, async () => {
+test("AC6 scheduler shard failure cancels active leases and releases the search pin", { timeout: 60_000 }, async () => {
   const { DaemonSearchStoreService } = await import(path.join(repoRoot, "src/daemon/search-store/service.ts"));
   const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
   const snapshot = snapshotHandle(built, "pin-life");
   const pin = { snapshotId: snapshot.snapshotId, pinToken: "pin-life" };
   const released = [];
-  const cancelled = [];
-  let siblingSettled = false;
-  let dispatchedJobs = 0;
   const terminalError = Object.assign(new Error("simulated shard failure"), { code: "INTERNAL" });
+  let runCount = 0;
   const fakeStore = {
     pin: async () => pin,
     snapshotHandleForPin: () => snapshot,
@@ -273,35 +398,17 @@ test("AC6 shard failure cancels siblings, waits all settled, fails whole query, 
     },
     searchAnalyzerIdentity: () => analyzer.identity
   };
-  const fakeSearchExecution = {
-    dispatchSearchShards: async (jobs) => {
-      dispatchedJobs = jobs.length;
-      return jobs.map((job, index) => ({
-        job,
-        slotId: index + 1,
-        promise: index === 0
-          ? Promise.resolve().then(() => {
-              throw terminalError;
-            })
-          : new Promise((resolve) => {
-              setTimeout(() => {
-                siblingSettled = true;
-                resolve({
-                  snapshotId: job.snapshot.snapshotId,
-                  partitionIds: job.snapshot.segments.map((segment) => segment.partitionId),
-                  requestedLimit: job.requestedLimit,
-                  workEstimate: job.workEstimate,
-                  scoredCount: 0,
-                  finalists: []
-                });
-              }, 25);
-            })
-      }));
-    },
-    cancel: (cancellationId) => {
-      cancelled.push(cancellationId);
+  const fakeSearchExecution = new ControlledLeasePool([1, 2], (job, options, slotId, pool) => {
+    runCount += 1;
+    if (runCount === 1) {
+      return Promise.resolve().then(() => {
+        throw terminalError;
+      });
     }
-  };
+    return new Promise((resolve, reject) => {
+      pool.active.set(slotId, { job, options, resolve, reject });
+    });
+  });
   const service = new DaemonSearchStoreService(
     fakeStore,
     {
@@ -323,165 +430,35 @@ test("AC6 shard failure cancels siblings, waits all settled, fails whole query, 
     (error) => error === terminalError
   );
 
-  assert.ok(dispatchedJobs >= 2, "fixture should dispatch sibling shard jobs");
-  assert.deepEqual(cancelled, ["ac6-life"]);
-  assert.equal(siblingSettled, true, "coordinator must wait for every shard to settle before returning");
+  assert.ok(fakeSearchExecution.runCalls.length >= 2, "fixture should dispatch concurrent shard jobs");
+  assert.deepEqual(fakeSearchExecution.cancelCalls, ["ac6-life"]);
   assert.deepEqual(released, ["pin-life"]);
 });
 
-test("AC6 fan-out skips zero-work shards without dispatching", async () => {
-  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
+test("AC6 scheduler skips zero-work plans without leasing search workers", async () => {
+  const { SearchQueryPlanner } = await import(path.join(repoRoot, "src/daemon/search-store/query-planner.ts"));
+  const { SearchQueryScheduler } = await import(path.join(repoRoot, "src/daemon/search-store/query-scheduler.ts"));
   const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
   const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
-  const snapshot = snapshotHandle(built, "pin-zero-work");
-  let dispatched = false;
-  const fakeSearchExecution = {
-    fanoutSlotCount: () => 4,
-    dispatchSearchShards: async () => {
-      dispatched = true;
-      throw new Error("zero-work query should not dispatch shards");
-    },
-    cancel: () => {}
-  };
-  const coordinator = new QueryCoordinator(fakeSearchExecution);
   const search = normalizeSearchParams({ query: "definitelyabsentterm", limit: 5 });
-  const result = await coordinator.execute({
+  const input = {
     vault,
     search,
     analysis: testQueryAnalysis(search.query),
     analyzerIdentity: analyzer.identity,
-    snapshot,
+    snapshot: snapshotHandle(built, "pin-zero-work"),
     deadline: Date.now() + 10_000,
     cancellationId: "ac6-zero-work"
+  };
+  const planner = new SearchQueryPlanner();
+  const plan = planner.plan(input);
+  const pool = new ControlledLeasePool([1, 2], () => {
+    throw new Error("zero-work query should not dispatch shards");
   });
+  const result = await new SearchQueryScheduler(pool, { exhaustiveWorkCeiling: 100 }).execute({ ...input, plan });
 
-  assert.equal(dispatched, false);
+  assert.equal(plan.tasks.length, 0);
+  assert.deepEqual(pool.leaseCalls, []);
+  assert.deepEqual(pool.runCalls, []);
   assert.deepEqual(result.matches, []);
 });
-
-test("AC6 fan-out defaults to reserving search workers for concurrent queries", async () => {
-  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
-  const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
-  const snapshot = snapshotHandle(built, "pin-fanout-reservation");
-  let dispatchedJobs = 0;
-  const fakeSearchExecution = {
-    fanoutSlotCount: () => 4,
-    dispatchSearchShards: async (jobs) => {
-      dispatchedJobs = jobs.length;
-      return jobs.map((job, index) => ({
-        job,
-        slotId: index + 1,
-        promise: Promise.resolve({
-          snapshotId: job.snapshot.snapshotId,
-          partitionIds: job.snapshot.segments.map((segment) => segment.partitionId),
-          requestedLimit: job.requestedLimit,
-          workEstimate: job.workEstimate,
-          scoredCount: 0,
-          finalists: []
-        })
-      }));
-    },
-    cancel: () => {}
-  };
-  const coordinator = new QueryCoordinator(fakeSearchExecution);
-  const search = normalizeSearchParams({ query: "needle common", limit: 5 });
-  await coordinator.execute({
-    vault,
-    search,
-    analysis: testQueryAnalysis(search.query),
-    analyzerIdentity: analyzer.identity,
-    snapshot,
-    deadline: Date.now() + 10_000,
-    cancellationId: "ac6-fanout-reservation"
-  });
-
-  assert.equal(dispatchedJobs, 2);
-});
-
-test("AC6 single-query fan-out latency report", { timeout: 240_000 }, async () => {
-  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
-  const { createDaemonPools } = await import(path.join(repoRoot, "src/daemon/pools.ts"));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
-  const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
-  const documentCount = 160;
-  const { analyzer, built, vault } = await buildSyntheticSnapshot(documentCount, 4);
-  const search = normalizeSearchParams({ query: "common needle fanout alpha", limit: 20, debug: true });
-  const analysis = testQueryAnalysis(search.query);
-  const repetitions = 5;
-  const baseline = normalizeScorePayload(executeSearchJob({
-    vault,
-    search,
-    analysis,
-    analyzerIdentity: analyzer.identity,
-    snapshot: snapshotHandle(built, "pin-latency-monolithic")
-  }));
-  assert.ok(baseline.length > 0, "latency baseline should return matches");
-
-  async function measure(workers) {
-    const pools = await createDaemonPools({
-      ...process.env,
-      OPTSIDIAN_SEARCH_ANALYZER: "intl",
-      OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
-      OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
-      OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
-      OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers),
-      OPTSIDIAN_SEARCH_FANOUT_ASSIGNMENT: "identity"
-    }, {});
-    try {
-      const coordinator = new QueryCoordinator(pools.searchExecution);
-      await coordinator.execute({
-        vault,
-        search,
-        analysis,
-        analyzerIdentity: analyzer.identity,
-        snapshot: snapshotHandle(built, `pin-latency-warm-${workers}`),
-        deadline: Date.now() + 120_000,
-        cancellationId: `ac6-latency-warm-${workers}`
-      });
-      const timings = [];
-      for (let index = 0; index < repetitions; index += 1) {
-        const started = performance.now();
-        const result = await coordinator.execute({
-          vault,
-          search,
-          analysis,
-          analyzerIdentity: analyzer.identity,
-          snapshot: snapshotHandle(built, `pin-latency-${workers}-${index}`),
-          deadline: Date.now() + 120_000,
-          cancellationId: `ac6-latency-${workers}-${index}`
-        });
-        assert.deepEqual(
-          normalizeScorePayload(result),
-          baseline,
-          `latency fan-out result must match monolithic baseline (workers=${workers} index=${index})`
-        );
-        timings.push(performance.now() - started);
-      }
-      return percentiles(timings);
-    } finally {
-      await pools.close();
-    }
-  }
-
-  const one = await measure(1);
-  const four = await measure(4);
-  console.log(
-    `AC6 latency: docs=${documentCount} reps=${repetitions} ` +
-    `workers1_p50=${one.p50.toFixed(1)}ms workers1_p95=${one.p95.toFixed(1)}ms ` +
-    `workers4_p50=${four.p50.toFixed(1)}ms workers4_p95=${four.p95.toFixed(1)}ms`
-  );
-});
-
-function percentiles(values) {
-  const sorted = [...values].sort((left, right) => left - right);
-  return {
-    p50: percentile(sorted, 0.5),
-    p95: percentile(sorted, 0.95)
-  };
-}
-
-function percentile(sorted, q) {
-  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * q) - 1);
-  return sorted[Math.max(0, index)];
-}

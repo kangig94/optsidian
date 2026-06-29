@@ -72,6 +72,7 @@ class SearchDaemon {
   private readonly owner: OwnerRecord;
   private readonly server: RpcServer;
   private readonly idleMs: number;
+  private readonly activeCancellationIds = new Map<string, string>();
   private idleTimer: NodeJS.Timeout | undefined;
 
   private constructor(
@@ -113,8 +114,7 @@ class SearchDaemon {
         onConnectionClosed: (requestIds) => {
           if (!daemon) return;
           for (const requestId of requestIds) {
-            daemon.scheduler.cancel(requestId);
-            daemon.profiles.cancel(requestId);
+            daemon.cancelRequest(requestId);
           }
         }
       });
@@ -146,10 +146,11 @@ class SearchDaemon {
     let failed = false;
     try {
       this.validateRequest(request);
+      this.activeCancellationIds.set(request.requestId, this.requestCancellationId(request));
       return await this.scheduler.run(
         {
           deadline: request.deadline,
-          cancellationId: request.cancellationId ?? request.requestId,
+          cancellationId: this.requestCancellationId(request),
           snapshotId: "snapshotId" in request.payload && typeof request.payload.snapshotId === "string"
             ? request.payload.snapshotId
             : undefined
@@ -160,8 +161,19 @@ class SearchDaemon {
       failed = true;
       throw error;
     } finally {
+      this.activeCancellationIds.delete(request.requestId);
       this.metrics.finishRequest(failed);
       this.armIdleTimer();
+    }
+  }
+
+  private cancelRequest(requestId: string): void {
+    const cancellationIds = new Set([requestId]);
+    const activeCancellationId = this.activeCancellationIds.get(requestId);
+    if (activeCancellationId) cancellationIds.add(activeCancellationId);
+    for (const cancellationId of cancellationIds) {
+      this.scheduler.cancel(cancellationId);
+      this.profiles.cancel(cancellationId);
     }
   }
 
@@ -196,7 +208,7 @@ class SearchDaemon {
           const result = await runtime.searchStore.search(request.payload, this.requestContext(request));
           runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
           return result;
-        });
+        }, { cancellationId: this.requestCancellationId(request) });
       }
       case "Explain": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
@@ -204,7 +216,7 @@ class SearchDaemon {
           const result = await runtime.searchStore.explain(request.payload, this.requestContext(request));
           runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
           return result;
-        });
+        }, { cancellationId: this.requestCancellationId(request) });
       }
       case "LoadVault": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
@@ -223,21 +235,39 @@ class SearchDaemon {
             runtime.vaults.transition(request.payload.vault, "unloaded", { error: errorMessage(error) });
             throw error;
           }
-        });
+        }, { cancellationId: this.requestCancellationId(request) });
       }
       case "Rebuild": {
-        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
-          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.rebuild(request.payload.vault, this.requestContext(request, progress)))
+        return this.profiles.withRuntimeFor(
+          request.payload,
+          (runtime) => this.updating(
+            runtime,
+            request.payload.vault,
+            (progress) => runtime.searchStore.rebuild(request.payload.vault, this.requestContext(request, progress))
+          ),
+          { cancellationId: this.requestCancellationId(request) }
         );
       }
       case "Refresh": {
-        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
-          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.refresh(request.payload.vault, this.requestContext(request, progress)))
+        return this.profiles.withRuntimeFor(
+          request.payload,
+          (runtime) => this.updating(
+            runtime,
+            request.payload.vault,
+            (progress) => runtime.searchStore.refresh(request.payload.vault, this.requestContext(request, progress))
+          ),
+          { cancellationId: this.requestCancellationId(request) }
         );
       }
       case "Compact": {
-        return this.profiles.withRuntimeFor(request.payload, (runtime) =>
-          this.updating(runtime, request.payload.vault, (progress) => runtime.searchStore.compact(request.payload.vault, this.requestContext(request, progress)))
+        return this.profiles.withRuntimeFor(
+          request.payload,
+          (runtime) => this.updating(
+            runtime,
+            request.payload.vault,
+            (progress) => runtime.searchStore.compact(request.payload.vault, this.requestContext(request, progress))
+          ),
+          { cancellationId: this.requestCancellationId(request) }
         );
       }
       case "Clear": {
@@ -251,7 +281,7 @@ class SearchDaemon {
             runtime.vaults.transition(request.payload.vault, "ready", { error: errorMessage(error) });
             throw error;
           }
-        });
+        }, { cancellationId: this.requestCancellationId(request) });
       }
       case "Prune":
         return this.profiles.pruneSearchCaches(request.payload);
@@ -371,10 +401,14 @@ class SearchDaemon {
   private requestContext(request: SearchDaemonRequest, progress?: (progress: SearchIndexProgressUpdate) => void) {
     return {
       deadline: request.deadline,
-      cancellationId: request.cancellationId ?? request.requestId,
+      cancellationId: this.requestCancellationId(request),
       requestId: request.requestId,
       progress
     };
+  }
+
+  private requestCancellationId(request: SearchDaemonRequest): string {
+    return request.cancellationId ?? request.requestId;
   }
 
   private progressReporter(runtime: ProfileRuntime, vault: string, state: "loading" | "updating"): (progress: SearchIndexProgressUpdate) => void {

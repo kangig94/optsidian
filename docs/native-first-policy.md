@@ -42,6 +42,7 @@ These commands are added or extended because the native CLI does not provide an 
 - `grep`
 - `search`
 - `index`
+- `config`
 - `frontmatter`
 - `edit`
 - `write`
@@ -52,7 +53,7 @@ These commands are added or extended because the native CLI does not provide an 
 - `update`
 - `plugin:install`
 
-`grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index.
+`grep` is intentionally not named `search`: it is exact/regex line matching for evidence checks. `search` is note-level ranked discovery backed by an external cache index. Search defaults to exhaustive daemon execution. `mode=approximate` / `--approximate` and its `budget-*` flags are Optsidian extensions and always surface warning labels in results.
 
 `frontmatter` does not replace native `property:*` commands. It provides an LLM-oriented structured editing surface with dry-run diffs, JSON values, MCP mutation support, and direct file fallback when native Obsidian vault resolution is unavailable.
 

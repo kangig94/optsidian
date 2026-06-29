@@ -1,4 +1,4 @@
-import type { SearchField } from "../types.js";
+import type { SearchExecutionBudget, SearchExecutionMode, SearchField } from "../types.js";
 import type { SearchTokenChannelTerms } from "./analysis/index.js";
 
 export type PathFilter = {
@@ -13,7 +13,20 @@ export type NormalizedSearchParams = {
   fields?: SearchField[];
   limit: number;
   debug: boolean;
+  mode: SearchExecutionMode;
+  budget?: SearchExecutionBudget;
 };
+
+export const SEARCH_WARNING_APPROXIMATE = "approximate";
+export const SEARCH_WARNING_NON_REPRODUCIBLE = "non-reproducible";
+
+export function searchExecutionWarningLabels(search: Pick<NormalizedSearchParams, "mode" | "budget">): string[] {
+  if (search.mode !== "approximate") return [];
+  return [
+    SEARCH_WARNING_APPROXIMATE,
+    ...(search.budget?.timeMs !== undefined ? [SEARCH_WARNING_NON_REPRODUCIBLE] : [])
+  ];
+}
 
 export type RankedCandidate = {
   path: string;

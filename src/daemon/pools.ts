@@ -228,40 +228,29 @@ export class AnalyzerWorkerPool {
 
 export class SearchExecutionWorkerPool {
   private readonly pool: DaemonWorkerPool;
-  private readonly env: NodeJS.ProcessEnv;
-  private nextFanoutOffset = 0;
 
-  constructor(pool: DaemonWorkerPool, env: NodeJS.ProcessEnv = process.env) {
+  constructor(pool: DaemonWorkerPool) {
     this.pool = pool;
-    this.env = env;
   }
 
   search(job: SearchExecutionJob, options: WorkerPoolRunOptions): Promise<SearchExecutionResult> {
     return this.pool.run<SearchExecutionResult>({ type: "search", payload: job }, options);
   }
 
-  fanoutSlotCount(): number {
-    return this.pool.slotIds().length;
+  idleReadySlotIds(): number[] {
+    return this.pool.idleReadySlotIds();
   }
 
-  async dispatchSearchShards(
-    jobs: readonly SearchShardExecutionJob[],
-    options: WorkerPoolRunOptions
-  ): Promise<Array<{ job: SearchShardExecutionJob; slotId: number; promise: Promise<SearchShardExecutionResult> }>> {
-    if (jobs.length === 0) return [];
-    await this.pool.warmup(this.fanoutWarmupTarget(jobs.length));
-    const readySlotIds = this.reserveFanoutSlotIds(this.orderedFanoutSlotIds(this.pool.readySlotIds()), jobs.length);
-    if (readySlotIds.length === 0) {
-      throw Object.assign(new Error("search execution pool has no ready workers"), { code: "SEARCH_DAEMON_NOT_READY" });
-    }
-    return jobs.map((job, index) => {
-      const slotId = readySlotIds[index % readySlotIds.length];
-      return {
-        job,
-        slotId,
-        promise: this.pool.runOnSlot<SearchShardExecutionResult>({ type: "searchShard", payload: job }, options, slotId)
-      };
-    });
+  leaseIdleSlot(): number | undefined {
+    return this.pool.leaseIdleSlot();
+  }
+
+  releaseIdleSlot(slotId: number): boolean {
+    return this.pool.releaseIdleSlot(slotId);
+  }
+
+  runOnSlot(job: SearchShardExecutionJob, options: WorkerPoolRunOptions, slotId: number): Promise<SearchShardExecutionResult> {
+    return this.pool.runOnSlot<SearchShardExecutionResult>({ type: "searchShard", payload: job }, options, slotId);
   }
 
   async preloadSnapshot(
@@ -316,34 +305,6 @@ export class SearchExecutionWorkerPool {
   stats() {
     return this.pool.stats();
   }
-
-  private orderedFanoutSlotIds(slotIds: readonly number[]): number[] {
-    const ordered = [...slotIds].sort((left, right) => left - right);
-    const assignment = this.env.OPTSIDIAN_SEARCH_FANOUT_ASSIGNMENT?.trim().toLowerCase();
-    if (!assignment || assignment === "identity") return ordered;
-    if (assignment === "reverse") return ordered.reverse();
-    const rotate = /^rotate:(\d+)$/u.exec(assignment);
-    if (rotate) {
-      const offset = Number(rotate[1]) % Math.max(ordered.length, 1);
-      return [...ordered.slice(offset), ...ordered.slice(0, offset)];
-    }
-    return ordered;
-  }
-
-  private reserveFanoutSlotIds(slotIds: readonly number[], jobCount: number): number[] {
-    const ordered = [...slotIds];
-    if (ordered.length <= 1) return ordered;
-    const offset = this.nextFanoutOffset % ordered.length;
-    const reserved = [...ordered.slice(offset), ...ordered.slice(0, offset)];
-    this.nextFanoutOffset = (this.nextFanoutOffset + Math.min(Math.max(1, jobCount), ordered.length)) % ordered.length;
-    return reserved;
-  }
-
-  private fanoutWarmupTarget(jobCount: number): number {
-    const slotCount = this.pool.slotIds().length;
-    if (jobCount >= slotCount) return slotCount;
-    return Math.min(slotCount, Math.max(1, jobCount * 2));
-  }
 }
 
 export async function createDaemonPools(
@@ -377,7 +338,7 @@ export async function createDaemonPools(
     size: searchWorkers,
     env,
     microbatchSize: 1
-  }), env);
+  }));
   const pools: DaemonPools = {
     latencyAnalyzer,
     throughputAnalyzer,

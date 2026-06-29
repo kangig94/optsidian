@@ -58,6 +58,14 @@ export type GrepResult = {
   count: number;
 };
 
+export type SearchExecutionMode = "exhaustive" | "approximate";
+
+export type SearchExecutionBudget = {
+  work?: number;
+  shards?: number;
+  timeMs?: number;
+};
+
 export type SearchParams = {
   query?: string;
   path?: string;
@@ -65,6 +73,8 @@ export type SearchParams = {
   fields?: string[];
   limit?: number;
   debug?: boolean;
+  mode?: SearchExecutionMode;
+  budget?: SearchExecutionBudget;
 };
 
 export type SearchField = "title" | "aliases" | "tags" | "headings" | "path" | "body";

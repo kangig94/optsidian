@@ -132,7 +132,46 @@ function normalizeScorePayload(result) {
   }));
 }
 
-async function createFanoutPool(workers, assignment) {
+const BATCH_ORDER_VARIANTS = [
+  {
+    name: "plan-order",
+    order: (tasks) => [...tasks]
+  },
+  {
+    name: "reverse-pending",
+    order: (tasks) => [...tasks].reverse()
+  }
+];
+
+class RecordingSearchExecutionPool {
+  constructor(inner) {
+    this.inner = inner;
+    this.jobs = [];
+  }
+
+  idleReadySlotIds() {
+    return this.inner.idleReadySlotIds();
+  }
+
+  leaseIdleSlot() {
+    return this.inner.leaseIdleSlot();
+  }
+
+  releaseIdleSlot(slotId) {
+    return this.inner.releaseIdleSlot(slotId);
+  }
+
+  runOnSlot(job, options, slotId) {
+    this.jobs.push({ job, options, slotId });
+    return this.inner.runOnSlot(job, options, slotId);
+  }
+
+  cancel(cancellationId) {
+    this.inner.cancel(cancellationId);
+  }
+}
+
+async function createExecutionPools(workers) {
   const { createDaemonPools } = await import(path.join(repoRoot, "src/daemon/pools.ts"));
   const env = {
     ...process.env,
@@ -140,10 +179,54 @@ async function createFanoutPool(workers, assignment) {
     OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
     OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
     OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
-    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers),
-    OPTSIDIAN_SEARCH_FANOUT_ASSIGNMENT: assignment
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: String(workers)
   };
-  return createDaemonPools(env, {});
+  const pools = await createDaemonPools(env, {});
+  await pools.searchExecution.warmup(workers);
+  return pools;
+}
+
+async function executeScheduledSearch(input, ordering) {
+  const { SearchQueryPlanner } = await import(path.join(repoRoot, "src/daemon/search-store/query-planner.ts"));
+  const { SearchQueryScheduler } = await import(path.join(repoRoot, "src/daemon/search-store/query-scheduler.ts"));
+  const { pool: searchExecutionPool, ...schedulerInput } = input;
+  const planner = new SearchQueryPlanner();
+  const plan = planner.plan(schedulerInput);
+  const pool = new RecordingSearchExecutionPool(searchExecutionPool);
+  const scheduler = new SearchQueryScheduler(pool, {
+    testOrdering: {
+      orderPendingTasks: ordering.order
+    }
+  });
+  const result = await scheduler.execute({ ...schedulerInput, plan });
+  return { jobs: pool.jobs, plan, result };
+}
+
+function planPartitionIds(plan) {
+  return plan.tasks.flatMap((task) => task.snapshot.segments.map((segment) => segment.partitionId)).sort((left, right) => left - right);
+}
+
+function dispatchedPartitionIds(jobs) {
+  return jobs.flatMap(({ job }) => job.snapshot.segments.map((segment) => segment.partitionId)).sort((left, right) => left - right);
+}
+
+function dispatchSignature(jobs) {
+  return jobs.map(({ job }) => job.snapshot.segments.map((segment) => segment.partitionId));
+}
+
+function expectedInitialDispatchSignature(tasks, leaseCount) {
+  const pending = [...tasks];
+  const groups = [];
+  for (let leasesRemaining = leaseCount; leasesRemaining > 0 && pending.length > 0; leasesRemaining -= 1) {
+    const batchSize = Math.max(1, Math.ceil(pending.length / Math.max(1, leasesRemaining)));
+    const batch = pending.splice(0, batchSize);
+    groups.push(batch.flatMap((task) => task.snapshot.segments.map((segment) => segment.partitionId)));
+  }
+  return groups;
+}
+
+function assertExhaustiveDispatchedEveryPlanUnit(plan, jobs, label) {
+  assert.deepEqual(dispatchedPartitionIds(jobs), planPartitionIds(plan), `${label}: exhaustive scheduling must dispatch every planned shard unit`);
 }
 
 test("AC6 exact dominance bound computation reuses cached snapshot state by snapshotId", async () => {
@@ -169,9 +252,8 @@ test("AC6 exact dominance bound computation reuses cached snapshot state by snap
   assert.ok(after.snapshotIds.includes(snapshot.snapshotId));
 });
 
-test("AC6 fan-out is byte-identical to monolithic for exact-identity queries across topologies", { timeout: 240_000 }, async () => {
+test("AC6 scheduler pipeline is byte-identical to monolithic for exact-identity queries across batch orders", { timeout: 240_000 }, async () => {
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
-  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
   const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
   const { analyzer, built, vault } = await buildIdentitySnapshot(4);
 
@@ -183,9 +265,9 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
     { query: "hotel", limit: 8 }
   ];
   const workerCounts = [1, 2, 4];
-  const assignments = ["identity", "reverse"];
   const baselines = new Map();
-  let explainReplayChecked = false;
+  const explainReplayChecked = new Set();
+  const exhaustiveDispatchSignatures = new Map();
 
   for (const queryCase of queryCases) {
     const search = normalizeSearchParams({ ...queryCase, debug: true });
@@ -202,34 +284,36 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
       baselinePayload.some((entry) => (entry.identityScore ?? 0) > 0),
       `query=${queryCase.query} must produce at least one exact-identity match (identityScore > 0)`
     );
-    baselines.set(queryCase.query, baselinePayload);
+    baselines.set(queryCase.query, JSON.stringify(baselinePayload));
   }
 
   for (const workers of workerCounts) {
-    for (const assignment of assignments) {
-      const pools = await createFanoutPool(workers, assignment);
+    for (const ordering of BATCH_ORDER_VARIANTS) {
+      const pools = await createExecutionPools(workers);
       try {
-        const coordinator = new QueryCoordinator(pools.searchExecution);
         for (const queryCase of queryCases) {
           const search = normalizeSearchParams({ ...queryCase, debug: true });
-          const explain = !explainReplayChecked && workers === 2 && assignment === "reverse" && queryCase.query === "alpha";
-          const result = await coordinator.execute({
+          const explain = workers === 2 && queryCase.query === "alpha";
+          const label = `query=${queryCase.query} workers=${workers} batchOrder=${ordering.name}`;
+          const { jobs, plan, result } = await executeScheduledSearch({
             vault,
             search,
             analysis: testQueryAnalysis(queryCase.query),
             analyzerIdentity: analyzer.identity,
-            snapshot: snapshotHandle(built, `pin-${workers}-${assignment}-${queryCase.query}`),
+            snapshot: snapshotHandle(built, `pin-${workers}-${ordering.name}-${queryCase.query}`),
             deadline: Date.now() + 120_000,
-            cancellationId: `ac6-identity-${workers}-${assignment}-${crypto.randomUUID()}`,
-            explain
-          });
-          assert.deepEqual(
-            normalizeScorePayload(result),
-            baselines.get(queryCase.query),
-            `query=${queryCase.query} workers=${workers} assignment=${assignment}`
+            cancellationId: `ac6-identity-${workers}-${ordering.name}-${crypto.randomUUID()}`,
+            explain,
+            pool: pools.searchExecution
+          }, ordering);
+          assertExhaustiveDispatchedEveryPlanUnit(plan, jobs, label);
+          exhaustiveDispatchSignatures.set(
+            `${workers}:${queryCase.query}:${ordering.name}`,
+            JSON.stringify(dispatchSignature(jobs))
           );
+          assert.equal(JSON.stringify(normalizeScorePayload(result)), baselines.get(queryCase.query), label);
           if (explain) {
-            assert.ok(result.explainTrace, "fan-out explain should include a trace");
+            assert.ok(result.explainTrace, "scheduler explain should include a trace");
             const tracePath = path.join(tempRoot("optsidian-ac6-explain-"), "trace.json");
             fs.writeFileSync(tracePath, `${JSON.stringify(result.explainTrace, null, 2)}\n`);
             const replay = spawnSync(process.execPath, [
@@ -243,7 +327,7 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
             assert.equal(replay.status, 0, `offline replay failed\nstdout:\n${replay.stdout}\nstderr:\n${replay.stderr}`);
             const replayed = JSON.parse(replay.stdout);
             assert.equal(replayed.outputHash, result.explainTrace.expectedOutputHash);
-            explainReplayChecked = true;
+            explainReplayChecked.add(ordering.name);
           }
         }
       } finally {
@@ -252,6 +336,65 @@ test("AC6 fan-out is byte-identical to monolithic for exact-identity queries acr
     }
   }
 
-  assert.equal(explainReplayChecked, true);
-  console.log(`AC6 exact-identity byte-identity: workers=${workerCounts.join("/")} assignments=${assignments.join("/")} queries=${queryCases.length}`);
+  assert.deepEqual(
+    [...explainReplayChecked].sort(),
+    BATCH_ORDER_VARIANTS.map((variant) => variant.name).sort(),
+    "offline explain replay should run once per batch ordering for alpha at workers=2"
+  );
+  assert.equal(
+    queryCases.some((queryCase) => workerCounts.some((workers) =>
+      exhaustiveDispatchSignatures.get(`${workers}:${queryCase.query}:plan-order`) !==
+      exhaustiveDispatchSignatures.get(`${workers}:${queryCase.query}:reverse-pending`)
+    )),
+    true,
+    "at least one exhaustive run should vary dispatch signatures across batch-order seams"
+  );
+  console.log(`AC6 exact-identity byte-identity: workers=${workerCounts.join("/")} batchOrders=${BATCH_ORDER_VARIANTS.map((variant) => variant.name).join("/")} queries=${queryCases.length}`);
+});
+
+test("AC6 approximate budget is deterministic and labeled approximate", { timeout: 240_000 }, async () => {
+  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { SEARCH_WARNING_APPROXIMATE } = await import(path.join(repoRoot, "src/core/search/internal-types.ts"));
+  const { analyzer, built, vault } = await buildIdentitySnapshot(4);
+  const search = normalizeSearchParams({
+    query: "needle",
+    limit: 8,
+    debug: true,
+    mode: "approximate",
+    budget: { shards: 4, work: 1_000_000 }
+  });
+  const analysis = testQueryAnalysis(search.query);
+  let expectedBytes;
+
+  for (const ordering of BATCH_ORDER_VARIANTS) {
+    const pools = await createExecutionPools(2);
+    try {
+      const run = async (index) => executeScheduledSearch({
+        vault,
+        search,
+        analysis,
+        analyzerIdentity: analyzer.identity,
+        snapshot: snapshotHandle(built, `pin-approx-${ordering.name}-${index}`),
+        deadline: Date.now() + 120_000,
+        cancellationId: `ac6-approx-${ordering.name}-${index}-${crypto.randomUUID()}`,
+        pool: pools.searchExecution
+      }, ordering);
+
+      const first = await run(1);
+      const second = await run(2);
+      const firstBytes = JSON.stringify(first.result);
+      const secondBytes = JSON.stringify(second.result);
+      const expectedBudgetedTasks = ordering.order(first.plan.tasks.slice(0, search.budget.shards));
+      const expectedSignature = expectedInitialDispatchSignature(expectedBudgetedTasks, 2);
+
+      assert.deepEqual(first.result.warnings, [SEARCH_WARNING_APPROXIMATE]);
+      assert.equal(firstBytes, secondBytes, `approximate search must be byte-deterministic for batchOrder=${ordering.name}`);
+      assert.deepEqual(dispatchSignature(first.jobs), dispatchSignature(second.jobs), `approximate dispatch order must be deterministic for batchOrder=${ordering.name}`);
+      assert.deepEqual(dispatchSignature(first.jobs), expectedSignature, `approximate dispatch must follow the ordered deterministic prefix for batchOrder=${ordering.name}`);
+      if (expectedBytes === undefined) expectedBytes = firstBytes;
+      assert.equal(firstBytes, expectedBytes, `approximate search must be byte-deterministic across batchOrder=${ordering.name}`);
+    } finally {
+      await pools.close();
+    }
+  }
 });

@@ -35,6 +35,12 @@ type ProfileRuntimeEntry = {
   idleDeadline?: string;
 };
 
+type ProfileRuntimeAcquireOptions = {
+  cancellationId?: string;
+};
+
+const MAX_CANCELLED_IDS = 4096;
+
 export class ProfileRuntime {
   readonly profile: SearchRuntimeProfile;
   readonly profileHash: string;
@@ -75,6 +81,7 @@ export class ProfileRuntime {
   }
 
   cancel(cancellationId: string): void {
+    this.searchStore.cancel(cancellationId);
     this.pools.cancel(cancellationId);
   }
 
@@ -101,6 +108,7 @@ export class ProfileRuntime {
 export class ProfileManager {
   private readonly runtimes = new Map<string, ProfileRuntimeEntry>();
   private readonly pending = new Map<string, Promise<ProfileRuntimeEntry>>();
+  private readonly cancelled = new Set<string>();
   private readonly defaultProfile: SearchRuntimeProfile;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private closed = false;
@@ -110,11 +118,17 @@ export class ProfileManager {
     this.defaultProfile = effectiveSearchRuntimeProfile(process.cwd(), baseEnv);
   }
 
-  async acquire(payload: { profile?: SearchRuntimeProfile }): Promise<ProfileRuntimeLease> {
+  async acquire(payload: { profile?: SearchRuntimeProfile }, options: ProfileRuntimeAcquireOptions = {}): Promise<ProfileRuntimeLease> {
     if (this.closed) throw Object.assign(new Error("profile manager is closed"), { code: "SEARCH_DAEMON_NOT_READY" });
     const profile = this.profileForPayload(payload);
     const profileHash = searchRuntimeProfileHash(profile);
+    assertNotCancelled(options.cancellationId, this.cancelled);
     const entry = await this.liveEntryFor(profileHash, profile);
+    if (options.cancellationId && this.cancelled.has(options.cancellationId)) {
+      entry.runtime.cancel(options.cancellationId);
+      if (entry.activeRequests === 0) this.armIdleTimer(profileHash, entry);
+      throw cancelledError();
+    }
     this.retain(entry);
     let released = false;
     return {
@@ -127,8 +141,12 @@ export class ProfileManager {
     };
   }
 
-  async withRuntimeFor<T>(payload: { profile?: SearchRuntimeProfile }, fn: (runtime: ProfileRuntime) => Promise<T>): Promise<T> {
-    const lease = await this.acquire(payload);
+  async withRuntimeFor<T>(
+    payload: { profile?: SearchRuntimeProfile },
+    fn: (runtime: ProfileRuntime) => Promise<T>,
+    options: ProfileRuntimeAcquireOptions = {}
+  ): Promise<T> {
+    const lease = await this.acquire(payload, options);
     try {
       return await fn(lease.runtime);
     } finally {
@@ -181,6 +199,7 @@ export class ProfileManager {
   }
 
   cancel(cancellationId: string): void {
+    rememberCancelled(this.cancelled, cancellationId);
     for (const entry of this.runtimes.values()) entry.runtime.cancel(cancellationId);
   }
 
@@ -264,5 +283,24 @@ export class ProfileManager {
     this.runtimes.delete(profileHash);
     this.clearIdleTimer(entry);
     await entry.runtime.close();
+  }
+}
+
+function assertNotCancelled(cancellationId: string | undefined, cancelled: ReadonlySet<string>): void {
+  if (!cancellationId || !cancelled.has(cancellationId)) return;
+  throw cancelledError();
+}
+
+function cancelledError(): Error {
+  return Object.assign(new Error("profile runtime request was cancelled"), { code: "CANCELLED" });
+}
+
+function rememberCancelled(cancelled: Set<string>, cancellationId: string): void {
+  cancelled.delete(cancellationId);
+  cancelled.add(cancellationId);
+  while (cancelled.size > MAX_CANCELLED_IDS) {
+    const oldest = cancelled.values().next();
+    if (oldest.done) break;
+    cancelled.delete(oldest.value);
   }
 }

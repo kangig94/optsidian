@@ -9,6 +9,7 @@ import {
   type IndexAffectingSearchSettings
 } from "../../core/search/index-settings.js";
 import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
+import { searchExecutionWarningLabels } from "../../core/search/internal-types.js";
 import type { SearchIndexMutationResult, SearchResult } from "../../core/types.js";
 import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
@@ -18,7 +19,8 @@ import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import { executeMetadataSearchFromSnapshotHandle, type SearchExecutionSnapshotHandle } from "../search-execution.js";
 import type { AnalyzerWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import { DaemonSnapshotStore, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
-import { QueryCoordinator } from "./query-coordinator.js";
+import { SearchQueryScheduler } from "./query-scheduler.js";
+import { applySearchWarnings } from "./result-shaping.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 
@@ -39,7 +41,7 @@ export class DaemonSearchStoreService {
   private readonly store: DaemonSnapshotStore;
   private readonly latencyAnalyzer: AnalyzerWorkerPool;
   private readonly searchExecution: SearchExecutionWorkerPool;
-  private readonly queryCoordinator: QueryCoordinator;
+  private readonly queryScheduler: SearchQueryScheduler;
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly searchSettingsHash: string;
 
@@ -52,7 +54,7 @@ export class DaemonSearchStoreService {
     this.store = store;
     this.latencyAnalyzer = latencyAnalyzer;
     this.searchExecution = searchExecution;
-    this.queryCoordinator = new QueryCoordinator(searchExecution);
+    this.queryScheduler = new SearchQueryScheduler(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
     this.queryAnalysisCache = new QueryAnalysisCache(
@@ -105,6 +107,10 @@ export class DaemonSearchStoreService {
     return this.store.protectedStoreIdsForPrune();
   }
 
+  cancel(cancellationId: string): void {
+    this.queryScheduler.cancel(cancellationId);
+  }
+
   async search(payload: SearchRequestPayload, context: DaemonRequestContext): Promise<SearchResult & { snapshotId: string }> {
     const result = await this.executeSearch(payload, context, false);
     const { explainTrace: _trace, ...search } = result;
@@ -120,7 +126,8 @@ export class DaemonSearchStoreService {
       command: "explain",
       snapshotId: search.snapshotId,
       search,
-      trace: explainTrace
+      trace: explainTrace,
+      ...(search.warnings && search.warnings.length > 0 ? { warnings: search.warnings } : {})
     };
   }
 
@@ -131,18 +138,18 @@ export class DaemonSearchStoreService {
     try {
       const snapshot = this.store.snapshotHandleForPin(pin);
       if (!search.query) {
-        return executeMetadataSearchFromSnapshotHandle({
+        return applySearchWarnings(executeMetadataSearchFromSnapshotHandle({
           search,
           pathFilter,
           snapshot,
           analyzerIdentity: this.requireAnalyzerIdentity()
-        });
+        }), searchExecutionWarningLabels(search));
       }
       const analysisResult = search.query
         ? await this.queryAnalysis(search.query, search, payload.vault, context)
         : undefined;
       if (!analysisResult) throw Object.assign(new Error("query analysis is required for query search"), { code: "INTERNAL" });
-      return await this.queryCoordinator.execute({
+      return await this.queryScheduler.execute({
         vault: payload.vault,
         search,
         pathFilter,
