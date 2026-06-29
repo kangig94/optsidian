@@ -1269,7 +1269,8 @@ export class ProjectionReader {
   private readonly tagStringRefs: readonly number[];
   readonly fieldTextsByteLength: number | undefined;
 
-  constructor(segmentBytes: Uint8Array, options: { sectionOnly?: boolean } = {}) {
+  constructor(segmentBytes: Uint8Array, options: { sectionOnly?: boolean; validate?: boolean } = {}) {
+    const validate = options.validate ?? true;
     const projectionBytes = options.sectionOnly
       ? segmentBytes
       : canonicalSegmentSectionBytes(segmentBytes, CANONICAL_SEGMENT_SECTION.docProjection);
@@ -1280,13 +1281,13 @@ export class ProjectionReader {
     this.bytes = projectionBytes;
     this.fieldTextsByteLength = fieldTextsBytes?.byteLength;
     this.header = readDocProjectionHeader(this.bytes);
-    this.stringTable = readDocProjectionStringTable(this.bytes, this.header.stringTableOffset, this.header.tagDictionaryOffset);
+    this.stringTable = readDocProjectionStringTable(this.bytes, this.header.stringTableOffset, this.header.tagDictionaryOffset, validate);
     this.tagStringRefs = readDocProjectionSingleColumnTable(this.bytes, this.header.tagDictionaryOffset, this.header.rowsOffset);
-    validateProjectionReader(this);
+    if (validate) validateProjectionReader(this);
   }
 
-  static fromSectionBytes(bytes: Uint8Array): ProjectionReader {
-    return new ProjectionReader(bytes, { sectionOnly: true });
+  static fromSectionBytes(bytes: Uint8Array, options: { validate?: boolean } = {}): ProjectionReader {
+    return new ProjectionReader(bytes, { sectionOnly: true, validate: options.validate });
   }
 
   documentCount(): number {
@@ -1483,7 +1484,8 @@ function validateProjectionOffsets(header: DocProjectionHeader, minimumOffset: n
 function readDocProjectionStringTable(
   bytes: Uint8Array,
   tableOffset: number,
-  tableEnd: number
+  tableEnd: number,
+  validate: boolean
 ): { count: number; offsets: readonly number[]; entriesStart: number; end: number } {
   const reader = new ByteReader(bytes.subarray(tableOffset, tableEnd));
   const count = reader.readUnsigned();
@@ -1499,17 +1501,19 @@ function readDocProjectionStringTable(
     offsets.push(offset);
     previous = offset;
   }
-  let previousString: string | undefined;
-  for (let index = 0; index < count; index += 1) {
-    const start = entriesStart + offsets[index];
-    const end = index + 1 < count ? entriesStart + offsets[index + 1] : tableEnd;
-    const stringReader = new ByteReader(bytes.subarray(start, end));
-    const value = stringReader.readString();
-    stringReader.assertDone();
-    if (previousString !== undefined && compareByteStrings(previousString, value) >= 0) {
-      throw new Error("docProjection string table must be sorted by UTF-8 bytes");
+  if (validate) {
+    let previousString: string | undefined;
+    for (let index = 0; index < count; index += 1) {
+      const start = entriesStart + offsets[index];
+      const end = index + 1 < count ? entriesStart + offsets[index + 1] : tableEnd;
+      const stringReader = new ByteReader(bytes.subarray(start, end));
+      const value = stringReader.readString();
+      stringReader.assertDone();
+      if (previousString !== undefined && compareByteStrings(previousString, value) >= 0) {
+        throw new Error("docProjection string table must be sorted by UTF-8 bytes");
+      }
+      previousString = value;
     }
-    previousString = value;
   }
   return { count, offsets, entriesStart, end: tableEnd };
 }

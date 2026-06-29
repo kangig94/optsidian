@@ -203,7 +203,7 @@ function segmentMatchesPathFilter(
   pathFilter: PathFilter | undefined
 ): boolean {
   if (!pathFilter) return true;
-  const projection = new ProjectionReader(sharedBytes(segment.bytes));
+  const projection = new ProjectionReader(sharedBytes(segment.bytes), { validate: false });
   for (let localDocId = 1; localDocId <= projection.documentCount(); localDocId += 1) {
     if (matchesPathFilter(projection.doc(localDocId).path, pathFilter)) return true;
   }

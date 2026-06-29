@@ -75,6 +75,8 @@ type SegmentProximityMatch = {
   };
 };
 
+type QueryPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
+
 export function createPositionalRetriever(snapshot: SearchSnapshot): Retriever {
   return {
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
@@ -88,12 +90,13 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
   const explicitChannels = Boolean(query.channels);
   const channels = positionalSearchChannels(query);
   const searchedChannels = new Set<SearchTokenChannel>();
+  const postingsLookup = createQueryPostingsLookup();
 
   const searchChannel = (channel: SearchTokenChannel) => {
     searchedChannels.add(channel);
     const terms = query.analysis.channels[channel].map((term) => term.normalize("NFC").trim()).filter(Boolean);
     if (terms.length === 0) return;
-    const channelScores = scoreChannel(snapshot, channel, terms, fields);
+    const channelScores = scoreChannel(snapshot, channel, terms, fields, postingsLookup);
     channelScores.forEach((scored, index) => {
       const rank = index + 1;
       const builder = candidateBuilder(scored.segment, candidateBuilders, scored.ref);
@@ -109,7 +112,7 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
       });
     });
 
-    for (const phraseMatch of findSegmentPhraseMatches(snapshot, channel, terms, fields)) {
+    for (const phraseMatch of findSegmentPhraseMatches(snapshot, channel, terms, fields, postingsLookup)) {
       const segment = segmentForRef(snapshot, phraseMatch.ref);
       candidateBuilder(segment, candidateBuilders, phraseMatch.ref).phraseMatches.push({
         channel,
@@ -118,7 +121,7 @@ export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: Re
         starts: phraseMatch.starts
       });
     }
-    for (const proximityMatch of findSegmentProximityMatches(snapshot, channel, terms, fields, query.proximityWindow)) {
+    for (const proximityMatch of findSegmentProximityMatches(snapshot, channel, terms, fields, query.proximityWindow, postingsLookup)) {
       const segment = segmentForRef(snapshot, proximityMatch.ref);
       candidateBuilder(segment, candidateBuilders, proximityMatch.ref).proximityMatches.push({
         channel,
@@ -178,13 +181,14 @@ function scoreChannel(
   snapshot: SearchSnapshot,
   channel: SearchTokenChannel,
   terms: readonly string[],
-  fields: readonly SearchField[]
+  fields: readonly SearchField[],
+  postingsLookup: QueryPostingsLookup
 ): ChannelScoredDocument[] {
   const matchedByDocument = new Map<string, MatchedDocumentFields>();
   const allowedFieldIds = new Set(fields.map((field) => POSITIONAL_FIELD_ID[field]));
   for (const segment of snapshot.segments) {
     for (const term of terms) {
-      for (const posting of segment.postings.postingsForTerm(canonicalTerm(channel, term))) {
+      for (const posting of postingsLookup(segment, canonicalTerm(channel, term))) {
         if (!allowedFieldIds.has(posting.fieldId)) continue;
         const ref = shardDocRef(segment, posting.docId);
         const key = shardKey(ref);
@@ -236,14 +240,15 @@ function findSegmentPhraseMatches(
   snapshot: SearchSnapshot,
   channel: SearchTokenChannel,
   terms: readonly string[],
-  fields: readonly SearchField[]
+  fields: readonly SearchField[],
+  postingsLookup: QueryPostingsLookup
 ): SegmentPhraseMatch[] {
   const normalizedTerms = terms.map(normalizeTerm).filter(Boolean);
   if (normalizedTerms.length === 0) return [];
   const allowedFieldIds = new Set(fields.map((field) => POSITIONAL_FIELD_ID[field]));
   const matches: SegmentPhraseMatch[] = [];
   for (const segment of snapshot.segments) {
-    const postingsByTerm = postingsByTermForSegment(segment, channel, normalizedTerms);
+    const postingsByTerm = postingsByTermForSegment(segment, channel, normalizedTerms, postingsLookup);
     const firstPostings = postingsByTerm.get(normalizedTerms[0]) ?? [];
     for (const firstPosting of firstPostings) {
       if (!allowedFieldIds.has(firstPosting.fieldId)) continue;
@@ -265,14 +270,15 @@ function findSegmentProximityMatches(
   channel: SearchTokenChannel,
   terms: readonly string[],
   fields: readonly SearchField[],
-  maxWindow: number | undefined
+  maxWindow: number | undefined,
+  postingsLookup: QueryPostingsLookup
 ): SegmentProximityMatch[] {
   const normalizedTerms = [...new Set(terms.map(normalizeTerm).filter(Boolean))];
   if (normalizedTerms.length === 0) return [];
   const allowedFieldIds = new Set(fields.map((field) => POSITIONAL_FIELD_ID[field]));
   const matches: SegmentProximityMatch[] = [];
   for (const segment of snapshot.segments) {
-    const postingsByTerm = postingsByTermForSegment(segment, channel, normalizedTerms);
+    const postingsByTerm = postingsByTermForSegment(segment, channel, normalizedTerms, postingsLookup);
     for (const key of postingKeysForTermPostings(postingsByTerm, normalizedTerms)) {
       if (!allowedFieldIds.has(key.fieldId)) continue;
       const positionLists = normalizedTerms.map((term) => positionsFromPostings(postingsByTerm.get(term) ?? [], key.localDocId, key.fieldId));
@@ -293,11 +299,28 @@ function findSegmentProximityMatches(
 function postingsByTermForSegment(
   segment: SearchSnapshotSegment,
   channel: SearchTokenChannel,
-  terms: readonly string[]
+  terms: readonly string[],
+  postingsLookup: QueryPostingsLookup
 ): ReadonlyMap<string, readonly CanonicalPosting[]> {
   const postings = new Map<string, readonly CanonicalPosting[]>();
-  for (const term of terms) postings.set(term, segment.postings.postingsForTerm(canonicalTerm(channel, term)));
+  for (const term of terms) postings.set(term, postingsLookup(segment, canonicalTerm(channel, term)));
   return postings;
+}
+
+function createQueryPostingsLookup(): QueryPostingsLookup {
+  const bySegment = new Map<SearchSnapshotSegment, Map<string, readonly CanonicalPosting[]>>();
+  return (segment, term) => {
+    let entries = bySegment.get(segment);
+    if (!entries) {
+      entries = new Map();
+      bySegment.set(segment, entries);
+    }
+    const cached = entries.get(term);
+    if (cached) return cached;
+    const postings = segment.postings.postingsForTerm(term);
+    entries.set(term, postings);
+    return postings;
+  };
 }
 
 function positionsFromPostings(postings: readonly CanonicalPosting[], localDocId: number, fieldId: number): readonly number[] {

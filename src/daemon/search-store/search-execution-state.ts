@@ -71,7 +71,8 @@ export function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHa
       partitionId: segment.partitionId,
       bytes: sharedBytes(segment.bytes)
     })),
-    bm25Stats: handle.bm25Stats
+    bm25Stats: handle.bm25Stats,
+    validateProjection: false
   });
   return { snapshot };
 }

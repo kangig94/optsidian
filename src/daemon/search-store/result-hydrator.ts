@@ -15,6 +15,7 @@ import {
   type SearchExecutionSnapshotHandle,
   type SearchShardFinalist
 } from "./result-shaping.js";
+import type { PersistedDocumentRecord } from "./types.js";
 import { finalistsInBaseRankOrder } from "./finalist-order.js";
 
 export type ResultHydrationAggregation = {
@@ -30,15 +31,15 @@ export type ResultHydratorInput = {
   analyzerIdentity: SearchAnalyzerIdentity;
   explain?: boolean;
   aggregation: ResultHydrationAggregation;
+  documents?: ReadonlyMap<string, PersistedDocumentRecord>;
 };
 
 export class ResultHydrator {
   hydrate(input: ResultHydratorInput): SearchExecutionResult {
-    const documents = documentsFromHandle(input.snapshot);
-    const documentsByRelPath = documentsByPath(documents);
+    const documents = input.documents ?? documentsFromHandle(input.snapshot);
     const rankedAll = [...input.aggregation.finalists];
     const ranked = rankedAll.slice(0, input.search.limit);
-    const matches = this.hydrateMatches(input, documents, documentsByRelPath, ranked);
+    const matches = this.hydrateMatches(input, documents, ranked);
     const result: SearchExecutionResult = searchResult(
       matches,
       input.snapshot.snapshotId,
@@ -53,12 +54,16 @@ export class ResultHydrator {
 
   private hydrateMatches(
     input: ResultHydratorInput,
-    documents: ReturnType<typeof documentsFromHandle>,
-    documentsByRelPath: ReturnType<typeof documentsByPath>,
+    documents: ReadonlyMap<string, PersistedDocumentRecord>,
     ranked: readonly SearchShardFinalist[]
   ): SearchMatch[] {
+    let documentsByRelPath: ReturnType<typeof documentsByPath> | undefined;
     return ranked.map((finalist): SearchMatch => {
-      const record = documents.get(finalist.documentId) ?? documentsByRelPath.get(finalist.path);
+      let record = documents.get(finalist.documentId);
+      if (!record) {
+        documentsByRelPath ??= documentsByPath(documents);
+        record = documentsByRelPath.get(finalist.path);
+      }
       return {
         path: finalist.rank.path,
         title: record?.title ?? finalist.rank.title,

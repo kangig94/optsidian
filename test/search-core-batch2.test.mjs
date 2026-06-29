@@ -9,6 +9,7 @@ import {
   decodeCanonicalSegment,
   encodeCanonicalSegment
 } from "../src/core/search/segments/canonical.ts";
+import { createPositionalRetriever } from "../src/core/search/retrieval/positional/index.ts";
 import { ProjectionReader } from "../src/core/search/retrieval/positional/segment-projection-reader.ts";
 import { POSITIONAL_FIELD_ID } from "../src/core/search/retrieval/positional/types.ts";
 
@@ -79,12 +80,15 @@ test("AC3 docProjection reader exposes shard-local identity, tags, lengths, and 
   assert.equal(decoded.fieldTexts?.some((entry) => entry.fieldId === POSITIONAL_FIELD_ID.body), false);
 
   const projection = new ProjectionReader(bytes);
+  const trustedProjection = new ProjectionReader(bytes, { validate: false });
   assert.equal(projection.documentCount(), 1);
+  assert.equal(trustedProjection.documentCount(), 1);
   assert.deepEqual(projection.doc(1), {
     localDocId: 1,
     documentId: "a".repeat(64),
     path: "Projects/Alpha Project.md"
   });
+  assert.deepEqual(trustedProjection.doc(1), projection.doc(1));
   assert.deepEqual(projection.identityKeys(1).title, ["alpha project"]);
   assert.ok(projection.identityKeys(1).aliases.includes("project alpha"));
   assert.equal(projection.identityKeys(1).filenameStem, "alpha project");
@@ -144,4 +148,72 @@ test("AC3 freshly built segment omits body field text while preserving body inde
   assert.equal(bodyOffsets.length, 1);
   assert.equal(bodyOffsets[0].fieldTextOffset, 0);
   assert.equal(bodyOffsets[0].fieldTextByteLength, 0);
+});
+
+test("positional retriever reuses postings decode only within one retrieve call", () => {
+  const calls = new Map();
+  const postingsByTerm = new Map([
+    ["morph\u0000alpha", [{ term: "morph\u0000alpha", fieldId: POSITIONAL_FIELD_ID.title, docId: 1, positions: [1] }]],
+    ["morph\u0000beta", [{ term: "morph\u0000beta", fieldId: POSITIONAL_FIELD_ID.title, docId: 1, positions: [2] }]]
+  ]);
+  const segment = {
+    segmentId: "segment-1",
+    partitionId: 1,
+    bytes: new Uint8Array(),
+    postings: {
+      postingsForTerm(term) {
+        calls.set(term, (calls.get(term) ?? 0) + 1);
+        return postingsByTerm.get(term) ?? [];
+      }
+    },
+    projection: {
+      documentCount: () => 1,
+      doc: () => ({ localDocId: 1, documentId: "doc-a", path: "Alpha.md" }),
+      fieldLength: () => 2
+    }
+  };
+  const snapshot = {
+    snapshotId: "snapshot-query-scoped-postings",
+    documentCount: 1,
+    segments: [segment],
+    bm25Stats: {
+      schemaId: 1,
+      corpusStats: [{ channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, documentCount: 1, totalFieldLength: 2, averageFieldLength: 2 }],
+      rows: [
+        { channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, term: "alpha", documentFrequency: 1 },
+        { channel: "morph", fieldId: POSITIONAL_FIELD_ID.title, term: "beta", documentFrequency: 1 }
+      ],
+      hash: "bm25"
+    }
+  };
+
+  const candidateSet = createPositionalRetriever(snapshot).retrieve({
+    rawQuery: "alpha beta",
+    analysis: {
+      raw: "alpha beta",
+      primaryChannel: "morph",
+      primaryTerms: ["alpha", "beta"],
+      channels: { morph: ["alpha", "beta"], surface: [], ngram: [] }
+    },
+    limit: 10,
+    snapshotId: snapshot.snapshotId
+  });
+
+  assert.equal(candidateSet.candidates.length, 1);
+  assert.equal(calls.get("morph\u0000alpha"), 1);
+  assert.equal(calls.get("morph\u0000beta"), 1);
+
+  createPositionalRetriever(snapshot).retrieve({
+    rawQuery: "alpha beta",
+    analysis: {
+      raw: "alpha beta",
+      primaryChannel: "morph",
+      primaryTerms: ["alpha", "beta"],
+      channels: { morph: ["alpha", "beta"], surface: [], ngram: [] }
+    },
+    limit: 10,
+    snapshotId: snapshot.snapshotId
+  });
+  assert.equal(calls.get("morph\u0000alpha"), 2);
+  assert.equal(calls.get("morph\u0000beta"), 2);
 });

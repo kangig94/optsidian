@@ -27,6 +27,7 @@ import { compareCanonicalBm25Terms, compareTagOnlyMatches, identityScoreFromExac
 import { matchesPathFilter, matchesTagFilter } from "../core/search/params.js";
 import { SEARCH_FIELD_CHANNEL_BOOST } from "../core/search/schema.js";
 import { SEARCH_PROPERTIES } from "../core/search/schema.js";
+import type { CanonicalPosting } from "../core/search/segments/index.js";
 import type { NormalizedSearchParams, PathFilter, QueryContext, RankedCandidate } from "../core/search/internal-types.js";
 import type { SearchField, SearchMatch, SearchResult } from "../core/types.js";
 import { compareRankedHitEntries, type RankedHitEntry } from "./search-store/finalist-order.js";
@@ -102,6 +103,8 @@ type PositionalHit = {
   candidate: RetrievalCandidate;
   source: "persisted";
 };
+
+type SearchExecutionPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
 
 export type SearchShardExecutionResult = {
   snapshotId: string;
@@ -222,8 +225,9 @@ export function executeMetadataSearchFromSnapshotHandle(input: {
   pathFilter?: PathFilter;
   snapshot: SearchExecutionSnapshotHandle;
   analyzerIdentity: SearchAnalyzerIdentity;
+  documents?: ReadonlyMap<string, PersistedDocumentRecord>;
 }): SearchExecutionResult {
-  const documents = documentsFromHandle(input.snapshot);
+  const documents = input.documents ?? documentsFromHandle(input.snapshot);
   return metadataSearch(input.search, input.pathFilter, documents, input.snapshot.snapshotId, input.analyzerIdentity);
 }
 
@@ -291,7 +295,7 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
 function metadataSearch(
   search: NormalizedSearchParams,
   pathFilter: PathFilter | undefined,
-  documents: Map<string, PersistedDocumentRecord>,
+  documents: ReadonlyMap<string, PersistedDocumentRecord>,
   snapshotId: string,
   analyzerIdentity: SearchAnalyzerIdentity
 ): SearchResult & { snapshotId: string } {
@@ -396,14 +400,15 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot): FeatureStore {
     featuresFor: (query, candidateSet) => {
       const allowedFields = query.fields ?? [...SEARCH_PROPERTIES];
       const terms = weightedQueryTerms(query.analysis.channels);
+      const context = featureQueryContext(query);
+      const postingsLookup = createSearchExecutionPostingsLookup();
       return candidateSet.candidates.map((candidate) => {
-        const context = featureQueryContext(query);
-        const coverage = projectionCoverage(snapshot, candidate, context);
+        const coverage = projectionCoverage(snapshot, candidate, context, postingsLookup);
         const exactPriority = nullableRankPriority(projectionExactPriority(snapshot, candidate, context));
         const phrasePriority = nullableRankPriority(projectionPhrasePriority(snapshot, candidate, context));
         return {
           candidate: candidateRef(candidate),
-          bm25: bm25Features(snapshot, candidate, allowedFields),
+          bm25: bm25Features(snapshot, candidate, allowedFields, postingsLookup),
           phrasePositions: candidate.phraseMatches,
           proximity: candidate.proximityMatches,
           rarity: {
@@ -414,7 +419,7 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot): FeatureStore {
           coverage: {
             terms: coverage.terms,
             fieldScore: coverage.fieldScore,
-            matched: coverageMatches(snapshot, candidate, terms, allowedFields)
+            matched: coverageMatches(snapshot, candidate, terms, allowedFields, postingsLookup)
           },
           identity: {
             exactPriority,
@@ -430,14 +435,15 @@ function createSnapshotFeatureStore(snapshot: SearchSnapshot): FeatureStore {
 function bm25Features(
   snapshot: SearchSnapshot,
   candidate: RetrievalCandidate,
-  fields: readonly SearchField[]
+  fields: readonly SearchField[],
+  postingsLookup: SearchExecutionPostingsLookup
 ): CandidateFeaturePayload["bm25"] {
   const output: CandidateBm25Feature[] = [];
   for (const channelRank of candidate.channels) {
     for (const term of channelRank.matchedTerms) {
       for (const field of fields) {
         const fieldId = POSITIONAL_FIELD_ID[field];
-        const frequency = positionsForCandidateTerm(snapshot, candidate, channelRank.channel, term, fieldId).length;
+        const frequency = positionsForCandidateTerm(snapshot, candidate, channelRank.channel, term, fieldId, postingsLookup).length;
         if (frequency <= 0) continue;
         const corpus = bm25CorpusStats(snapshot.bm25Stats, channelRank.channel, fieldId);
         const fieldLength = candidateFieldLength(snapshot, candidate, channelRank.channel, fieldId);
@@ -463,14 +469,15 @@ function coverageMatches(
   snapshot: SearchSnapshot,
   candidate: RetrievalCandidate,
   terms: ReadonlyArray<{ channel: SearchTokenChannel; term: string; weight: number }>,
-  fields: readonly SearchField[]
+  fields: readonly SearchField[],
+  postingsLookup: SearchExecutionPostingsLookup
 ): CandidateCoverageFeature["matched"] {
   const matched: Array<CandidateCoverageFeature["matched"][number]> = [];
   for (const term of terms) {
     for (const field of fields) {
       if (field === "body") continue;
       const fieldId = POSITIONAL_FIELD_ID[field];
-      if (positionsForCandidateTerm(snapshot, candidate, term.channel, term.term, fieldId).length > 0) {
+      if (positionsForCandidateTerm(snapshot, candidate, term.channel, term.term, fieldId, postingsLookup).length > 0) {
         matched.push({ channel: term.channel, field, term: term.term, weight: term.weight });
       }
     }
@@ -499,14 +506,32 @@ function positionsForCandidateTerm(
   candidate: RetrievalCandidate,
   channel: SearchTokenChannel,
   term: string,
-  fieldId: number
+  fieldId: number,
+  postingsLookup?: SearchExecutionPostingsLookup
 ): readonly number[] {
   const segment = segmentForCandidate(snapshot, candidate);
   const localDocId = candidate.shardDocRef.localDocId;
   const canonicalTerm = `${channel}\u0000${term.normalize("NFC").trim()}`;
-  const posting = segment.postings.postingsForTerm(canonicalTerm)
+  const postings = postingsLookup ? postingsLookup(segment, canonicalTerm) : segment.postings.postingsForTerm(canonicalTerm);
+  const posting = postings
     .find((entry) => entry.docId === localDocId && entry.fieldId === fieldId);
   return posting?.positions ?? [];
+}
+
+function createSearchExecutionPostingsLookup(): SearchExecutionPostingsLookup {
+  const bySegment = new Map<SearchSnapshotSegment, Map<string, readonly CanonicalPosting[]>>();
+  return (segment, term) => {
+    let entries = bySegment.get(segment);
+    if (!entries) {
+      entries = new Map();
+      bySegment.set(segment, entries);
+    }
+    const cached = entries.get(term);
+    if (cached) return cached;
+    const postings = segment.postings.postingsForTerm(term);
+    entries.set(term, postings);
+    return postings;
+  };
 }
 
 function candidateFieldLength(
@@ -526,7 +551,8 @@ function candidateTags(snapshot: SearchSnapshot, candidate: RetrievalCandidate |
 function projectionCoverage(
   snapshot: SearchSnapshot,
   candidate: RetrievalCandidate,
-  context: QueryContext
+  context: QueryContext,
+  postingsLookup: SearchExecutionPostingsLookup
 ): { terms: number; fieldScore: number } {
   if (context.terms.length === 0 && SEARCH_TOKEN_CHANNELS.every((channel) => context.channels[channel].length === 0)) {
     return { terms: 0, fieldScore: 0 };
@@ -545,7 +571,7 @@ function projectionCoverage(
       let matched = false;
       for (const field of metadataCoverageFields(context)) {
         const fieldId = POSITIONAL_FIELD_ID[field];
-        if (positionsForCandidateTerm(snapshot, candidate, channel, term, fieldId).length === 0) continue;
+        if (positionsForCandidateTerm(snapshot, candidate, channel, term, fieldId, postingsLookup).length === 0) continue;
         matched = true;
         fieldScore += COVERAGE_FIELD_WEIGHT[field] * channelWeight;
       }

@@ -281,6 +281,42 @@ test("ResultAggregator and ResultHydrator are byte-identical across shuffled sha
   }
 });
 
+test("ResultHydrator can use provided loaded documents without decoding snapshot document bytes", () => {
+  const document = documentRecord("doc-a", "a.md", "Alpha", "segment-1");
+  const snapshot = {
+    ...snapshotHandle([]),
+    documents: sharedHandle(textEncoder.encode("{not-json"))
+  };
+  const search = normalizeSearchParams({ query: "needle", limit: 1 });
+  const result = new ResultHydrator().hydrate({
+    search,
+    snapshot,
+    analyzerIdentity,
+    documents: new Map([[document.documentId, document]]),
+    aggregation: {
+      finalists: [
+        finalist({
+          id: "candidate-a",
+          documentId: "doc-a",
+          pathName: "a.md",
+          title: "Alpha",
+          segmentId: "segment-1",
+          partitionId: 1,
+          localDocId: 1,
+          score: 3,
+          baseRank: 1
+        })
+      ],
+      scoredCount: 1,
+      exactBound,
+      analysis
+    }
+  });
+
+  assert.equal(result.matches[0].title, "Alpha");
+  assert.equal(result.matches[0].snippets[0].text, "Alpha needle body");
+});
+
 test("AC4 split keeps aggregation separate and delegates finalist ordering to shared helpers", () => {
   const aggregatorSource = fs.readFileSync(path.join(repoRoot, "src/daemon/search-store/result-aggregator.ts"), "utf8");
   const hydratorSource = fs.readFileSync(path.join(repoRoot, "src/daemon/search-store/result-hydrator.ts"), "utf8");

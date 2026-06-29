@@ -325,6 +325,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
     };
   }
 
+  documentsForPin(pin: PinnedSnapshot): ReadonlyMap<string, PersistedDocumentRecord> {
+    return this.loadedForPin(pin).documentsByDocumentId;
+  }
+
   statsForTests(): {
     loadedSnapshots: number;
     loadedBytes: number;

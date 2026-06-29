@@ -65,7 +65,7 @@ export function sharedBytes(handle: SharedBytesHandle): Uint8Array {
   return new Uint8Array(handle.buffer, handle.byteOffset, handle.byteLength);
 }
 
-export function documentsByPath(documents: Map<string, PersistedDocumentRecord>): Map<string, PersistedDocumentRecord> {
+export function documentsByPath(documents: ReadonlyMap<string, PersistedDocumentRecord>): Map<string, PersistedDocumentRecord> {
   return new Map([...documents.values()].map((record) => [record.path, record]));
 }
 

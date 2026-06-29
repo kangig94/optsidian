@@ -32,9 +32,10 @@ export function buildSearchSnapshotFromSegments(input: {
   snapshotId: string;
   segments: readonly PositionalSnapshotSegmentInput[];
   bm25Stats: PositionalBm25GlobalStats;
+  validateProjection?: boolean;
 }): SearchSnapshot {
   const segments = input.segments.map((segment) => {
-    const projection = new ProjectionReader(segment.bytes);
+    const projection = new ProjectionReader(segment.bytes, { validate: input.validateProjection ?? true });
     return {
       segmentId: segment.segmentId,
       partitionId: segment.partitionId,

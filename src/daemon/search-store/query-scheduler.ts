@@ -10,10 +10,12 @@ import { SearchQueryPlanner, type SearchPlan, type SearchQueryPlanInput, type Sh
 import { ResultAggregator } from "./result-aggregator.js";
 import { ResultHydrator } from "./result-hydrator.js";
 import { applySearchWarnings } from "./result-shaping.js";
+import type { PersistedDocumentRecord } from "./types.js";
 
 export type SearchQuerySchedulerInput = SearchQueryPlanInput & {
   requestId?: string;
   plan?: SearchPlan;
+  documents?: ReadonlyMap<string, PersistedDocumentRecord>;
 };
 
 export type SearchQueryLeasePool = {
@@ -380,6 +382,7 @@ export class SearchQuerySession {
       snapshot: this.input.snapshot,
       analyzerIdentity: this.input.analyzerIdentity,
       explain: this.input.explain,
+      documents: this.input.documents,
       aggregation: this.aggregator.finalize()
     });
     return applySearchWarnings(result, this.warnings);

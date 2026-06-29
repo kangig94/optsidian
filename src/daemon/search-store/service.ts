@@ -137,12 +137,14 @@ export class DaemonSearchStoreService {
     const pin = await this.store.pin(payload.vault, payload.snapshotId, snapshotContext(context));
     try {
       const snapshot = this.store.snapshotHandleForPin(pin);
+      const documents = this.documentsForPin(pin);
       if (!search.query) {
         return applySearchWarnings(executeMetadataSearchFromSnapshotHandle({
           search,
           pathFilter,
           snapshot,
-          analyzerIdentity: this.requireAnalyzerIdentity()
+          analyzerIdentity: this.requireAnalyzerIdentity(),
+          documents
         }), searchExecutionWarningLabels(search));
       }
       const analysisResult = search.query
@@ -156,6 +158,7 @@ export class DaemonSearchStoreService {
         analysis: analysisResult.analysis,
         analyzerIdentity: analysisResult.analyzerIdentity,
         snapshot,
+        documents,
         deadline: context.deadline,
         cancellationId: context.cancellationId,
         requestId: context.requestId,
@@ -170,6 +173,11 @@ export class DaemonSearchStoreService {
     return {
       queryAnalysisCache: this.queryAnalysisCache.stats()
     };
+  }
+
+  private documentsForPin(pin: Parameters<DaemonSnapshotStore["documentsForPin"]>[0]) {
+    const store = this.store as { documentsForPin?: DaemonSnapshotStore["documentsForPin"] };
+    return store.documentsForPin?.(pin);
   }
 
   private async preloadSnapshot(
