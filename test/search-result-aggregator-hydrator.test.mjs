@@ -317,6 +317,50 @@ test("ResultHydrator can use provided loaded documents without decoding snapshot
   assert.equal(result.matches[0].snippets[0].text, "Alpha needle body");
 });
 
+test("snippetsForDocument keeps top scored unique body lines", () => {
+  const line = (lineNumber, morph, text) => ({
+    line: lineNumber,
+    text,
+    snippetId: `line-${lineNumber}-${text}`,
+    segmentId: "segment-1",
+    documentId: "doc-a",
+    byteStart: 0,
+    byteEnd: text.length,
+    channels: { morph, surface: [], ngram: [] }
+  });
+  const record = {
+    documentId: "doc-a",
+    path: "a.md",
+    contentHash: "hash-a",
+    partitionId: 1,
+    title: "Alpha",
+    tags: [],
+    snippetCorpus: {
+      bodyStartLine: 1,
+      lines: [
+        line(3, ["needle"], "line three lower duplicate"),
+        line(2, ["needle"], "line two"),
+        line(5, ["needle", "bonus"], "line five"),
+        line(3, ["needle", "bonus"], "line three higher duplicate"),
+        line(4, ["bonus"], "line four"),
+        line(6, [], "line six"),
+        line(7, ["needle", "bonus"], "   ")
+      ],
+      fallback: { kind: "line", snippetId: "line-2-line two" }
+    }
+  };
+  const queryChannels = { morph: ["needle", "bonus"], surface: [], ngram: [] };
+
+  assert.deepEqual(
+    snippetsForDocument(record, queryChannels).map((snippet) => [snippet.line, snippet.text]),
+    [
+      [3, "line three higher duplicate"],
+      [5, "line five"],
+      [2, "line two"]
+    ]
+  );
+});
+
 test("AC4 split keeps aggregation separate and delegates finalist ordering to shared helpers", () => {
   const aggregatorSource = fs.readFileSync(path.join(repoRoot, "src/daemon/search-store/result-aggregator.ts"), "utf8");
   const hydratorSource = fs.readFileSync(path.join(repoRoot, "src/daemon/search-store/result-hydrator.ts"), "utf8");

@@ -40,7 +40,6 @@ import {
   searchExecutionStateFromShardHandle
 } from "./search-store/search-execution-state.js";
 import {
-  documentsByPath,
   documentsFromHandle,
   explainTrace,
   matchDebug,
@@ -113,7 +112,20 @@ type SearchExecutionLookupContext = {
   segmentByKey: ReadonlyMap<string, SearchSnapshotSegment>;
   bm25StatsLookup: PositionalBm25StatsLookup;
   fieldLengthLookup: SearchFieldLengthLookup;
+  positionsLookup: CandidateTermPositionsLookup;
 };
+
+type CandidateTermPositionsLookup = (
+  segment: SearchSnapshotSegment,
+  localDocId: number,
+  channel: SearchTokenChannel,
+  term: string,
+  fieldId: number,
+  postingsLookup?: QueryPostingsLookup
+) => readonly number[];
+
+const EMPTY_SEARCH_POSITIONS: readonly number[] = [];
+type CandidateTermPositionsIndex = ReadonlyMap<string, readonly number[]>;
 
 export type SearchShardExecutionResult = {
   snapshotId: string;
@@ -194,23 +206,21 @@ function querySearch(
   const featurePayloads = engine.featureStore.featuresFor(retrievalQuery, rerankCandidateSet) as readonly CandidateFeaturePayload[];
   const exactBound = exactDominanceBoundForSearchSnapshot({ snapshot, analysis, search });
   const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
-  const rankedAll = deterministicRankedHits(
+  const rankedHits = deterministicRankedHits(
     hits,
     rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals)
-  ).map((entry) => entry.rank);
-  const ranked = rankedAll.slice(0, search.limit);
-  const hitByPath = new Map(hits.map((hit) => [hit.document.path, hit]));
-  const documentsByRelPath = documentsByPath(documents);
-  const matches = ranked.map((rank): SearchMatch => {
-    const hit = hitByPath.get(rank.path);
-    const record = hit ? documents.get(hit.candidate.documentId) : documentsByRelPath.get(rank.path);
+  );
+  const rankedAll = rankedHits.map((entry) => entry.rank);
+  const ranked = rankedHits.slice(0, search.limit);
+  const matches = ranked.map(({ hit, rank }): SearchMatch => {
+    const record = documents.get(hit.candidate.documentId);
     const snippets = record ? snippetsForDocument(record, analysis.channels) : [];
     return {
       path: rank.path,
       title: rank.title,
       tags: rank.tags,
       snippets: record ? snippets : [],
-      ...(search.debug && hit
+      ...(search.debug
         ? {
             debug: matchDebug({
               hit,
@@ -421,7 +431,8 @@ function createSearchExecutionLookupContext(snapshot: SearchSnapshot): SearchExe
   return {
     segmentByKey: new Map(snapshot.segments.map((segment) => [searchSegmentKey(segment), segment])),
     bm25StatsLookup: createPositionalBm25StatsLookup(snapshot.bm25Stats),
-    fieldLengthLookup: createSearchFieldLengthLookup()
+    fieldLengthLookup: createSearchFieldLengthLookup(),
+    positionsLookup: createCandidateTermPositionsLookup()
   };
 }
 
@@ -559,11 +570,47 @@ function positionsForCandidateTerm(
 ): readonly number[] {
   const segment = segmentForCandidate(snapshot, candidate, lookupContext);
   const localDocId = candidate.shardDocRef.localDocId;
+  if (lookupContext) {
+    return lookupContext.positionsLookup(segment, localDocId, channel, term, fieldId, postingsLookup);
+  }
   const canonicalTerm = `${channel}\u0000${term.normalize("NFC").trim()}`;
   const postings = postingsLookup ? postingsLookup(segment, canonicalTerm) : segment.postings.postingsForTerm(canonicalTerm);
   const posting = postings
     .find((entry) => entry.docId === localDocId && entry.fieldId === fieldId);
-  return posting?.positions ?? [];
+  return posting?.positions ?? EMPTY_SEARCH_POSITIONS;
+}
+
+function createCandidateTermPositionsLookup(): CandidateTermPositionsLookup {
+  const bySegment = new Map<SearchSnapshotSegment, Map<string, CandidateTermPositionsIndex>>();
+  return (segment, localDocId, channel, term, fieldId, postingsLookup) => {
+    let entries = bySegment.get(segment);
+    if (!entries) {
+      entries = new Map();
+      bySegment.set(segment, entries);
+    }
+    const normalizedTerm = term.normalize("NFC").trim();
+    const canonicalTerm = `${channel}\u0000${normalizedTerm}`;
+    let positionsByDocField = entries.get(canonicalTerm);
+    if (!positionsByDocField) {
+      const postings = postingsLookup ? postingsLookup(segment, canonicalTerm) : segment.postings.postingsForTerm(canonicalTerm);
+      positionsByDocField = candidateTermPositionsIndex(postings);
+      entries.set(canonicalTerm, positionsByDocField);
+    }
+    return positionsByDocField.get(candidateTermDocFieldKey(localDocId, fieldId)) ?? EMPTY_SEARCH_POSITIONS;
+  };
+}
+
+function candidateTermPositionsIndex(postings: readonly { docId: number; fieldId: number; positions: readonly number[] }[]): CandidateTermPositionsIndex {
+  const positionsByDocField = new Map<string, readonly number[]>();
+  for (const posting of postings) {
+    const key = candidateTermDocFieldKey(posting.docId, posting.fieldId);
+    if (!positionsByDocField.has(key)) positionsByDocField.set(key, posting.positions);
+  }
+  return positionsByDocField;
+}
+
+function candidateTermDocFieldKey(localDocId: number, fieldId: number): string {
+  return `${localDocId}\u0000${fieldId}`;
 }
 
 function candidateFieldLength(

@@ -54,6 +54,11 @@ export type SearchShardFinalist = SearchHitEvidence & {
   feature: CandidateFeaturePayload;
 };
 
+type ScoredSnippetLine = {
+  line: SnapshotSnippetLine;
+  score: number;
+};
+
 const textDecoder = new TextDecoder();
 
 export function documentsFromHandle(handle: SearchExecutionSnapshotHandle): Map<string, PersistedDocumentRecord> {
@@ -71,14 +76,16 @@ export function documentsByPath(documents: ReadonlyMap<string, PersistedDocument
 
 export function snippetsForDocument(record: PersistedDocumentRecord, queryChannels: SearchTokenChannelTerms) {
   const corpus = record.snippetCorpus;
-  const candidates = corpus.lines.filter(
-    (line) => snippetLineHasChannels(line) && line.line > corpus.bodyStartLine && line.text.trim().length > 0
-  );
-  const scored = candidates
-    .map((line) => ({ line, score: snippetScore(line, queryChannels) }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score || left.line.line - right.line.line);
-  if (scored.length > 0) return uniqueSnippets(scored.map((entry) => entry.line)).slice(0, 3);
+  const scoredByLine = new Map<number, ScoredSnippetLine>();
+  for (const line of corpus.lines) {
+    if (!snippetLineHasChannels(line) || line.line <= corpus.bodyStartLine || line.text.trim().length === 0) continue;
+    const score = snippetScore(line, queryChannels);
+    if (score <= 0) continue;
+    const current = scoredByLine.get(line.line);
+    if (!current || score > current.score) scoredByLine.set(line.line, { line, score });
+  }
+  const scored = topScoredSnippetLines(scoredByLine.values(), 3);
+  if (scored.length > 0) return scored.map((entry) => entry.line);
   if (corpus.fallback.kind === "line") {
     const fallbackSnippetId = corpus.fallback.snippetId;
     const fallback = corpus.lines.find((line) => line.snippetId === fallbackSnippetId);
@@ -209,9 +216,10 @@ export function explainTrace(input: {
 function snippetScore(line: SnapshotSnippetLine, queryChannels: SearchTokenChannelTerms): number {
   let score = 0;
   for (const channel of SEARCH_TOKEN_CHANNELS) {
-    const lineTerms = new Set(line.channels[channel]);
+    const lineTerms = line.channels[channel];
+    if (lineTerms.length === 0) continue;
     for (const term of queryChannels[channel]) {
-      if (lineTerms.has(term)) score += SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
+      if (lineTerms.includes(term)) score += SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
     }
   }
   return score;
@@ -221,15 +229,20 @@ function snippetLineHasChannels(line: SnapshotSnippetLine): boolean {
   return SEARCH_TOKEN_CHANNELS.some((channel) => line.channels[channel].length > 0);
 }
 
-function uniqueSnippets<T extends { line: number }>(snippets: readonly T[]): T[] {
-  const seen = new Set<number>();
-  const output: T[] = [];
-  for (const snippet of snippets) {
-    if (seen.has(snippet.line)) continue;
-    seen.add(snippet.line);
-    output.push(snippet);
+function topScoredSnippetLines(entries: Iterable<ScoredSnippetLine>, limit: number): ScoredSnippetLine[] {
+  const output: ScoredSnippetLine[] = [];
+  for (const entry of entries) {
+    const insertAt = output.findIndex((current) => compareScoredSnippetLine(entry, current) < 0);
+    if (insertAt < 0) output.push(entry);
+    else output.splice(insertAt, 0, entry);
+    if (output.length > limit) output.pop();
   }
   return output;
+}
+
+function compareScoredSnippetLine(left: ScoredSnippetLine, right: ScoredSnippetLine): number {
+  if (right.score !== left.score) return right.score - left.score;
+  return left.line.line - right.line.line;
 }
 
 function analyzerDebugInfo(identity: SearchAnalyzerIdentity) {
