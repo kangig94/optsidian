@@ -151,6 +151,7 @@ export class DaemonSearchStoreService {
         snapshot,
         deadline: context.deadline,
         cancellationId: context.cancellationId,
+        requestId: context.requestId,
         explain
       });
     } finally {
@@ -196,6 +197,7 @@ export class DaemonSearchStoreService {
       {
         deadline: context.deadline,
         cancellationId: context.cancellationId,
+        requestId: context.requestId,
         vault
       },
       options
@@ -243,6 +245,7 @@ export class DaemonSearchStoreService {
     const result = await this.latencyAnalyzer.analyzeQuery(rawQuery, {
       deadline: context.deadline,
       cancellationId: context.cancellationId,
+      requestId: context.requestId,
       vault
     }, { ngram: this.searchSettings.ngram });
     assertQueryAnalysisTermCount(result.analysis);

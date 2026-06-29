@@ -229,6 +229,7 @@ export class AnalyzerWorkerPool {
 export class SearchExecutionWorkerPool {
   private readonly pool: DaemonWorkerPool;
   private readonly env: NodeJS.ProcessEnv;
+  private nextFanoutOffset = 0;
 
   constructor(pool: DaemonWorkerPool, env: NodeJS.ProcessEnv = process.env) {
     this.pool = pool;
@@ -249,7 +250,7 @@ export class SearchExecutionWorkerPool {
   ): Promise<Array<{ job: SearchShardExecutionJob; slotId: number; promise: Promise<SearchShardExecutionResult> }>> {
     if (jobs.length === 0) return [];
     await this.pool.warmup(Math.min(jobs.length, this.pool.slotIds().length));
-    const readySlotIds = this.orderedFanoutSlotIds(this.pool.readySlotIds());
+    const readySlotIds = this.reserveFanoutSlotIds(this.orderedFanoutSlotIds(this.pool.readySlotIds()), jobs.length);
     if (readySlotIds.length === 0) {
       throw Object.assign(new Error("search execution pool has no ready workers"), { code: "SEARCH_DAEMON_NOT_READY" });
     }
@@ -327,6 +328,15 @@ export class SearchExecutionWorkerPool {
       return [...ordered.slice(offset), ...ordered.slice(0, offset)];
     }
     return ordered;
+  }
+
+  private reserveFanoutSlotIds(slotIds: readonly number[], jobCount: number): number[] {
+    const ordered = [...slotIds];
+    if (ordered.length <= 1) return ordered;
+    const offset = this.nextFanoutOffset % ordered.length;
+    const reserved = [...ordered.slice(offset), ...ordered.slice(0, offset)];
+    this.nextFanoutOffset = (this.nextFanoutOffset + Math.min(Math.max(1, jobCount), ordered.length)) % ordered.length;
+    return reserved;
   }
 }
 

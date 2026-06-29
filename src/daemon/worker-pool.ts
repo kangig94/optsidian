@@ -16,6 +16,7 @@ export type DaemonWorkerRequest = {
 export type WorkerPoolRunOptions = {
   deadline: number;
   cancellationId: string;
+  requestId?: string;
   vault?: string;
   onProgress?: (progress: SearchIndexProgressUpdate) => void;
 };
@@ -130,6 +131,7 @@ export class DaemonWorkerPool {
   private nextId = 1;
   private nextSlotId = 1;
   private lastVault: string | undefined;
+  private readonly lastTargetRequestGroupBySlot = new Map<number, string>();
   private closed = false;
   private restartCount = 0;
   private lastRestartReason: string | undefined;
@@ -481,6 +483,11 @@ export class DaemonWorkerPool {
   }
 
   private retargetQueuedItems(previousSlotId: number, nextSlotId?: number): void {
+    const lastTargetRequestGroup = this.lastTargetRequestGroupBySlot.get(previousSlotId);
+    this.lastTargetRequestGroupBySlot.delete(previousSlotId);
+    if (nextSlotId !== undefined && lastTargetRequestGroup !== undefined) {
+      this.lastTargetRequestGroupBySlot.set(nextSlotId, lastTargetRequestGroup);
+    }
     for (const item of this.queue) {
       if (item.targetSlotId !== previousSlotId) continue;
       if (nextSlotId === undefined) delete item.targetSlotId;
@@ -515,11 +522,8 @@ export class DaemonWorkerPool {
   // drain calls this per idle slot, so the scan is O(slots × queue); the queue is expected to stay small.
   private dequeueRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
     if (this.queue.length === 0) return undefined;
-    const targetIndex = this.queue.findIndex((item) => item.targetSlotId === slot.id);
-    if (targetIndex >= 0) {
-      const [item] = this.queue.splice(targetIndex, 1);
-      return item;
-    }
+    const targeted = this.dequeueTargetedRunnable(slot);
+    if (targeted) return targeted;
     const runnable = this.queue.filter((item) => item.targetSlotId === undefined);
     const vaults = [...new Set(runnable.map((item) => item.options.vault ?? ""))];
     const start = this.lastVault === undefined ? 0 : Math.max(0, vaults.indexOf(this.lastVault) + 1);
@@ -535,6 +539,26 @@ export class DaemonWorkerPool {
     if (genericIndex < 0) return undefined;
     const [item] = this.queue.splice(genericIndex, 1);
     return item;
+  }
+
+  private dequeueTargetedRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
+    const groups = [
+      ...new Set(this.queue
+        .filter((item) => item.targetSlotId === slot.id)
+        .map((item) => requestGroupKey(item)))
+    ];
+    if (groups.length === 0) return undefined;
+    const lastGroup = this.lastTargetRequestGroupBySlot.get(slot.id);
+    const start = lastGroup === undefined ? 0 : Math.max(0, groups.indexOf(lastGroup) + 1);
+    const orderedGroups = [...groups.slice(start), ...groups.slice(0, start)];
+    for (const group of orderedGroups) {
+      const index = this.queue.findIndex((item) => item.targetSlotId === slot.id && requestGroupKey(item) === group);
+      if (index < 0) continue;
+      const [item] = this.queue.splice(index, 1);
+      this.lastTargetRequestGroupBySlot.set(slot.id, group);
+      return item;
+    }
+    return undefined;
   }
 
   private idleSlot(): WorkerSlot | undefined {
@@ -656,6 +680,10 @@ function memoryRestartReason(
 
 function restartBackoffMs(attempts: number): number {
   return Math.min(SLOT_RESTART_BACKOFF_CAP_MS, SLOT_RESTART_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
+}
+
+function requestGroupKey(item: QueueItem<unknown>): string {
+  return JSON.stringify([item.options.vault ?? "", item.options.requestId ?? item.options.cancellationId]);
 }
 
 function delay(ms: number): Promise<void> {

@@ -728,6 +728,93 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("worker pool round-robins targeted jobs by request group", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "targeted-request-fairness.mjs");
+  const releasePath = path.join(root, "release.marker");
+  const jobLog = path.join(root, "jobs.log");
+  fs.writeFileSync(jobLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const releasePath = ${JSON.stringify(releasePath)};
+const jobLog = ${JSON.stringify(jobLog)};
+
+function finish(id, result) {
+  parentPort.postMessage({ id, ok: true, result, memoryRss: process.memoryUsage().rss });
+}
+
+function waitForRelease(id) {
+  if (fs.existsSync(releasePath)) {
+    finish(id, { label: "block" });
+    return;
+  }
+  setTimeout(() => waitForRelease(id), 5);
+}
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  const label = message.request?.payload?.label;
+  fs.appendFileSync(jobLog, label + "\\n");
+  if (label === "block") {
+    waitForRelease(message.id);
+    return;
+  }
+  finish(message.id, { label });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "targeted-request-fairness",
+    kind: "search",
+    size: 1,
+    workerScript,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    const [slotId] = pool.readySlotIds();
+    const deadline = Date.now() + 10_000;
+    const blocker = pool.runOnSlot({ type: "search", payload: { label: "block" } }, {
+      deadline,
+      cancellationId: "block",
+      requestId: "block",
+      vault: "vault-a"
+    }, slotId);
+    await waitFor(() => fs.readFileSync(jobLog, "utf8").includes("block\n"));
+
+    const a1 = pool.runOnSlot({ type: "search", payload: { label: "a1" } }, {
+      deadline,
+      cancellationId: "request-a",
+      requestId: "request-a",
+      vault: "vault-a"
+    }, slotId);
+    const a2 = pool.runOnSlot({ type: "search", payload: { label: "a2" } }, {
+      deadline,
+      cancellationId: "request-a",
+      requestId: "request-a",
+      vault: "vault-a"
+    }, slotId);
+    const b1 = pool.runOnSlot({ type: "search", payload: { label: "b1" } }, {
+      deadline,
+      cancellationId: "request-b",
+      requestId: "request-b",
+      vault: "vault-a"
+    }, slotId);
+
+    fs.writeFileSync(releasePath, "go");
+    await Promise.all([blocker, a1, a2, b1]);
+    assert.equal(fs.readFileSync(jobLog, "utf8"), "block\na1\nb1\na2\n");
+  } finally {
+    fs.writeFileSync(releasePath, "go");
+    await pool.close();
+  }
+});
+
 test("daemon pools defer latency analyzer warmup until query analysis", async () => {
   const { createDaemonPools } = await futureImport("src/daemon/pools.ts");
   const pools = await createDaemonPools({
@@ -2758,6 +2845,68 @@ parentPort.on("message", (message) => {
       assert.equal(error.code, "CANCELLED");
       return true;
     });
+  } finally {
+    await pool.close();
+  }
+});
+
+test("search-execution pool rotates partial fan-out slot reservations", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const { SearchExecutionWorkerPool } = await futureImport("src/daemon/pools.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "partial-fanout-rotation.mjs");
+  fs.writeFileSync(workerScript, `
+import { parentPort } from "node:worker_threads";
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  parentPort.postMessage({
+    id: message.id,
+    ok: true,
+    result: {
+      snapshotId: "snap",
+      partitionIds: [],
+      requestedLimit: 0,
+      workEstimate: 0,
+      scoredCount: 0,
+      finalists: []
+    },
+    memoryRss: process.memoryUsage().rss
+  });
+});
+`);
+  const pool = new SearchExecutionWorkerPool(new DaemonWorkerPool({
+    name: "partial-fanout-rotation",
+    kind: "search",
+    size: 4,
+    workerScript,
+    env: { ...process.env }
+  }));
+  try {
+    await pool.warmup();
+    const shardJob = (label) => ({ label });
+    const first = await pool.dispatchSearchShards([shardJob("a1"), shardJob("a2")], {
+      deadline: Date.now() + 10_000,
+      cancellationId: "fanout-a",
+      requestId: "fanout-a",
+      vault: "vault-a"
+    });
+    const second = await pool.dispatchSearchShards([shardJob("b1"), shardJob("b2")], {
+      deadline: Date.now() + 10_000,
+      cancellationId: "fanout-b",
+      requestId: "fanout-b",
+      vault: "vault-a"
+    });
+    const firstSlotIds = first.map((entry) => entry.slotId);
+    const secondSlotIds = second.map((entry) => entry.slotId);
+
+    assert.equal(new Set(firstSlotIds).size, 2);
+    assert.equal(new Set(secondSlotIds).size, 2);
+    assert.equal(new Set([...firstSlotIds, ...secondSlotIds]).size, 4);
+    await Promise.all([...first, ...second].map((entry) => entry.promise));
   } finally {
     await pool.close();
   }

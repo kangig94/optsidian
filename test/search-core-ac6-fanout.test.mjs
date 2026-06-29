@@ -359,6 +359,46 @@ test("AC6 fan-out skips zero-work shards without dispatching", async () => {
   assert.deepEqual(result.matches, []);
 });
 
+test("AC6 fan-out defaults to reserving search workers for concurrent queries", async () => {
+  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
+  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
+  const snapshot = snapshotHandle(built, "pin-fanout-reservation");
+  let dispatchedJobs = 0;
+  const fakeSearchExecution = {
+    fanoutSlotCount: () => 4,
+    dispatchSearchShards: async (jobs) => {
+      dispatchedJobs = jobs.length;
+      return jobs.map((job, index) => ({
+        job,
+        slotId: index + 1,
+        promise: Promise.resolve({
+          snapshotId: job.snapshot.snapshotId,
+          partitionIds: job.snapshot.segments.map((segment) => segment.partitionId),
+          requestedLimit: job.requestedLimit,
+          workEstimate: job.workEstimate,
+          scoredCount: 0,
+          finalists: []
+        })
+      }));
+    },
+    cancel: () => {}
+  };
+  const coordinator = new QueryCoordinator(fakeSearchExecution);
+  const search = normalizeSearchParams({ query: "needle common", limit: 5 });
+  await coordinator.execute({
+    vault,
+    search,
+    analysis: testQueryAnalysis(search.query),
+    analyzerIdentity: analyzer.identity,
+    snapshot,
+    deadline: Date.now() + 10_000,
+    cancellationId: "ac6-fanout-reservation"
+  });
+
+  assert.equal(dispatchedJobs, 2);
+});
+
 test("AC6 single-query fan-out latency report", { timeout: 240_000 }, async () => {
   const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
   const { createDaemonPools } = await import(path.join(repoRoot, "src/daemon/pools.ts"));

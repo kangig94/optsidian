@@ -32,6 +32,7 @@ export type QueryCoordinatorInput = {
   snapshot: SearchExecutionSnapshotHandle;
   deadline: number;
   cancellationId: string;
+  requestId?: string;
   explain?: boolean;
 };
 
@@ -169,6 +170,7 @@ export class QueryCoordinator {
       scheduled = await this.searchExecution.dispatchSearchShards(jobs, {
         deadline: input.deadline,
         cancellationId: input.cancellationId,
+        requestId: input.requestId ?? input.cancellationId,
         vault: input.vault
       });
     } catch (error) {
@@ -211,10 +213,16 @@ function fanoutSearchChannels(
 function fanoutGroupCount(searchExecution: SearchExecutionWorkerPool, segmentCount: number): number {
   if (segmentCount <= 0) return 0;
   const candidate = (searchExecution as unknown as { fanoutSlotCount?: () => number }).fanoutSlotCount?.();
+  const configured = envPositiveInt("OPTSIDIAN_SEARCH_FANOUT_GROUPS");
   const slots = typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0
     ? candidate
-    : envPositiveInt("OPTSIDIAN_SEARCH_FANOUT_GROUPS") ?? DEFAULT_FANOUT_GROUPS;
-  return Math.max(1, Math.min(segmentCount, slots));
+    : configured ?? DEFAULT_FANOUT_GROUPS;
+  return Math.max(1, Math.min(segmentCount, slots, configured ?? defaultFanoutGroupCount(slots)));
+}
+
+function defaultFanoutGroupCount(slots: number): number {
+  if (slots <= 2) return slots;
+  return Math.max(2, Math.ceil(slots / 2));
 }
 
 function packSegmentsByWork(segments: readonly WeightedSegment[], groupCount: number): SegmentGroup[] {
