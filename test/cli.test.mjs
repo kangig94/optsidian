@@ -1367,6 +1367,7 @@ test("similarity command exposes vector contract with provider fallback", () => 
     "mode=global",
     "frontmatter-key=type",
     "frontmatter-value=project",
+    "path-glob=LLM-Wiki/*/index.md",
     "field=title,body",
     "top-k=5",
     "min-score=0.55",
@@ -1380,6 +1381,8 @@ test("similarity command exposes vector contract with provider fallback", () => 
   assert.equal(payload.schemaVersion, 1);
   assert.equal(payload.available, false);
   assert.equal(payload.status, "provider-unavailable");
+  assert.equal(payload.request.scope.pathGlob, "LLM-Wiki/*/index.md");
+  assert.deepEqual(payload.request.scope.paths, []);
   assert.deepEqual(payload.request.scope.frontmatter, [{ key: "type", op: "eq", value: "project" }]);
   assert.deepEqual(payload.request.projection.fields, ["title", "body"]);
   assert.equal(payload.request.projection.version, "title-body-plain-strip-frontmatter-v1");
@@ -1404,18 +1407,26 @@ test("similarity command exposes vector contract with provider fallback", () => 
   const requestJson = JSON.stringify({
     mode: "left",
     left: { text: "semantic project text", id: "ad-hoc-left" },
-    scope: { frontmatter: [{ key: "type", op: "eq", value: "project" }] },
+    scope: {
+      paths: ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"],
+      frontmatter: [{ key: "type", op: "eq", value: "project" }]
+    },
     projection: { fields: ["title"], stripFrontmatter: true },
     topK: 3
   });
   const structured = run(["similarity", `request-json=${requestJson}`, "format=json"], { env });
   assert.equal(structured.status, 0, structured.stderr);
   assert.equal(JSON.parse(structured.stdout).request.left.id, "ad-hoc-left");
+  assert.deepEqual(JSON.parse(structured.stdout).request.scope.paths, ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"]);
   assert.deepEqual(JSON.parse(structured.stdout).request.projection.fields, ["title"]);
 
   const invalid = run(["similarity", "mode=left", "format=json"], { env });
   assert.equal(invalid.status, 2);
   assert.match(invalid.stderr, /mode=left requires left/);
+
+  const invalidScope = run(["similarity", "path=Projects", "path-glob=LLM-Wiki/*/index.md"], { env });
+  assert.equal(invalidScope.status, 2);
+  assert.match(invalidScope.stderr, /Use only one/);
 });
 
 test("index mutation rendering stays stable", async () => {

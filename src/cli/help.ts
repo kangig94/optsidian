@@ -72,7 +72,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
   similarity: {
     summary: "Vector similarity API contract for note and text comparisons",
     usage: [
-      "optsidian similarity mode=global [frontmatter-key=<key> frontmatter-value=<value>] [path=<dir|file>] [field=<field,...>] [top-k=<n>] [min-score=<0..1>] [model=<id>] [format=text|json]",
+      "optsidian similarity mode=global [frontmatter-key=<key> frontmatter-value=<value>] [path=<dir|file>|paths=<path,...>|path-glob=<glob>] [field=<field,...>] [top-k=<n>] [min-score=<0..1>] [model=<id>] [format=text|json]",
       "optsidian similarity mode=left left=<path>|left-text=<text|@file> [frontmatter-key=<key> frontmatter-value=<value>] [top-k=<n>] [format=text|json]",
       "optsidian similarity mode=pair left=<path>|left-text=<text|@file> right=<path>|right-text=<text|@file> [format=text|json]",
       "optsidian similarity request-json=<json|@file> [format=text|json]"
@@ -83,6 +83,9 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "frontmatter-value=<value>", description: "String frontmatter value for equality filtering" },
       { name: "frontmatter-value-json=<json>", description: "Typed scalar frontmatter value, or @file" },
       { name: "path=<dir|file>", description: "Vault-relative candidate scope" },
+      { name: "paths=<path,...>", description: "Exact vault-relative candidate paths" },
+      { name: "paths-json=<json>", description: "Exact candidate paths as a JSON string array, or @file" },
+      { name: "path-glob=<glob>", description: "Vault-relative glob candidate scope, e.g. LLM-Wiki/*/index.md" },
       { name: "field=<field,...>", description: "Projection fields: title, body, aliases, headings, tags (default: title,body)" },
       { name: "strip-frontmatter=true|false", description: "Exclude YAML frontmatter from body projection by default" },
       { name: "markdown=plain|raw", description: "Projection markdown handling; plain is the default contract" },
@@ -99,7 +102,8 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     notes: [
       "Similarity is CLI-only and currently returns available=false until an embedding provider is configured.",
       "The default projection is title plus frontmatter-excluded body.",
-      "frontmatter filters select candidates but are not embedded as projection text."
+      "frontmatter filters select candidates but are not embedded as projection text.",
+      "Use only one path selector: path, paths, or path-glob."
     ]
   },
   index: {

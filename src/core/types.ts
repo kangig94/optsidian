@@ -170,6 +170,8 @@ export type SimilarityFrontmatterFilter = {
 
 export type SimilarityScope = {
   path?: string;
+  paths?: string[];
+  pathGlob?: string;
   frontmatter?: SimilarityFrontmatterFilter[];
 };
 
@@ -204,6 +206,8 @@ export type NormalizedSimilarityParams = {
   mode: SimilarityMode;
   scope: {
     path?: string;
+    paths: string[];
+    pathGlob?: string;
     frontmatter: SimilarityFrontmatterFilter[];
   };
   projection: {

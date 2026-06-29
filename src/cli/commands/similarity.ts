@@ -75,12 +75,50 @@ function parseSimilarityMode(value: string | undefined): SimilarityMode | undefi
 
 function similarityScopeFromArgs(args: ParsedArgs): SimilarityParams["scope"] | undefined {
   const path = getValue(args, "path")?.trim();
+  const paths = scopePathsFromArgs(args);
+  const pathGlob = pathGlobFromArgs(args);
   const frontmatter = frontmatterFilterFromArgs(args);
-  if (!path && !frontmatter) return undefined;
+  if (!path && !paths && !pathGlob && !frontmatter) return undefined;
   return {
     ...(path ? { path } : {}),
+    ...(paths ? { paths } : {}),
+    ...(pathGlob ? { pathGlob } : {}),
     ...(frontmatter ? { frontmatter: [frontmatter] } : {})
   };
+}
+
+function scopePathsFromArgs(args: ParsedArgs): string[] | undefined {
+  const raw = getValue(args, "paths");
+  const rawJson = getValue(args, "paths-json");
+  if (raw !== undefined && rawJson !== undefined) throw new UsageError("Use either paths=<path,...> or paths-json=<json>, not both");
+  if (rawJson !== undefined) return parsePathsJson(rawJson);
+  if (raw === undefined) return undefined;
+  const paths = raw.split(",").map((item) => item.trim()).filter(Boolean);
+  if (paths.length === 0) throw new UsageError("paths must include at least one path");
+  return paths;
+}
+
+function parsePathsJson(value: string): string[] {
+  const raw = readRawValueOrFile(value);
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) throw new UsageError("paths-json must be a JSON array");
+    return parsed.map((item, index) => {
+      if (typeof item !== "string") throw new UsageError(`paths-json[${index}] must be a string`);
+      return item;
+    });
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    throw new UsageError(`Invalid paths-json: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function pathGlobFromArgs(args: ParsedArgs): string | undefined {
+  const raw = getValue(args, "path-glob");
+  if (raw === undefined) return undefined;
+  const pathGlob = raw.trim();
+  if (!pathGlob) throw new UsageError("path-glob must not be empty");
+  return pathGlob;
 }
 
 function frontmatterFilterFromArgs(args: ParsedArgs): SimilarityFrontmatterFilter | undefined {

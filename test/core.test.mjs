@@ -229,11 +229,27 @@ test("similarity contract normalizes vector request and unavailable fallback", a
     minScore: 0.55
   });
 
+  assert.equal(normalized.scope.path, "Projects");
+  assert.deepEqual(normalized.scope.paths, []);
   assert.deepEqual(normalized.scope.frontmatter, [{ key: "type", op: "eq", value: "project" }]);
   assert.deepEqual(normalized.projection.fields, ["title", "body"]);
   assert.equal(normalized.projection.stripFrontmatter, true);
   assert.equal(normalized.projection.version, "title-body-plain-strip-frontmatter-v1");
   assert.equal(normalized.provider.model, "bge-m3");
+
+  const retopologyScope = normalizeSimilarityParams({
+    scope: {
+      pathGlob: " LLM-Wiki/*/index.md ",
+      frontmatter: [{ key: "type", op: "eq", value: "llm-wiki" }]
+    }
+  });
+  assert.equal(retopologyScope.scope.pathGlob, "LLM-Wiki/*/index.md");
+  assert.deepEqual(retopologyScope.scope.paths, []);
+
+  const exactPaths = normalizeSimilarityParams({
+    scope: { paths: ["LLM-Wiki/a/index.md", " LLM-Wiki/b/index.md ", "LLM-Wiki/a/index.md"] }
+  });
+  assert.deepEqual(exactPaths.scope.paths, ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"]);
 
   const result = similarityUnavailableResult(vault, {
     mode: "left",
@@ -249,6 +265,7 @@ test("similarity contract normalizes vector request and unavailable fallback", a
 
   assert.throws(() => normalizeSimilarityParams({ mode: "left" }), /mode=left requires left/);
   assert.throws(() => normalizeSimilarityParams({ mode: "pair", left: { path: "a.md" } }), /mode=pair requires left and right/);
+  assert.throws(() => normalizeSimilarityParams({ scope: { path: "A.md", pathGlob: "*.md" } }), /Use only one/);
   assert.throws(
     () => normalizeSimilarityParams({ scope: { frontmatter: [{ key: "type", op: "eq", value: ["project"] }] } }),
     /must be null, string, number, or boolean/

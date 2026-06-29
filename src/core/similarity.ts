@@ -89,12 +89,36 @@ function normalizeSimilarityMode(mode: SimilarityMode | undefined): SimilarityMo
 function normalizeSimilarityScope(scope: SimilarityParams["scope"]): NormalizedSimilarityParams["scope"] {
   if (scope !== undefined && !isRecord(scope)) throw new UsageError("scope must be an object");
   if (scope?.path !== undefined && typeof scope.path !== "string") throw new UsageError("scope.path must be a string");
+  if (scope?.paths !== undefined && !Array.isArray(scope.paths)) throw new UsageError("scope.paths must be an array");
+  if (scope?.pathGlob !== undefined && typeof scope.pathGlob !== "string") throw new UsageError("scope.pathGlob must be a string");
   const frontmatter = scope?.frontmatter ?? [];
   if (!Array.isArray(frontmatter)) throw new UsageError("scope.frontmatter must be an array");
+  const path = scope?.path?.trim();
+  const paths = normalizeScopePaths(scope?.paths);
+  const pathGlob = scope?.pathGlob?.trim();
+  if (scope?.path !== undefined && !path) throw new UsageError("scope.path must not be empty");
+  if (scope?.paths !== undefined && paths.length === 0) throw new UsageError("scope.paths must include at least one path");
+  if (scope?.pathGlob !== undefined && !pathGlob) throw new UsageError("scope.pathGlob must not be empty");
+  const selectors = [Boolean(path), paths.length > 0, Boolean(pathGlob)].filter(Boolean).length;
+  if (selectors > 1) throw new UsageError("Use only one of scope.path, scope.paths, or scope.pathGlob");
   return {
-    ...(scope?.path?.trim() ? { path: scope.path.trim() } : {}),
+    ...(path ? { path } : {}),
+    paths,
+    ...(pathGlob ? { pathGlob } : {}),
     frontmatter: normalizeFrontmatterFilters(frontmatter)
   };
+}
+
+function normalizeScopePaths(paths: readonly string[] | undefined): string[] {
+  if (paths === undefined) return [];
+  const normalized: string[] = [];
+  for (const [index, value] of paths.entries()) {
+    if (typeof value !== "string") throw new UsageError(`scope.paths[${index}] must be a string`);
+    const path = value.trim();
+    if (!path) throw new UsageError(`scope.paths[${index}] must not be empty`);
+    if (!normalized.includes(path)) normalized.push(path);
+  }
+  return normalized;
 }
 
 function normalizeFrontmatterFilters(filters: readonly SimilarityFrontmatterFilter[]): SimilarityFrontmatterFilter[] {
