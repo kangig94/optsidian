@@ -40,7 +40,20 @@ export type QueryCoordinatorOptions = {
 };
 
 const DEFAULT_EXHAUSTIVE_WORK_CEILING = 10_000_000;
+const DEFAULT_FANOUT_GROUPS = 4;
 const EMPTY_DOCUMENTS_HANDLE = sharedBytesHandle(new TextEncoder().encode("[]"));
+
+type WeightedSegment = {
+  segment: SearchExecutionSnapshotHandle["segments"][number];
+  workEstimate: number;
+};
+
+type SegmentGroup = {
+  segments: SearchExecutionSnapshotHandle["segments"][number][];
+  workEstimate: number;
+};
+
+type SearchShardExecutionJobPlan = Omit<SearchShardExecutionJob, "exactBound">;
 
 export class QueryCoordinator {
   private readonly exhaustiveWorkCeiling: number;
@@ -60,20 +73,22 @@ export class QueryCoordinator {
   async execute(input: QueryCoordinatorInput): Promise<SearchExecutionResult> {
     assertRemainingDeadline(input.deadline, "before partition fan-out");
     const channels = fanoutSearchChannels(input.snapshot, input.analysis, input.search.fields);
-    const exactBound = exactDominanceBoundForSearchHandle({
-      search: input.search,
-      snapshot: input.snapshot,
-      analysis: input.analysis
-    });
-    const jobs = this.partitionJobs(input, channels, exactBound);
-    const totalWorkEstimate = jobs.reduce((sum, job) => sum + job.workEstimate, 0);
+    const jobPlans = this.partitionJobPlans(input, channels);
+    const totalWorkEstimate = jobPlans.reduce((sum, job) => sum + job.workEstimate, 0);
     if (totalWorkEstimate > this.exhaustiveWorkCeiling) {
       throw Object.assign(
         new Error(`query exhaustive work bound ${totalWorkEstimate} exceeds ceiling ${this.exhaustiveWorkCeiling}`),
         { code: "DEADLINE_EXCEEDED" }
       );
     }
-    if (jobs.length === 0) {
+    const exactBound = jobPlans.length > 0 || input.explain
+      ? exactDominanceBoundForSearchHandle({
+          search: input.search,
+          snapshot: input.snapshot,
+          analysis: input.analysis
+        })
+      : undefined;
+    if (jobPlans.length === 0) {
       return hydrateSearchShardFinalists({
         search: input.search,
         snapshot: input.snapshot,
@@ -85,6 +100,8 @@ export class QueryCoordinator {
         exactBound
       });
     }
+    if (!exactBound) throw Object.assign(new Error("search shard jobs require exact-bound evidence"), { code: "INTERNAL" });
+    const jobs = jobPlans.map((job) => ({ ...job, exactBound }));
 
     const shardResults = await this.dispatchAllSettled(jobs, input);
     for (const result of shardResults) {
@@ -106,16 +123,20 @@ export class QueryCoordinator {
     });
   }
 
-  private partitionJobs(
+  private partitionJobPlans(
     input: QueryCoordinatorInput,
-    channels: readonly SearchTokenChannel[],
-    exactBound: SearchShardExecutionJob["exactBound"]
-  ): SearchShardExecutionJob[] {
-    const segments = [...input.snapshot.segments]
+    channels: readonly SearchTokenChannel[]
+  ): SearchShardExecutionJobPlan[] {
+    const weightedSegments = [...input.snapshot.segments]
       .filter((segment) => segmentMatchesPathFilter(segment, input.pathFilter))
-      .sort((left, right) => left.partitionId - right.partitionId || compareByteStrings(left.segmentId, right.segmentId));
-    return segments.map((segment) => {
-      const workEstimate = estimateSegmentWork(segment, input.analysis, input.search.fields, channels);
+      .sort(compareSegments)
+      .map((segment): WeightedSegment => ({
+        segment,
+        workEstimate: estimateSegmentWork(segment, input.analysis, input.search.fields, channels)
+      }))
+      .filter((entry) => entry.workEstimate > 0);
+    const groups = packSegmentsByWork(weightedSegments, fanoutGroupCount(this.searchExecution, weightedSegments.length));
+    return groups.map((group) => {
       return {
         vault: input.vault,
         search: input.search,
@@ -127,12 +148,11 @@ export class QueryCoordinator {
           pinToken: input.snapshot.pinToken,
           bm25Stats: input.snapshot.bm25Stats,
           documents: EMPTY_DOCUMENTS_HANDLE,
-          segments: [segment]
+          segments: group.segments
         },
         channels,
-        exactBound,
         requestedLimit: input.search.limit,
-        workEstimate,
+        workEstimate: group.workEstimate,
         deadline: input.deadline,
         cancellationId: input.cancellationId,
         explain: input.explain
@@ -186,6 +206,50 @@ function fanoutSearchChannels(
     return ngramWork > 0 ? ["ngram"] : SEARCH_TOKEN_CHANNELS.filter((channel) => channel !== "ngram");
   }
   return SEARCH_TOKEN_CHANNELS;
+}
+
+function fanoutGroupCount(searchExecution: SearchExecutionWorkerPool, segmentCount: number): number {
+  if (segmentCount <= 0) return 0;
+  const candidate = (searchExecution as unknown as { fanoutSlotCount?: () => number }).fanoutSlotCount?.();
+  const slots = typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0
+    ? candidate
+    : envPositiveInt("OPTSIDIAN_SEARCH_FANOUT_GROUPS") ?? DEFAULT_FANOUT_GROUPS;
+  return Math.max(1, Math.min(segmentCount, slots));
+}
+
+function packSegmentsByWork(segments: readonly WeightedSegment[], groupCount: number): SegmentGroup[] {
+  if (segments.length === 0 || groupCount <= 0) return [];
+  const groups: SegmentGroup[] = Array.from({ length: Math.min(groupCount, segments.length) }, () => ({
+    segments: [],
+    workEstimate: 0
+  }));
+  const weighted = [...segments].sort((left, right) =>
+    right.workEstimate - left.workEstimate || compareSegments(left.segment, right.segment)
+  );
+  for (const entry of weighted) {
+    const group = leastLoadedGroup(groups);
+    group.segments.push(entry.segment);
+    group.workEstimate += entry.workEstimate;
+  }
+  return groups
+    .filter((group) => group.segments.length > 0)
+    .map((group) => ({
+      segments: group.segments.sort(compareSegments),
+      workEstimate: group.workEstimate
+    }))
+    .sort((left, right) => compareSegments(left.segments[0], right.segments[0]));
+}
+
+function leastLoadedGroup(groups: readonly SegmentGroup[]): SegmentGroup {
+  return groups.reduce((best, group) => {
+    if (group.workEstimate < best.workEstimate) return group;
+    if (group.workEstimate > best.workEstimate) return best;
+    const bestFirst = best.segments[0];
+    const groupFirst = group.segments[0];
+    if (!bestFirst) return best;
+    if (!groupFirst) return group;
+    return compareSegments(groupFirst, bestFirst) < 0 ? group : best;
+  });
 }
 
 function estimateSegmentWork(
@@ -270,6 +334,13 @@ function segmentMatchesPathFilter(
     if (matchesPathFilter(projection.doc(localDocId).path, pathFilter)) return true;
   }
   return false;
+}
+
+function compareSegments(
+  left: SearchExecutionSnapshotHandle["segments"][number],
+  right: SearchExecutionSnapshotHandle["segments"][number]
+): number {
+  return left.partitionId - right.partitionId || compareByteStrings(left.segmentId, right.segmentId);
 }
 
 function sharedBytes(handle: SharedBytesHandle): Uint8Array {

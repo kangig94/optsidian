@@ -329,6 +329,36 @@ test("AC6 shard failure cancels siblings, waits all settled, fails whole query, 
   assert.deepEqual(released, ["pin-life"]);
 });
 
+test("AC6 fan-out skips zero-work shards without dispatching", async () => {
+  const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
+  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
+  const snapshot = snapshotHandle(built, "pin-zero-work");
+  let dispatched = false;
+  const fakeSearchExecution = {
+    fanoutSlotCount: () => 4,
+    dispatchSearchShards: async () => {
+      dispatched = true;
+      throw new Error("zero-work query should not dispatch shards");
+    },
+    cancel: () => {}
+  };
+  const coordinator = new QueryCoordinator(fakeSearchExecution);
+  const search = normalizeSearchParams({ query: "definitelyabsentterm", limit: 5 });
+  const result = await coordinator.execute({
+    vault,
+    search,
+    analysis: testQueryAnalysis(search.query),
+    analyzerIdentity: analyzer.identity,
+    snapshot,
+    deadline: Date.now() + 10_000,
+    cancellationId: "ac6-zero-work"
+  });
+
+  assert.equal(dispatched, false);
+  assert.deepEqual(result.matches, []);
+});
+
 test("AC6 single-query fan-out latency report", { timeout: 240_000 }, async () => {
   const { QueryCoordinator } = await import(path.join(repoRoot, "src/daemon/search-store/query-coordinator.ts"));
   const { createDaemonPools } = await import(path.join(repoRoot, "src/daemon/pools.ts"));

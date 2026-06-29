@@ -239,6 +239,10 @@ export class SearchExecutionWorkerPool {
     return this.pool.run<SearchExecutionResult>({ type: "search", payload: job }, options);
   }
 
+  fanoutSlotCount(): number {
+    return this.pool.slotIds().length;
+  }
+
   async dispatchSearchShards(
     jobs: readonly SearchShardExecutionJob[],
     options: WorkerPoolRunOptions
