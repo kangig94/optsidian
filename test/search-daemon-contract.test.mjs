@@ -2012,6 +2012,60 @@ test("search execution state cache is scoped by immutable snapshot id, not reque
   assert.deepEqual(second.matches.map((match) => match.path), ["Alpha.md"]);
 });
 
+test("query execution shares postings cache between retrieval and feature scoring", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const {
+    exactDominanceBoundForSearchHandle,
+    executeSearchJob
+  } = await futureImport("src/daemon/search-execution.ts");
+  const { normalizeSearchParams } = await futureImport("src/core/search/params.ts");
+  const { CanonicalSegmentPostingsReader } = await futureImport("src/core/search/retrieval/positional/segment-postings-reader.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "CacheProbe.md", "# Cache Probe Unique\n\ncacheprobeunique target cacheprobeunique\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const snapshot = {
+    snapshotId: built.snapshotId,
+    pinToken: "pin-postings-cache",
+    bm25Stats: bm25StatsFromManifest(built.manifest),
+    documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
+    segments: built.segments.map((segment) => ({
+      segmentId: segment.hash,
+      partitionId: segment.partitionId,
+      bytes: sharedHandle(segment.bytes)
+    }))
+  };
+  const search = normalizeSearchParams({ query: "cacheprobeunique", limit: 10 });
+  const analysis = testQueryAnalysis("cacheprobeunique");
+  // Warm the snapshot-wide exact-bound cache so this probe isolates query-local retrieval and feature postings reads.
+  exactDominanceBoundForSearchHandle({ search, snapshot, analysis });
+  const calls = new Map();
+  const originalPostingsForTerm = CanonicalSegmentPostingsReader.prototype.postingsForTerm;
+  CanonicalSegmentPostingsReader.prototype.postingsForTerm = function patchedPostingsForTerm(term) {
+    calls.set(term, (calls.get(term) ?? 0) + 1);
+    return originalPostingsForTerm.call(this, term);
+  };
+  try {
+    const result = executeSearchJob({
+      vault,
+      search,
+      analysis,
+      analyzerIdentity: analyzer.identity,
+      snapshot
+    });
+
+    assert.deepEqual(result.matches.map((match) => match.path), ["CacheProbe.md"]);
+    assert.equal(calls.get("morph\u0000cacheprobeunique"), snapshot.segments.length);
+    assert.equal(calls.get("surface\u0000cacheprobeunique"), snapshot.segments.length);
+  } finally {
+    CanonicalSegmentPostingsReader.prototype.postingsForTerm = originalPostingsForTerm;
+  }
+});
+
 test("metadata-only search does not hydrate positional segments", async () => {
   const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
   const { executeSearchJob } = await futureImport("src/daemon/search-execution.ts");

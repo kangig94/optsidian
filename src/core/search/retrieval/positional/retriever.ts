@@ -75,22 +75,25 @@ type SegmentProximityMatch = {
   };
 };
 
-type QueryPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
+export type QueryPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
 
-export function createPositionalRetriever(snapshot: SearchSnapshot): Retriever {
+export function createPositionalRetriever(snapshot: SearchSnapshot, postingsLookup?: QueryPostingsLookup): Retriever {
   return {
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
-    retrieve: (query) => retrievePositionalCandidates(snapshot, query)
+    retrieve: (query) => retrievePositionalCandidates(snapshot, query, postingsLookup)
   };
 }
 
-export function retrievePositionalCandidates(snapshot: SearchSnapshot, query: RetrievalQuery): CandidateSet {
+export function retrievePositionalCandidates(
+  snapshot: SearchSnapshot,
+  query: RetrievalQuery,
+  postingsLookup = createQueryPostingsLookup()
+): CandidateSet {
   const fields = allowedFields(query.fields);
   const candidateBuilders = new Map<string, CandidateBuilder>();
   const explicitChannels = Boolean(query.channels);
   const channels = positionalSearchChannels(query);
   const searchedChannels = new Set<SearchTokenChannel>();
-  const postingsLookup = createQueryPostingsLookup();
 
   const searchChannel = (channel: SearchTokenChannel) => {
     searchedChannels.add(channel);
@@ -307,7 +310,7 @@ function postingsByTermForSegment(
   return postings;
 }
 
-function createQueryPostingsLookup(): QueryPostingsLookup {
+export function createQueryPostingsLookup(): QueryPostingsLookup {
   const bySegment = new Map<SearchSnapshotSegment, Map<string, readonly CanonicalPosting[]>>();
   return (segment, term) => {
     let entries = bySegment.get(segment);
