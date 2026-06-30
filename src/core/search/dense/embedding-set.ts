@@ -8,8 +8,8 @@ import {
   type EmbeddingVector
 } from "./provider.js";
 
-export const FAKE_EMBEDDING_RECIPE_VERSION = "fake-embedding-recipe-v1";
-export const FAKE_VECTOR_PROJECTION_VERSION = "fake-l2-float64-projection-v1";
+export const DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION = "deterministic-hash-embedding-recipe-v1";
+export const EMBEDDING_VECTOR_PROJECTION_VERSION = "l2-float64-projection-v1";
 
 export type EmbeddingRecipeIdentity = {
   schemaVersion: 1;
@@ -74,7 +74,7 @@ export type BuiltEmbeddingSet = {
   coveredDocumentIds: ReadonlySet<string>;
 };
 
-export function fakeEmbeddingRecipeIdentity(provider: EmbeddingProviderIdentity): EmbeddingRecipeIdentity {
+export function deterministicHashEmbeddingRecipeIdentity(provider: EmbeddingProviderIdentity): EmbeddingRecipeIdentity {
   return {
     schemaVersion: 1,
     provider: {
@@ -83,49 +83,69 @@ export function fakeEmbeddingRecipeIdentity(provider: EmbeddingProviderIdentity)
       dim: provider.dim,
       version: provider.version
     },
-    recipeVersion: FAKE_EMBEDDING_RECIPE_VERSION,
-    projectionVersion: FAKE_VECTOR_PROJECTION_VERSION,
+    recipeVersion: DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION,
+    projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,
     normalization: "l2"
   };
 }
 
-export async function buildFakeEmbeddingSet(input: {
+export async function buildEmbeddingSet(input: {
   provider: EmbeddingProvider;
   documents: readonly EmbeddingSetDocumentInput[];
 }): Promise<BuiltEmbeddingSet> {
   const recipe = embeddingRecipeIdentityForProvider(input.provider);
-  const records = await Promise.all(input.documents.map(async (document) => {
-    const vector = normalizeEmbeddingVector(
+  const vectors = await Promise.all(input.documents.map(async (document) =>
+    normalizeEmbeddingVector(
       await input.provider.embed(document.text, { inputKind: "document" }),
       input.provider.identity.dim
-    );
+    )
+  ));
+  return buildEmbeddingSetFromVectors({
+    provider: input.provider.identity,
+    recipe,
+    documents: input.documents,
+    vectors
+  });
+}
+
+export function buildEmbeddingSetFromVectors(input: {
+  provider: EmbeddingProviderIdentity;
+  recipe: EmbeddingRecipeIdentity;
+  documents: readonly EmbeddingSetDocumentInput[];
+  vectors: readonly EmbeddingVector[];
+}): BuiltEmbeddingSet {
+  if (input.documents.length !== input.vectors.length) {
+    throw new Error(`embedding set vector count ${input.vectors.length} does not match document count ${input.documents.length}`);
+  }
+  const records = input.documents.map((document, index) => {
+    const rawVector = input.vectors[index];
+    if (!rawVector) throw new Error(`embedding vector is missing for document ${document.documentId}`);
+    const vector = normalizeEmbeddingVector(rawVector, input.provider.dim);
     return {
       ...document,
       vector,
       vectorProjectionHash: vectorProjectionHash(vector)
     };
-  }));
+  });
   const sorted = sortEmbeddingSetRecords(records);
   const embeddingSetId = computeEmbeddingSetId({
-    recipe,
+    recipe: input.recipe,
     records: sorted
   });
   return {
     schemaVersion: 1,
     embeddingSetId,
-    recipe,
-    model: input.provider.identity.model,
-    dim: input.provider.identity.dim,
+    recipe: input.recipe,
+    model: input.provider.model,
+    dim: input.provider.dim,
     records: sorted,
     coveredDocumentIds: new Set(sorted.map((record) => record.documentId))
   };
 }
 
-export const buildEmbeddingSet = buildFakeEmbeddingSet;
-
 export function embeddingRecipeIdentityForProvider(provider: EmbeddingProvider): EmbeddingRecipeIdentity {
   const custom = (provider as EmbeddingProvider & { recipeIdentity?: EmbeddingRecipeIdentity }).recipeIdentity;
-  return custom ?? fakeEmbeddingRecipeIdentity(provider.identity);
+  return custom ?? deterministicHashEmbeddingRecipeIdentity(provider.identity);
 }
 
 export function computeEmbeddingSetId(input: {
@@ -147,7 +167,7 @@ export function computeEmbeddingSetId(input: {
 
 export function vectorProjectionHash(vector: EmbeddingVector): string {
   return sha256(canonicalValueBytes({
-    projectionVersion: FAKE_VECTOR_PROJECTION_VERSION,
+    projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,
     vector: projectVector(vector)
   }));
 }

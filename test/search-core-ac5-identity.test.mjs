@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
 const PRE_CHANGE_SCHEMA_DIGEST = "298ed77e0d89ac164671c8104225d1f292e955d75ed27423de49d169e185afac";
@@ -93,6 +94,7 @@ test("AC5 schema digest identity changes from the pre-change baseline and stale 
     analyzer,
     partitionBits: 1,
     searchSettings: SEARCH_SETTINGS,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
     snapshotBuilder: async () => {
       buildCount += 1;
       return built;
@@ -150,7 +152,13 @@ test("AC5 snapshot envelope validator rejects old diagnostics.documents shape at
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer(), partitionBits: 1, searchSettings: SEARCH_SETTINGS });
+  const store = createDaemonSnapshotStore({
+    env,
+    analyzer: testAnalyzer(),
+    partitionBits: 1,
+    searchSettings: SEARCH_SETTINGS,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder()
+  });
 
   const loaded = await store.loadVault(vault);
   assert.equal(loaded.vaults[0].status, "ready");

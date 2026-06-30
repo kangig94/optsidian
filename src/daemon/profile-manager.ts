@@ -1,10 +1,14 @@
 import { createDaemonPools, type DaemonPools } from "./pools.js";
 import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from "./protocol.js";
-import { createDaemonSnapshotStore, DaemonSearchStoreService } from "./search-store/index.js";
+import { createDaemonSnapshotStore, createWorkerEmbeddingSetBuilder, DaemonSearchStoreService } from "./search-store/index.js";
 import { SearchCacheCatalog } from "./search-store/cache-catalog.js";
 import { createMemoryCoralNeedleInstanceFactory, VectorGenerationPool } from "./vector-store/index.js";
 import type { CoralNeedleInstanceFactory } from "./vector-store/types.js";
 import type { SearchIndexPruneResult } from "../core/types.js";
+import {
+  DeterministicHashProvider,
+  createLocalOnnxProviderFromConfig
+} from "../core/search/dense/index.js";
 import { VaultRegistry } from "./vault-registry.js";
 import {
   effectiveSearchRuntimeProfile,
@@ -71,6 +75,19 @@ export class ProfileRuntime {
     const settings = settingsForSearchRuntimeProfile(normalized);
     const pools = await createDaemonPools(env, settings);
     const vectorPool = new VectorGenerationPool({ factory: vectorInstanceFactory(env) });
+    const embeddingProvider = normalized.embedding.provider === "deterministic-hash"
+      ? new DeterministicHashProvider()
+      : createLocalOnnxProviderFromConfig(settings, env);
+    const providerPayload = normalized.embedding.provider === "deterministic-hash"
+      ? {
+          kind: "deterministic-hash" as const,
+          model: embeddingProvider.identity.model,
+          dim: embeddingProvider.identity.dim
+        }
+      : {
+          kind: "local-onnx" as const,
+          model: normalized.embedding.model
+        };
     const snapshotStore = createDaemonSnapshotStore({
       env,
       countCap: normalized.memory.snapshotCountCap,
@@ -79,6 +96,11 @@ export class ProfileRuntime {
       profileHash,
       searchSettings: normalized.index,
       vectorPool,
+      embeddingSetBuilder: createWorkerEmbeddingSetBuilder({
+        provider: embeddingProvider,
+        providerPayload,
+        embedding: pools.embedding
+      }),
       snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
         deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
         cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { FakeProvider } from "../src/core/search/dense/index.ts";
+import { DeterministicHashProvider } from "../src/core/search/dense/index.ts";
 import { ModelSessionLifecycle } from "../src/daemon/model-session/index.ts";
 import {
   EmbedOnSaveIndexPlane,
@@ -26,11 +26,11 @@ function makeKey(overrides = {}) {
   };
 }
 
-function makeSpec(specId = "fake-spec", dims = 3) {
+function makeSpec(specId = "deterministic-spec", dims = 3) {
   return {
     specId,
-    provider: "fake",
-    model: "fake-content-hash-v1",
+    provider: "deterministic-hash",
+    model: "content-hash-v1",
     dims,
     normalization: "l2",
     createdAt: "2026-01-01T00:00:00.000Z"
@@ -513,7 +513,7 @@ test("AC11 P4 freshness persists dirty/building/fresh states and embed-on-save r
     vectorGenerationId: "gen-initial"
   });
 
-  const provider = new FakeProvider({
+  const provider = new DeterministicHashProvider({
     fixtures: new Map([
       ["alpha changed", [0, 0, 1]],
       ["broken", [1, 1, 1]]

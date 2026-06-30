@@ -149,8 +149,8 @@ export type ReduceBuildSegmentWorkerPayload = {
 
 export type ReduceBuildSegmentWorkerResult = BuiltSegment;
 
-export type FakeModelProviderPayload = {
-  kind: "fake";
+export type DeterministicHashModelProviderPayload = {
+  kind: "deterministic-hash";
   model?: string;
   dim?: number;
   fixtures?: readonly [string, EmbeddingVector][];
@@ -162,7 +162,7 @@ export type LocalOnnxModelProviderPayload = {
   executionProvider?: OnnxExecutionProviderPreference;
 };
 
-export type ModelProviderPayload = FakeModelProviderPayload | LocalOnnxModelProviderPayload;
+export type ModelProviderPayload = DeterministicHashModelProviderPayload | LocalOnnxModelProviderPayload;
 
 export type ModelEncodeWorkerPayload = {
   texts: readonly string[];

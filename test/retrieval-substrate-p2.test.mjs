@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { FakeProvider, createDenseRetriever } from "../src/core/search/dense/index.ts";
+import { DeterministicHashProvider, createDenseRetriever } from "../src/core/search/dense/index.ts";
 import { SEARCH_SCORING_LAMBDAS } from "../src/core/search/constants.ts";
 import { fuseCandidateSets, retrieveWithFusion } from "../src/core/search/retrieval/fusion.ts";
 import { POSITIONAL_FIELD_ID } from "../src/core/search/retrieval/positional/index.ts";
@@ -187,15 +187,15 @@ test("AC3 P2 fusion handles zero weights duplicate merge preference and tie brea
   assert.equal(fused.candidates.find((candidate) => candidate.candidateId === "beta")?.rrfScore, 0);
 });
 
-test("AC3 P2 fake dense retriever propagates denseAgreement through fusion features and rerankScore", async () => {
+test("AC3 P2 deterministic dense retriever propagates denseAgreement through fusion features and rerankScore", async () => {
   assert.ok(SEARCH_SCORING_LAMBDAS.dense > 0);
   assert.ok(SEARCH_SCORING_LAMBDAS.link > 0);
 
   const queryText = "semantic handle";
   const nearText = "near latent concept";
   const farText = "literal but opposite";
-  const provider = new FakeProvider({
-    model: "fake-semantic-v1",
+  const provider = new DeterministicHashProvider({
+    model: "deterministic-semantic-v1",
     fixtures: new Map([
       [queryText, [1, 0, 0]],
       [nearText, [1, 0, 0]],
@@ -242,7 +242,7 @@ test("AC3 P2 fake dense retriever propagates denseAgreement through fusion featu
 
   const denseSet = await denseRetriever.retrieve(query);
   assert.equal(denseSet.retrieverIdentity.id, "dense");
-  assert.deepEqual(denseSet.retrieverIdentity.parameters, { model: "fake-semantic-v1", metric: "cosine" });
+  assert.deepEqual(denseSet.retrieverIdentity.parameters, { model: "deterministic-semantic-v1", metric: "cosine" });
   assert.deepEqual(denseSet.candidates.map((candidate) => candidate.path), ["Near.md", "Far.md"]);
 
   const lexicalRetriever = {

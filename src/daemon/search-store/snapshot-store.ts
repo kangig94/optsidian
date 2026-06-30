@@ -6,6 +6,7 @@ import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer, ty
 import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../core/search/analysis/index.js";
 import {
   canonicalBm25GlobalStatsHash,
+  corpusSnapshotIdFromManifest,
   decodeCanonicalSegment,
   canonicalValueBytes,
   reduceCanonicalBm25GlobalStats,
@@ -25,11 +26,18 @@ import type {
   SnapshotView
 } from "../../core/search/contracts.js";
 import {
-  FakeProvider,
-  buildFakeEmbeddingSet,
+  buildEmbeddingSet,
+  buildEmbeddingSetFromVectors,
+  DeterministicHashProvider,
+  createLocalOnnxProviderFromConfig,
+  embeddingRecipeIdentityForProvider,
   type EmbeddingProviderIdentity,
+  type BuiltEmbeddingSet,
+  type EmbeddingProvider,
   type EmbeddingRecipeIdentity,
-  type EmbeddingSetRecord
+  type EmbeddingSetDocumentInput,
+  type EmbeddingSetRecord,
+  type EmbeddingVector
 } from "../../core/search/dense/index.js";
 import { DENSE_RETRIEVER_VERSION } from "../../core/search/dense/retriever.js";
 import { computeRetrieverPlanIdentity, DEFAULT_RRF_K, type FusionParameters } from "../../core/search/retrieval/fusion.js";
@@ -41,12 +49,17 @@ import {
 import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
 import { recordVaultAccess, recentVaultAccessRoots } from "../../core/vault-access.js";
 import { vaultRelative, walkFiles } from "../../core/path.js";
-import { readOptsidianSettings, searchNgramEnabled } from "../../core/settings.js";
+import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings } from "../../core/settings.js";
 import {
   normalizeIndexAffectingSearchSettings,
   type IndexAffectingSearchSettings
 } from "../../core/search/index-settings.js";
-import type { SearchIndexProgressUpdate } from "../protocol.js";
+import {
+  SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
+  type ModelProviderPayload,
+  type SearchIndexProgressUpdate
+} from "../protocol.js";
+import type { EmbeddingWorkerPool } from "../pools.js";
 import { buildCanonicalSearchSnapshot, DEFAULT_PARTITION_BITS, snapshotIdentityTuple, snapshotIdentityTupleForAnalyzerIdentity } from "./builder.js";
 import { searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
 import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "../search-execution.js";
@@ -106,6 +119,7 @@ export type DaemonSnapshotStoreOptions = {
   durableRenameRetrievalPointer?: DurableRename;
   durableRenameLinkGraph?: DurableRename;
   vectorPool?: VectorGenerationPool;
+  embeddingSetBuilder?: RetrievalEmbeddingSetBuilder;
 };
 
 export type LoadVaultResult = {
@@ -137,6 +151,24 @@ type SnapshotBuilderInput = {
   cancellationId?: string;
   progress?: (progress: SearchIndexProgressUpdate) => void;
 };
+
+export type RetrievalEmbeddingSetBuilderInput = {
+  vaultRoot: string;
+  documents: readonly EmbeddingSetDocumentInput[];
+  deadline?: number;
+  cancellationId?: string;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
+};
+
+export type RetrievalEmbeddingSetBuilder = {
+  readonly providerIdentity: EmbeddingProviderIdentity;
+  build(input: RetrievalEmbeddingSetBuilderInput): Promise<BuiltEmbeddingSet>;
+};
+
+type RetrievalSnapshotSource = Pick<
+  BuiltSnapshot,
+  "snapshotId" | "corpusSnapshotId" | "identityTuple" | "documents" | "linkGraphId"
+>;
 
 type LoadedSnapshot = {
   vaultRoot: string;
@@ -215,6 +247,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly renameRetrieval: DurableRename;
   private readonly renameLinkGraph: DurableRename;
   private readonly vectorPool: VectorGenerationPool | undefined;
+  private readonly embeddingSetBuilder: RetrievalEmbeddingSetBuilder;
   private readonly loaded = new Map<string, LoadedSnapshot>();
   private readonly activeByVault = new Map<string, string>();
   private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
@@ -258,6 +291,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.renameRetrieval = options.durableRenameRetrievalPointer ?? durableRename;
     this.renameLinkGraph = options.durableRenameLinkGraph ?? durableRename;
     this.vectorPool = options.vectorPool;
+    this.embeddingSetBuilder = options.embeddingSetBuilder ??
+      createConfiguredEmbeddingSetBuilder(settings, this.env);
   }
 
   searchAnalyzerIdentity(): SearchAnalyzerIdentity {
@@ -409,7 +444,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
     const currentIdentity = currentRetrievalIdentity({
       linkGraphId: retrieval.linkGraphId,
-      rankingFeatureVersion: String(envelope.manifest.identityTuple.rankingFeatureVersion)
+      rankingFeatureVersion: String(envelope.manifest.identityTuple.rankingFeatureVersion),
+      provider: this.embeddingSetBuilder.providerIdentity
     });
     if (
       retrieval.retrieverPlanIdentity !== currentIdentity.retrieverPlanIdentity ||
@@ -585,7 +621,23 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const active = this.readActivePointer(paths);
     if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
       try {
-        await this.ensureLoaded(paths, active.snapshotId);
+        const loaded = await this.ensureLoaded(paths, active.snapshotId);
+        const retrievalPin = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
+        if (
+          retrievalPin.status === "ready" &&
+          retrievalPin.pin.snapshotId === active.snapshotId &&
+          retrievalPin.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
+        ) {
+          this.release(retrievalPin.pin);
+        } else {
+          if (retrievalPin.status === "ready") this.release(retrievalPin.pin);
+          await this.publishRetrievalSnapshot(
+            paths,
+            retrievalSnapshotSourceFromEnvelope(loaded.envelope),
+            loaded.envelope,
+            context
+          );
+        }
         this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
         return active.snapshotId;
       } catch {
@@ -613,7 +665,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       total: built.segments.length,
       completed: 0
     });
-    await this.publishBuiltSnapshot(paths, built);
+    await this.publishBuiltSnapshot(paths, built, context);
     context.progress?.({
       phase: "publishing",
       total: built.segments.length,
@@ -644,7 +696,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
     );
   }
 
-  private async publishBuiltSnapshot(paths: SearchStoreCachePaths, built: BuiltSnapshot): Promise<void> {
+  private async publishBuiltSnapshot(
+    paths: SearchStoreCachePaths,
+    built: BuiltSnapshot,
+    context: SnapshotRequestContext = {}
+  ): Promise<void> {
     this.ensureDirs(paths);
     const envelope = snapshotEnvelope(built);
     this.inFlightPublishManifests.set(built.snapshotId, envelope);
@@ -698,7 +754,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       await this.renameActive(activeTmp, paths.activePointerPath);
       fsyncDirSync(paths.activeDir);
 
-      await this.publishRetrievalSnapshot(paths, built, envelope);
+      await this.publishRetrievalSnapshot(paths, built, envelope, context);
 
       await this.recoverVault(paths);
       this.markSweepGc(paths);
@@ -710,14 +766,19 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private async publishRetrievalSnapshot(
     paths: SearchStoreCachePaths,
-    built: BuiltSnapshot,
-    envelope: SnapshotEnvelope
+    source: RetrievalSnapshotSource,
+    envelope: SnapshotEnvelope,
+    context: SnapshotRequestContext = {}
   ): Promise<void> {
-    const provider = new FakeProvider();
-    const embeddingSet = await buildFakeEmbeddingSet({
-      provider,
-      documents: denseDocumentsForBuiltSnapshot(built)
+    const embeddingSet = await this.embeddingSetBuilder.build({
+      vaultRoot: paths.vaultRoot,
+      documents: denseDocumentsForRetrievalSource(source),
+      deadline: context.deadline,
+      cancellationId: context.cancellationId,
+      progress: context.progress
     });
+    assertProviderIdentityMatches(embeddingSet.recipe.provider, this.embeddingSetBuilder.providerIdentity);
+    const provider = embeddingSet.recipe.provider;
     const vectorPaths = vectorStoreCachePaths({
       vaultRoot: paths.vaultRoot,
       profileHash: this.profileHash,
@@ -725,10 +786,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
       env: this.env
     });
     const spec: CoralEmbeddingSpec = {
-      specId: embeddingSpecId(embeddingSet.embeddingSetId, provider.identity.model, provider.identity.dim),
-      provider: provider.identity.id,
-      model: provider.identity.model,
-      dims: provider.identity.dim,
+      specId: embeddingSpecId(embeddingSet.embeddingSetId, provider.model, provider.dim),
+      provider: provider.id,
+      model: provider.model,
+      dims: provider.dim,
       normalization: "l2",
       createdAt: new Date(0).toISOString()
     };
@@ -762,13 +823,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
 
     const { retrieverPlanIdentity, rankingFeatureVersion } = currentRetrievalIdentity({
-      linkGraphId: built.linkGraphId,
-      rankingFeatureVersion: String(built.identityTuple.rankingFeatureVersion),
+      linkGraphId: source.linkGraphId,
+      rankingFeatureVersion: String(source.identityTuple.rankingFeatureVersion),
       provider
     });
     const retrievalSnapshotId = computeRetrievalSnapshotId({
-      corpusSnapshotId: built.corpusSnapshotId,
-      linkGraphId: built.linkGraphId,
+      corpusSnapshotId: source.corpusSnapshotId,
+      linkGraphId: source.linkGraphId,
       embeddingSetId: embeddingSet.embeddingSetId,
       retrieverPlanIdentity,
       rankingFeatureVersion
@@ -776,9 +837,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const retrievalEnvelope: RetrievalSnapshotEnvelope = {
       schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
       retrievalSnapshotId,
-      snapshotId: built.snapshotId,
-      corpusSnapshotId: built.corpusSnapshotId,
-      linkGraphId: built.linkGraphId,
+      snapshotId: source.snapshotId,
+      corpusSnapshotId: source.corpusSnapshotId,
+      linkGraphId: source.linkGraphId,
       embeddingSetId: embeddingSet.embeddingSetId,
       retrieverPlanIdentity,
       rankingFeatureVersion,
@@ -793,14 +854,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
       },
       freshness: {
         state: "fresh",
-        corpusRevision: built.corpusSnapshotId
+        corpusRevision: source.corpusSnapshotId
       }
     };
     await storeRetrievalSnapshotEnvelope(paths, retrievalEnvelope);
     await new RetrievalFreshnessStore({ paths: vectorPaths }).markFresh({
-      corpusRevision: built.corpusSnapshotId,
-      corpusSnapshotId: built.corpusSnapshotId,
-      linkGraphId: built.linkGraphId,
+      corpusRevision: source.corpusSnapshotId,
+      corpusSnapshotId: source.corpusSnapshotId,
+      linkGraphId: source.linkGraphId,
       embeddingSetId: embeddingSet.embeddingSetId,
       retrievalSnapshotId,
       vectorGenerationId: generationId
@@ -809,9 +870,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const active: RetrievalActivePointer = {
       schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
       retrievalSnapshotId,
-      snapshotId: built.snapshotId,
-      corpusSnapshotId: built.corpusSnapshotId,
-      linkGraphId: built.linkGraphId,
+      snapshotId: source.snapshotId,
+      corpusSnapshotId: source.corpusSnapshotId,
+      linkGraphId: source.linkGraphId,
       embeddingSetId: embeddingSet.embeddingSetId,
       vectorGenerationId: generationId
     };
@@ -1131,6 +1192,74 @@ export function createDaemonSnapshotStore(options: DaemonSnapshotStoreOptions = 
   return new DaemonSnapshotStore(options);
 }
 
+export function createProviderEmbeddingSetBuilder(provider: EmbeddingProvider): RetrievalEmbeddingSetBuilder {
+  return {
+    providerIdentity: provider.identity,
+    build: (input) => buildEmbeddingSet({
+      provider,
+      documents: input.documents
+    })
+  };
+}
+
+export function createWorkerEmbeddingSetBuilder(input: {
+  provider: EmbeddingProvider;
+  providerPayload: ModelProviderPayload;
+  embedding: Pick<EmbeddingWorkerPool, "encode">;
+  batchSize?: number;
+}): RetrievalEmbeddingSetBuilder {
+  const batchSize = positiveCap(input.batchSize ?? 32);
+  const recipe = embeddingRecipeIdentityForProvider(input.provider);
+  return {
+    providerIdentity: input.provider.identity,
+    async build(builderInput) {
+      const vectors: EmbeddingVector[] = [];
+      for (let offset = 0; offset < builderInput.documents.length; offset += batchSize) {
+        const batch = builderInput.documents.slice(offset, offset + batchSize);
+        const encoded = await input.embedding.encode({
+          texts: batch.map((document) => document.text),
+          inputKind: "document",
+          provider: input.providerPayload
+        }, {
+          deadline: builderInput.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
+          cancellationId: builderInput.cancellationId ?? `${builderInput.vaultRoot}:embedding-build`,
+          vault: builderInput.vaultRoot,
+          onProgress: builderInput.progress
+        });
+        assertProviderIdentityMatches(encoded.provider, input.provider.identity);
+        if (encoded.vectors.length !== batch.length) {
+          throw new Error(`embedding worker returned ${encoded.vectors.length} vectors for ${batch.length} documents`);
+        }
+        vectors.push(...encoded.vectors);
+      }
+      return buildEmbeddingSetFromVectors({
+        provider: input.provider.identity,
+        recipe,
+        documents: builderInput.documents,
+        vectors
+      });
+    }
+  };
+}
+
+export function createLocalOnnxEmbeddingSetBuilder(
+  settings: OptsidianSettings = {},
+  env: NodeJS.ProcessEnv = process.env
+): RetrievalEmbeddingSetBuilder {
+  return createProviderEmbeddingSetBuilder(createLocalOnnxProviderFromConfig(settings, env));
+}
+
+export function createConfiguredEmbeddingSetBuilder(
+  settings: OptsidianSettings = {},
+  env: NodeJS.ProcessEnv = process.env
+): RetrievalEmbeddingSetBuilder {
+  const provider = env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER?.trim().toLowerCase();
+  if (provider === "deterministic-hash" || provider === "deterministic") {
+    return createProviderEmbeddingSetBuilder(new DeterministicHashProvider());
+  }
+  return createLocalOnnxEmbeddingSetBuilder(settings, env);
+}
+
 function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
   return {
     schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
@@ -1161,8 +1290,18 @@ export function computeRetrievalSnapshotId(input: {
   }));
 }
 
-function denseDocumentsForBuiltSnapshot(built: BuiltSnapshot) {
-  return built.documents.map((document) => ({
+function retrievalSnapshotSourceFromEnvelope(envelope: SnapshotEnvelope): RetrievalSnapshotSource {
+  return {
+    snapshotId: envelope.snapshotId,
+    corpusSnapshotId: envelope.corpusSnapshotId ?? corpusSnapshotIdFromManifest(envelope.manifest),
+    identityTuple: envelope.manifest.identityTuple,
+    documents: envelope.documents,
+    linkGraphId: envelope.linkGraphId
+  };
+}
+
+function denseDocumentsForRetrievalSource(source: RetrievalSnapshotSource): EmbeddingSetDocumentInput[] {
+  return source.documents.map((document) => ({
     documentId: document.documentId,
     shardDocRef: {
       segmentId: "",
@@ -1215,16 +1354,30 @@ function vectorChunksForEmbeddingSet(
   }));
 }
 
+function assertProviderIdentityMatches(actual: EmbeddingProviderIdentity, expected: EmbeddingProviderIdentity): void {
+  if (
+    actual.id !== expected.id ||
+    actual.model !== expected.model ||
+    actual.dim !== expected.dim ||
+    actual.version !== expected.version
+  ) {
+    throw new Error(
+      `embedding provider identity mismatch: expected ${expected.id}/${expected.model}/${expected.dim}/${expected.version}, ` +
+      `got ${actual.id}/${actual.model}/${actual.dim}/${actual.version}`
+    );
+  }
+}
+
 function currentRetrievalIdentity(input: {
   linkGraphId: LinkGraphId;
   rankingFeatureVersion: string;
-  provider?: { identity: EmbeddingProviderIdentity };
+  provider: EmbeddingProviderIdentity;
 }): {
   provider: EmbeddingProviderIdentity;
   retrieverPlanIdentity: string;
   rankingFeatureVersion: string;
 } {
-  const provider = input.provider?.identity ?? new FakeProvider().identity;
+  const provider = input.provider;
   return {
     provider,
     retrieverPlanIdentity: retrievalPlanIdentityFor({

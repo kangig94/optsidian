@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
 const textEncoder = new TextEncoder();
@@ -211,7 +212,11 @@ test("AC7 persisted worker bytes and decoded segments carry no plaintext body co
     phrases[1]
   ].join("\n"));
 
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore({
+    env,
+    analyzer: testAnalyzer(),
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder()
+  });
   await store.loadVault(vault);
   const pin = await store.pin(vault);
   const handle = store.snapshotHandleForPin(pin);

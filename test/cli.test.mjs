@@ -431,6 +431,7 @@ function setup() {
     XDG_CACHE_HOME: path.join(dir, "cache"),
     XDG_RUNTIME_DIR: path.join(dir, "runtime"),
     OPTSIDIAN_SEARCH_VECTOR_INSTANCE: "memory",
+    OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: "deterministic-hash",
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
   });
   return { dir, vault, env, log };

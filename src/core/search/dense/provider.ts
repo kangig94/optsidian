@@ -15,23 +15,23 @@ export interface EmbeddingProvider {
   embed(text: string, options?: { inputKind?: EmbeddingInputKind }): EmbeddingVector | Promise<EmbeddingVector>;
 }
 
-export type FakeProviderOptions = {
+export type DeterministicHashProviderOptions = {
   model?: string;
   dim?: number;
   fixtures?: ReadonlyMap<string, EmbeddingVector>;
 };
 
-export class FakeProvider implements EmbeddingProvider {
+export class DeterministicHashProvider implements EmbeddingProvider {
   readonly identity: EmbeddingProviderIdentity;
   private readonly fixtures: ReadonlyMap<string, EmbeddingVector>;
 
-  constructor(options: FakeProviderOptions = {}) {
+  constructor(options: DeterministicHashProviderOptions = {}) {
     const firstFixture = options.fixtures?.values().next().value;
     const dim = options.dim ?? (Array.isArray(firstFixture) ? firstFixture.length : undefined) ?? 8;
-    if (!Number.isSafeInteger(dim) || dim <= 0) throw new Error("FakeProvider dim must be a positive integer");
+    if (!Number.isSafeInteger(dim) || dim <= 0) throw new Error("DeterministicHashProvider dim must be a positive integer");
     this.identity = {
-      id: "fake",
-      model: options.model ?? "fake-content-hash-v1",
+      id: "deterministic-hash",
+      model: options.model ?? "content-hash-v1",
       dim,
       version: "1"
     };
@@ -77,7 +77,7 @@ function contentHashUnitVector(text: string, dim: number): number[] {
   let counter = 0;
   while (values.length < dim) {
     const hash = crypto.createHash("sha256")
-      .update("optsidian-fake-embedding-v1\0")
+      .update("optsidian-deterministic-hash-embedding-v1\0")
       .update(text.normalize("NFC"))
       .update("\0")
       .update(String(counter))

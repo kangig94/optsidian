@@ -1,7 +1,7 @@
 import { isMainThread, parentPort, workerData, type TransferListItem } from "node:worker_threads";
 import { analyzeSearchQuery, type SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from "../core/search/analyzer.js";
-import { FakeProvider, LocalOnnxProvider, type EmbeddingProvider } from "../core/search/dense/index.js";
+import { DeterministicHashProvider, LocalOnnxProvider, type EmbeddingProvider } from "../core/search/dense/index.js";
 import { ModelSessionLifecycle, type ModelDevice, type ModelSession } from "./model-session/index.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { readOptsidianSettings } from "../core/settings.js";
@@ -256,8 +256,8 @@ async function providerSessionForPayload(payload: ModelProviderPayload, device: 
 }
 
 function providerForPayload(payload: ModelProviderPayload, device: ModelDevice = "cpu"): EmbeddingProvider {
-  if (payload.kind === "fake") {
-    return new FakeProvider({
+  if (payload.kind === "deterministic-hash") {
+    return new DeterministicHashProvider({
       model: payload.model,
       dim: payload.dim,
       fixtures: payload.fixtures ? new Map(payload.fixtures) : undefined

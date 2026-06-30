@@ -8,6 +8,8 @@ import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
+export type SearchEmbeddingProviderKind = "local-onnx" | "deterministic-hash";
+
 export type SearchRuntimeProfile = {
   schemaVersion: typeof SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION;
   analyzer: {
@@ -21,6 +23,7 @@ export type SearchRuntimeProfile = {
   };
   index: IndexAffectingSearchSettings;
   embedding: {
+    provider: SearchEmbeddingProviderKind;
     model: "bge-m3" | "multilingual-e5-small";
   };
   ranking: {
@@ -75,6 +78,7 @@ export function effectiveSearchRuntimeProfile(
       ngram: searchNgramEnabled(env, settings)
     },
     embedding: {
+      provider: embeddingProvider(env),
       model: embeddingModel(env, settings)
     },
     ranking: {
@@ -139,6 +143,7 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
       ngram: booleanValue(index.ngram ?? false, "search runtime ngram")
     },
     embedding: {
+      provider: normalizeEmbeddingProvider(embedding.provider ?? "local-onnx", "search runtime embedding provider"),
       model: normalizeEmbeddingModel(embedding.model ?? "bge-m3", "search runtime embedding model")
     },
     ranking: {
@@ -182,6 +187,7 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     OPTSIDIAN_SEARCH_ANALYZER: normalized.analyzer.mode,
     OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(","),
     OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
+    OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: normalized.embedding.provider,
     OPTSIDIAN_SEARCH_EMBEDDING_MODEL: normalized.embedding.model,
     OPTSIDIAN_SEARCH_DENSE_LAMBDA: String(normalized.ranking.denseLambda),
     OPTSIDIAN_SEARCH_LINK_LAMBDA: String(normalized.ranking.linkLambda),
@@ -246,6 +252,10 @@ function embeddingModel(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "b
   return normalizeEmbeddingModel(env.OPTSIDIAN_SEARCH_EMBEDDING_MODEL ?? settings.search?.embeddingModel ?? "bge-m3", "search embedding model");
 }
 
+function embeddingProvider(env: NodeJS.ProcessEnv): SearchEmbeddingProviderKind {
+  return normalizeEmbeddingProvider(env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER ?? "local-onnx", "search embedding provider");
+}
+
 function optionalRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === undefined || value === null) return {};
   return asRecord(value, label);
@@ -303,6 +313,13 @@ function normalizeEmbeddingModel(value: unknown, label: string): "bge-m3" | "mul
     return "multilingual-e5-small";
   }
   throw new Error(`${label} must be bge-m3 or multilingual-e5-small`);
+}
+
+function normalizeEmbeddingProvider(value: unknown, label: string): SearchEmbeddingProviderKind {
+  const raw = stringValue(String(value), label).trim().toLowerCase();
+  if (raw === "local-onnx" || raw === "onnx") return "local-onnx";
+  if (raw === "deterministic-hash" || raw === "deterministic") return "deterministic-hash";
+  throw new Error(`${label} must be local-onnx or deterministic-hash`);
 }
 
 function stringList(value: unknown): string[] {

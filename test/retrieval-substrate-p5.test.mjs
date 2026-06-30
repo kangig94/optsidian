@@ -12,7 +12,11 @@ import {
   similarityResultFromRetrieve
 } from "../src/cli/commands/similarity.ts";
 import { normalizeSimilarityParams } from "../src/core/similarity.ts";
-import { FakeProvider, buildFakeEmbeddingSet } from "../src/core/search/dense/index.ts";
+import {
+  DeterministicHashProvider,
+  buildEmbeddingSet,
+  createDeterministicEmbeddingSetBuilder
+} from "./helpers/deterministic-embedding.mjs";
 import { corpusSnapshotIdFromManifest } from "../src/core/search/segments/canonical.ts";
 import { createSearchDaemonClient } from "../src/daemon/client.ts";
 import {
@@ -113,7 +117,7 @@ function createEmbeddingPool() {
       if (Date.now() >= options.deadline) {
         throw Object.assign(new Error("deadline exceeded"), { code: "DEADLINE_EXCEEDED" });
       }
-      const provider = new FakeProvider({
+      const provider = new DeterministicHashProvider({
         model: payload.provider.model,
         dim: payload.provider.dim
       });
@@ -138,7 +142,7 @@ function createEmbeddingPool() {
 }
 
 function createLifecycleEmbeddingPool() {
-  const provider = new FakeProvider();
+  const provider = new DeterministicHashProvider();
   const calls = { load: 0, close: 0, encode: 0 };
   const lifecycle = new ModelSessionLifecycle({
     requiredVramBytes: 1,
@@ -312,6 +316,7 @@ function createHarness(options = {}) {
     partitionBits: 1,
     profileHash: PROFILE_HASH,
     vectorPool,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
     snapshotBuilder: async (input) => {
       buildCount += 1;
       return buildCanonicalSearchSnapshot({
@@ -834,12 +839,12 @@ test("AC6 composite identity separates lexical, embedding, retrieval, and ANN id
     denseDoc("alpha", "Projects/Alpha.md", "alpha project semantic handle"),
     denseDoc("beta", "Projects/Beta.md", "alpha project semantic neighbor")
   ];
-  const embeddingA = await buildFakeEmbeddingSet({
-    provider: new FakeProvider({ model: "fake-model-a" }),
+  const embeddingA = await buildEmbeddingSet({
+    provider: new DeterministicHashProvider({ model: "deterministic-model-a" }),
     documents: docs
   });
-  const embeddingB = await buildFakeEmbeddingSet({
-    provider: new FakeProvider({ model: "fake-model-b" }),
+  const embeddingB = await buildEmbeddingSet({
+    provider: new DeterministicHashProvider({ model: "deterministic-model-b" }),
     documents: docs
   });
   assert.notEqual(embeddingA.embeddingSetId, embeddingB.embeddingSetId);

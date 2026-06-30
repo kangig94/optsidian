@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { unpack } from "msgpackr";
+import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
 process.env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE = "memory";
@@ -60,6 +61,13 @@ function writeVaultFile(vault, rel, content) {
 
 function tempRoot(prefix = "optsidian-search-daemon-contract-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function snapshotStoreOptions(options = {}) {
+  return {
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
+    ...options
+  };
 }
 
 function assertPrivateMode(filePath, expectedMode) {
@@ -312,12 +320,12 @@ async function createPinnedSearchFixture(files, options = {}) {
   const vault = tempRoot();
   for (const [rel, content] of Object.entries(files)) writeVaultFile(vault, rel, content);
   const analyzer = testAnalyzer();
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer,
     countCap: 4,
     byteCap: 64 * 1024 * 1024
-  });
+  }));
   await store.loadVault(vault);
   const pin = await store.pin(vault);
   const snapshot = store.snapshotHandleForPin(pin);
@@ -1592,7 +1600,7 @@ test("AC8 snapshot tmp sweep removes only files aged at least five minutes", asy
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
   await store.loadVault(vault);
 
   const paths = searchStoreCachePaths(vault, env);
@@ -1618,7 +1626,7 @@ test("search store persists cache directories and snapshot files privately", asy
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(vault, "Private.md", "# Private\n\ncache permissions\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
 
   await store.loadVault(vault);
 
@@ -1659,7 +1667,7 @@ test("search cache catalog prunes stores by last-used time and skips loaded stor
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(oldVault, "Old.md", "# Old\n\nold cache\n");
   writeVaultFile(loadedVault, "Loaded.md", "# Loaded\n\nloaded cache\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
 
   await store.loadVault(oldVault);
   await store.loadVault(loadedVault);
@@ -1695,7 +1703,7 @@ test("search cache prune skips stores with a lifecycle mutation in progress", as
   let blockBuild = false;
   let buildStarted;
   let releaseBuild;
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env,
     analyzerIdentity: testAnalyzer().identity,
     snapshotBuilder: async (input) => {
@@ -1710,7 +1718,7 @@ test("search cache prune skips stores with a lifecycle mutation in progress", as
         analyzer: testAnalyzer()
       });
     }
-  });
+  }));
 
   await store.loadVault(vault);
   const paths = searchStoreCachePaths(vault, env);
@@ -1739,7 +1747,7 @@ test("search cache prune falls back to mtimes when metadata JSON is corrupt", as
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(vault, "Corrupt.md", "# Corrupt\n\nmetadata fallback\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
 
   await store.loadVault(vault);
   const paths = searchStoreCachePaths(vault, env);
@@ -1763,7 +1771,7 @@ test("AC4 snapshot envelope stores runtime documents outside diagnostics", async
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
-  const store = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
 
   const first = await store.loadVault(vault);
   assert.equal(first.vaults[0].status, "ready");
@@ -1833,12 +1841,12 @@ test("AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
   const vaultB = tempRoot();
   writeVaultFile(vaultA, "Alpha.md", "# Alpha\n\nproject alpha\n");
   writeVaultFile(vaultB, "Beta.md", "# Beta\n\nproject beta\n");
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env,
     analyzer: testAnalyzer(),
     countCap: 1,
     byteCap: 1024 * 1024
-  });
+  }));
 
   await store.loadVault(vaultA);
   const pathsA = searchStoreCachePaths(vaultA, env);
@@ -2961,12 +2969,12 @@ test("AC7 rebuild during an in-flight search keeps the pinned snapshot stable", 
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer: testAnalyzer(),
     countCap: 4,
     byteCap: 1024 * 1024
-  });
+  }));
 
   await store.loadVault(vault);
   const pin = await store.pin(vault);
@@ -2987,12 +2995,12 @@ test("AC8 daemon restart reloads latest valid persisted snapshot with identity p
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nproject alpha\n");
 
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
-  const firstStore = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const firstStore = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
   const first = await firstStore.loadVault(vault);
   const firstSnapshotId = first.snapshotId;
   assert.match(firstSnapshotId, /^[a-f0-9]{64}$/);
 
-  const restartedStore = createDaemonSnapshotStore({ env, analyzer: testAnalyzer() });
+  const restartedStore = createDaemonSnapshotStore(snapshotStoreOptions({ env, analyzer: testAnalyzer() }));
   const restarted = await restartedStore.loadVault(vault);
   assert.equal(restarted.snapshotId, firstSnapshotId);
 });
@@ -3004,12 +3012,12 @@ test("AC11 cross-vault count budget evicts cold snapshots and reloads on demand"
   const vaultB = tempRoot();
   writeVaultFile(vaultA, "Alpha.md", "# Alpha\n\nproject alpha\n");
   writeVaultFile(vaultB, "Beta.md", "# Beta\n\nproject beta\n");
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer: testAnalyzer(),
     countCap: 1,
     byteCap: 1024 * 1024
-  });
+  }));
 
   const first = await store.loadVault(vaultA);
   const pinA = await store.pin(vaultA);
@@ -3029,12 +3037,12 @@ test("snapshot pin survives snapshots larger than the byte budget", async () => 
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, "Large.md", `# Large\n\n${"needle ".repeat(4096)}\n`);
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer: testAnalyzer(),
     countCap: 4,
     byteCap: 1
-  });
+  }));
 
   const loaded = await store.loadVault(vault);
   const pin = await store.pin(vault);
@@ -3054,12 +3062,12 @@ test("AC4 snippets resolve from the pinned snapshot without rereading vault file
   const vault = tempRoot();
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nfirst line\nNeedle channel target\n");
   const analyzer = testAnalyzer();
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer,
     countCap: 4,
     byteCap: 1024 * 1024
-  });
+  }));
 
   await store.loadVault(vault);
   const pin = await store.pin(vault);
@@ -3147,12 +3155,12 @@ test("AC12 debug output explains channels, scores, rerank signals, analyzer iden
   const vault = tempRoot();
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nNeedle project alpha\n");
   const analyzer = testAnalyzer();
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer,
     countCap: 4,
     byteCap: 1024 * 1024
-  });
+  }));
 
   await store.loadVault(vault);
   const pin = await store.pin(vault);
@@ -3248,12 +3256,12 @@ test("refresh after mutation makes new files visible and removed files disappear
   const vault = tempRoot();
   writeVaultFile(vault, "Seed.md", "# Seed\n\nordinary content\n");
   const analyzer = testAnalyzer();
-  const store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
     env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
     analyzer,
     countCap: 4,
     byteCap: 16 * 1024 * 1024
-  });
+  }));
   const searchPaths = async () => {
     const pin = await store.pin(vault);
     try {

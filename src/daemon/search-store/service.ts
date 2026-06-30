@@ -562,11 +562,14 @@ function modelProviderPayloadForEmbeddingSet(embeddingSet: PinnedRetrievalSnapsh
       model: embeddingSet.recipe.provider.model === "multilingual-e5-small" ? "multilingual-e5-small" : "bge-m3"
     };
   }
-  return {
-    kind: "fake",
-    model: embeddingSet.model,
-    dim: embeddingSet.dim
-  };
+  if (embeddingSet.recipe.provider.id === "deterministic-hash") {
+    return {
+      kind: "deterministic-hash",
+      model: embeddingSet.model,
+      dim: embeddingSet.dim
+    };
+  }
+  throw new UsageError(`Unsupported embedding provider ${embeddingSet.recipe.provider.id}`);
 }
 
 function filterMatchesByMinScore(matches: readonly SearchMatch[], minScore: number | undefined): SearchMatch[] {

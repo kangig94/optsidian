@@ -30,6 +30,7 @@ import {
 } from "../src/daemon/search-store/link-graph.ts";
 import { searchStoreCachePaths } from "../src/daemon/search-store/cache-paths.ts";
 import { createDaemonSnapshotStore } from "../src/daemon/search-store/snapshot-store.ts";
+import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
 
 function testAnalyzer() {
   const tokenize = (text) =>
@@ -241,6 +242,7 @@ test("AC2 P3 link graph sidecar hash/load/view accessors are deterministic", asy
     analyzer: testAnalyzer(),
     partitionBits: 1,
     searchSettings: { ngram: false },
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
     snapshotBuilder: async () => built
   });
   const loadedVault = await store.loadVault(vault);
@@ -281,6 +283,7 @@ test("AC2 P3 link graph GC roots protect active in-flight loaded retained and co
     partitionBits: 1,
     searchSettings: { ngram: false },
     retentionCount: 1,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
     snapshotBuilder: async () => {
       buildIndex += 1;
       return buildIndex === 1 ? builtA : builtB;
@@ -331,6 +334,7 @@ test("AC2 P3 link graph GC roots protect active in-flight loaded retained and co
     partitionBits: 1,
     searchSettings: { ngram: false },
     retentionCount: 2,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
     snapshotBuilder: async () => {
       retainedBuildIndex += 1;
       return retainedBuildIndex === 1 ? builtA : builtB;
