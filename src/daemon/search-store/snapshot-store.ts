@@ -73,8 +73,7 @@ import {
   LINK_GRAPH_RESOLVER_VERSION,
   linkGraphSidecarExists,
   loadLinkGraphView,
-  storeLinkGraphSidecar,
-  sweepLinkGraphSidecars
+  storeLinkGraphSidecar
 } from "./link-graph.js";
 import {
   RetrievalFreshnessStore,
@@ -269,9 +268,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly activeByVault = new Map<string, string>();
   private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
   private readonly inFlightPublishLinkGraphs = new Set<LinkGraphId>();
+  private readonly inFlightRetrievalSnapshots = new Map<RetrievalSnapshotId, RetrievalSnapshotEnvelope>();
   private readonly inFlightVectorGenerations = new Set<string>();
-  private readonly queuedVectorGcVaults = new Set<string>();
-  private readonly runningVectorGcByVault = new Map<string, Promise<void>>();
+  private readonly queuedGcVaults = new Set<string>();
+  private readonly runningGcByVault = new Map<string, Promise<void>>();
   private readonly lifecycleStoreRefs = new Map<string, number>();
   private readonly pinnedVectorGenerations = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
@@ -390,16 +390,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
       fs.rmSync(paths.activePointerPath, { force: true });
       fs.rmSync(paths.retrievalActivePointerPath, { force: true });
       fsyncDirSync(paths.activeDir);
-      const pinned = new Set(
-        [...this.loaded.values()]
-          .filter((snapshot) => snapshot.vaultKey === paths.vaultStateHash && snapshot.refCount > 0)
-          .map((snapshot) => snapshot.snapshotId)
-      );
-      for (const file of safeReadDir(paths.snapshotsDir)) {
-        const snapshotId = file;
-        if (!isValidSnapshotId(snapshotId)) continue;
-        if (!pinned.has(snapshotId)) fs.rmSync(path.join(paths.snapshotsDir, file), { force: true });
-      }
       this.activeByVault.delete(paths.vaultStateHash);
       this.markSweepGc(paths);
       this.cacheCatalog.recordCleared(paths);
@@ -806,7 +796,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (retrievalPublicationPromise && !retrievalPublished) {
         void retrievalPublicationPromise.then((publication) => {
           this.inFlightVectorGenerations.delete(publication.vectorGenerationGcKey);
-          this.queueVectorGc(paths);
+          this.markSweepGc(paths);
         }, () => undefined);
       }
       throw error;
@@ -1053,6 +1043,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     paths: SearchStoreCachePaths,
     publication: RetrievalSnapshotPublication
   ): Promise<void> {
+    this.inFlightRetrievalSnapshots.set(publication.envelope.retrievalSnapshotId, publication.envelope);
     try {
       await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
       await new RetrievalFreshnessStore({ paths: publication.vectorPaths }).markFresh({
@@ -1070,6 +1061,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       fsyncDirSync(paths.activeDir);
       this.markSweepGc(paths);
     } finally {
+      this.inFlightRetrievalSnapshots.delete(publication.envelope.retrievalSnapshotId);
       this.inFlightVectorGenerations.delete(publication.vectorGenerationGcKey);
     }
   }
@@ -1183,52 +1175,40 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private markSweepGc(paths: SearchStoreCachePaths): void {
     this.ensureDirs(paths);
-    const roots = this.gcRoots(paths);
-    for (const file of safeReadDir(paths.retrievalsDir)) {
-      if (!roots.retrievalSnapshotIds.has(file)) fs.rmSync(path.join(paths.retrievalsDir, file), { force: true });
-    }
-    for (const file of safeReadDir(paths.snapshotsDir)) {
-      if (!roots.snapshotIds.has(file)) fs.rmSync(path.join(paths.snapshotsDir, file), { force: true });
-    }
-    for (const file of safeReadDir(paths.segmentsDir)) {
-      if (!roots.segmentHashes.has(file)) fs.rmSync(path.join(paths.segmentsDir, file), { force: true });
-    }
-    sweepLinkGraphSidecars(paths, roots.linkGraphIds);
-    this.queueVectorGc(paths);
-    sweepStaleTmpDir(paths.tmpDir);
+    this.queueGc(paths);
   }
 
-  private gcRoots(paths: SearchStoreCachePaths): GcRoots {
+  private async gcRootsAsync(paths: SearchStoreCachePaths): Promise<GcRoots> {
     const snapshotIds = new Set<string>();
     const segmentHashes = new Set<string>();
     const linkGraphIds = new Set<LinkGraphId>();
     const retrievalSnapshotIds = new Set<RetrievalSnapshotId>();
     const vectorGenerationKeys = new Set<string>();
-    const activeRetrieval = this.readRetrievalActivePointer(paths);
+    const roots: GcRoots = { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds, vectorGenerationKeys };
+    const activeRetrieval = await this.readRetrievalActivePointerAsync(paths);
     if (activeRetrieval) {
       retrievalSnapshotIds.add(activeRetrieval.retrievalSnapshotId);
-      const retrieval = this.readRetrievalSnapshotEnvelope(paths, activeRetrieval.retrievalSnapshotId);
+      const retrieval = await this.readRetrievalSnapshotEnvelopeAsync(paths, activeRetrieval.retrievalSnapshotId);
       if (retrieval) {
-        snapshotIds.add(retrieval.snapshotId);
-        linkGraphIds.add(retrieval.linkGraphId);
-        addRetrievalVectorGcRoot(vectorGenerationKeys, paths, this.profileHash, retrieval);
+        await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
       }
     }
-    const active = this.readActivePointer(paths);
+    const active = await this.readActivePointerAsync(paths);
     if (active) {
       snapshotIds.add(active.snapshotId);
-      const envelope = this.readSnapshotEnvelope(paths, active.snapshotId);
+      const envelope = await this.readSnapshotEnvelopeAsync(paths, active.snapshotId);
       if (envelope) {
-        linkGraphIds.add(envelope.linkGraphId);
-        for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
+        addSnapshotEnvelopeGcRoots(roots, envelope);
       }
     }
     for (const [snapshotId, envelope] of this.inFlightPublishManifests) {
       snapshotIds.add(snapshotId);
-      linkGraphIds.add(envelope.linkGraphId);
-      for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
+      addSnapshotEnvelopeGcRoots(roots, envelope);
     }
     for (const linkGraphId of this.inFlightPublishLinkGraphs) linkGraphIds.add(linkGraphId);
+    for (const retrieval of this.inFlightRetrievalSnapshots.values()) {
+      await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
+    }
     for (const snapshot of this.loaded.values()) {
       if (snapshot.vaultKey !== paths.vaultStateHash) continue;
       linkGraphIds.add(snapshot.linkGraph.linkGraphId);
@@ -1236,20 +1216,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
       snapshotIds.add(snapshot.snapshotId);
       for (const partition of snapshot.envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
     }
-    for (const file of retainedSnapshotFiles(paths.snapshotsDir, this.retentionCount)) {
-      const envelope = this.readSnapshotEnvelope(paths, file);
+    for (const file of await retainedSnapshotFilesAsync(paths.snapshotsDir, this.retentionCount)) {
+      const envelope = await this.readSnapshotEnvelopeAsync(paths, file);
       if (!envelope) continue;
-      snapshotIds.add(envelope.snapshotId);
-      linkGraphIds.add(envelope.linkGraphId);
-      for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
+      addSnapshotEnvelopeGcRoots(roots, envelope);
     }
-    for (const file of retainedSnapshotFiles(paths.retrievalsDir, this.retentionCount)) {
-      const retrieval = this.readRetrievalSnapshotEnvelope(paths, file);
+    for (const file of await retainedSnapshotFilesAsync(paths.retrievalsDir, this.retentionCount)) {
+      const retrieval = await this.readRetrievalSnapshotEnvelopeAsync(paths, file);
       if (!retrieval) continue;
-      retrievalSnapshotIds.add(retrieval.retrievalSnapshotId);
-      snapshotIds.add(retrieval.snapshotId);
-      linkGraphIds.add(retrieval.linkGraphId);
-      addRetrievalVectorGcRoot(vectorGenerationKeys, paths, this.profileHash, retrieval);
+      await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
     }
     const vaultVectorPrefix = vectorGenerationGcPrefix(this.profileHash, paths.vaultStateHash);
     for (const key of this.inFlightVectorGenerations) {
@@ -1258,26 +1233,82 @@ export class DaemonSnapshotStore implements SnapshotStore {
     for (const key of this.pinnedVectorGenerations.keys()) {
       if (key.startsWith(vaultVectorPrefix)) vectorGenerationKeys.add(key);
     }
-    return { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds, vectorGenerationKeys };
+    return roots;
   }
 
-  private queueVectorGc(paths: SearchStoreCachePaths): void {
+  private async addRetrievalSnapshotGcRoots(
+    roots: GcRoots,
+    paths: SearchStoreCachePaths,
+    retrieval: RetrievalSnapshotEnvelope
+  ): Promise<void> {
+    roots.retrievalSnapshotIds.add(retrieval.retrievalSnapshotId);
+    roots.snapshotIds.add(retrieval.snapshotId);
+    roots.linkGraphIds.add(retrieval.linkGraphId);
+    const envelope = await this.readSnapshotEnvelopeAsync(paths, retrieval.snapshotId);
+    if (envelope) addSnapshotEnvelopeGcRoots(roots, envelope);
+    addRetrievalVectorGcRoot(roots.vectorGenerationKeys, paths, this.profileHash, retrieval);
+  }
+
+  private queueGc(paths: SearchStoreCachePaths): void {
     const vaultKey = paths.vaultStateHash;
-    if (this.queuedVectorGcVaults.has(vaultKey)) return;
-    this.queuedVectorGcVaults.add(vaultKey);
+    if (this.queuedGcVaults.has(vaultKey)) return;
+    this.queuedGcVaults.add(vaultKey);
     const scheduled = setImmediate(() => {
-      this.queuedVectorGcVaults.delete(vaultKey);
-      const previous = this.runningVectorGcByVault.get(vaultKey) ?? Promise.resolve();
+      this.queuedGcVaults.delete(vaultKey);
+      const previous = this.runningGcByVault.get(vaultKey) ?? Promise.resolve();
       const run = previous
         .catch(() => undefined)
-        .then(() => this.markSweepVectorGc(paths))
+        .then(() => this.runBackgroundGc(paths))
         .catch(() => undefined)
         .finally(() => {
-          if (this.runningVectorGcByVault.get(vaultKey) === run) this.runningVectorGcByVault.delete(vaultKey);
+          if (this.runningGcByVault.get(vaultKey) === run) this.runningGcByVault.delete(vaultKey);
         });
-      this.runningVectorGcByVault.set(vaultKey, run);
+      this.runningGcByVault.set(vaultKey, run);
     });
     scheduled.unref?.();
+  }
+
+  private async runBackgroundGc(paths: SearchStoreCachePaths): Promise<void> {
+    this.ensureDirs(paths);
+    await this.markSweepSearchGc(paths);
+    await this.markSweepVectorGc(paths);
+    await sweepStaleTmpDirAsync(paths.tmpDir);
+  }
+
+  private async markSweepSearchGc(paths: SearchStoreCachePaths): Promise<void> {
+    for (const file of await safeReadDirAsync(paths.retrievalsDir)) {
+      if (await this.retrievalSnapshotIsProtected(paths, file)) continue;
+      await fs.promises.rm(path.join(paths.retrievalsDir, file), { force: true });
+    }
+    for (const file of await safeReadDirAsync(paths.snapshotsDir)) {
+      if (await this.snapshotIsProtectedForGc(paths, file)) continue;
+      await fs.promises.rm(path.join(paths.snapshotsDir, file), { force: true });
+    }
+    for (const file of await safeReadDirAsync(paths.segmentsDir)) {
+      if (await this.segmentIsProtectedForGc(paths, file)) continue;
+      await fs.promises.rm(path.join(paths.segmentsDir, file), { force: true });
+    }
+    for (const file of await safeReadDirAsync(paths.linkGraphsDir)) {
+      if (!isValidSnapshotId(file)) continue;
+      if (await this.linkGraphIsProtectedForGc(paths, file as LinkGraphId)) continue;
+      await fs.promises.rm(path.join(paths.linkGraphsDir, file), { force: true });
+    }
+  }
+
+  private async retrievalSnapshotIsProtected(paths: SearchStoreCachePaths, retrievalSnapshotId: string): Promise<boolean> {
+    return (await this.gcRootsAsync(paths)).retrievalSnapshotIds.has(retrievalSnapshotId as RetrievalSnapshotId);
+  }
+
+  private async snapshotIsProtectedForGc(paths: SearchStoreCachePaths, snapshotId: string): Promise<boolean> {
+    return (await this.gcRootsAsync(paths)).snapshotIds.has(snapshotId);
+  }
+
+  private async segmentIsProtectedForGc(paths: SearchStoreCachePaths, segmentHash: string): Promise<boolean> {
+    return (await this.gcRootsAsync(paths)).segmentHashes.has(segmentHash);
+  }
+
+  private async linkGraphIsProtectedForGc(paths: SearchStoreCachePaths, linkGraphId: LinkGraphId): Promise<boolean> {
+    return (await this.gcRootsAsync(paths)).linkGraphIds.has(linkGraphId);
   }
 
   private async markSweepVectorGc(paths: SearchStoreCachePaths): Promise<void> {
@@ -1306,7 +1337,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
           embeddingSetId: embeddingSetDir,
           generationId: generationDir
         });
-        if (this.vectorGenerationIsProtected(paths, key)) continue;
+        if (await this.vectorGenerationIsProtected(paths, key)) continue;
         await fs.promises.rm(generationPath, { recursive: true, force: true });
       }
       let hasGenerations = false;
@@ -1316,7 +1347,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
           break;
         }
       }
-      if (!hasGenerations && !this.vectorStoreHasProtectedGeneration(paths, embeddingSetDir)) {
+      if (!hasGenerations && !await this.vectorStoreHasProtectedGeneration(paths, embeddingSetDir)) {
         await fs.promises.rm(vectorPaths.rootDir, { recursive: true, force: true });
         removedStoreIds.push(vectorStoreId(vectorPaths));
       }
@@ -1326,13 +1357,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
-  private vectorGenerationIsProtected(paths: SearchStoreCachePaths, key: string): boolean {
-    return this.gcRoots(paths).vectorGenerationKeys.has(key);
+  private async vectorGenerationIsProtected(paths: SearchStoreCachePaths, key: string): Promise<boolean> {
+    return (await this.gcRootsAsync(paths)).vectorGenerationKeys.has(key);
   }
 
-  private vectorStoreHasProtectedGeneration(paths: SearchStoreCachePaths, embeddingSetId: string): boolean {
+  private async vectorStoreHasProtectedGeneration(paths: SearchStoreCachePaths, embeddingSetId: string): Promise<boolean> {
     return hasProtectedVectorStoreGeneration(
-      this.gcRoots(paths).vectorGenerationKeys,
+      (await this.gcRootsAsync(paths)).vectorGenerationKeys,
       this.profileHash,
       paths.vaultStateHash,
       embeddingSetId
@@ -1363,7 +1394,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
     this.ensureDirs(paths);
-    sweepStaleTmpDir(paths.tmpDir);
     const active = this.readActivePointer(paths);
     if (active && !this.readSnapshotEnvelope(paths, active.snapshotId)) {
       fs.rmSync(paths.activePointerPath, { force: true });
@@ -1383,9 +1413,30 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
+  private async readActivePointerAsync(paths: SearchStoreCachePaths): Promise<ActivePointer | undefined> {
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(paths.activePointerPath, "utf8")) as unknown;
+      if (!isActivePointer(parsed)) return undefined;
+      if (!await this.readSnapshotEnvelopeAsync(paths, parsed.snapshotId)) return undefined;
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
   private readRetrievalActivePointer(paths: SearchStoreCachePaths): RetrievalActivePointer | undefined {
     try {
       const parsed = JSON.parse(fs.readFileSync(paths.retrievalActivePointerPath, "utf8")) as unknown;
+      if (!isRetrievalActivePointer(parsed)) return undefined;
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readRetrievalActivePointerAsync(paths: SearchStoreCachePaths): Promise<RetrievalActivePointer | undefined> {
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(paths.retrievalActivePointerPath, "utf8")) as unknown;
       if (!isRetrievalActivePointer(parsed)) return undefined;
       return parsed;
     } catch {
@@ -1410,6 +1461,19 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
+  private async readSnapshotEnvelopeAsync(paths: SearchStoreCachePaths, snapshotId: string): Promise<SnapshotEnvelope | undefined> {
+    if (!isValidSnapshotId(snapshotId)) return undefined;
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(path.join(paths.snapshotsDir, snapshotId), "utf8")) as unknown;
+      if (!isSnapshotEnvelope(parsed)) return undefined;
+      const actual = snapshotIdFromManifest(parsed.manifest);
+      if (actual !== parsed.snapshotId || parsed.snapshotId !== snapshotId) return undefined;
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
   private readRetrievalSnapshotEnvelope(
     paths: SearchStoreCachePaths,
     retrievalSnapshotId: string
@@ -1417,6 +1481,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
     if (!isValidSnapshotId(retrievalSnapshotId)) return undefined;
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(paths.retrievalsDir, retrievalSnapshotId), "utf8")) as unknown;
+      if (!isRetrievalSnapshotEnvelope(parsed)) return undefined;
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readRetrievalSnapshotEnvelopeAsync(
+    paths: SearchStoreCachePaths,
+    retrievalSnapshotId: string
+  ): Promise<RetrievalSnapshotEnvelope | undefined> {
+    if (!isValidSnapshotId(retrievalSnapshotId)) return undefined;
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(path.join(paths.retrievalsDir, retrievalSnapshotId), "utf8")) as unknown;
       if (!isRetrievalSnapshotEnvelope(parsed)) return undefined;
       return parsed;
     } catch {
@@ -1889,6 +1967,15 @@ function addRetrievalVectorGcRoot(
   }));
 }
 
+function addSnapshotEnvelopeGcRoots(
+  roots: Pick<GcRoots, "snapshotIds" | "segmentHashes" | "linkGraphIds">,
+  envelope: SnapshotEnvelope
+): void {
+  roots.snapshotIds.add(envelope.snapshotId);
+  roots.linkGraphIds.add(envelope.linkGraphId);
+  for (const partition of envelope.manifest.partitions) roots.segmentHashes.add(partition.segmentHash);
+}
+
 function vectorGenerationGcKey(input: {
   profileHash: string;
   vaultStateHash: string;
@@ -1976,14 +2063,6 @@ function accessTime(snapshot: LoadedSnapshot, vaultAccessMs: Map<string, number>
   return Math.max(snapshot.lastAccessMs, vaultAccessMs.get(snapshot.vaultKey) ?? 0);
 }
 
-function safeReadDir(dirPath: string): string[] {
-  try {
-    return fs.readdirSync(dirPath).sort(compareCodePoint);
-  } catch {
-    return [];
-  }
-}
-
 async function safeReadDirAsync(dirPath: string): Promise<string[]> {
   try {
     return (await fs.promises.readdir(dirPath)).sort(compareCodePoint);
@@ -2000,24 +2079,24 @@ async function isDirectoryPathAsync(filePath: string): Promise<boolean> {
   }
 }
 
-function sweepStaleTmpDir(dirPath: string, nowMs = Date.now()): void {
-  for (const file of safeReadDir(dirPath)) {
+async function sweepStaleTmpDirAsync(dirPath: string, nowMs = Date.now()): Promise<void> {
+  for (const file of await safeReadDirAsync(dirPath)) {
     const filePath = path.join(dirPath, file);
-    if (!isStaleTmpPath(filePath, nowMs)) continue;
-    fs.rmSync(filePath, { recursive: true, force: true });
+    if (!await isStaleTmpPathAsync(filePath, nowMs)) continue;
+    await fs.promises.rm(filePath, { recursive: true, force: true });
   }
 }
 
-function isStaleTmpPath(filePath: string, nowMs: number): boolean {
+async function isStaleTmpPathAsync(filePath: string, nowMs: number): Promise<boolean> {
   try {
-    return nowMs - fs.statSync(filePath).mtimeMs >= TMP_STALE_MS;
+    return nowMs - (await fs.promises.stat(filePath)).mtimeMs >= TMP_STALE_MS;
   } catch {
     return false;
   }
 }
 
-function retainedSnapshotFiles(dirPath: string, count: number): string[] {
-  return safeReadDir(dirPath)
+async function retainedSnapshotFilesAsync(dirPath: string, count: number): Promise<string[]> {
+  return (await safeReadDirAsync(dirPath))
     .filter(isValidSnapshotId)
     .sort((left, right) => compareCodePoint(right, left))
     .slice(0, count)

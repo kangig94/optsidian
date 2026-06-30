@@ -327,7 +327,8 @@ function createHarness(options = {}) {
         searchSettings: input.searchSettings,
         progress: input.progress
       });
-    }
+    },
+    ...options.snapshotStoreOptions
   });
   const embedding = options.embedding ?? createEmbeddingPool();
   const service = new DaemonSearchStoreService(
@@ -946,6 +947,37 @@ test("AC9 vector GC protects in-flight generations during publish", async () => 
   const { envelope } = await ensureActiveRetrieval(harness);
   const activeVectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
   assert.equal(fs.existsSync(path.join(activeVectorPaths.generationsDir, envelope.vector.generationId)), true);
+});
+
+test("AC9 retrieval GC protects in-flight retrieval envelopes during publish", async () => {
+  let harness;
+  let sweepRan = false;
+  let retrievalEnvelopePath;
+  harness = createHarness({
+    snapshotStoreOptions: {
+      durableRenameRetrievalPointer: async (from, to) => {
+        const paths = searchStoreCachePaths(harness.vault, harness.env);
+        const active = readJson(from);
+        retrievalEnvelopePath = path.join(paths.retrievalsDir, active.retrievalSnapshotId);
+        const orphanPath = path.join(paths.retrievalsDir, "orphan-retrieval");
+        fs.writeFileSync(orphanPath, "{}\n");
+        assert.equal(fs.existsSync(retrievalEnvelopePath), true);
+        harness.store.markSweepGc(paths);
+        await eventually(() => {
+          assert.equal(fs.existsSync(orphanPath), false, "orphan retrieval envelope must be collected");
+        });
+        assert.equal(fs.existsSync(retrievalEnvelopePath), true, "in-flight retrieval envelope was collected during publish");
+        sweepRan = true;
+        await fs.promises.mkdir(path.dirname(to), { recursive: true });
+        await fs.promises.rename(from, to);
+      }
+    }
+  });
+  writeSampleVault(harness.vault);
+  const loaded = await harness.service.loadVault(harness.vault, context(), { preload: false, warmupQueryAnalyzer: false });
+  assert.equal(loaded.vaults[0].status, "ready");
+  assert.equal(sweepRan, true);
+  assert.equal(fs.existsSync(retrievalEnvelopePath), true);
 });
 
 test("AC9 vector GC keeps rooted generations and removes stale vector stores", async () => {

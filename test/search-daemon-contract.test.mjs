@@ -1685,7 +1685,7 @@ test("AC8 snapshot tmp sweep removes only files aged at least five minutes", asy
 
   await store.compact(vault);
 
-  assert.equal(fs.existsSync(oldTmp), false);
+  await waitFor(() => !fs.existsSync(oldTmp));
   assert.equal(fs.existsSync(youngTmp), true);
 });
 

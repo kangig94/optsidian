@@ -46,6 +46,19 @@ function tempRoot(prefix = "optsidian-retrieval-p3-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+async function eventually(assertion, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assertion();
+}
+
 function writeVaultFile(vault, rel, content) {
   const file = path.join(vault, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -318,10 +331,25 @@ test("AC2 P3 link graph GC roots protect active in-flight loaded retained and co
   await storeLinkGraphSidecar(paths, orphan);
   assert.equal(fs.existsSync(linkGraphSidecarPath(paths, orphan.linkGraphId)), true);
   store.markSweepGc(paths);
-  assert.equal(fs.existsSync(linkGraphSidecarPath(paths, orphan.linkGraphId)), false, "orphan link graph must be collected");
+  await eventually(() => {
+    assert.equal(fs.existsSync(linkGraphSidecarPath(paths, orphan.linkGraphId)), false, "orphan link graph must be collected");
+  });
 
+  const releaseOrphan = buildLinkGraphSidecar({
+    corpusSnapshotId: "e".repeat(64),
+    edges: [{
+      sourcePath: "ReleaseOrphan.md",
+      targetPath: "Nowhere.md",
+      sourceDocumentId: sha256Text("ReleaseOrphan.md"),
+      targetDocumentId: sha256Text("Nowhere.md")
+    }]
+  });
+  await storeLinkGraphSidecar(paths, releaseOrphan);
   store.release(pinA);
   store.markSweepGc(paths);
+  await eventually(() => {
+    assert.equal(fs.existsSync(linkGraphSidecarPath(paths, releaseOrphan.linkGraphId)), false, "release orphan link graph must be collected");
+  });
   assert.equal(fs.existsSync(linkGraphSidecarPath(paths, builtA.linkGraphId)), true, "loaded link graph remains protected after pin release");
 
   const retainedCacheRoot = tempRoot();
@@ -342,7 +370,20 @@ test("AC2 P3 link graph GC roots protect active in-flight loaded retained and co
   });
   await retainedStore.loadVault(vault);
   await retainedStore.rebuild(vault);
+  const retainedOrphan = buildLinkGraphSidecar({
+    corpusSnapshotId: "d".repeat(64),
+    edges: [{
+      sourcePath: "RetainedOrphan.md",
+      targetPath: "Nowhere.md",
+      sourceDocumentId: sha256Text("RetainedOrphan.md"),
+      targetDocumentId: sha256Text("Nowhere.md")
+    }]
+  });
+  await storeLinkGraphSidecar(retainedPaths, retainedOrphan);
   retainedStore.markSweepGc(retainedPaths);
+  await eventually(() => {
+    assert.equal(fs.existsSync(linkGraphSidecarPath(retainedPaths, retainedOrphan.linkGraphId)), false, "retained-store orphan link graph must be collected");
+  });
   assert.equal(fs.existsSync(linkGraphSidecarPath(retainedPaths, builtA.linkGraphId)), true, "retained link graph must survive GC");
   assert.equal(fs.existsSync(linkGraphSidecarPath(retainedPaths, builtB.linkGraphId)), true, "active retained-store link graph must survive GC");
 });
