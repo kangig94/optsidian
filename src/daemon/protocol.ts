@@ -417,6 +417,7 @@ export type RefreshResult = {
   command: "index";
   action: "refresh";
   rebuilt: boolean;
+  snapshotId?: string;
 };
 
 export type CompactResult = {

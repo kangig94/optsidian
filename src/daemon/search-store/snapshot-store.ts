@@ -341,16 +341,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   async refresh(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<{ ok: true; command: "index"; action: "refresh"; rebuilt: boolean; snapshotId?: string }> {
     const paths = this.paths(vaultRoot);
-    const before = this.readActivePointer(paths)?.snapshotId;
-    const snapshotId = await this.withLifecycleStore(paths, async () => {
-      return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
-    });
+    const refreshed = await this.withLifecycleStore(paths, () => this.refreshIndexedSnapshot(paths, context));
     return {
       ok: true,
       command: "index",
       action: "refresh",
-      rebuilt: before !== snapshotId,
-      snapshotId
+      rebuilt: refreshed.rebuilt,
+      snapshotId: refreshed.snapshotId
     };
   }
 
@@ -467,7 +464,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     paths: SearchStoreCachePaths,
     snapshotId: string,
     context: SnapshotRequestContext
-  ): Promise<void> {
+  ): Promise<boolean> {
     const loadedBefore = new Set(this.loaded.keys());
     const releasePreparedPin = (pin: PinnedRetrievalSnapshot): void => {
       const key = loadedKey(paths.vaultStateHash, pin.snapshotId);
@@ -483,7 +480,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       current.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
     ) {
       releasePreparedPin(current.pin);
-      return;
+      return false;
     }
     if (current.status === "ready") releasePreparedPin(current.pin);
     await this.publishRetrievalSnapshot(
@@ -495,6 +492,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const result = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
     if (result.status !== "ready") throw new Error(`retrieval snapshot is not ready after indexing: ${result.reason}`);
     releasePreparedPin(result.pin);
+    return true;
   }
 
   async tryPinActiveRetrievalSnapshot(vaultRoot: string): Promise<RetrievalPinResult> {
@@ -684,19 +682,37 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private async ensureIndexedSnapshot(paths: SearchStoreCachePaths, context: SnapshotRequestContext = {}): Promise<string> {
+    return (await this.refreshIndexedSnapshot(paths, context)).snapshotId;
+  }
+
+  private async refreshIndexedSnapshot(
+    paths: SearchStoreCachePaths,
+    context: SnapshotRequestContext = {}
+  ): Promise<{ snapshotId: string; rebuilt: boolean }> {
     await this.recoverVault(paths);
     const active = this.readActivePointer(paths);
     if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
       try {
         await this.ensureLoaded(paths, active.snapshotId);
         this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
-        await this.prepareRetrievalSnapshotForSnapshot(paths, active.snapshotId, context);
-        return active.snapshotId;
+        const retrievalPrepared = await this.prepareRetrievalSnapshotForSnapshot(paths, active.snapshotId, context);
+        if (!retrievalPrepared) {
+          context.progress?.({
+            phase: "scanning",
+            total: 0,
+            completed: 0,
+            message: "already fresh"
+          });
+        }
+        return { snapshotId: active.snapshotId, rebuilt: false };
       } catch {
         this.loaded.delete(loadedKey(paths.vaultStateHash, active.snapshotId));
       }
     }
-    return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
+    return {
+      snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true }),
+      rebuilt: true
+    };
   }
 
   private async ensureActiveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {

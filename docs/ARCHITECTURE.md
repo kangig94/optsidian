@@ -99,7 +99,7 @@ than to the daemon process.
 
 | Process | Hidden verb | Module | Transport & lifecycle |
 |---------|-------------|--------|-----------------------|
-| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; separate query/control Unix domain sockets under the runtime search-daemon directory. Query RPC exposes `Status` and `Retrieve`; CLI `search` and `explain` are client-side adapters over `Retrieve`. Control RPC exposes `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, and `Shutdown`. The daemon owns snapshot MVCC, retrieval generations, worker pools, query caches, and loaded vault state. |
+| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; separate query/control Unix domain sockets under the runtime search-daemon directory. Query RPC exposes `Status`, `Search`, and `Retrieve`; CLI `search` uses `Search` for default lexical search and switches to `Retrieve` for vector/hybrid retrieval, while `explain` uses `Retrieve`. Control RPC exposes `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, and `Shutdown`. The daemon owns snapshot MVCC, retrieval generations, worker pools, query caches, and loaded vault state. |
 
 **Install / update lifecycle.** `scripts/install.sh` installs a release and writes the manifest
 `~/.cache/optsidian/install.json`. `optsidian update` (`src/update/installer.ts`) fetches a release,
@@ -118,11 +118,12 @@ The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
   build and publish new snapshots atomically, and active requests keep their pinned snapshot until
   release. Query release is refcount-only; file deletion and mark-sweep GC are control/index
   maintenance operations.
-- **Retrieve is the public query path.** Query RPC accepts `Retrieve` for `origin=text`, `origin=note`,
-  `origin=pair`, and adapter-backed search. A ready retrieval request is served from a pinned
-  retrieval snapshot and a promoted built vector generation. If the generation is absent, stale, or
-  built for a different identity, Retrieve returns `status: "index-not-ready"` rather than scanning
-  in-process embedding JSON.
+- **Search and Retrieve are separate query paths.** Query RPC accepts `Search` for default lexical
+  search, and `Retrieve` for `origin=text`, `origin=note`, `origin=pair`, vector/hybrid search,
+  similarity, and explain. A ready retrieval request is served from a pinned retrieval snapshot and a
+  promoted built vector generation. If the generation is absent, stale, or built for a different
+  identity, Retrieve returns `status: "index-not-ready"` rather than scanning in-process embedding
+  JSON.
 - **Query pipeline.** Query search is planned by `SearchQueryPlanner`, scheduled by
   `SearchQueryScheduler` / `SearchQuerySession`, merged by `ResultAggregator`, and hydrated by
   `ResultHydrator`. The retained monolithic `executeSearchJob` / `querySearch` path is the test
