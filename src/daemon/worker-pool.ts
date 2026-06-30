@@ -70,7 +70,7 @@ type WorkerReply =
 type WorkerMemoryUsage = {
   rss?: number;
   heapTotal?: number;
-  heapUsed: number;
+  heapUsed?: number;
   external?: number;
   arrayBuffers?: number;
 };
@@ -392,8 +392,7 @@ export class DaemonWorkerPool {
 
   private recordMemory(slot: WorkerSlot, message: WorkerReply): void {
     slot.lastMemory = message.memory ?? {
-      rss: message.memoryRss,
-      heapUsed: message.memoryRss
+      rss: message.memoryRss
     };
   }
 
@@ -692,8 +691,8 @@ function memoryRestartReason(
   slot: WorkerSlot,
   options: Required<WorkerPoolOptions>
 ): string | undefined {
-  const heapUsed = message.memory?.heapUsed ?? message.memoryRss;
-  if (heapUsed > options.heapGuardBytes) {
+  const heapUsed = message.memory?.heapUsed;
+  if (typeof heapUsed === "number" && heapUsed > options.heapGuardBytes) {
     return `heap guard exceeded (${heapUsed} > ${options.heapGuardBytes})`;
   }
   const rss = message.memory?.rss ?? message.memoryRss;

@@ -1005,6 +1005,53 @@ parentPort.on("message", (message) => {
   }
 });
 
+test("worker pool heap guard ignores legacy memoryRss-only replies", async () => {
+  const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
+  const root = tempRoot();
+  const workerScript = path.join(root, "legacy-memory-rss-only.mjs");
+  const warmupLog = path.join(root, "warmups.log");
+  fs.writeFileSync(warmupLog, "");
+  fs.writeFileSync(workerScript, `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const warmupLog = ${JSON.stringify(warmupLog)};
+const memoryRss = 1024 * 1024 * 1024;
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(warmupLog, "warmup\\n");
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss });
+    return;
+  }
+  parentPort.postMessage({ id: message.id, ok: true, result: { ok: true }, memoryRss });
+});
+`);
+  const pool = new DaemonWorkerPool({
+    name: "legacy-memory-rss-only",
+    kind: "search",
+    size: 1,
+    workerScript,
+    memoryLimitBytes: 10,
+    env: { ...process.env }
+  });
+  try {
+    await pool.warmup();
+    await pool.run({ type: "search" }, {
+      deadline: Date.now() + 1000,
+      cancellationId: "legacy-memory-rss-only"
+    });
+    const warmups = fs.readFileSync(warmupLog, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(warmups.length, 1);
+    const stats = pool.stats();
+    assert.equal(stats.restarts, 0);
+    assert.equal(stats.slots[0].lastMemory.rss, 1024 * 1024 * 1024);
+    assert.equal(stats.slots[0].lastMemory.heapUsed, undefined);
+  } finally {
+    await pool.close();
+  }
+});
+
 test("worker pool optional rss guard restarts only after configured strikes", async () => {
   const { DaemonWorkerPool } = await futureImport("src/daemon/worker-pool.ts");
   const root = tempRoot();
