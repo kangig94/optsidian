@@ -11,6 +11,7 @@ import { hasVaultPathArg, resolveVaultRoot, vaultArg } from "../vault.js";
 export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<void> {
   const action = args.positionals[0] ?? "status";
   const format = parseFormat(getValue(args, "format"));
+  const progress = { enabled: shouldRenderProgress(args, format) };
   const client = createSearchDaemonClient();
   switch (action) {
     case "status":
@@ -22,12 +23,21 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
         client,
         vaultRoot,
         () => client.rebuild({ vault: vaultRoot }),
-        { enabled: shouldRenderProgress(format) }
+        progress
+      ), format));
+      return;
+    case "refresh":
+      if (!vaultRoot) throw new UsageError("index refresh requires a vault");
+      process.stdout.write(renderIndexResult(await withVaultProgress(
+        client,
+        vaultRoot,
+        () => client.refresh({ vault: vaultRoot }),
+        progress
       ), format));
       return;
     case "warm": {
       const discovery = indexWarmVaultRoots(args);
-      process.stdout.write(renderIndexResult(await loadDiscoveredVaults(client, discovery, { enabled: shouldRenderProgress(format) }), format));
+      process.stdout.write(renderIndexResult(await loadDiscoveredVaults(client, discovery, progress), format));
       return;
     }
     case "clear":
@@ -43,7 +53,7 @@ export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<vo
       return;
     }
     default:
-      throw new UsageError("index action must be status, rebuild, warm, clear, or prune");
+      throw new UsageError("index action must be status, rebuild, refresh, warm, clear, or prune");
   }
 }
 
@@ -126,8 +136,8 @@ async function withVaultProgress<T>(
   }
 }
 
-function shouldRenderProgress(format: "text" | "json"): boolean {
-  return format === "text" && process.stderr.isTTY === true;
+function shouldRenderProgress(args: ParsedArgs, format: "text" | "json"): boolean {
+  return format === "text" && !hasFlag(args, "no-progress") && process.stderr.isTTY === true;
 }
 
 function renderVaultProgress(status: StatusResult, vaultRoot: string): string {

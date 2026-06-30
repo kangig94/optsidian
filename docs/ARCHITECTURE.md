@@ -140,10 +140,10 @@ The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
   atomic, targeted `runOnSlot` consumes the lease, and busy/leased slots are excluded from later leases.
   Scheduler fairness is single-source: active sessions share idle capacity first, then any otherwise
   idle slots are relaxed to runnable sessions.
-- **Execution modes.** `exhaustive` is collect-all: all planned shard units are scheduled and the final
-  global ordering is independent of batch composition. `approximate` schedules a deterministic bounded
-  prefix for shard/work budgets and returns warning labels; time budgets are best-effort and marked
-  non-reproducible.
+- **Coverage modes.** `coverage=full` is collect-all: all planned shard units are scheduled and the
+  final global ordering is independent of batch composition. `coverage=bounded` schedules a
+  deterministic bounded prefix for shard/work budgets and returns warning labels; time budgets are
+  best-effort and marked non-reproducible.
 - **Korean.** Hangul routes to Kiwi when enabled, with the model downloaded as a SHA256-pinned
   artifact on first use. Parallelism comes from isolated workers, not concurrent calls into one
   analyzer object.

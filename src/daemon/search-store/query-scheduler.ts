@@ -254,7 +254,7 @@ export class SearchQuerySession {
     this.onRunnable = args.onRunnable;
     this.onTerminal = args.onTerminal;
     this.pending = orderedPendingTasks(
-      budgetedTaskPrefix(args.plan.tasks, args.input.search),
+      boundedTaskPrefix(args.plan.tasks, args.input.search),
       args.testOrdering?.orderPendingTasks
     );
     this.warnings = searchExecutionWarningLabels(args.input.search);
@@ -390,14 +390,14 @@ export class SearchQuerySession {
 
   private workCeilingEstimate(): number {
     const budget = this.input.search.budget;
-    if (this.input.search.mode === "approximate" && (budget?.work !== undefined || budget?.shards !== undefined)) {
+    if (this.input.search.coverage === "bounded" && (budget?.work !== undefined || budget?.shards !== undefined)) {
       return this.pending.reduce((sum, task) => sum + task.workEstimate, 0);
     }
     return this.plan.estimatedWork;
   }
 
   private shardBatchSize(leasesRemainingForSession: number): number {
-    if (this.input.search.mode === "approximate" && this.input.search.budget?.timeMs !== undefined) return 1;
+    if (this.input.search.coverage === "bounded" && this.input.search.budget?.timeMs !== undefined) return 1;
     return Math.max(1, Math.ceil(this.pending.length / Math.max(1, leasesRemainingForSession)));
   }
 
@@ -414,7 +414,7 @@ export class SearchQuerySession {
   }
 
   private armTimeBudgetTimer(): void {
-    const timeMs = this.input.search.mode === "approximate" ? this.input.search.budget?.timeMs : undefined;
+    const timeMs = this.input.search.coverage === "bounded" ? this.input.search.budget?.timeMs : undefined;
     if (timeMs === undefined) return;
     this.timeBudgetTimer = setTimeout(() => {
       if (this.state !== "active") return;
@@ -456,8 +456,8 @@ export class SearchQuerySession {
   }
 }
 
-function budgetedTaskPrefix(tasks: readonly ShardTaskPlan[], search: SearchQuerySchedulerInput["search"]): ShardTaskPlan[] {
-  if (search.mode !== "approximate") return [...tasks];
+function boundedTaskPrefix(tasks: readonly ShardTaskPlan[], search: SearchQuerySchedulerInput["search"]): ShardTaskPlan[] {
+  if (search.coverage !== "bounded") return [...tasks];
   const budget = search.budget;
   if (!budget) return [...tasks];
 

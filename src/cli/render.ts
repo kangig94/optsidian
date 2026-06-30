@@ -11,7 +11,7 @@ import type {
   SearchResult,
   SimilarityResult
 } from "../core/types.js";
-import type { StatusResult } from "../daemon/protocol.js";
+import type { RefreshResult, StatusResult } from "../daemon/protocol.js";
 
 export type OutputFormat = "text" | "json";
 
@@ -115,7 +115,7 @@ export function renderFrontmatterRead(result: FrontmatterReadResult, format: Out
 }
 
 export function renderIndexResult(
-  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult,
+  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult | RefreshResult,
   format: OutputFormat = "text"
 ): string {
   if (format === "json") {
@@ -157,6 +157,9 @@ export function renderIndexResult(
   if (result.action === "rebuild") {
     return "Index rebuilt.\n";
   }
+  if (result.action === "refresh") {
+    return result.rebuilt ? "Index refreshed.\n" : "Index already fresh.\n";
+  }
   if (result.action === "warm") {
     const lines = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
     if (result.vaults.length === 0) {
@@ -183,7 +186,7 @@ export function renderIndexResult(
   return "Index cleared.\n";
 }
 
-function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult): result is StatusResult {
+function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult | RefreshResult): result is StatusResult {
   return "phase" in result && "metrics" in result && "vaults" in result;
 }
 

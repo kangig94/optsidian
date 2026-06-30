@@ -1,5 +1,5 @@
 import { UsageError } from "../../errors.js";
-import type { SearchExecutionBudget, SearchExecutionMode, SearchField, SearchParams } from "../types.js";
+import type { SearchCoverageBudget, SearchCoverageMode, SearchField, SearchParams, SearchRetrievalMode } from "../types.js";
 import { assertOptionalPositiveInteger } from "../validation.js";
 import type { NormalizedSearchParams, PathFilter } from "./internal-types.js";
 import { SEARCH_PROPERTIES } from "./schema.js";
@@ -8,10 +8,11 @@ export const MAX_SEARCH_QUERY_LENGTH = 4096;
 
 export function normalizeSearchParams(params: SearchParams): NormalizedSearchParams {
   assertOptionalPositiveInteger(params.limit, "limit");
-  const mode = normalizeSearchMode(params.mode);
+  const retrieval = normalizeSearchRetrieval(params.retrieval);
+  const coverage = normalizeSearchCoverage(params.coverage);
   const budget = normalizeSearchBudget(params.budget);
-  if (budget && mode !== "approximate") {
-    throw new UsageError("search budget requires mode=approximate");
+  if (budget && coverage !== "bounded") {
+    throw new UsageError("search budget requires coverage=bounded");
   }
   if (params.query !== undefined && params.query.length > MAX_SEARCH_QUERY_LENGTH) {
     throw new UsageError(`query must be ${MAX_SEARCH_QUERY_LENGTH} characters or fewer`);
@@ -25,6 +26,10 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
   if (fields && !query) {
     throw new UsageError("field=<field> requires query=<text>");
   }
+  if (retrieval === "vector") {
+    if (!query) throw new UsageError("retrieval=vector requires query=<text>");
+    if (fields) throw new UsageError("field=<field> is not supported with retrieval=vector");
+  }
   if (!query && !tags) {
     throw new UsageError("search requires query=<text> or tag=<tag>");
   }
@@ -35,7 +40,8 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
     fields,
     limit: params.limit ?? 10,
     debug: params.debug === true,
-    mode,
+    retrieval,
+    coverage,
     ...(budget ? { budget } : {})
   };
 }
@@ -75,20 +81,28 @@ function normalizeSearchFields(fields: string[] | undefined): SearchField[] | un
   return normalized as SearchField[];
 }
 
-function normalizeSearchMode(mode: SearchParams["mode"]): SearchExecutionMode {
-  if (mode === undefined) return "exhaustive";
-  if (mode !== "exhaustive" && mode !== "approximate") {
-    throw new UsageError("mode must be exhaustive or approximate");
+function normalizeSearchRetrieval(retrieval: SearchParams["retrieval"]): SearchRetrievalMode {
+  if (retrieval === undefined) return "lexical";
+  if (retrieval !== "lexical" && retrieval !== "vector" && retrieval !== "hybrid") {
+    throw new UsageError("retrieval must be lexical, vector, or hybrid");
   }
-  return mode;
+  return retrieval;
 }
 
-function normalizeSearchBudget(budget: SearchParams["budget"]): SearchExecutionBudget | undefined {
+function normalizeSearchCoverage(coverage: SearchParams["coverage"]): SearchCoverageMode {
+  if (coverage === undefined) return "full";
+  if (coverage !== "full" && coverage !== "bounded") {
+    throw new UsageError("coverage must be full or bounded");
+  }
+  return coverage;
+}
+
+function normalizeSearchBudget(budget: SearchParams["budget"]): SearchCoverageBudget | undefined {
   if (budget === undefined) return undefined;
   assertOptionalPositiveInteger(budget.work, "budget.work");
   assertOptionalPositiveInteger(budget.shards, "budget.shards");
   assertOptionalPositiveInteger(budget.timeMs, "budget.timeMs");
-  const normalized: SearchExecutionBudget = {
+  const normalized: SearchCoverageBudget = {
     ...(budget.work !== undefined ? { work: budget.work } : {}),
     ...(budget.shards !== undefined ? { shards: budget.shards } : {}),
     ...(budget.timeMs !== undefined ? { timeMs: budget.timeMs } : {})

@@ -178,20 +178,23 @@ test("AC6 search query and Hangul ngram analysis are length-bounded", async () =
   assert.throws(() => normalizeSearchParams({ path: "note.md" }), /query=<text> or tag=<tag>/);
   assert.throws(() => normalizeSearchParams({ query: "alpha", fields: ["unknown"] }), /field must be one of/);
   assert.throws(() => normalizeSearchParams({ tags: ["project"], fields: ["body"] }), /field=<field> requires query=<text>/);
-  assert.throws(() => normalizeSearchParams({ query: "alpha", mode: "invalid" }), /mode must be exhaustive or approximate/);
-  assert.throws(() => normalizeSearchParams({ query: "alpha", budget: { work: 1 } }), /budget requires mode=approximate/);
+  assert.throws(() => normalizeSearchParams({ query: "alpha", retrieval: "invalid" }), /retrieval must be lexical, vector, or hybrid/);
+  assert.throws(() => normalizeSearchParams({ query: "alpha", coverage: "invalid" }), /coverage must be full or bounded/);
+  assert.throws(() => normalizeSearchParams({ query: "alpha", budget: { work: 1 } }), /budget requires coverage=bounded/);
   assert.throws(
-    () => normalizeSearchParams({ query: "alpha", mode: "exhaustive", budget: { shards: 1 } }),
-    /budget requires mode=approximate/
+    () => normalizeSearchParams({ query: "alpha", coverage: "full", budget: { shards: 1 } }),
+    /budget requires coverage=bounded/
   );
   assert.deepEqual(
     normalizeSearchParams({
       query: "alpha",
-      mode: "approximate",
+      coverage: "bounded",
       budget: { work: 10, shards: 2, timeMs: 50 }
     }).budget,
     { work: 10, shards: 2, timeMs: 50 }
   );
+  assert.equal(normalizeSearchParams({ query: "alpha" }).retrieval, "lexical");
+  assert.equal(normalizeSearchParams({ query: "alpha" }).coverage, "full");
 
   assert.deepEqual(ngramSearchTerms(["검색어"]), ["검색", "색어", "검색어"]);
 

@@ -26,7 +26,6 @@ import type {
   SnapshotView
 } from "../../core/search/contracts.js";
 import {
-  buildEmbeddingSet,
   buildEmbeddingSetFromVectors,
   DeterministicHashProvider,
   createLocalOnnxProviderFromConfig,
@@ -85,6 +84,7 @@ import {
   vectorStoreCachePaths,
   writeActiveVectorPointer,
   type CoralEmbeddingSpec,
+  type VectorStoreCachePaths,
   type VectorGenerationMetadata
 } from "../vector-store/index.js";
 import type { CoralChunkRecord, VectorStoreKey } from "../vector-store/types.js";
@@ -169,6 +169,12 @@ type RetrievalSnapshotSource = Pick<
   BuiltSnapshot,
   "snapshotId" | "corpusSnapshotId" | "identityTuple" | "documents" | "linkGraphId"
 >;
+
+type RetrievalSnapshotPublication = {
+  envelope: RetrievalSnapshotEnvelope;
+  active: RetrievalActivePointer;
+  vectorPaths: VectorStoreCachePaths;
+};
 
 type LoadedSnapshot = {
   vaultRoot: string;
@@ -302,7 +308,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async loadVault(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<LoadVaultResult> {
     try {
       const paths = this.paths(vaultRoot);
-      const snapshotId = await this.withLifecycleStore(paths, () => this.ensureActiveSnapshot(paths.vaultRoot, context));
+      const snapshotId = await this.withLifecycleStore(paths, () => this.ensureIndexedSnapshot(paths, context));
       return {
         ok: true,
         command: "index",
@@ -322,7 +328,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   async rebuild(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<SnapshotMutationResult> {
     const paths = this.paths(vaultRoot);
-    const snapshotId = await this.withLifecycleStore(paths, () => this.publishFreshSnapshot(paths.vaultRoot, context));
+    const snapshotId = await this.withLifecycleStore(paths, async () => {
+      return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
+    });
     return {
       ok: true,
       command: "index",
@@ -334,7 +342,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async refresh(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<{ ok: true; command: "index"; action: "refresh"; rebuilt: boolean; snapshotId?: string }> {
     const paths = this.paths(vaultRoot);
     const before = this.readActivePointer(paths)?.snapshotId;
-    const snapshotId = await this.withLifecycleStore(paths, () => this.publishFreshSnapshot(paths.vaultRoot, context));
+    const snapshotId = await this.withLifecycleStore(paths, async () => {
+      return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
+    });
     return {
       ok: true,
       command: "index",
@@ -427,6 +437,64 @@ export class DaemonSnapshotStore implements SnapshotStore {
       });
     }
     return result.pin;
+  }
+
+  async ensureActiveRetrievalSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<RetrievalPinResult> {
+    const paths = this.paths(vaultRoot);
+    return await this.withLifecycleStore(paths, async () => {
+      const snapshotId = await this.ensureActiveSnapshot(paths.vaultRoot, context);
+      const loaded = await this.ensureLoaded(paths, snapshotId);
+      const current = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
+      if (
+        current.status === "ready" &&
+        current.pin.snapshotId === snapshotId &&
+        current.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
+      ) {
+        return current;
+      }
+      if (current.status === "ready") this.release(current.pin);
+      await this.publishRetrievalSnapshot(
+        paths,
+        retrievalSnapshotSourceFromEnvelope(loaded.envelope),
+        loaded.envelope,
+        context
+      );
+      return await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
+    });
+  }
+
+  private async prepareRetrievalSnapshotForSnapshot(
+    paths: SearchStoreCachePaths,
+    snapshotId: string,
+    context: SnapshotRequestContext
+  ): Promise<void> {
+    const loadedBefore = new Set(this.loaded.keys());
+    const releasePreparedPin = (pin: PinnedRetrievalSnapshot): void => {
+      const key = loadedKey(paths.vaultStateHash, pin.snapshotId);
+      this.release(pin);
+      const loaded = this.loaded.get(key);
+      if (!loadedBefore.has(key) && loaded?.refCount === 0) this.loaded.delete(key);
+    };
+    const loaded = await this.ensureLoaded(paths, snapshotId);
+    const current = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
+    if (
+      current.status === "ready" &&
+      current.pin.snapshotId === snapshotId &&
+      current.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
+    ) {
+      releasePreparedPin(current.pin);
+      return;
+    }
+    if (current.status === "ready") releasePreparedPin(current.pin);
+    await this.publishRetrievalSnapshot(
+      paths,
+      retrievalSnapshotSourceFromEnvelope(loaded.envelope),
+      loaded.envelope,
+      context
+    );
+    const result = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
+    if (result.status !== "ready") throw new Error(`retrieval snapshot is not ready after indexing: ${result.reason}`);
+    releasePreparedPin(result.pin);
   }
 
   async tryPinActiveRetrievalSnapshot(vaultRoot: string): Promise<RetrievalPinResult> {
@@ -615,29 +683,29 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return protectedStoreIdsForPrune(this.loaded, this.lifecycleStoreRefs);
   }
 
+  private async ensureIndexedSnapshot(paths: SearchStoreCachePaths, context: SnapshotRequestContext = {}): Promise<string> {
+    await this.recoverVault(paths);
+    const active = this.readActivePointer(paths);
+    if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
+      try {
+        await this.ensureLoaded(paths, active.snapshotId);
+        this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
+        await this.prepareRetrievalSnapshotForSnapshot(paths, active.snapshotId, context);
+        return active.snapshotId;
+      } catch {
+        this.loaded.delete(loadedKey(paths.vaultStateHash, active.snapshotId));
+      }
+    }
+    return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
+  }
+
   private async ensureActiveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
     const paths = this.paths(vaultRoot);
     await this.recoverVault(paths);
     const active = this.readActivePointer(paths);
     if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
       try {
-        const loaded = await this.ensureLoaded(paths, active.snapshotId);
-        const retrievalPin = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
-        if (
-          retrievalPin.status === "ready" &&
-          retrievalPin.pin.snapshotId === active.snapshotId &&
-          retrievalPin.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
-        ) {
-          this.release(retrievalPin.pin);
-        } else {
-          if (retrievalPin.status === "ready") this.release(retrievalPin.pin);
-          await this.publishRetrievalSnapshot(
-            paths,
-            retrievalSnapshotSourceFromEnvelope(loaded.envelope),
-            loaded.envelope,
-            context
-          );
-        }
+        await this.ensureLoaded(paths, active.snapshotId);
         this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
         return active.snapshotId;
       } catch {
@@ -647,7 +715,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return this.publishFreshSnapshot(vaultRoot, context);
   }
 
-  private async publishFreshSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
+  private async publishFreshSnapshot(
+    vaultRoot: string,
+    context: SnapshotRequestContext = {},
+    options: { prepareRetrieval?: boolean } = {}
+  ): Promise<string> {
     const paths = this.paths(vaultRoot);
     await this.recoverVault(paths);
     const built = this.snapshotBuilder
@@ -660,22 +732,35 @@ export class DaemonSnapshotStore implements SnapshotStore {
           progress: context.progress
         })
       : await this.buildSnapshotInProcess(paths.vaultRoot, context.progress);
+    const envelope = snapshotEnvelope(built);
+    const retrievalPublicationPromise = options.prepareRetrieval
+      ? this.buildRetrievalSnapshotPublication(
+          paths,
+          retrievalSnapshotSourceFromEnvelope(envelope),
+          envelope,
+          context
+        )
+      : undefined;
+    retrievalPublicationPromise?.catch(() => undefined);
     context.progress?.({
       phase: "publishing",
       total: built.segments.length,
       completed: 0
     });
-    await this.publishBuiltSnapshot(paths, built, context);
-    context.progress?.({
-      phase: "publishing",
-      total: built.segments.length,
-      completed: built.segments.length
-    });
+    await this.publishBuiltSnapshot(paths, built, context, envelope);
     this.cacheCatalog.recordIndexed(paths, {
       snapshotId: built.snapshotId,
       documentCount: built.documents.length
     });
     this.activeByVault.set(paths.vaultStateHash, built.snapshotId);
+    if (retrievalPublicationPromise) {
+      await this.publishRetrievalSnapshotPublication(paths, await retrievalPublicationPromise);
+    }
+    context.progress?.({
+      phase: "publishing",
+      total: built.segments.length,
+      completed: built.segments.length
+    });
     this.enforceBudget();
     return built.snapshotId;
   }
@@ -699,10 +784,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private async publishBuiltSnapshot(
     paths: SearchStoreCachePaths,
     built: BuiltSnapshot,
-    context: SnapshotRequestContext = {}
+    context: SnapshotRequestContext = {},
+    envelope: SnapshotEnvelope = snapshotEnvelope(built)
   ): Promise<void> {
     this.ensureDirs(paths);
-    const envelope = snapshotEnvelope(built);
     this.inFlightPublishManifests.set(built.snapshotId, envelope);
     this.inFlightPublishLinkGraphs.add(built.linkGraphId);
     try {
@@ -719,21 +804,30 @@ export class DaemonSnapshotStore implements SnapshotStore {
         { durableRenameLinkGraph: this.renameLinkGraph }
       );
 
-      for (const segment of built.segments) {
+      for (const [index, segment] of built.segments.entries()) {
         const target = path.join(paths.segmentsDir, segment.hash);
+        let published = false;
         if (fs.existsSync(target)) {
           const existingHash = sha256(fs.readFileSync(target));
-          if (existingHash === segment.hash) continue;
-          fs.rmSync(target, { force: true });
+          if (existingHash === segment.hash) published = true;
+          else fs.rmSync(target, { force: true });
         }
-        const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.segment.tmp`);
-        writePrivateFileSync(tmp, segment.bytes, "Optsidian search segment");
-        fsyncFileSync(tmp);
-        fsyncDirSync(paths.tmpDir);
-        const actual = sha256(fs.readFileSync(tmp));
-        if (actual !== segment.hash) throw new Error(`segment hash verification failed for ${segment.hash}`);
-        await this.renameSegment(tmp, target);
-        fsyncDirSync(paths.segmentsDir);
+        if (!published) {
+          const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.segment.tmp`);
+          writePrivateFileSync(tmp, segment.bytes, "Optsidian search segment");
+          fsyncFileSync(tmp);
+          fsyncDirSync(paths.tmpDir);
+          const actual = sha256(fs.readFileSync(tmp));
+          if (actual !== segment.hash) throw new Error(`segment hash verification failed for ${segment.hash}`);
+          await this.renameSegment(tmp, target);
+          fsyncDirSync(paths.segmentsDir);
+        }
+        context.progress?.({
+          phase: "publishing",
+          total: built.segments.length,
+          completed: index + 1,
+          current: segment.hash
+        });
       }
 
       const manifestPath = path.join(paths.snapshotsDir, built.snapshotId);
@@ -754,8 +848,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
       await this.renameActive(activeTmp, paths.activePointerPath);
       fsyncDirSync(paths.activeDir);
 
-      await this.publishRetrievalSnapshot(paths, built, envelope, context);
-
       await this.recoverVault(paths);
       this.markSweepGc(paths);
     } finally {
@@ -770,6 +862,18 @@ export class DaemonSnapshotStore implements SnapshotStore {
     envelope: SnapshotEnvelope,
     context: SnapshotRequestContext = {}
   ): Promise<void> {
+    await this.publishRetrievalSnapshotPublication(
+      paths,
+      await this.buildRetrievalSnapshotPublication(paths, source, envelope, context)
+    );
+  }
+
+  private async buildRetrievalSnapshotPublication(
+    paths: SearchStoreCachePaths,
+    source: RetrievalSnapshotSource,
+    envelope: SnapshotEnvelope,
+    context: SnapshotRequestContext = {}
+  ): Promise<RetrievalSnapshotPublication> {
     const embeddingSet = await this.embeddingSetBuilder.build({
       vaultRoot: paths.vaultRoot,
       documents: denseDocumentsForRetrievalSource(source),
@@ -810,7 +914,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
         paths: vectorPaths,
         spec,
         chunks: vectorChunksForEmbeddingSet(embeddingSet.records, spec),
-        generationId
+        generationId,
+        progress: context.progress
       });
       await this.vectorPool.promoteBuiltGeneration(vectorPaths, builtGeneration.metadata);
       generation.dbPath = builtGeneration.metadata.dbPath;
@@ -818,8 +923,21 @@ export class DaemonSnapshotStore implements SnapshotStore {
       generation.builtEngine = builtGeneration.metadata.builtEngine;
       generation.createdAt = builtGeneration.metadata.createdAt;
     } else {
+      context.progress?.({
+        phase: "vector-indexing",
+        total: embeddingSet.records.length,
+        completed: 0,
+        current: generationId
+      });
       await storeVectorGenerationMetadata(vectorPaths, generation);
       await writeActiveVectorPointer(vectorPaths, generation);
+      context.progress?.({
+        phase: "vector-indexing",
+        total: embeddingSet.records.length,
+        completed: embeddingSet.records.length,
+        current: generationId,
+        message: "stored"
+      });
     }
 
     const { retrieverPlanIdentity, rankingFeatureVersion } = currentRetrievalIdentity({
@@ -857,16 +975,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
         corpusRevision: source.corpusSnapshotId
       }
     };
-    await storeRetrievalSnapshotEnvelope(paths, retrievalEnvelope);
-    await new RetrievalFreshnessStore({ paths: vectorPaths }).markFresh({
-      corpusRevision: source.corpusSnapshotId,
-      corpusSnapshotId: source.corpusSnapshotId,
-      linkGraphId: source.linkGraphId,
-      embeddingSetId: embeddingSet.embeddingSetId,
-      retrievalSnapshotId,
-      vectorGenerationId: generationId
-    });
-
     const active: RetrievalActivePointer = {
       schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
       retrievalSnapshotId,
@@ -876,8 +984,24 @@ export class DaemonSnapshotStore implements SnapshotStore {
       embeddingSetId: embeddingSet.embeddingSetId,
       vectorGenerationId: generationId
     };
-    const activeTmp = path.join(paths.tmpDir, `${retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
-    writePrivateFileSync(activeTmp, `${JSON.stringify(active)}\n`, "Optsidian retrieval active pointer");
+    return { envelope: retrievalEnvelope, active, vectorPaths };
+  }
+
+  private async publishRetrievalSnapshotPublication(
+    paths: SearchStoreCachePaths,
+    publication: RetrievalSnapshotPublication
+  ): Promise<void> {
+    await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
+    await new RetrievalFreshnessStore({ paths: publication.vectorPaths }).markFresh({
+      corpusRevision: publication.envelope.corpusSnapshotId,
+      corpusSnapshotId: publication.envelope.corpusSnapshotId,
+      linkGraphId: publication.envelope.linkGraphId,
+      embeddingSetId: publication.envelope.embeddingSetId,
+      retrievalSnapshotId: publication.envelope.retrievalSnapshotId,
+      vectorGenerationId: publication.active.vectorGenerationId
+    });
+    const activeTmp = path.join(paths.tmpDir, `${publication.active.retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
+    writePrivateFileSync(activeTmp, `${JSON.stringify(publication.active)}\n`, "Optsidian retrieval active pointer");
     fsyncFileSync(activeTmp);
     await this.renameRetrieval(activeTmp, paths.retrievalActivePointerPath);
     fsyncDirSync(paths.activeDir);
@@ -1195,10 +1319,33 @@ export function createDaemonSnapshotStore(options: DaemonSnapshotStoreOptions = 
 export function createProviderEmbeddingSetBuilder(provider: EmbeddingProvider): RetrievalEmbeddingSetBuilder {
   return {
     providerIdentity: provider.identity,
-    build: (input) => buildEmbeddingSet({
-      provider,
-      documents: input.documents
-    })
+    async build(input) {
+      const recipe = embeddingRecipeIdentityForProvider(provider);
+      const total = input.documents.length;
+      const interval = progressReportInterval(total);
+      let completed = 0;
+      input.progress?.({ phase: "embedding", total, completed: 0 });
+      const vectors: EmbeddingVector[] = new Array(total);
+      await Promise.all(input.documents.map(async (document, index) => {
+        vectors[index] = await provider.embed(document.text, { inputKind: "document" });
+        completed += 1;
+        if (completed === total || completed % interval === 0) {
+          input.progress?.({
+            phase: "embedding",
+            total,
+            completed,
+            current: document.path,
+            message: `${completed} vectors`
+          });
+        }
+      }));
+      return buildEmbeddingSetFromVectors({
+        provider: provider.identity,
+        recipe,
+        documents: input.documents,
+        vectors
+      });
+    }
   };
 }
 
@@ -1214,6 +1361,8 @@ export function createWorkerEmbeddingSetBuilder(input: {
     providerIdentity: input.provider.identity,
     async build(builderInput) {
       const vectors: EmbeddingVector[] = [];
+      const total = builderInput.documents.length;
+      builderInput.progress?.({ phase: "embedding", total, completed: 0 });
       for (let offset = 0; offset < builderInput.documents.length; offset += batchSize) {
         const batch = builderInput.documents.slice(offset, offset + batchSize);
         const encoded = await input.embedding.encode({
@@ -1231,6 +1380,13 @@ export function createWorkerEmbeddingSetBuilder(input: {
           throw new Error(`embedding worker returned ${encoded.vectors.length} vectors for ${batch.length} documents`);
         }
         vectors.push(...encoded.vectors);
+        builderInput.progress?.({
+          phase: "embedding",
+          total,
+          completed: Math.min(total, offset + batch.length),
+          current: batch[batch.length - 1]?.path,
+          message: `${vectors.length} vectors`
+        });
       }
       return buildEmbeddingSetFromVectors({
         provider: input.provider.identity,
@@ -1589,6 +1745,11 @@ function currentContentHashes(vaultRoot: string): Map<string, string> {
 
 function positiveCap(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : Number.MAX_SAFE_INTEGER;
+}
+
+function progressReportInterval(total: number): number {
+  if (total <= 200) return 1;
+  return Math.max(1, Math.floor(total / 100));
 }
 
 function envNumber(raw: string | undefined): number | undefined {

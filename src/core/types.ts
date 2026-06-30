@@ -60,9 +60,11 @@ export type GrepResult = {
   count: number;
 };
 
-export type SearchExecutionMode = "exhaustive" | "approximate";
+export type SearchRetrievalMode = "lexical" | "vector" | "hybrid";
 
-export type SearchExecutionBudget = {
+export type SearchCoverageMode = "full" | "bounded";
+
+export type SearchCoverageBudget = {
   work?: number;
   shards?: number;
   timeMs?: number;
@@ -75,8 +77,9 @@ export type SearchParams = {
   fields?: string[];
   limit?: number;
   debug?: boolean;
-  mode?: SearchExecutionMode;
-  budget?: SearchExecutionBudget;
+  retrieval?: SearchRetrievalMode;
+  coverage?: SearchCoverageMode;
+  budget?: SearchCoverageBudget;
 };
 
 export type SearchField = "title" | "aliases" | "tags" | "headings" | "path" | "body";

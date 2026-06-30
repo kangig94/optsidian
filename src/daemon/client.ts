@@ -297,8 +297,11 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     },
     search(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return queryReady("Retrieve", withRuntimeProfile(searchPayloadToRetrieve(payload), runtimeProfile), { deadlineMs, cancellationId, traceId })
-        .then(searchResultFromRetrieve);
+      if (payload.retrieval === "vector" || payload.retrieval === "hybrid") {
+        return queryReady("Retrieve", withRuntimeProfile(searchPayloadToRetrieve(payload), runtimeProfile), { deadlineMs, cancellationId, traceId })
+          .then(searchResultFromRetrieve);
+      }
+      return queryReady("Search", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     explain(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;

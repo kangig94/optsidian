@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import { UsageError } from "../../errors.js";
-import { normalizeSearchParams } from "../../core/search/params.js";
+import { matchesPathFilter, matchesTagFilter, normalizeSearchParams } from "../../core/search/params.js";
 import { DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS, type SearchScoringLambdas } from "../../core/search/constants.js";
 import { createInlineQueryAnalyzer, type SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import { analyzeSearchQuery, SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
+import { analyzeSearchQuery, emptySearchTokenChannels, SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis } from "../../core/search/analysis/index.js";
+import { denseAgreementFromCosine } from "../../core/search/dense/index.js";
 import {
   indexAffectingSearchSettingsHash,
   normalizeIndexAffectingSearchSettings,
@@ -29,6 +30,7 @@ import { applySearchWarnings } from "./result-shaping.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../../core/settings.js";
 import type { DenseVectorSearchHit } from "../search-execution.js";
 import type { VectorGenerationPool } from "../vector-store/index.js";
+import { snippetsForDocument } from "./result-shaping.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 
@@ -138,13 +140,17 @@ export class DaemonSearchStoreService {
   }
 
   async search(payload: SearchRequestPayload, context: DaemonRequestContext): Promise<SearchResult & { snapshotId: string }> {
+    const search = normalizeSearchParams(payload);
+    if (search.retrieval !== "lexical") {
+      throw Object.assign(new Error("Search method supports retrieval=lexical only; use Retrieve for vector or hybrid retrieval"), { code: "BAD_REQUEST" });
+    }
     const result = await this.executeSearch(payload, context, false);
-    const { explainTrace: _trace, ...search } = result;
-    return search;
+    const { explainTrace: _trace, ...searchResult } = result;
+    return searchResult;
   }
 
   async retrieve(payload: RetrieveRequestPayload, context: DaemonRequestContext): Promise<RetrieveResult> {
-    const pinResult = await this.store.tryPinActiveRetrievalSnapshot(payload.vault);
+    const pinResult = await this.store.ensureActiveRetrievalSnapshot(payload.vault, snapshotContext(context));
     if (pinResult.status !== "ready") {
       return {
         ok: true,
@@ -163,6 +169,21 @@ export class DaemonSearchStoreService {
       assertRetrieveProviderModel(payload, pin);
       const resolved = await this.resolveRetrieveOrigin(payload, pin, context);
       const searchPayload = retrieveSearchPayload(payload, resolved.queryText);
+      const search = normalizeSearchParams(searchPayload);
+      if (search.retrieval === "vector" && !resolved.queryVector) {
+        return {
+          ok: true,
+          command: "retrieve",
+          schemaVersion: 1,
+          available: false,
+          status: "index-not-ready",
+          origin: payload.origin,
+          reason: "vector-active-spec-missing",
+          matches: [],
+          results: [],
+          ...(resolved.warnings.length > 0 ? { warnings: resolved.warnings } : {})
+        };
+      }
       const denseSearch = await this.searchActiveDenseGeneration(searchPayload, pin, resolved.queryVector);
       if (denseSearch.status !== "ready") {
         return {
@@ -176,6 +197,12 @@ export class DaemonSearchStoreService {
           matches: [],
           results: []
         };
+      }
+      if (search.retrieval === "vector") {
+        return this.vectorOnlyRetrieveResult(payload, searchPayload, pin, denseSearch.results ?? [], {
+          excludeDocumentIds: resolved.excludeDocumentIds,
+          warnings: resolved.warnings
+        });
       }
       const explain = payload.explain === true;
       const result = await this.executeSearchWithPin({ ...searchPayload, debug: true }, context, explain, pin, {
@@ -344,6 +371,79 @@ export class DaemonSearchStoreService {
         entryId: entry.entryId,
         similarity: entry.similarity
       }))
+    };
+  }
+
+  private vectorOnlyRetrieveResult(
+    payload: RetrieveRequestPayload,
+    searchPayload: SearchRequestPayload,
+    pin: PinnedRetrievalSnapshot,
+    denseResults: readonly DenseVectorSearchHit[],
+    resolved: {
+      excludeDocumentIds?: readonly string[];
+      warnings?: readonly string[];
+    }
+  ): RetrieveResult {
+    const search = normalizeSearchParams(searchPayload);
+    const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
+    const documents = this.documentsForPin(pin);
+    const records = new Map(pin.embeddingSet.records.map((record) => [record.documentId, record]));
+    const excluded = new Set(resolved.excludeDocumentIds ?? []);
+    const matchesWithScore: Array<{ match: SearchMatch; score: number }> = [];
+    for (const [index, result] of denseResults.entries()) {
+      const embeddingRecord = records.get(result.entryId);
+      if (!embeddingRecord || excluded.has(embeddingRecord.documentId)) continue;
+      const document = documents?.get(embeddingRecord.documentId);
+      const relPath = document?.path ?? embeddingRecord.path;
+      if (!relPath) continue;
+      if (pathFilter && !matchesPathFilter(relPath, pathFilter)) continue;
+      const tags = document?.tags ?? [];
+      if (!matchesTagFilter(tags, search.tags)) continue;
+      const score = denseAgreementFromCosine(result.similarity);
+      matchesWithScore.push({
+        score,
+        match: {
+          path: relPath,
+          title: document?.title ?? titleFromPath(relPath),
+          tags,
+          snippets: document ? snippetsForDocument(document, emptySearchTokenChannels()) : [],
+          ...(search.debug
+            ? {
+                debug: {
+                  source: "persisted" as const,
+                  queryTerms: [],
+                  analyzer: this.requireAnalyzerIdentity(),
+                  retrievalScore: score,
+                  denseAgreement: score,
+                  baseRank: index + 1,
+                  snapshotId: pin.snapshotId
+                }
+              }
+            : {})
+        }
+      });
+      if (matchesWithScore.length >= search.limit) break;
+    }
+    const matches = matchesWithScore.map((entry) => entry.match);
+    return {
+      ok: true,
+      command: "retrieve",
+      schemaVersion: 1,
+      available: true,
+      status: "ready",
+      origin: payload.origin,
+      snapshotId: pin.snapshotId,
+      retrievalSnapshotId: pin.retrievalSnapshotId,
+      matches,
+      results: matchesWithScore.map(({ match, score }) => ({
+        path: match.path,
+        title: match.title,
+        score,
+        tags: match.tags,
+        snippets: match.snippets,
+        ...(payload.debug && match.debug ? { debug: match.debug } : {})
+      })),
+      ...((resolved.warnings?.length ?? 0) > 0 ? { warnings: [...(resolved.warnings ?? [])] } : {})
     };
   }
 
@@ -540,7 +640,8 @@ function retrieveSearchPayload(payload: RetrieveRequestPayload, queryText: strin
     fields: payload.fields,
     limit,
     debug: payload.debug,
-    mode: payload.mode,
+    retrieval: payload.retrieval ?? "hybrid",
+    coverage: payload.coverage,
     budget: payload.budget,
     snapshotId: payload.snapshotId,
     profile: payload.profile
@@ -579,6 +680,10 @@ function filterMatchesByMinScore(matches: readonly SearchMatch[], minScore: numb
 
 function scoreForMatch(match: SearchMatch): number {
   return match.debug?.rerankScore ?? match.debug?.retrievalScore ?? 0;
+}
+
+function titleFromPath(relPath: string): string {
+  return relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
 }
 
 function recordByPath(records: readonly { path?: string; documentId: string; text: string; vector: readonly number[] }[], relPath: string) {

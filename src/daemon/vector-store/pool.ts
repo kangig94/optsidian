@@ -22,6 +22,7 @@ import type {
   VectorStoreKey
 } from "./types.js";
 import { vectorStoreKeyString } from "./types.js";
+import type { SearchIndexProgressUpdate } from "../protocol.js";
 
 export type VectorGenerationPoolOptions = {
   factory?: CoralNeedleInstanceFactory;
@@ -36,6 +37,7 @@ export type BuildVectorGenerationInput = {
   chunks: readonly CoralChunkRecord[];
   engineName?: "auto" | string;
   generationId?: string;
+  progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
 export type BuiltVectorGeneration = {
@@ -83,6 +85,13 @@ export class VectorGenerationPool {
     const generationId = input.generationId ?? createGenerationId(this.now());
     const stagingDir = vectorStagingDir(input.paths, generationId);
     const stagingDbPath = vectorStagingDbPath(input.paths, generationId);
+    const progressTotal = input.chunks.length + 2;
+    input.progress?.({
+      phase: "vector-indexing",
+      total: progressTotal,
+      completed: 0,
+      current: generationId
+    });
     ensurePrivateDirSync(stagingDir, "Optsidian vector staging generation directory");
     const instance = await this.factory.create({
       role: "staging",
@@ -94,7 +103,21 @@ export class VectorGenerationPool {
       await instance.initStore(stagingDbPath);
       await instance.setActiveSpec(input.spec);
       if (input.chunks.length > 0) await instance.upsertChunks(input.chunks);
+      input.progress?.({
+        phase: "vector-indexing",
+        total: progressTotal,
+        completed: input.chunks.length,
+        current: generationId,
+        message: `${input.chunks.length} chunks`
+      });
       await instance.buildIndex(input.engineName ?? "auto");
+      input.progress?.({
+        phase: "vector-indexing",
+        total: progressTotal,
+        completed: input.chunks.length + 1,
+        current: generationId,
+        message: "built"
+      });
       const finalDir = vectorGenerationDir(input.paths, generationId);
       if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true, force: true });
       ensurePrivateDirSync(input.paths.generationsDir, "Optsidian vector generations directory");
@@ -112,6 +135,13 @@ export class VectorGenerationPool {
         embeddingSetId: input.paths.key.embeddingSetId
       };
       await storeVectorGenerationMetadata(input.paths, metadata);
+      input.progress?.({
+        phase: "vector-indexing",
+        total: progressTotal,
+        completed: progressTotal,
+        current: generationId,
+        message: "stored"
+      });
       return { metadata, dbPath: metadata.dbPath };
     } finally {
       await Promise.resolve(instance.close()).catch(() => undefined);

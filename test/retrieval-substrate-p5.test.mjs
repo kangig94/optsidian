@@ -392,6 +392,16 @@ function activeRetrieval(paths) {
   return readJson(paths.retrievalActivePointerPath);
 }
 
+async function ensureActiveRetrieval(harness) {
+  const ready = await harness.store.ensureActiveRetrievalSnapshot(harness.vault, context());
+  assert.equal(ready.status, "ready");
+  const paths = searchStoreCachePaths(harness.vault, harness.env);
+  const active = activeRetrieval(paths);
+  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  harness.store.release(ready.pin);
+  return { paths, active, envelope };
+}
+
 function retrievalEnvelope(paths, retrievalSnapshotId) {
   return readJson(path.join(paths.retrievalsDir, retrievalSnapshotId));
 }
@@ -468,9 +478,7 @@ test("AC5 single Retrieve powers search and similarity sugar", async () => {
 
 test("public Retrieve dense path uses the active built vector generation", async () => {
   const harness = await readyHarness();
-  const paths = searchStoreCachePaths(harness.vault, harness.env);
-  const active = activeRetrieval(paths);
-  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  const { envelope } = await ensureActiveRetrieval(harness);
   assert.ok(harness.vector.calls.buildIndex.some((call) =>
     call.role === "staging" && call.generationId === envelope.vector.generationId
   ));
@@ -677,6 +685,7 @@ test("AC9 query socket has no mutating side effects", async () => {
 
 test("AC9 service Retrieve release is refcount-only and performs no cache file mutation", async () => {
   const harness = await readyHarness();
+  await ensureActiveRetrieval(harness);
   const writes = [];
   const deletes = [];
   const originalWriteFileSync = fs.writeFileSync;
@@ -705,18 +714,22 @@ test("AC9 service Retrieve release is refcount-only and performs no cache file m
   }
 });
 
-test("AC9 retrieval envelope readiness gates fail closed before model encode", async () => {
+test("AC9 Retrieve lazily prepares retrieval while low-level readiness gates fail closed before model encode", async () => {
   const absent = createHarness();
   writeSampleVault(absent.vault);
+  const absentPin = await absent.store.tryPinActiveRetrievalSnapshot(absent.vault);
+  assert.deepEqual(absentPin, { status: "index-not-ready", reason: "no-active-retrieval-snapshot" });
+  assert.equal(absent.embedding.calls.encode, 0);
+  assert.equal(absent.buildCount(), 0);
+
   const absentResult = await absent.service.retrieve({
     vault: absent.vault,
     origin: "text",
     text: "alpha project"
   }, context());
-  assert.equal(absentResult.status, "index-not-ready");
-  assert.equal(absentResult.reason, "no-active-retrieval-snapshot");
-  assert.equal(absent.embedding.calls.encode, 0);
-  assert.equal(absent.buildCount(), 0);
+  assert.equal(absentResult.status, "ready");
+  assert.ok(absent.embedding.calls.encode > 0);
+  assert.equal(absent.buildCount(), 1);
 
   await assertNotReadyAfter("retrieval-state-dirty", async (harness, envelope) => {
     await new RetrievalFreshnessStore({
@@ -768,11 +781,9 @@ test("AC9 retrieval envelope readiness gates fail closed before model encode", a
   });
 });
 
-test("active retrieval snapshot is refused after current fusion identity changes", async () => {
+test("active retrieval pin is refused after current fusion identity changes", async () => {
   const harness = await readyHarness();
-  const paths = searchStoreCachePaths(harness.vault, harness.env);
-  const active = activeRetrieval(paths);
-  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
   const staleRetrieverPlanIdentity = `${envelope.retrieverPlanIdentity}:stale-fusion`;
   const staleRetrievalSnapshotId = computeRetrievalSnapshotId({
     corpusSnapshotId: envelope.corpusSnapshotId,
@@ -802,11 +813,7 @@ test("active retrieval snapshot is refused after current fusion identity changes
     vectorGenerationId: envelope.vector.generationId
   });
 
-  const result = await harness.service.retrieve({
-    vault: harness.vault,
-    origin: "text",
-    text: "alpha project"
-  }, context());
+  const result = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
   assert.equal(result.status, "index-not-ready");
   assert.equal(result.reason, "retrieval-snapshot-mismatched");
   assert.equal(harness.embedding.calls.encode, 0);
@@ -882,9 +889,7 @@ test("AC6 composite identity separates lexical, embedding, retrieval, and ANN id
 
 test("AC9 retrieval envelope protects sidecar roots through compact", async () => {
   const harness = await readyHarness();
-  const paths = searchStoreCachePaths(harness.vault, harness.env);
-  const active = activeRetrieval(paths);
-  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
   const retrievalPath = path.join(paths.retrievalsDir, active.retrievalSnapshotId);
   const linkGraphPath = path.join(paths.linkGraphsDir, envelope.linkGraphId);
 
@@ -903,7 +908,7 @@ test("AC9 retrieval envelope protects sidecar roots through compact", async () =
   assert.ok(fs.existsSync(linkGraphPath));
 });
 
-test("AC9 CLI search sugar requests Retrieve on query capability", async () => {
+test("AC9 hybrid search requests Retrieve on query capability", async () => {
   const root = tempRoot();
   const runtimeDir = path.join(root, "runtime");
   const desired = desiredOwnerIdentity(process.execPath);
@@ -948,6 +953,7 @@ test("AC9 CLI search sugar requests Retrieve on query capability", async () => {
   const result = await client.search({
     vault: root,
     query: "alpha project",
+    retrieval: "hybrid",
     limit: 2
   });
   assert.equal(result.command, "search");
@@ -984,16 +990,10 @@ test("AC14 removed similarity fallback and reserved vector section code", () => 
 
 async function assertNotReadyAfter(expectedReason, mutate) {
   const harness = await readyHarness();
-  const paths = searchStoreCachePaths(harness.vault, harness.env);
-  const active = activeRetrieval(paths);
-  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  const { paths, envelope } = await ensureActiveRetrieval(harness);
   const buildsBefore = harness.buildCount();
   await mutate(harness, envelope, paths);
-  const result = await harness.service.retrieve({
-    vault: harness.vault,
-    origin: "text",
-    text: "alpha project"
-  }, context());
+  const result = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
   assert.equal(result.status, "index-not-ready");
   assert.equal(result.reason, expectedReason);
   assert.equal(harness.embedding.calls.encode, 0);

@@ -352,15 +352,15 @@ test("AC6 scheduler pipeline is byte-identical to monolithic for exact-identity 
   console.log(`AC6 exact-identity byte-identity: workers=${workerCounts.join("/")} batchOrders=${BATCH_ORDER_VARIANTS.map((variant) => variant.name).join("/")} queries=${queryCases.length}`);
 });
 
-test("AC6 approximate budget is deterministic and labeled approximate", { timeout: 240_000 }, async () => {
+test("AC6 bounded budget is deterministic and labeled bounded", { timeout: 240_000 }, async () => {
   const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
-  const { SEARCH_WARNING_APPROXIMATE } = await import(path.join(repoRoot, "src/core/search/internal-types.ts"));
+  const { SEARCH_WARNING_BOUNDED } = await import(path.join(repoRoot, "src/core/search/internal-types.ts"));
   const { analyzer, built, vault } = await buildIdentitySnapshot(4);
   const search = normalizeSearchParams({
     query: "needle",
     limit: 8,
     debug: true,
-    mode: "approximate",
+    coverage: "bounded",
     budget: { shards: 4, work: 1_000_000 }
   });
   const analysis = testQueryAnalysis(search.query);
@@ -376,7 +376,7 @@ test("AC6 approximate budget is deterministic and labeled approximate", { timeou
         analyzerIdentity: analyzer.identity,
         snapshot: snapshotHandle(built, `pin-approx-${ordering.name}-${index}`),
         deadline: Date.now() + 120_000,
-        cancellationId: `ac6-approx-${ordering.name}-${index}-${crypto.randomUUID()}`,
+        cancellationId: `ac6-bounded-${ordering.name}-${index}-${crypto.randomUUID()}`,
         pool: pools.searchExecution
       }, ordering);
 
@@ -387,12 +387,12 @@ test("AC6 approximate budget is deterministic and labeled approximate", { timeou
       const expectedBudgetedTasks = ordering.order(first.plan.tasks.slice(0, search.budget.shards));
       const expectedSignature = expectedInitialDispatchSignature(expectedBudgetedTasks, 2);
 
-      assert.deepEqual(first.result.warnings, [SEARCH_WARNING_APPROXIMATE]);
-      assert.equal(firstBytes, secondBytes, `approximate search must be byte-deterministic for batchOrder=${ordering.name}`);
-      assert.deepEqual(dispatchSignature(first.jobs), dispatchSignature(second.jobs), `approximate dispatch order must be deterministic for batchOrder=${ordering.name}`);
-      assert.deepEqual(dispatchSignature(first.jobs), expectedSignature, `approximate dispatch must follow the ordered deterministic prefix for batchOrder=${ordering.name}`);
+      assert.deepEqual(first.result.warnings, [SEARCH_WARNING_BOUNDED]);
+      assert.equal(firstBytes, secondBytes, `bounded search must be byte-deterministic for batchOrder=${ordering.name}`);
+      assert.deepEqual(dispatchSignature(first.jobs), dispatchSignature(second.jobs), `bounded dispatch order must be deterministic for batchOrder=${ordering.name}`);
+      assert.deepEqual(dispatchSignature(first.jobs), expectedSignature, `bounded dispatch must follow the ordered deterministic prefix for batchOrder=${ordering.name}`);
       if (expectedBytes === undefined) expectedBytes = firstBytes;
-      assert.equal(firstBytes, expectedBytes, `approximate search must be byte-deterministic across batchOrder=${ordering.name}`);
+      assert.equal(firstBytes, expectedBytes, `bounded search must be byte-deterministic across batchOrder=${ordering.name}`);
     } finally {
       await pools.close();
     }

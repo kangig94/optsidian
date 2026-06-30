@@ -43,7 +43,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "optsidian search <query> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
       "optsidian search query=<text> [tag=<tag>[,<tag>...]] [path=<dir|file>] [field=<field>[,<field>...]] [limit=<n>] [debug=true] [format=text|json]",
       "optsidian search tag=<tag>[,<tag>...] [path=<dir|file>] [limit=<n>] [format=text|json]",
-      "optsidian search <query> --approximate [budget-work=<n>] [budget-shards=<n>] [budget-time-ms=<n>] [format=text|json]"
+      "optsidian search <query> retrieval=lexical|vector|hybrid [coverage=full|bounded] [budget-work=<n>] [budget-shards=<n>] [budget-time-ms=<n>] [format=text|json]"
     ],
     options: [
       { name: "<query>", description: "Ranked note search query; multiple positional terms are joined with spaces" },
@@ -53,17 +53,18 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "field=<field,...>", description: "Restrict query matching to title, aliases, tags, headings, path, or body" },
       { name: "limit=<n>", description: "Maximum notes to return (default: 10)" },
       { name: "debug=true", description: "Include analyzer tokens and ranking diagnostics in JSON output" },
-      { name: "mode=exhaustive|approximate", description: "Execution mode; exhaustive is the default" },
-      { name: "--approximate", description: "Shortcut for mode=approximate" },
-      { name: "budget-work=<n>", description: "Approximate mode deterministic work-unit estimate budget" },
-      { name: "budget-shards=<n>", description: "Approximate mode deterministic shard-unit prefix budget" },
-      { name: "budget-time-ms=<n>", description: "Approximate mode best-effort time budget; marked non-reproducible" },
+      { name: "retrieval=lexical|vector|hybrid", description: "Retrieval source; lexical is the default and never loads the vector model" },
+      { name: "coverage=full|bounded", description: "Execution coverage; full is the default" },
+      { name: "budget-work=<n>", description: "Bounded coverage deterministic work-unit estimate budget" },
+      { name: "budget-shards=<n>", description: "Bounded coverage deterministic shard-unit prefix budget" },
+      { name: "budget-time-ms=<n>", description: "Bounded coverage best-effort time budget; marked non-reproducible" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
       "Search is CLI-only. Use MCP command_map for routing and CLI help discovery.",
       "A positional query or query= is required unless tag= is provided.",
       "field= is only valid when a query is present.",
+      "field= is not supported with retrieval=vector.",
       "Search indexes analyzer tokens; default baseline is Intl.Segmenter plus Latin folding and ASCII stemming.",
       "Search is served through the search daemon RPC client.",
       "Search output returns note path, title, tags, and body snippets only."
@@ -99,12 +100,14 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     summary: "Manage the ranked search cache",
     usage: [
       "optsidian index [status] [format=text|json]",
-      "optsidian index rebuild [format=text|json]",
-      "optsidian index warm [format=text|json]",
+      "optsidian index rebuild [--no-progress] [format=text|json]",
+      "optsidian index refresh [--no-progress] [format=text|json]",
+      "optsidian index warm [--no-progress] [format=text|json]",
       "optsidian index clear [format=text|json]",
       "optsidian index prune [unused-days=30] [--dry-run] [format=text|json]"
     ],
     options: [
+      { name: "--no-progress", description: "Disable the interactive progress bar for warm, rebuild, and refresh" },
       { name: "unused-days=<n>", description: "Prune search cache stores unused for at least n days (default: 30)" },
       { name: "--dry-run", description: "Report prune candidates without deleting cache stores" },
       { name: "format=text|json", description: "Output format (default: text)" }
@@ -113,7 +116,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       "The search cache lives outside the vault and is owned by the search daemon.",
       "warm discovers Obsidian's vault registry and sends one LoadVault request per vault.",
       "status reports daemon readiness, request metrics, and loaded vault states.",
-      "rebuild and clear are daemon RPC mutations for the selected vault.",
+      "rebuild, refresh, and clear are daemon RPC mutations for the selected vault.",
       "prune deletes cache stores by last-used time, not by last-indexed time, so read-only vaults remain cached while they are searched."
     ]
   },

@@ -244,8 +244,20 @@ function analyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "int
 
 function extraLangs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string[] {
   const raw = env.OPTSIDIAN_SEARCH_EXTRA_LANGS;
-  const values = raw !== undefined ? raw.split(",") : settings.search?.extraLangs ?? [];
+  const values = raw !== undefined
+    ? raw.split(",")
+    : env.LANGS !== undefined
+      ? langsEnvExtraLangs(env.LANGS)
+      : settings.search?.extraLangs ?? [];
   return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort();
+}
+
+function langsEnvExtraLangs(raw: string): string[] {
+  return raw
+    .split(/[,:;\s]+/u)
+    .map((value) => value.trim().toLowerCase())
+    .map((value) => value.split(/[_.-]/u)[0])
+    .filter((value) => value === "ko");
 }
 
 function embeddingModel(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "bge-m3" | "multilingual-e5-small" {

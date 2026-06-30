@@ -1,4 +1,4 @@
-import type { SearchExecutionBudget, SearchExecutionMode, SearchField } from "../types.js";
+import type { SearchCoverageBudget, SearchCoverageMode, SearchField, SearchRetrievalMode } from "../types.js";
 import type { SearchTokenChannelTerms } from "./analysis/index.js";
 
 export type PathFilter = {
@@ -13,17 +13,18 @@ export type NormalizedSearchParams = {
   fields?: SearchField[];
   limit: number;
   debug: boolean;
-  mode: SearchExecutionMode;
-  budget?: SearchExecutionBudget;
+  retrieval: SearchRetrievalMode;
+  coverage: SearchCoverageMode;
+  budget?: SearchCoverageBudget;
 };
 
-export const SEARCH_WARNING_APPROXIMATE = "approximate";
+export const SEARCH_WARNING_BOUNDED = "bounded";
 export const SEARCH_WARNING_NON_REPRODUCIBLE = "non-reproducible";
 
-export function searchExecutionWarningLabels(search: Pick<NormalizedSearchParams, "mode" | "budget">): string[] {
-  if (search.mode !== "approximate") return [];
+export function searchExecutionWarningLabels(search: Pick<NormalizedSearchParams, "coverage" | "budget">): string[] {
+  if (search.coverage !== "bounded") return [];
   return [
-    SEARCH_WARNING_APPROXIMATE,
+    SEARCH_WARNING_BOUNDED,
     ...(search.budget?.timeMs !== undefined ? [SEARCH_WARNING_NON_REPRODUCIBLE] : [])
   ];
 }

@@ -130,6 +130,7 @@ export class AnalyzerWorkerPool {
     const analyzerIdentity = await this.warmAnalyzerIdentity();
     options.onProgress?.({ phase: "scanning", completed: 0 });
     const scan = scanBuildDocuments(vaultRoot);
+    options.onProgress?.({ phase: "scanning", total: scan.files.length, completed: scan.files.length });
     const effectivePartitionBits = partitionBits ?? DEFAULT_PARTITION_BITS;
     const effectiveSearchSettings = normalizeIndexAffectingSearchSettings(searchSettings);
     const parseBatches = chunk(scan.files, this.pool.microbatchSize);

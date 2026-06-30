@@ -203,9 +203,9 @@ lifecycle deadline exists so large vault load/build/preload work can finish inst
 fixed timeout.
 
 The daemon reports lifecycle progress through `index status` and daemon `Status` JSON. Interactive
-`index warm` and `index rebuild` render a single stderr progress line showing the current phase,
-completed count, total count when known, and current file. This progress output does not change
-stdout JSON/text results.
+`index warm`, `index rebuild`, and `index refresh` render a single stderr progress line showing the
+current phase, completed count, total count when known, and current file. Pass `--no-progress` to
+disable the interactive line. This progress output does not change stdout JSON/text results.
 
 By default, quality evaluation runs queries with concurrency 1 and prints score metrics only. Use
 `--workers=<n>` as the normal daemon worker control: it sets `OPTSIDIAN_SEARCH_WORKERS` and
@@ -292,7 +292,7 @@ Cold query `Search` / `Explain` requests load the active snapshot, warm the quer
 on one search-execution worker preloading that snapshot before running the query. The analyzer warmup
 overlaps snapshot load/preload work. Cold metadata-only searches, such as tag-only searches, skip
 positional snapshot preload and hydrate only document metadata in the search worker. Explicit
-lifecycle warmup commands such as `index warm`, `index rebuild`, `refresh`, and `compact` still
+lifecycle warmup commands such as `index warm`, `index rebuild`, `index refresh`, and `compact` still
 preload all search-execution workers for the active snapshot.
 
 Cold-start reference measurements from the 2026-06-24 lazy-startup run:

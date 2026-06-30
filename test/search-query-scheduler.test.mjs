@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SEARCH_WARNING_APPROXIMATE, SEARCH_WARNING_NON_REPRODUCIBLE } from "../src/core/search/internal-types.ts";
+import { SEARCH_WARNING_BOUNDED, SEARCH_WARNING_NON_REPRODUCIBLE } from "../src/core/search/internal-types.ts";
 import { normalizeSearchParams } from "../src/core/search/params.ts";
 import { SearchQueryScheduler } from "../src/daemon/search-store/query-scheduler.ts";
 
@@ -345,14 +345,14 @@ test("SearchQuerySession releases a lease when dispatch fails before the slot is
   assert.deepEqual(pool.idleReadySlotIds(), [1]);
 });
 
-test("SearchQuerySession approximate shard budget ceases scheduling without cancelling in-flight work", async () => {
+test("SearchQuerySession bounded shard budget ceases scheduling without cancelling in-flight work", async () => {
   const pool = new FakeLeasePool([1, 2]);
   const scheduler = new SearchQueryScheduler(pool, { exhaustiveWorkCeiling: 100 });
   const resultPromise = scheduler.execute(schedulerInput("shard-budget-stop", 2, {
     search: {
       query: "needle",
       limit: 5,
-      mode: "approximate",
+      coverage: "bounded",
       budget: { shards: 1 }
     }
   }));
@@ -367,18 +367,18 @@ test("SearchQuerySession approximate shard budget ceases scheduling without canc
   const result = await resultPromise;
 
   assert.equal(result.snapshotId, "snapshot-shard-budget-stop");
-  assert.deepEqual(result.warnings, [SEARCH_WARNING_APPROXIMATE]);
+  assert.deepEqual(result.warnings, [SEARCH_WARNING_BOUNDED]);
   assert.deepEqual(pool.cancelCalls, []);
 });
 
-test("SearchQuerySession applies approximate and non-reproducible warnings for time budgets", async () => {
+test("SearchQuerySession applies bounded and non-reproducible warnings for time budgets", async () => {
   const pool = new FakeLeasePool([1]);
   const scheduler = new SearchQueryScheduler(pool, { exhaustiveWorkCeiling: 100 });
   const resultPromise = scheduler.execute(schedulerInput("time-budget", 1, {
     search: {
       query: "needle",
       limit: 5,
-      mode: "approximate",
+      coverage: "bounded",
       budget: { timeMs: 60_000 }
     }
   }));
@@ -389,10 +389,10 @@ test("SearchQuerySession applies approximate and non-reproducible warnings for t
   pool.completeAll();
   const result = await resultPromise;
 
-  assert.deepEqual(result.warnings, [SEARCH_WARNING_APPROXIMATE, SEARCH_WARNING_NON_REPRODUCIBLE]);
+  assert.deepEqual(result.warnings, [SEARCH_WARNING_BOUNDED, SEARCH_WARNING_NON_REPRODUCIBLE]);
 });
 
-test("SearchQuerySession approximate explain marks incomplete candidate set in result and trace warnings", async () => {
+test("SearchQuerySession bounded explain marks incomplete candidate set in result and trace warnings", async () => {
   const pool = new FakeLeasePool([1]);
   const scheduler = new SearchQueryScheduler(pool, { exhaustiveWorkCeiling: 100 });
   const resultPromise = scheduler.execute(schedulerInput("approx-explain", 1, {
@@ -400,7 +400,7 @@ test("SearchQuerySession approximate explain marks incomplete candidate set in r
     search: {
       query: "needle",
       limit: 5,
-      mode: "approximate",
+      coverage: "bounded",
       budget: { shards: 1 }
     }
   }));
@@ -409,9 +409,9 @@ test("SearchQuerySession approximate explain marks incomplete candidate set in r
   pool.completeAll();
   const result = await resultPromise;
 
-  assert.deepEqual(result.warnings, [SEARCH_WARNING_APPROXIMATE]);
+  assert.deepEqual(result.warnings, [SEARCH_WARNING_BOUNDED]);
   assert.ok(result.explainTrace);
-  assert.deepEqual(result.explainTrace.warnings, [SEARCH_WARNING_APPROXIMATE]);
+  assert.deepEqual(result.explainTrace.warnings, [SEARCH_WARNING_BOUNDED]);
   assert.equal(result.explainTrace.inputs.candidateSet.complete, false);
 });
 
@@ -422,7 +422,7 @@ test("SearchQuerySession time budget ceases scheduling pending work without canc
     search: {
       query: "needle",
       limit: 5,
-      mode: "approximate",
+      coverage: "bounded",
       budget: { timeMs: 1 }
     }
   }));
@@ -440,7 +440,7 @@ test("SearchQuerySession time budget ceases scheduling pending work without canc
   const result = await resultPromise;
   await settleSchedulerTurn();
 
-  assert.deepEqual(result.warnings, [SEARCH_WARNING_APPROXIMATE, SEARCH_WARNING_NON_REPRODUCIBLE]);
+  assert.deepEqual(result.warnings, [SEARCH_WARNING_BOUNDED, SEARCH_WARNING_NON_REPRODUCIBLE]);
   assert.equal(pool.runCalls.length, 1);
   assert.deepEqual(pool.cancelCalls, []);
 });

@@ -293,6 +293,13 @@ class SearchDaemon {
     switch (request.method) {
       case "Status":
         return this.status(request);
+      case "Search": {
+        return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
+          const result = await runtime.searchStore.search(request.payload, this.requestContext(request));
+          if (result.status === undefined || result.status === "ready") runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+          return result;
+        }, { cancellationId: this.requestCancellationId(request) });
+      }
       case "Retrieve": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
           const result = await runtime.searchStore.retrieve(request.payload, this.requestContext(request));
@@ -568,6 +575,7 @@ function settingNumber(raw: string | undefined, fallback: number | undefined): n
 function queryRegistry(): Record<QueryDaemonRequest["method"], RegistryHandler<QueryRuntime>> {
   return {
     Status: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
+    Search: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     Retrieve: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest)
   };
 }

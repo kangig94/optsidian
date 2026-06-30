@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { unpack } from "msgpackr";
-import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
+import { createDeterministicEmbeddingSetBuilder, DeterministicHashProvider } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
 process.env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE = "memory";
@@ -1289,6 +1289,76 @@ test("search store loadVault can warm the query analyzer alongside preload", asy
   ].sort());
 });
 
+test("index rebuild overlaps retrieval vector build with lexical snapshot publish", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const {
+    createDaemonSnapshotStore,
+    createProviderEmbeddingSetBuilder
+  } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const vault = tempRoot();
+  writeVaultFile(vault, "Parallel.md", "# Parallel\n\nalpha project\n");
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({
+    vaultRoot: vault,
+    analyzer,
+    partitionBits: 1
+  });
+  const innerEmbedding = createProviderEmbeddingSetBuilder(new DeterministicHashProvider());
+  const progress = [];
+  let resolveEmbeddingStarted;
+  let releaseEmbedding;
+  let releasePublish;
+  const embeddingStarted = new Promise((resolve) => {
+    resolveEmbeddingStarted = resolve;
+  });
+  const embeddingReleased = new Promise((resolve) => {
+    releaseEmbedding = resolve;
+  });
+  const publishReleased = new Promise((resolve) => {
+    releasePublish = resolve;
+  });
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
+    analyzerIdentity: analyzer.identity,
+    partitionBits: 1,
+    snapshotBuilder: async () => built,
+    embeddingSetBuilder: {
+      providerIdentity: innerEmbedding.providerIdentity,
+      build: async (input) => {
+        resolveEmbeddingStarted();
+        await embeddingReleased;
+        return innerEmbedding.build(input);
+      }
+    },
+    durableRenameLinkGraph: async (from, to) => {
+      await fs.promises.mkdir(path.dirname(to), { recursive: true });
+      if (path.basename(to) === built.linkGraphId) {
+        await Promise.race([
+          embeddingStarted,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("retrieval vector build did not start while lexical publish was blocked")), 250))
+        ]);
+        releaseEmbedding();
+        await publishReleased;
+      }
+      await fs.promises.rename(from, to);
+    }
+  }));
+
+  const rebuild = store.rebuild(vault, {
+    progress: (update) => progress.push(update)
+  });
+  await embeddingStarted;
+  releasePublish();
+  const result = await rebuild;
+  assert.equal(result.snapshotId, built.snapshotId);
+  assert.ok(progress.some((update) => update.phase === "publishing"), "publishing progress must be reported");
+  const embedding = progress.filter((update) => update.phase === "embedding");
+  assert.ok(embedding.length > 0, "embedding progress must be reported");
+  assert.equal(embedding.at(-1).completed, embedding.at(-1).total);
+  const vectorIndexing = progress.filter((update) => update.phase === "vector-indexing");
+  assert.ok(vectorIndexing.length > 0, "vector-indexing progress must be reported");
+  assert.equal(vectorIndexing.at(-1).completed, vectorIndexing.at(-1).total);
+});
+
 test("search store service metadata path uses loaded documents for a pinned snapshot", async () => {
   const { DaemonSearchStoreService } = await futureImport("src/daemon/search-store/service.ts");
   const vault = tempRoot();
@@ -1877,7 +1947,7 @@ test("AC1 protocol method coverage is split by query and control capability", as
     SEARCH_DAEMON_PROTOCOL_VERSION
   } = await futureImport("src/daemon/protocol.ts");
 
-  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ["Retrieve", "Status"]);
+  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ["Retrieve", "Search", "Status"]);
   assert.deepEqual([...CONTROL_DAEMON_METHODS].sort(), [
     "Clear",
     "Compact",
@@ -1923,18 +1993,17 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
         }
-        if (request.method === "Retrieve") {
+        if (request.method === "Search") {
           return {
             ok: true,
-            command: "retrieve",
+            command: "search",
             schemaVersion: 1,
             available: true,
             status: "ready",
-            origin: request.payload.origin,
+            origin: "text",
             matches: [],
             results: [],
-            snapshotId: "snap-a",
-            retrievalSnapshotId: "retrieval-a"
+            snapshotId: "snap-a"
           };
         }
         throw new Error(`unexpected method ${request.method}`);
@@ -1952,9 +2021,8 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
   assert.ok(loadRequest.deadline <= Date.now() + expected + 1000);
 
   await client.search({ vault, query: "alpha", limit: 1 });
-  const searchRequest = requests.find((request) => request.method === "Retrieve");
+  const searchRequest = requests.find((request) => request.method === "Search");
   assert.ok(searchRequest);
-  assert.equal(searchRequest.payload.origin, "text");
   assert.ok(searchRequest.deadline >= Date.now() + SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS - 1000);
 });
 
@@ -2012,6 +2080,9 @@ test("snapshot build reports deterministic progress counts", async () => {
   });
 
   assert.equal(progress[0].phase, "scanning");
+  const scanning = progress.filter((update) => update.phase === "scanning");
+  assert.equal(scanning.at(-1).total, 2);
+  assert.equal(scanning.at(-1).completed, 2);
   const parsing = progress.filter((update) => update.phase === "parsing");
   assert.equal(parsing.at(-1).total, 2);
   assert.equal(parsing.at(-1).completed, 2);
@@ -2348,16 +2419,14 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
     { method: "Status", result: { ready: false, phase: "starting" } },
     { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: 2 } },
     {
-      method: "Retrieve",
+      method: "Search",
       result: {
         ok: true,
-        command: "retrieve",
+        command: "search",
         schemaVersion: 1,
         available: true,
         status: "ready",
-        origin: "text",
         snapshotId: "snap-a",
-        retrievalSnapshotId: "retrieval-a",
         matches: [{ path: "Alpha.md", snippets: [] }],
         results: [{ path: "Alpha.md", score: 1, snippets: [] }]
       }
@@ -2377,7 +2446,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
         const next = responses.shift();
         assert.equal(request.method, next.method);
         if (next.method === "Status" && next.result.ready) next.result.nonce = spawns[0].nonce;
-        if (next.method === "Retrieve") assert.equal(request.nonce, spawns[0].nonce);
+        if (next.method === "Search") assert.equal(request.nonce, spawns[0].nonce);
         return next.result;
       },
       close: async () => {}
@@ -2387,7 +2456,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const result = await client.search({ vault: runtimeDir, query: "alpha", limit: 5, deadlineMs: 1000 });
 
   assert.equal(spawns.length, 1);
-  assert.deepEqual(calls.map((call) => call.method), ["Status", "Status", "Retrieve"]);
+  assert.deepEqual(calls.map((call) => call.method), ["Status", "Status", "Search"]);
   assert.equal(result.snapshotId, "snap-a");
   assert.deepEqual(result.matches.map((match) => match.path), ["Alpha.md"]);
 
@@ -2427,18 +2496,15 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
         if (request.method === "Status") {
           return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, owner: { nonce: request.nonce } };
         }
-        // AC5/AC8 route search sugar through the read-only Retrieve method.
-        assert.equal(request.method, "Retrieve");
+        assert.equal(request.method, "Search");
         assert.equal(typeof request.nonce, "string");
         return {
           ok: true,
-          command: "retrieve",
+          command: "search",
           schemaVersion: 1,
           available: true,
           status: "ready",
-          origin: request.payload.origin,
           snapshotId: "snap-a",
-          retrievalSnapshotId: "retrieval-a",
           matches: [],
           results: []
         };
@@ -2448,7 +2514,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
   });
 
   await client.search({ vault: runtimeDir, query: "alpha", limit: 1 });
-  assert.deepEqual(seen.map((request) => request.method), ["Status", "Retrieve"]);
+  assert.deepEqual(seen.map((request) => request.method), ["Status", "Search"]);
   assert.equal(seen[0].nonce, seen[1].nonce);
 
   const mismatched = createSearchDaemonClient({
@@ -2492,18 +2558,15 @@ test("daemon client sends runtime profile per request even when owner is reused"
       if (request.method === "Status") {
         return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2 };
       }
-      // AC5/AC8 route search sugar through the read-only Retrieve method.
-      assert.equal(request.method, "Retrieve");
+      assert.equal(request.method, "Search");
       searchRequests.push(request);
       return {
         ok: true,
-        command: "retrieve",
+        command: "search",
         schemaVersion: 1,
         available: true,
         status: "ready",
-        origin: request.payload.origin,
         snapshotId: "snap-a",
-        retrievalSnapshotId: "retrieval-a",
         matches: [],
         results: []
       };

@@ -149,8 +149,9 @@ optsidian search rollout tag=project path=Projects
 optsidian search tag=project,alpha
 optsidian search "#project alpha" format=json
 optsidian search "project alpha" format=json debug=true
-optsidian search "project alpha" --approximate budget-shards=8
-optsidian search "project alpha" mode=approximate budget-work=25000 format=json
+optsidian search "project alpha" retrieval=vector format=json
+optsidian search "project alpha" retrieval=hybrid coverage=bounded budget-shards=8
+optsidian search "project alpha" coverage=bounded budget-work=25000 format=json
 optsidian similarity mode=left left=Projects/Alpha.md top-k=5 min-score=0.25 format=json
 optsidian similarity mode=left left-text="semantic project handoff" path=Projects top-k=5
 optsidian similarity mode=pair left=Projects/Alpha.md right=Projects/Beta.md format=json
@@ -160,11 +161,11 @@ Search returns only note path, title, tags, and body-focused snippets. Frontmatt
 
 With `format=json`, the search envelope carries a top-level `snapshotId` alongside `matches`: the 64-hex content-addressed id of the immutable snapshot the request was served from. Results are a pure function of that snapshot, so the id identifies exactly which index produced the matches; with `debug=true` the same id also appears under each match's `debug.snapshotId`.
 
-Search defaults to `mode=exhaustive`, which schedules all matching shard work for the pinned snapshot before ranking the final result. `mode=approximate` or `--approximate` opts into a bounded shard/work prefix with `budget-shards=<n>` and/or `budget-work=<n>`. Approximate results always include a top-level `warnings` array containing `approximate`; text output renders this as `warning: approximate`. `budget-time-ms=<n>` is best-effort and can vary with runtime scheduling, so it also returns the exact warning label `non-reproducible`. Budgets are accepted only in approximate mode; combining `mode=exhaustive` with any `budget-*` flag is an error.
+Search defaults to `retrieval=lexical` and `coverage=full`, which schedules all matching shard work for the pinned lexical snapshot before ranking the final result and does not load the vector model. `retrieval=vector` uses dense vector hits only, while `retrieval=hybrid` fuses dense/link signals with lexical ranking. `coverage=bounded` opts into a bounded shard/work prefix with `budget-shards=<n>` and/or `budget-work=<n>`. Bounded results always include a top-level `warnings` array containing `bounded`; text output renders this as `warning: bounded`. `budget-time-ms=<n>` is best-effort and can vary with runtime scheduling, so it also returns the exact warning label `non-reproducible`. Budgets are accepted only with bounded coverage; combining `coverage=full` with any `budget-*` flag is an error.
 
 The search daemon stores immutable corpus and retrieval snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with durable active pointers. Each corpus snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, resolved link graph data, and line snippet data. Each retrieval snapshot binds that corpus snapshot to an embedding recipe/provider, link resolver/scoring identity, retriever plan, ranking feature version, and promoted built vector generation. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query.
 
-The daemon is resident and uses separate query/control sockets. Query RPC exposes `Retrieve`; CLI `search`, `similarity`, and `explain` are adapters over that public Retrieve path. Control RPC owns `index rebuild`, `index warm`, `index clear`, `index prune`, and maintenance GC. Query release is refcount-only and does not delete cache files. Dense retrieval queries the active built vector generation through the vector generation pool; link retrieval uses the snapshot link graph; lexical scores stay stable when dense/link signals are absent. If the daemon cannot start, the retrieval snapshot is stale, or a built vector generation is missing, commands fail clearly or return `status=index-not-ready` instead of falling back to in-process indexing.
+The daemon is resident and uses separate query/control sockets. Query RPC exposes `Search` for lexical search and `Retrieve` for vector, hybrid, similarity, and explain flows. CLI `search` uses `Search` by default and switches to `Retrieve` when `retrieval=vector` or `retrieval=hybrid` is requested. Control RPC owns `index rebuild`, `index refresh`, `index warm`, `index clear`, `index prune`, and maintenance GC. Query release is refcount-only and does not delete cache files. Dense retrieval lazily prepares and queries the active built vector generation through the vector generation pool; link retrieval uses the snapshot link graph; lexical scores stay stable when dense/link signals are absent. If the daemon cannot start or a retrieval envelope fails validation, commands fail clearly or return `status=index-not-ready` instead of falling back to in-process indexing.
 
 With `format=json`, similarity returns the Retrieve-derived envelope:
 
@@ -209,11 +210,12 @@ The underlying daemon `Retrieve` payload supports `origin=text`, `origin=note`, 
 
 `similarity` currently supports `mode=left` with `left=<path>` or `left-text=<text|@file>`, `mode=pair` with note paths, `path=<dir|file>` candidate scope, `top-k`, `min-score`, and `model=<id>`. The model id must match the active built retrieval generation. Historical `paths=`, `path-glob=`, frontmatter filter, projection, and pair text flags are rejected with a UsageError rather than ignored.
 
-`index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index warm`, and `index clear` are daemon RPC mutations.
+`index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index refresh`, `index warm`, and `index clear` are daemon RPC mutations. Interactive `warm`, `rebuild`, and `refresh` render a single stderr progress bar unless `--no-progress` is passed.
 
 ```bash
 optsidian index status
 optsidian index rebuild
+optsidian index refresh
 optsidian index warm
 optsidian index clear
 ```

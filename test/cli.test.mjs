@@ -477,19 +477,20 @@ after(async () => {
   }
 });
 
-test("search CLI request payload carries explicit approximate mode and budgets", async () => {
+test("search CLI request payload carries explicit retrieval and bounded coverage budgets", async () => {
   const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
   const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
   const vault = "/tmp/optsidian-search-cli-contract";
   const request = (tokens) => searchRequestFromArgs(parseArgs(["search", ...tokens]), vault);
 
-  const approximateFlag = request(["needle", "--approximate"]);
-  assert.equal(approximateFlag.query, "needle");
-  assert.equal(approximateFlag.mode, "approximate");
-  assert.equal("budget" in approximateFlag, false);
+  const vector = request(["query=needle", "retrieval=vector"]);
+  assert.equal(vector.query, "needle");
+  assert.equal(vector.retrieval, "vector");
+  assert.equal("budget" in vector, false);
 
-  const approximateMode = request(["query=needle", "mode=approximate"]);
-  assert.equal(approximateMode.mode, "approximate");
+  const hybridBounded = request(["query=needle", "retrieval=hybrid", "coverage=bounded"]);
+  assert.equal(hybridBounded.retrieval, "hybrid");
+  assert.equal(hybridBounded.coverage, "bounded");
 
   const budgeted = request([
     "needle",
@@ -497,53 +498,70 @@ test("search CLI request payload carries explicit approximate mode and budgets",
     "budget-shards=3",
     "budget-time-ms=40"
   ]);
-  assert.equal(budgeted.mode, "approximate");
+  assert.equal(budgeted.coverage, "bounded");
   assert.deepEqual(budgeted.budget, { work: 20, shards: 3, timeMs: 40 });
 });
 
-test("search CLI rejects invalid mode and exhaustive budget combinations", async () => {
+test("search CLI rejects invalid retrieval, coverage, and full budget combinations", async () => {
   const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
   const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
   const vault = "/tmp/optsidian-search-cli-contract";
   const request = (tokens) => searchRequestFromArgs(parseArgs(["search", ...tokens]), vault);
 
-  assert.throws(() => request(["needle", "mode=invalid"]), /mode must be exhaustive or approximate/);
+  assert.throws(() => request(["needle", "retrieval=invalid"]), /retrieval must be lexical, vector, or hybrid/);
+  assert.throws(() => request(["needle", "coverage=invalid"]), /coverage must be full or bounded/);
+  assert.throws(() => request(["retrieval=vector", "tag=project"]), /retrieval=vector requires query=<text>/);
+  assert.throws(() => request(["needle", "retrieval=vector", "field=title"]), /field=<field> is not supported with retrieval=vector/);
   for (const budgetFlag of ["budget-work=1", "budget-shards=1", "budget-time-ms=1"]) {
     assert.throws(
-      () => request(["needle", "mode=exhaustive", budgetFlag]),
-      /approximate budgets require mode=approximate/
+      () => request(["needle", "coverage=full", budgetFlag]),
+      /search budgets require coverage=bounded/
     );
   }
 });
 
-test("search CLI treats positional approximate as an exhaustive query term", async () => {
+test("search CLI treats positional bounded as a lexical query term", async () => {
   const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
   const { normalizeSearchParams } = await import(path.resolve("src/core/search/params.ts"));
   const { searchExecutionWarningLabels } = await import(path.resolve("src/core/search/internal-types.ts"));
   const { searchRequestFromArgs } = await import(path.resolve("src/cli/commands/search.ts"));
 
   const payload = searchRequestFromArgs(
-    parseArgs(["search", "approximate"]),
+    parseArgs(["search", "bounded"]),
     "/tmp/optsidian-search-cli-contract"
   );
   const normalized = normalizeSearchParams(payload);
 
-  assert.equal(payload.query, "approximate");
-  assert.equal(payload.mode, undefined);
+  assert.equal(payload.query, "bounded");
+  assert.equal(payload.retrieval, undefined);
+  assert.equal(payload.coverage, undefined);
   assert.equal(payload.budget, undefined);
-  assert.equal(normalized.mode, "exhaustive");
+  assert.equal(normalized.retrieval, "lexical");
+  assert.equal(normalized.coverage, "full");
   assert.deepEqual(searchExecutionWarningLabels(normalized), []);
 });
 
-test("search help documents approximate mode and budgets", async () => {
+test("search help documents retrieval, coverage, and budgets", async () => {
   const { commandHelpText } = await import(path.resolve("src/cli/help.ts"));
   const help = commandHelpText("search");
 
-  assert.match(help, /mode=exhaustive\|approximate/);
-  assert.match(help, /--approximate/);
+  assert.match(help, /retrieval=lexical\|vector\|hybrid/);
+  assert.match(help, /coverage=full\|bounded/);
+  assert.doesNotMatch(help, /--approximate/);
   assert.match(help, /budget-work=<n>/);
   assert.match(help, /budget-shards=<n>/);
   assert.match(help, /budget-time-ms=<n>/);
+});
+
+test("index help documents refresh and progress control", async () => {
+  const { commandHelpText } = await import(path.resolve("src/cli/help.ts"));
+  const help = commandHelpText("index");
+
+  assert.match(help, /optsidian index rebuild \[--no-progress\]/);
+  assert.match(help, /optsidian index refresh \[--no-progress\]/);
+  assert.match(help, /optsidian index warm \[--no-progress\]/);
+  assert.match(help, /--no-progress/);
+  assert.match(help, /rebuild, refresh, and clear/);
 });
 
 test("native-sufficient commands delegate unchanged", () => {
@@ -1336,8 +1354,8 @@ test("search ranks notes and renders CLI output", async () => {
   );
   fs.writeFileSync(path.join(vault, "body.md"), "project alpha is mentioned only in body\n");
 
-  // AC9 moved index build/publish to the control path; CLI search is Retrieve
-  // sugar over the read-only query path and must consume an already published snapshot.
+  // Warm publishes the lexical snapshot. Default CLI search stays lexical and
+  // does not require a retrieval snapshot or vector model.
   const warm = run(["index", "warm", `vault-path=${vault}`, "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(warm.status, 0, warm.stderr);
 
@@ -1345,25 +1363,14 @@ test("search ranks notes and renders CLI output", async () => {
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
-  assert.equal(payload.available, true);
-  assert.equal(payload.status, "ready");
-  assert.equal(payload.origin, "text");
   assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-  assert.match(payload.retrievalSnapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
   assert.deepEqual(Object.keys(payload).sort(), [
-    "available",
     "command",
     "debug",
     "matches",
     "ok",
-    "origin",
-    "results",
-    "retrievalSnapshotId",
-    "schemaVersion",
-    "snapshotId",
-    "status"
+    "snapshotId"
   ]);
-  assert.equal(payload.results.length, payload.matches.length);
   assert.deepEqual(payload.debug.query.terms, ["project", "alpha"]);
   assert.equal(payload.debug.reranker, "unified-scalar-ac4-v1");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
@@ -1523,6 +1530,8 @@ test("similarity command parses retrieve sugar", async () => {
 test("index mutation rendering stays stable", async () => {
   const { renderIndexResult } = await import(path.resolve("src/cli/render.ts"));
   assert.equal(renderIndexResult({ ok: true, command: "index", action: "rebuild" }), "Index rebuilt.\n");
+  assert.equal(renderIndexResult({ ok: true, command: "index", action: "refresh", rebuilt: true }), "Index refreshed.\n");
+  assert.equal(renderIndexResult({ ok: true, command: "index", action: "refresh", rebuilt: false }), "Index already fresh.\n");
   assert.equal(renderIndexResult({ ok: true, command: "index", action: "clear" }), "Index cleared.\n");
   assert.equal(renderIndexResult({
     ok: true,

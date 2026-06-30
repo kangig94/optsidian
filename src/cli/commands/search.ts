@@ -3,7 +3,7 @@ import { parseFormat, renderSearch } from "../render.js";
 import { createSearchDaemonClient } from "../../daemon/client.js";
 import { UsageError } from "../../errors.js";
 import type { SearchRequestPayload } from "../../daemon/protocol.js";
-import type { SearchExecutionBudget, SearchExecutionMode } from "../../core/types.js";
+import type { SearchCoverageBudget, SearchCoverageMode, SearchRetrievalMode } from "../../core/types.js";
 
 const SEARCH_FIELDS = ["title", "aliases", "tags", "headings", "path", "body"] as const;
 
@@ -17,8 +17,9 @@ export function searchRequestFromArgs(args: ParsedArgs, vaultRoot: string): Sear
   const tags = parseList(getValue(args, "tag"));
   const fields = parseList(getValue(args, "field"));
   const budget = parseSearchBudget(args);
-  const mode = parseSearchMode(args, budget !== undefined);
-  validateSearchRequest(query, tags, fields);
+  const coverage = parseSearchCoverage(args, budget !== undefined);
+  const retrieval = parseSearchRetrieval(args);
+  validateSearchRequest(query, tags, fields, retrieval);
   return {
     vault: vaultRoot,
     query: query?.trim() || undefined,
@@ -27,7 +28,8 @@ export function searchRequestFromArgs(args: ParsedArgs, vaultRoot: string): Sear
     fields,
     limit: parsePositiveInt(getValue(args, "limit"), "limit"),
     debug: hasFlag(args, "debug"),
-    ...(mode ? { mode } : {}),
+    ...(retrieval ? { retrieval } : {}),
+    ...(coverage ? { coverage } : {}),
     ...(budget ? { budget } : {})
   };
 }
@@ -53,26 +55,29 @@ function parseList(value: string | undefined): string[] | undefined {
   return items.length > 0 ? items : [];
 }
 
-function parseSearchMode(args: ParsedArgs, hasBudget: boolean): SearchExecutionMode | undefined {
-  const raw = getValue(args, "mode")?.trim().toLowerCase();
-  if (raw !== undefined && raw !== "exhaustive" && raw !== "approximate") {
-    throw new UsageError("mode must be exhaustive or approximate");
+function parseSearchRetrieval(args: ParsedArgs): SearchRetrievalMode | undefined {
+  const raw = getValue(args, "retrieval")?.trim().toLowerCase();
+  if (raw !== undefined && raw !== "lexical" && raw !== "vector" && raw !== "hybrid") {
+    throw new UsageError("retrieval must be lexical, vector, or hybrid");
   }
-  const explicit = raw as SearchExecutionMode | undefined;
-  const approximateFlag = hasLongOption(args, "approximate");
-  if (explicit === "exhaustive" && (approximateFlag || hasBudget)) {
-    throw new UsageError("approximate budgets require mode=approximate");
+  return raw as SearchRetrievalMode | undefined;
+}
+
+function parseSearchCoverage(args: ParsedArgs, hasBudget: boolean): SearchCoverageMode | undefined {
+  const raw = getValue(args, "coverage")?.trim().toLowerCase();
+  if (raw !== undefined && raw !== "full" && raw !== "bounded") {
+    throw new UsageError("coverage must be full or bounded");
+  }
+  const explicit = raw as SearchCoverageMode | undefined;
+  if (explicit === "full" && hasBudget) {
+    throw new UsageError("search budgets require coverage=bounded");
   }
   if (explicit) return explicit;
-  return approximateFlag || hasBudget ? "approximate" : undefined;
+  return hasBudget ? "bounded" : undefined;
 }
 
-function hasLongOption(args: ParsedArgs, key: string): boolean {
-  return args.raw.includes(`--${key}`);
-}
-
-function parseSearchBudget(args: ParsedArgs): SearchExecutionBudget | undefined {
-  const budget: SearchExecutionBudget = {
+function parseSearchBudget(args: ParsedArgs): SearchCoverageBudget | undefined {
+  const budget: SearchCoverageBudget = {
     ...(getValue(args, "budget-work") !== undefined
       ? { work: parsePositiveInt(getValue(args, "budget-work"), "budget-work") }
       : {}),
@@ -86,7 +91,12 @@ function parseSearchBudget(args: ParsedArgs): SearchExecutionBudget | undefined 
   return Object.keys(budget).length > 0 ? budget : undefined;
 }
 
-function validateSearchRequest(query: string | undefined, tags: string[] | undefined, fields: string[] | undefined): void {
+function validateSearchRequest(
+  query: string | undefined,
+  tags: string[] | undefined,
+  fields: string[] | undefined,
+  retrieval: SearchRetrievalMode | undefined
+): void {
   const trimmedQuery = query?.trim();
   if (query !== undefined && !trimmedQuery) {
     throw new UsageError("query must not be empty");
@@ -106,6 +116,10 @@ function validateSearchRequest(query: string | undefined, tags: string[] | undef
   }
   if (fields && !trimmedQuery) {
     throw new UsageError("field=<field> requires query=<text>");
+  }
+  if (retrieval === "vector") {
+    if (!trimmedQuery) throw new UsageError("retrieval=vector requires query=<text>");
+    if (fields) throw new UsageError("field=<field> is not supported with retrieval=vector");
   }
   if (!trimmedQuery && tags === undefined) {
     throw new UsageError("search requires query=<text> or tag=<tag>");

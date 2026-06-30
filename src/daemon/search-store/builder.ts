@@ -123,6 +123,7 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
   const searchSettings = normalizeIndexAffectingSearchSettings(input.searchSettings);
   input.progress?.({ phase: "scanning", completed: 0 });
   const scan = scanBuildDocuments(input.vaultRoot);
+  input.progress?.({ phase: "scanning", total: scan.files.length, completed: scan.files.length });
   const documents = await parseVaultDocuments(scan, input.analyzer, partitionBits, searchSettings, input.progress);
   const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
   const builtSegments = reduceBuildSegments(partitionEntries, input.progress);

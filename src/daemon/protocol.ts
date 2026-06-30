@@ -35,6 +35,7 @@ import type {
 export const SEARCH_DAEMON_PROTOCOL_VERSION = 2;
 export const QUERY_DAEMON_METHODS = [
   "Status",
+  "Search",
   "Retrieve"
 ] as const;
 
@@ -317,6 +318,7 @@ export type ShutdownRequestPayload = {
 
 export type QueryDaemonRequest =
   | DaemonRequestBase<"Status", StatusRequestPayload>
+  | DaemonRequestBase<"Search", SearchRequestPayload>
   | DaemonRequestBase<"Retrieve", RetrieveRequestPayload>;
 
 export type ControlDaemonRequest =
@@ -350,7 +352,14 @@ export type SearchDaemonPhase = "starting" | "ready" | "shutting-down";
 
 export type VaultState = "unloaded" | "loading" | "ready" | "updating";
 
-export type SearchIndexProgressPhase = "scanning" | "parsing" | "segmenting" | "publishing" | "preloading";
+export type SearchIndexProgressPhase =
+  | "scanning"
+  | "parsing"
+  | "segmenting"
+  | "embedding"
+  | "vector-indexing"
+  | "publishing"
+  | "preloading";
 
 export type SearchIndexProgressUpdate = {
   phase: SearchIndexProgressPhase;
@@ -424,6 +433,7 @@ export type ShutdownResult = {
 
 export type QueryDaemonResultByMethod = {
   Status: PublicStatusResult | StatusResult;
+  Search: SearchResult;
   Retrieve: RetrieveResult;
 };
 

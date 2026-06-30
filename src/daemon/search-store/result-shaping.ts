@@ -13,7 +13,7 @@ import { RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../../core/searc
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import { nullableRankPriority, rankBucketName, type ExactDominanceBound } from "../../core/search/ranking/index.js";
 import type { PositionalBm25GlobalStats } from "../../core/search/retrieval/positional/index.js";
-import { SEARCH_WARNING_APPROXIMATE, type NormalizedSearchParams, type RankedCandidate } from "../../core/search/internal-types.js";
+import { SEARCH_WARNING_BOUNDED, type NormalizedSearchParams, type RankedCandidate } from "../../core/search/internal-types.js";
 import type { SearchMatch, SearchResult } from "../../core/types.js";
 import type { PersistedDocumentRecord, SnapshotSnippetLine } from "./types.js";
 
@@ -142,7 +142,7 @@ export function applySearchWarnings(result: SearchExecutionResult, warnings: rea
   if (warnings.length === 0) return result;
   result.warnings = [...new Set([...(result.warnings ?? []), ...warnings])];
   if (result.explainTrace) {
-    if (result.warnings.includes(SEARCH_WARNING_APPROXIMATE)) {
+    if (result.warnings.includes(SEARCH_WARNING_BOUNDED)) {
       result.explainTrace.inputs.candidateSet.complete = false;
     }
     Object.assign(result.explainTrace, { warnings: result.warnings });
