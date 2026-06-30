@@ -2,6 +2,8 @@ import { createDaemonPools, type DaemonPools } from "./pools.js";
 import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from "./protocol.js";
 import { createDaemonSnapshotStore, DaemonSearchStoreService } from "./search-store/index.js";
 import { SearchCacheCatalog } from "./search-store/cache-catalog.js";
+import { createMemoryCoralNeedleInstanceFactory, VectorGenerationPool } from "./vector-store/index.js";
+import type { CoralNeedleInstanceFactory } from "./vector-store/types.js";
 import type { SearchIndexPruneResult } from "../core/types.js";
 import { VaultRegistry } from "./vault-registry.js";
 import {
@@ -45,27 +47,38 @@ export class ProfileRuntime {
   readonly profile: SearchRuntimeProfile;
   readonly profileHash: string;
   readonly pools: DaemonPools;
+  readonly vectorPool: VectorGenerationPool;
   readonly searchStore: DaemonSearchStoreService;
   readonly vaults = new VaultRegistry();
 
-  private constructor(profile: SearchRuntimeProfile, pools: DaemonPools, searchStore: DaemonSearchStoreService) {
+  private constructor(
+    profile: SearchRuntimeProfile,
+    pools: DaemonPools,
+    vectorPool: VectorGenerationPool,
+    searchStore: DaemonSearchStoreService
+  ) {
     this.profile = profile;
     this.profileHash = searchRuntimeProfileHash(profile);
     this.pools = pools;
+    this.vectorPool = vectorPool;
     this.searchStore = searchStore;
   }
 
   static async create(profile: SearchRuntimeProfile, baseEnv: NodeJS.ProcessEnv): Promise<ProfileRuntime> {
     const normalized = normalizeSearchRuntimeProfile(profile);
+    const profileHash = searchRuntimeProfileHash(normalized);
     const env = envForSearchRuntimeProfile(normalized, baseEnv);
     const settings = settingsForSearchRuntimeProfile(normalized);
     const pools = await createDaemonPools(env, settings);
+    const vectorPool = new VectorGenerationPool({ factory: vectorInstanceFactory(env) });
     const snapshotStore = createDaemonSnapshotStore({
       env,
       countCap: normalized.memory.snapshotCountCap,
       byteCap: normalized.memory.snapshotByteCap,
       retentionCount: normalized.cache.snapshotRetention,
+      profileHash,
       searchSettings: normalized.index,
+      vectorPool,
       snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
         deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
         cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
@@ -73,11 +86,13 @@ export class ProfileRuntime {
         onProgress: input.progress
       }, input.searchSettings)
     });
-    const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.searchExecution, {
+    const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, pools.embedding, pools.searchExecution, {
       queryCacheSize: normalized.cache.queryAnalysisEntries,
-      searchSettings: normalized.index
+      searchSettings: normalized.index,
+      settings,
+      vectorPool
     });
-    return new ProfileRuntime(normalized, pools, searchStore);
+    return new ProfileRuntime(normalized, pools, vectorPool, searchStore);
   }
 
   cancel(cancellationId: string): void {
@@ -85,8 +100,11 @@ export class ProfileRuntime {
     this.pools.cancel(cancellationId);
   }
 
-  close(): Promise<void> {
-    return this.pools.close();
+  async close(): Promise<void> {
+    await Promise.all([
+      this.vectorPool.close(),
+      this.pools.close()
+    ]);
   }
 
   async status(
@@ -103,6 +121,14 @@ export class ProfileRuntime {
       vaults: this.vaults.list()
     };
   }
+}
+
+function vectorInstanceFactory(env: NodeJS.ProcessEnv): CoralNeedleInstanceFactory | undefined {
+  const mode = env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE?.trim().toLowerCase();
+  if (mode === "memory" || env.OPTSIDIAN_TEST_FAKE_CORAL_NEEDLE === "1") {
+    return createMemoryCoralNeedleInstanceFactory();
+  }
+  return undefined;
 }
 
 export class ProfileManager {
@@ -126,7 +152,6 @@ export class ProfileManager {
     const entry = await this.liveEntryFor(profileHash, profile);
     if (options.cancellationId && this.cancelled.has(options.cancellationId)) {
       entry.runtime.cancel(options.cancellationId);
-      if (entry.activeRequests === 0) this.armIdleTimer(profileHash, entry);
       throw cancelledError();
     }
     this.retain(entry);
@@ -253,18 +278,8 @@ export class ProfileManager {
     this.armIdleTimer(profileHash, entry);
   }
 
-  private armIdleTimer(profileHash: string, entry: ProfileRuntimeEntry): void {
+  private armIdleTimer(_profileHash: string, entry: ProfileRuntimeEntry): void {
     this.clearIdleTimer(entry);
-    const idleMs = entry.runtime.profile.daemon.idleMs;
-    if (idleMs <= 0) {
-      void this.closeEntry(profileHash, entry);
-      return;
-    }
-    entry.idleDeadline = new Date(Date.now() + idleMs).toISOString();
-    entry.idleTimer = setTimeout(() => {
-      void this.closeEntryIfIdle(profileHash, entry);
-    }, idleMs);
-    entry.idleTimer.unref();
   }
 
   private clearIdleTimer(entry: ProfileRuntimeEntry): void {

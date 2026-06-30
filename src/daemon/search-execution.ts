@@ -10,7 +10,7 @@ import type {
   RetrievalCandidate,
   RetrievalQuery
 } from "../core/search/contracts.js";
-import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, COVERAGE_FIELD_WEIGHT, EXACT_PRIORITY, PHRASE_PRIORITY, SEARCH_TOKEN_CHANNEL_WEIGHT, WEAK_METADATA_COVERAGE_TERMS } from "../core/search/constants.js";
+import { CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MULTIPLIER, COVERAGE_FIELD_WEIGHT, EXACT_PRIORITY, PHRASE_PRIORITY, SEARCH_TOKEN_CHANNEL_WEIGHT, WEAK_METADATA_COVERAGE_TERMS, type SearchScoringLambdas } from "../core/search/constants.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import {
   bm25TermScoreFromStatsLookup,
@@ -26,6 +26,11 @@ import {
   type SearchSnapshot,
   type SearchSnapshotSegment
 } from "../core/search/retrieval/positional/index.js";
+import {
+  denseAgreementFromCosine
+} from "../core/search/dense/index.js";
+import { createLinkAdjacencyRetriever } from "../core/search/retrieval/link.js";
+import { fuseCandidateSets } from "../core/search/retrieval/fusion.js";
 import { identityPhraseCandidates } from "../core/search/ranking/identity.js";
 import { compareCanonicalBm25Terms, compareTagOnlyMatches, identityScoreFromExactPriority, nullableRankPriority, rerankCandidatesWithSignals, type CandidateRankSignals, type ExactDominanceBound, type RankDocument } from "../core/search/ranking/index.js";
 import { matchesPathFilter, matchesTagFilter } from "../core/search/params.js";
@@ -50,7 +55,7 @@ import {
   type SearchHitEvidence,
   type SearchShardFinalist
 } from "./search-store/result-shaping.js";
-import type { SnapshotEnvelope, PersistedDocumentRecord } from "./search-store/types.js";
+import type { SnapshotEnvelope, PersistedDocumentRecord, RetrievalEmbeddingSetEnvelope } from "./search-store/types.js";
 
 export type {
   SearchExecutionResult,
@@ -76,6 +81,14 @@ export type SearchExecutionJob = {
   analysis?: SearchTextAnalysis;
   analyzerIdentity: SearchAnalyzerIdentity;
   snapshot: SearchExecutionSnapshotHandle;
+  denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
+  queryVector?: readonly number[];
+  denseSearchResults?: readonly DenseVectorSearchHit[];
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  rrfK?: number;
+  scoringLambdas?: Partial<SearchScoringLambdas>;
   explain?: boolean;
 };
 
@@ -86,6 +99,14 @@ export type SearchShardExecutionJob = {
   analysis: SearchTextAnalysis;
   analyzerIdentity: SearchAnalyzerIdentity;
   snapshot: SearchExecutionSnapshotHandle;
+  denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
+  queryVector?: readonly number[];
+  denseSearchResults?: readonly DenseVectorSearchHit[];
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  rrfK?: number;
+  scoringLambdas?: Partial<SearchScoringLambdas>;
   channels?: readonly SearchTokenChannel[];
   exactBound: ExactDominanceBound;
   requestedLimit: number;
@@ -113,6 +134,23 @@ type SearchExecutionLookupContext = {
   bm25StatsLookup: PositionalBm25StatsLookup;
   fieldLengthLookup: SearchFieldLengthLookup;
   positionsLookup: CandidateTermPositionsLookup;
+};
+
+type RetrievalExecutionContext = {
+  denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
+  queryVector?: readonly number[];
+  denseSearchResults?: readonly DenseVectorSearchHit[];
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  rrfK?: number;
+  scoringLambdas?: Partial<SearchScoringLambdas>;
+};
+
+export type DenseVectorSearchHit = {
+  chunkId: string;
+  entryId: string;
+  similarity: number;
 };
 
 type CandidateTermPositionsLookup = (
@@ -143,11 +181,20 @@ export type SearchShardExecutionResult = {
 export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult {
   if (!job.search.query || !job.analysis) {
     const documents = documentsFromHandle(job.snapshot);
-    return metadataSearch(job.search, job.pathFilter, documents, job.snapshot.snapshotId, job.analyzerIdentity);
+    return metadataSearch(job.search, job.pathFilter, documents, job.snapshot.snapshotId, job.analyzerIdentity, job.excludeDocumentIds);
   }
   const state = cachedSearchExecutionStateFromHandle(job.snapshot).state;
   const documents = documentsFromHandle(job.snapshot);
-  return querySearch(job.search, job.pathFilter, state.snapshot, documents, job.analysis, job.analyzerIdentity, job.explain === true);
+  return querySearch(job.search, job.pathFilter, state.snapshot, documents, job.analysis, job.analyzerIdentity, job.explain === true, {
+    denseEmbeddingSet: job.denseEmbeddingSet,
+    queryVector: job.queryVector,
+    denseSearchResults: job.denseSearchResults,
+    sourceDocumentId: job.sourceDocumentId,
+    sourcePath: job.sourcePath,
+    excludeDocumentIds: job.excludeDocumentIds,
+    rrfK: job.rrfK,
+    scoringLambdas: job.scoringLambdas
+  });
 }
 
 export function executeSearchShardJob(job: SearchShardExecutionJob): SearchShardExecutionResult {
@@ -175,15 +222,17 @@ function querySearch(
   documents: Map<string, PersistedDocumentRecord>,
   analysis: SearchTextAnalysis,
   analyzerIdentity: SearchAnalyzerIdentity,
-  explain: boolean
+  explain: boolean,
+  retrieval: RetrievalExecutionContext = {}
 ): SearchExecutionResult {
   const query = search.query ?? "";
   if (analysis.primaryTerms.length === 0) return searchResult([], snapshot.snapshotId, analyzerIdentity, search, 0);
   const postingsLookup = createQueryPostingsLookup();
   const lookupContext = createSearchExecutionLookupContext(snapshot);
+  const lexicalRetriever = createPositionalRetriever(snapshot, postingsLookup, lookupContext.bm25StatsLookup);
   const engine = createSearchEngine(
     snapshot,
-    createPositionalRetriever(snapshot, postingsLookup, lookupContext.bm25StatsLookup),
+    lexicalRetriever,
     createSnapshotFeatureStore(snapshot, postingsLookup, lookupContext)
   );
   const retrievalQuery: RetrievalQuery = {
@@ -192,13 +241,23 @@ function querySearch(
     fields: search.fields,
     tags: search.tags,
     limit: exhaustiveCandidateLimit(snapshot.documentCount, search, analysis.channels),
-    snapshotId: snapshot.snapshotId
+    snapshotId: snapshot.snapshotId,
+    sourceDocumentId: retrieval.sourceDocumentId,
+    sourcePath: retrieval.sourcePath,
+    queryVector: retrieval.queryVector
   };
-  const candidateSet = engine.retrieve(retrievalQuery) as CandidateSet;
+  const candidateSet = retrieveCandidateSet({
+    lexicalRetriever,
+    lexicalSet: engine.retrieve(retrievalQuery) as CandidateSet,
+    retrievalQuery,
+    snapshot,
+    retrieval
+  });
   const hits = candidateSet.candidates
     .map((candidate) => hitFromCandidate(candidate, documents, analysis.channels))
     .filter((hit): hit is PositionalHit => Boolean(hit))
     .filter((hit) =>
+      !retrieval.excludeDocumentIds?.includes(hit.candidate.documentId) &&
       (!pathFilter || matchesPathFilter(hit.candidate.path ?? hit.document.path, pathFilter)) &&
       matchesTagFilter(candidateTags(snapshot, hit.candidate, lookupContext), search.tags)
     );
@@ -208,7 +267,9 @@ function querySearch(
   const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
   const rankedHits = deterministicRankedHits(
     hits,
-    rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals)
+    rerankCandidatesWithSignals(query, analysis.primaryTerms, hits, search.fields, signals, {
+      lambdas: retrieval.scoringLambdas
+    })
   );
   const rankedAll = rankedHits.map((entry) => entry.rank);
   const ranked = rankedHits.slice(0, search.limit);
@@ -251,9 +312,10 @@ export function executeMetadataSearchFromSnapshotHandle(input: {
   snapshot: SearchExecutionSnapshotHandle;
   analyzerIdentity: SearchAnalyzerIdentity;
   documents?: ReadonlyMap<string, PersistedDocumentRecord>;
+  excludeDocumentIds?: readonly string[];
 }): SearchExecutionResult {
   const documents = input.documents ?? documentsFromHandle(input.snapshot);
-  return metadataSearch(input.search, input.pathFilter, documents, input.snapshot.snapshotId, input.analyzerIdentity);
+  return metadataSearch(input.search, input.pathFilter, documents, input.snapshot.snapshotId, input.analyzerIdentity, input.excludeDocumentIds);
 }
 
 function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot): SearchShardExecutionResult {
@@ -261,9 +323,10 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
   const query = search.query ?? "";
   const postingsLookup = createQueryPostingsLookup();
   const lookupContext = createSearchExecutionLookupContext(snapshot);
+  const lexicalRetriever = createPositionalRetriever(snapshot, postingsLookup, lookupContext.bm25StatsLookup);
   const engine = createSearchEngine(
     snapshot,
-    createPositionalRetriever(snapshot, postingsLookup, lookupContext.bm25StatsLookup),
+    lexicalRetriever,
     createSnapshotFeatureStore(snapshot, postingsLookup, lookupContext)
   );
   const retrievalQuery: RetrievalQuery = {
@@ -273,14 +336,33 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
     tags: search.tags,
     limit: exhaustiveCandidateLimit(snapshot.documentCount, search, job.analysis.channels),
     channels: job.channels,
-    snapshotId: snapshot.snapshotId
+    snapshotId: snapshot.snapshotId,
+    sourceDocumentId: job.sourceDocumentId,
+    sourcePath: job.sourcePath,
+    queryVector: job.queryVector
   };
-  const candidateSet = engine.retrieve(retrievalQuery) as CandidateSet;
+  const candidateSet = retrieveCandidateSet({
+    lexicalRetriever,
+    lexicalSet: engine.retrieve(retrievalQuery) as CandidateSet,
+    retrievalQuery,
+    snapshot,
+    retrieval: {
+      denseEmbeddingSet: job.denseEmbeddingSet,
+      queryVector: job.queryVector,
+      denseSearchResults: job.denseSearchResults,
+      sourceDocumentId: job.sourceDocumentId,
+      sourcePath: job.sourcePath,
+      excludeDocumentIds: job.excludeDocumentIds,
+      rrfK: job.rrfK,
+      scoringLambdas: job.scoringLambdas
+    }
+  });
   assertSearchShardDeadline(job);
   const hits = candidateSet.candidates
     .map((candidate) => shardHitFromCandidate(snapshot, candidate, job.analysis.channels, lookupContext))
     .filter((hit): hit is SearchHitEvidence => Boolean(hit))
     .filter((hit) =>
+      !job.excludeDocumentIds?.includes(hit.candidate.documentId) &&
       (!job.pathFilter || matchesPathFilter(hit.candidate.path ?? hit.path, job.pathFilter)) &&
       matchesTagFilter(candidateTags(snapshot, hit.candidate, lookupContext), search.tags)
     );
@@ -290,7 +372,9 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
   const signals = rankSignalsFromFeatures(featurePayloads, exactBound.lambdaExact);
   const rankHits = deterministicRankedHits(
     hits,
-    rerankCandidatesWithSignals(query, job.analysis.primaryTerms, minimalRankDocuments(hits), search.fields, signals)
+    rerankCandidatesWithSignals(query, job.analysis.primaryTerms, minimalRankDocuments(hits), search.fields, signals, {
+      lambdas: job.scoringLambdas
+    })
   );
   const featureByCandidateId = new Map(featurePayloads.map((feature) => [feature.candidate.candidateId, feature]));
   const finalists = rankHits.map(({ hit, rank }): SearchShardFinalist => {
@@ -323,15 +407,122 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
   };
 }
 
+function retrieveCandidateSet(input: {
+  lexicalRetriever: ReturnType<typeof createPositionalRetriever>;
+  lexicalSet: CandidateSet;
+  retrievalQuery: RetrievalQuery;
+  snapshot: SearchSnapshot;
+  retrieval: RetrievalExecutionContext;
+}): CandidateSet {
+  const sets = [{
+    identity: input.lexicalRetriever.retrieverIdentity,
+    set: input.lexicalSet
+  }];
+  const dense = denseCandidateSet(input.snapshot, input.retrievalQuery, input.retrieval);
+  if (dense) sets.push({ identity: dense.retrieverIdentity, set: dense });
+  const link = linkCandidateSet(input.snapshot, input.retrievalQuery, input.retrieval);
+  if (link) sets.push({ identity: link.retrieverIdentity, set: link });
+  if (sets.length === 1) return input.lexicalSet;
+  return fuseCandidateSets(sets, input.retrievalQuery, {
+    limit: input.retrievalQuery.limit,
+    k: input.retrieval.rrfK
+  });
+}
+
+function denseCandidateSet(
+  snapshot: SearchSnapshot,
+  query: RetrievalQuery,
+  retrieval: RetrievalExecutionContext
+): CandidateSet | undefined {
+  if (!retrieval.denseEmbeddingSet || !retrieval.queryVector) return undefined;
+  if (!retrieval.denseSearchResults) return undefined;
+  const refs = documentRefIndex(snapshot);
+  const records = new Map(retrieval.denseEmbeddingSet.records.map((record) => [record.documentId, record]));
+  const candidates: RetrievalCandidate[] = [];
+  for (const result of retrieval.denseSearchResults) {
+    const record = records.get(result.entryId);
+    if (!record) continue;
+    const ref = refs.get(record.documentId);
+    if (!ref) continue;
+    const denseAgreement = denseAgreementFromCosine(result.similarity);
+    candidates.push({
+      candidateId: record.documentId,
+      documentId: record.documentId,
+      shardDocRef: ref,
+      path: record.path,
+      rank: 0,
+      retrievalScore: denseAgreement,
+      denseAgreement,
+      channels: [],
+      phraseMatches: [],
+      proximityMatches: []
+    });
+  }
+  const ranked = candidates
+    .filter((candidate) => !retrieval.excludeDocumentIds?.includes(candidate.documentId))
+    .sort((left, right) => right.retrievalScore - left.retrievalScore || (left.path ?? "").localeCompare(right.path ?? ""));
+  const retrieverIdentity = {
+    id: "dense",
+    version: "1",
+    parameters: {
+      model: retrieval.denseEmbeddingSet.model,
+      metric: "cosine"
+    }
+  };
+  return {
+    schemaVersion: 1,
+    snapshotId: query.snapshotId ?? snapshot.snapshotId,
+    retrieverIdentity,
+    complete: true,
+    candidates: ranked.slice(0, query.limit ?? ranked.length).map((candidate, index) => ({
+      ...candidate,
+      rank: index + 1
+    }))
+  };
+}
+
+function linkCandidateSet(
+  snapshot: SearchSnapshot,
+  query: RetrievalQuery,
+  retrieval: RetrievalExecutionContext
+): CandidateSet | undefined {
+  if (!retrieval.sourceDocumentId && !retrieval.sourcePath) return undefined;
+  const retriever = createLinkAdjacencyRetriever({ snapshot, limit: query.limit });
+  return retriever.retrieve({
+    ...query,
+    sourceDocumentId: retrieval.sourceDocumentId,
+    sourcePath: retrieval.sourcePath
+  }) as CandidateSet;
+}
+
+function documentRefIndex(snapshot: SearchSnapshot): ReadonlyMap<string, RetrievalCandidate["shardDocRef"]> {
+  const refs = new Map<string, RetrievalCandidate["shardDocRef"]>();
+  for (const segment of snapshot.segments) {
+    for (let localDocId = 1; localDocId <= segment.projection.documentCount(); localDocId += 1) {
+      const doc = segment.projection.doc(localDocId);
+      refs.set(doc.documentId, {
+        segmentId: segment.segmentId,
+        partitionId: segment.partitionId,
+        localDocId: doc.localDocId,
+        documentId: doc.documentId
+      });
+    }
+  }
+  return refs;
+}
+
 function metadataSearch(
   search: NormalizedSearchParams,
   pathFilter: PathFilter | undefined,
   documents: ReadonlyMap<string, PersistedDocumentRecord>,
   snapshotId: string,
-  analyzerIdentity: SearchAnalyzerIdentity
+  analyzerIdentity: SearchAnalyzerIdentity,
+  excludeDocumentIds: readonly string[] = []
 ): SearchResult & { snapshotId: string } {
+  const excluded = new Set(excludeDocumentIds);
   const matches = [...documents.values()]
     .filter((record) =>
+      !excluded.has(record.documentId) &&
       (!pathFilter || matchesPathFilter(record.path, pathFilter)) &&
       matchesTagFilter(record.tags, search.tags)
     )
@@ -451,8 +642,12 @@ function createSnapshotFeatureStore(
         const coverage = projectionCoverage(snapshot, candidate, context, postingsLookup, lookupContext);
         const exactPriority = nullableRankPriority(projectionExactPriority(snapshot, candidate, context, lookupContext));
         const phrasePriority = nullableRankPriority(projectionPhrasePriority(snapshot, candidate, context, lookupContext));
-        return {
+        const payload = {
           candidate: candidateRef(candidate),
+          ...(candidate.retrieverSignals ? { retrieverSignals: candidate.retrieverSignals } : {}),
+          ...(candidate.denseAgreement === undefined ? {} : { denseAgreement: candidate.denseAgreement }),
+          ...(candidate.linkAgreement === undefined ? {} : { linkAgreement: candidate.linkAgreement }),
+          ...(candidate.rrfScore === undefined ? {} : { rrfScore: candidate.rrfScore }),
           bm25: bm25Features(snapshot, candidate, allowedFields, postingsLookup, lookupContext),
           phrasePositions: candidate.phraseMatches,
           proximity: candidate.proximityMatches,
@@ -472,9 +667,36 @@ function createSnapshotFeatureStore(
           },
           tags: candidateTags(snapshot, candidate, lookupContext)
         } satisfies CandidateFeaturePayload;
+        assertRetrieverSignalsMaterialized(candidate, payload);
+        return payload;
       });
     },
   };
+}
+
+function assertRetrieverSignalsMaterialized(candidate: RetrievalCandidate, feature: CandidateFeaturePayload): void {
+  assertOptionalNumberEqual(candidate.denseAgreement, feature.denseAgreement, candidate.candidateId, "denseAgreement");
+  assertOptionalNumberEqual(candidate.linkAgreement, feature.linkAgreement, candidate.candidateId, "linkAgreement");
+  assertOptionalNumberEqual(candidate.rrfScore, feature.rrfScore, candidate.candidateId, "rrfScore");
+  const candidateSignals = candidate.retrieverSignals;
+  if (!candidateSignals) return;
+  if (!feature.retrieverSignals) throw new Error(`retriever signals were dropped for candidate ${candidate.candidateId}`);
+  if ((candidateSignals.dense && !feature.retrieverSignals.dense) || (candidateSignals.link && !feature.retrieverSignals.link)) {
+    throw new Error(`typed retriever signals were dropped for candidate ${candidate.candidateId}`);
+  }
+  if (candidateSignals.all.length !== feature.retrieverSignals.all.length) {
+    throw new Error(`retriever signal count changed for candidate ${candidate.candidateId}`);
+  }
+}
+
+function assertOptionalNumberEqual(
+  expected: number | undefined,
+  actual: number | undefined,
+  candidateId: string,
+  label: string
+): void {
+  if (expected === undefined) return;
+  if (actual !== expected) throw new Error(`${label} was not materialized for candidate ${candidateId}`);
 }
 
 function bm25Features(
@@ -828,7 +1050,7 @@ function canonicalBm25Order(terms: readonly CandidateBm25Feature[]): CandidateBm
   return [...terms].sort(compareCanonicalBm25Terms);
 }
 
-function rankSignalsFromFeatures(
+export function rankSignalsFromFeatures(
   features: readonly CandidateFeaturePayload[],
   exactLambda: number
 ): Map<string, CandidateRankSignals> {
@@ -845,7 +1067,9 @@ function rankSignalsFromFeatures(
       lexicalScore: featureLexicalScore(feature),
       identityScore: identityScoreFromExactPriority(exactPriority),
       exactLambda,
-      denseAgreement: 0,
+      denseAgreement: feature.denseAgreement ?? feature.retrieverSignals?.dense?.normalizedScore ?? 0,
+      linkAgreement: feature.linkAgreement ?? feature.retrieverSignals?.link?.normalizedScore ?? 0,
+      rrfScore: feature.rrfScore ?? 0,
       rarityScore: 0,
       proximityScore: featureProximityScore(feature),
       bodyScore: 0

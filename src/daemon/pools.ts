@@ -28,7 +28,21 @@ import type {
   SearchShardExecutionJob,
   SearchShardExecutionResult
 } from "./search-execution.js";
-import type { ParseBuildDocumentsWorkerResult, ReduceBuildSegmentWorkerResult } from "./protocol.js";
+import type {
+  ModelEncodeWorkerPayload,
+  ModelEncodeWorkerResult,
+  ModelStatsWorkerResult,
+  ModelUnloadWorkerResult,
+  ParseBuildDocumentsWorkerResult,
+  ReduceBuildSegmentWorkerResult,
+  VectorBuildWorkerPayload,
+  VectorCloseWorkerPayload,
+  VectorPrewarmWorkerPayload,
+  VectorSearchActiveBuiltIndexWorkerPayload,
+  VectorSearchActiveBuiltIndexWorkerResult,
+  VectorUpsertWorkerPayload,
+  VectorWorkerResult
+} from "./protocol.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
 
 export type AnalyzerPoolAnalysis = {
@@ -45,6 +59,8 @@ export type DaemonPools = {
   latencyAnalyzer: AnalyzerWorkerPool;
   throughputAnalyzer: AnalyzerWorkerPool;
   searchExecution: SearchExecutionWorkerPool;
+  embedding: EmbeddingWorkerPool;
+  vector: VectorWorkerPool;
   warmup(): Promise<void>;
   cancel(cancellationId: string): void;
   close(): Promise<void>;
@@ -127,6 +143,8 @@ export class AnalyzerWorkerPool {
     const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
     const segments = sortBuiltSegmentsByPartitionId(await this.reduceBuildSegments(partitionEntries, options));
     const built = buildCanonicalSearchSnapshotFromSegments({
+      vaultRoot: scan.root,
+      scannedPaths: scan.files,
       analyzerIdentity,
       partitionBits: effectivePartitionBits,
       searchSettings: effectiveSearchSettings,
@@ -313,6 +331,89 @@ export class SearchExecutionWorkerPool {
   }
 }
 
+export class EmbeddingWorkerPool {
+  private readonly pool: DaemonWorkerPool;
+
+  constructor(pool: DaemonWorkerPool) {
+    this.pool = pool;
+  }
+
+  encode(payload: ModelEncodeWorkerPayload, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
+    return this.pool.run<ModelEncodeWorkerResult>({ type: "modelEncode", payload }, options);
+  }
+
+  unload(options: WorkerPoolRunOptions): Promise<ModelUnloadWorkerResult> {
+    return this.pool.run<ModelUnloadWorkerResult>({ type: "modelUnload" }, options);
+  }
+
+  modelStats(options: WorkerPoolRunOptions): Promise<ModelStatsWorkerResult> {
+    return this.pool.run<ModelStatsWorkerResult>({ type: "modelStats" }, options);
+  }
+
+  async warmup(minimumReady?: number): Promise<void> {
+    await this.pool.warmup(minimumReady);
+  }
+
+  cancel(cancellationId: string): void {
+    this.pool.cancel(cancellationId);
+  }
+
+  close(): Promise<void> {
+    return this.pool.close();
+  }
+
+  stats() {
+    return this.pool.stats();
+  }
+}
+
+export class VectorWorkerPool {
+  private readonly pool: DaemonWorkerPool;
+
+  constructor(pool: DaemonWorkerPool) {
+    this.pool = pool;
+  }
+
+  upsert(payload: VectorUpsertWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
+    return this.pool.run<VectorWorkerResult>({ type: "vectorUpsert", payload }, options);
+  }
+
+  build(payload: VectorBuildWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
+    return this.pool.run<VectorWorkerResult>({ type: "vectorBuild", payload }, options);
+  }
+
+  prewarm(payload: VectorPrewarmWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
+    return this.pool.run<VectorWorkerResult>({ type: "vectorPrewarm", payload }, options);
+  }
+
+  searchActiveBuiltIndex(
+    payload: VectorSearchActiveBuiltIndexWorkerPayload,
+    options: WorkerPoolRunOptions
+  ): Promise<VectorSearchActiveBuiltIndexWorkerResult> {
+    return this.pool.run<VectorSearchActiveBuiltIndexWorkerResult>({ type: "vectorSearchActiveBuiltIndex", payload }, options);
+  }
+
+  closeInstance(payload: VectorCloseWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
+    return this.pool.run<VectorWorkerResult>({ type: "vectorClose", payload }, options);
+  }
+
+  async warmup(minimumReady?: number): Promise<void> {
+    await this.pool.warmup(minimumReady);
+  }
+
+  cancel(cancellationId: string): void {
+    this.pool.cancel(cancellationId);
+  }
+
+  close(): Promise<void> {
+    return this.pool.close();
+  }
+
+  stats() {
+    return this.pool.stats();
+  }
+}
+
 export async function createDaemonPools(
   env: NodeJS.ProcessEnv = process.env,
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
@@ -321,6 +422,10 @@ export async function createDaemonPools(
   const queryWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (singleWorkers ? 1 : settings.search?.queryWorkers ?? 1);
   const indexWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (singleWorkers ? 1 : settings.search?.indexWorkers ?? 1);
   const searchWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? singleWorkers ?? settings.search?.executionWorkers ?? defaultSearchExecutionWorkerCount();
+  const embeddingWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EMBEDDING_WORKERS") ?? 1;
+  const vectorWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_VECTOR_WORKERS") ?? 1;
+  const modelRssGuardBytes = envBytesForPool(env, "OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB") ??
+    envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB");
   const latencyAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
     name: "latency-analyzer",
     kind: "analyzer",
@@ -344,10 +449,32 @@ export async function createDaemonPools(
     env,
     microbatchSize: 1
   }));
+  const embedding = new EmbeddingWorkerPool(new DaemonWorkerPool({
+    name: "embedding-model",
+    kind: "embedding",
+    size: embeddingWorkers,
+    env,
+    microbatchSize: 1,
+    rssGuardBytes: modelRssGuardBytes,
+    rssGuardExempt: true,
+    autoWarmup: false
+  }));
+  const vector = new VectorWorkerPool(new DaemonWorkerPool({
+    name: "vector-store",
+    kind: "vector",
+    size: vectorWorkers,
+    env,
+    microbatchSize: 1,
+    rssGuardBytes: envBytesForPool(env, "OPTSIDIAN_SEARCH_VECTOR_RSS_GUARD_MB") ??
+      envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB"),
+    autoWarmup: false
+  }));
   const pools: DaemonPools = {
     latencyAnalyzer,
     throughputAnalyzer,
     searchExecution,
+    embedding,
+    vector,
     async warmup() {
       await searchExecution.warmup(1);
     },
@@ -355,12 +482,16 @@ export async function createDaemonPools(
       latencyAnalyzer.cancel(cancellationId);
       throughputAnalyzer.cancel(cancellationId);
       searchExecution.cancel(cancellationId);
+      embedding.cancel(cancellationId);
+      vector.cancel(cancellationId);
     },
     async close() {
       await Promise.all([
         latencyAnalyzer.close(),
         throughputAnalyzer.close(),
-        searchExecution.close()
+        searchExecution.close(),
+        embedding.close(),
+        vector.close()
       ]);
     },
     async stats(options) {
@@ -375,6 +506,8 @@ export async function createDaemonPools(
       return {
         latencyAnalyzer: latencyAnalyzer.stats(),
         throughputAnalyzer: throughputAnalyzer.stats(),
+        embedding: embedding.stats(),
+        vector: vector.stats(),
         searchExecution: {
           ...searchExecution.stats(),
           cache: searchExecutionCache
@@ -384,6 +517,12 @@ export async function createDaemonPools(
   };
   await pools.warmup();
   return pools;
+}
+
+function envBytesForPool(env: NodeJS.ProcessEnv, key: string): number | undefined {
+  const raw = env[key]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  return Math.max(1, Number(raw)) * 1024 * 1024;
 }
 
 function chunk<T>(values: readonly T[], size: number): T[][] {

@@ -1,3 +1,5 @@
+import type { ExplainTrace } from "./search/contracts.js";
+
 export type LineRange = {
   start: number;
   end: number;
@@ -113,6 +115,8 @@ export type SearchMatchDebug = {
   identityScore?: number;
   exactLambda?: number;
   denseAgreement?: number;
+  linkAgreement?: number;
+  rrfScore?: number;
   rarityScore?: number;
   proximityScore?: number;
   bodyScore?: number;
@@ -149,10 +153,59 @@ export type SearchDebugInfo = {
 export type SearchResult = {
   ok: true;
   command: "search";
+  schemaVersion?: 1;
+  available?: boolean;
+  status?: "ready" | "index-not-ready";
+  origin?: RetrieveOrigin;
+  results?: RetrieveRankedResult[];
   matches: SearchMatch[];
+  snapshotId?: string;
+  retrievalSnapshotId?: string;
   debug?: SearchDebugInfo;
   warnings?: string[];
 };
+
+export type RetrieveOrigin = "text" | "note" | "pair" | "global";
+
+export type RetrieveRankedResult = {
+  path: string;
+  title: string;
+  score: number;
+  tags: string[];
+  snippets: SearchSnippet[];
+  debug?: SearchMatchDebug;
+};
+
+export type RetrieveReadyResult = {
+  ok: true;
+  command: "retrieve";
+  schemaVersion: 1;
+  available: true;
+  status: "ready";
+  origin: RetrieveOrigin;
+  snapshotId: string;
+  retrievalSnapshotId: string;
+  matches: SearchMatch[];
+  results: RetrieveRankedResult[];
+  debug?: SearchDebugInfo;
+  explainTrace?: ExplainTrace;
+  warnings?: string[];
+};
+
+export type RetrieveIndexNotReadyResult = {
+  ok: true;
+  command: "retrieve";
+  schemaVersion: 1;
+  available: false;
+  status: "index-not-ready";
+  origin: RetrieveOrigin;
+  reason: string;
+  matches: [];
+  results: [];
+  warnings?: string[];
+};
+
+export type RetrieveResult = RetrieveReadyResult | RetrieveIndexNotReadyResult;
 
 export type SimilarityMode = "global" | "left" | "pair";
 
@@ -226,38 +279,28 @@ export type NormalizedSimilarityParams = {
 };
 
 export type SimilarityPairResult = {
-  left: string;
-  right: string;
+  path: string;
+  title: string;
   score: number;
+  tags: string[];
+  snippets: SearchSnippet[];
+  debug?: SearchMatchDebug;
 };
 
 export type SimilarityResult = {
   ok: true;
   command: "similarity";
   schemaVersion: 1;
-  available: false;
-  status: "provider-unavailable";
+  available: boolean;
+  status: "ready" | "index-not-ready";
+  origin: RetrieveOrigin;
   request: NormalizedSimilarityParams;
-  model: {
-    requested: string;
-    resolved: null;
-    metric: "cosine";
-  };
-  provider: {
-    status: "unavailable";
-    reason: string;
-  };
+  snapshotId?: string;
+  retrievalSnapshotId?: string;
   results: SimilarityPairResult[];
-  cache: {
-    key: null;
-    hits: 0;
-    misses: 0;
-  };
-  fallback: {
-    available: true;
-    strategy: "lexical";
-    reason: string;
-  };
+  matches: SearchMatch[];
+  reason?: string;
+  warnings?: string[];
 };
 
 export type SearchIndexProjectionStatus = {

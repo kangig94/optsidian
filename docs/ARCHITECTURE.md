@@ -3,8 +3,10 @@
 `optsidian` is an LLM-optimized wrapper over the native Obsidian CLI. It ships two binaries —
 `optsidian` (CLI) and `optsidian-mcp` (an MCP server) — that sit on a single shell-independent
 core. The CLI and MCP adapters translate their respective transports into raw-string calls into
-`src/core/*`, which returns structured results. Search is served through one search daemon using a
-snapshot-resident positional engine plus Kiwi Korean morphology worker pools.
+`src/core/*`, which returns structured results. Search and similarity are served through one
+resident search daemon using query/control RPC sockets, immutable lexical/retrieval snapshots,
+Kiwi Korean morphology worker pools, a model-session lifecycle for embeddings, and a vector
+generation pool for dense retrieval.
 
 This document anchors the layer graph, the dependency rules, and the per-directory modification
 policy. It describes architectural roles and decisions — not source contents. For developer
@@ -26,7 +28,7 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 
 | Layer | Modules | Role |
 |-------|---------|------|
-| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, indexing, worker pools, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
+| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, retrieval, indexing, worker pools, query/control sockets, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
 | L2 — core | `src/core/*` including `search/*` and `kiwi/*` | Shell-independent command layer shared by both adapters: raw-string in, structured out. Editing, frontmatter, search/indexing, Korean analysis. |
 | L1 — platform | `src/native/*`, `src/net/github.ts`, `src/errors.ts`, `src/version.ts` | OS- and service-facing primitives: native Obsidian invocation + GUI launch, GitHub HTTP, error/exit-code types, version. `src/update/installer.ts` composes net + native for self-update. |
 
@@ -67,7 +69,7 @@ The native-first policy (`src/cli/policy.ts`) sorts every command into one of th
 |-------|--------|---------|
 | delegate | `NATIVE_SUFFICIENT_COMMANDS` | Native Obsidian CLI behavior is sufficient; `optsidian` passes the command straight through. |
 | optimize | `read` | The native name is kept but the behavior is replaced with an LLM-friendlier one (line ranges, bounded output). |
-| extend | `EXTENDED_COMMANDS` (13) | No native equivalent: `search, index, config, grep, frontmatter, edit, apply_patch, write, copy, mkdir, open-gui, update, plugin:install`. |
+| extend | `EXTENDED_COMMANDS` (14) | No native equivalent: `search, similarity, index, config, grep, frontmatter, edit, apply_patch, write, copy, mkdir, open-gui, update, plugin:install`. |
 
 A regression test enforces that no command is both implemented and native-sufficient
 (`native-first-policy.md` guardrail).
@@ -90,12 +92,14 @@ native-delegated Optsidian commands. Keep this list synchronized with `MCP_TOOL_
 ## Daemon & Lifecycle State
 
 There is exactly **one** search daemon process. It is started by the shared daemon client, owns a
-nonce-authenticated socket, serves multiple vaults, and shuts down by idle policy unless configured
-otherwise.
+nonce-authenticated query socket and control socket, and serves multiple vaults. The daemon is
+resident: it does not idle-exit after request release. Embedding model sessions have their own idle
+unload lifecycle inside workers, so zero-footprint-at-rest applies to loaded model sessions rather
+than to the daemon process.
 
 | Process | Hidden verb | Module | Transport & lifecycle |
 |---------|-------------|--------|-----------------------|
-| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; Unix domain socket under the runtime search-daemon directory; MessagePack RPC methods `Search`, `Explain`, `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, and `Shutdown`. The daemon owns snapshot MVCC, worker pools, query caches, and loaded vault state. |
+| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; separate query/control Unix domain sockets under the runtime search-daemon directory. Query RPC exposes `Status` and `Retrieve`; CLI `search` and `explain` are client-side adapters over `Retrieve`. Control RPC exposes `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, and `Shutdown`. The daemon owns snapshot MVCC, retrieval generations, worker pools, query caches, and loaded vault state. |
 
 **Install / update lifecycle.** `scripts/install.sh` installs a release and writes the manifest
 `~/.cache/optsidian/install.json`. `optsidian update` (`src/update/installer.ts`) fetches a release,
@@ -103,25 +107,35 @@ verifies its SHA256 and version, installs atomically, and refreshes the MCP regi
 
 ## Search
 
-The search subsystem spans `src/core/search/*` and `src/daemon/search-store/*`.
+The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
+`src/daemon/vector-store/*`.
 
-- **Snapshot identity is content-addressed.** The active snapshot id is the hash of the canonical
-  snapshot manifest. The identity tuple includes build version (segment encoding, partition scheme,
-  engine, and identity normalizer), field-set, partition bits, analyzer, settings, ranking-feature,
-  and retriever identity.
+- **Snapshot identity is content-addressed.** The active corpus snapshot id is the hash of the
+  canonical snapshot manifest. Retrieval snapshots add the retriever plan, embedding recipe/provider,
+  link resolver/scoring identity, and ranking feature version. Query-time pins validate the active
+  retrieval pointer against the current expected identity before serving.
 - **MVCC, not read-time planning.** Search pins one immutable snapshot for each request. Index jobs
   build and publish new snapshots atomically, and active requests keep their pinned snapshot until
-  release.
+  release. Query release is refcount-only; file deletion and mark-sweep GC are control/index
+  maintenance operations.
+- **Retrieve is the public query path.** Query RPC accepts `Retrieve` for `origin=text`, `origin=note`,
+  `origin=pair`, and adapter-backed search. A ready retrieval request is served from a pinned
+  retrieval snapshot and a promoted built vector generation. If the generation is absent, stale, or
+  built for a different identity, Retrieve returns `status: "index-not-ready"` rather than scanning
+  in-process embedding JSON.
 - **Query pipeline.** Query search is planned by `SearchQueryPlanner`, scheduled by
   `SearchQueryScheduler` / `SearchQuerySession`, merged by `ResultAggregator`, and hydrated by
   `ResultHydrator`. The retained monolithic `executeSearchJob` / `querySearch` path is the test
   determinism oracle (AC6 baseline), not dead code or the daemon query path.
-- **One lexical retrieval primitive.** V1 retrieval is positional postings over analyzer channels.
-  Phrase, coverage, proximity, rarity, exact identity, snippets, and debug signals are sourced from
-  snapshot-resident postings and feature payloads.
+- **Lexical, dense, and link retrieval.** Lexical retrieval is positional postings over analyzer
+  channels. Dense retrieval is a vector-generation-pool query against the active built generation.
+  Link retrieval uses the link graph carried with snapshot/shard handles so adjacency candidates
+  survive fanout. Phrase, coverage, proximity, rarity, exact identity, snippets, dense agreement,
+  link agreement, RRF score, and explain traces are sourced from pinned snapshot data.
 - **Worker pools.** Query analyzer workers serve latency-sensitive query tokenization; index analyzer
-  workers serve snapshot builds. Search execution runs in a dedicated pool with request deadlines and
-  cancellation.
+  workers serve snapshot builds. Embedding workers own `ModelSessionLifecycle` instances and route
+  encode/unload/stats through them. Search execution runs in a dedicated pool with request deadlines
+  and cancellation.
 - **Idle-ready search leases.** Query sessions lease only ready, idle search-execution slots. Leasing is
   atomic, targeted `runOnSlot` consumes the lease, and busy/leased slots are excluded from later leases.
   Scheduler fairness is single-source: active sessions share idle capacity first, then any otherwise
@@ -141,6 +155,8 @@ The search subsystem spans `src/core/search/*` and `src/daemon/search-store/*`.
 | Native Obsidian CLI (`obsidian`) | Delegated commands and vault discovery. |
 | `obsidian://` URI (`src/native/gui.ts`) | Launching / focusing the Obsidian GUI. |
 | Kiwi (`kiwi-nlp`) | Korean morphological analysis (WASM). |
+| ONNX Runtime | Local embedding model sessions in embedding workers. |
+| `coral-needle` | Native vector index instances for built dense generations; tests inject a fake instance when the native `.node` binding is absent. |
 | GitHub releases API (`src/net/github.ts`) | Fetching the Kiwi model artifact and self-update releases. |
 
 **Security invariant to preserve.** `src/net/github.ts` strips the `Authorization` header on

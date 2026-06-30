@@ -5,6 +5,7 @@ import type {
   CandidateRef,
   CandidateSet,
   ExplainTrace,
+  LinkGraphData,
   RetrievalCandidate
 } from "../../core/search/contracts.js";
 import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from "../../core/search/contracts.js";
@@ -27,6 +28,7 @@ export type SearchExecutionSnapshotHandle = {
   pinToken: string;
   bm25Stats: PositionalBm25GlobalStats;
   documents: SharedBytesHandle;
+  linkGraph?: LinkGraphData;
   segments: Array<{
     segmentId: string;
     partitionId: number;
@@ -182,6 +184,8 @@ export function matchDebug(input: {
     identityScore: input.rank.identityScore,
     exactLambda: input.rank.exactLambda,
     denseAgreement: input.rank.denseAgreement,
+    linkAgreement: input.rank.linkAgreement,
+    rrfScore: input.rank.rrfScore,
     rarityScore: input.rank.rarityScore,
     proximityScore: input.rank.proximityScore,
     bodyScore: input.rank.bodyScore,
@@ -283,6 +287,8 @@ function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
     identityScore: candidate.identityScore,
     exactLambda: candidate.exactLambda,
     denseAgreement: candidate.denseAgreement,
+    linkAgreement: candidate.linkAgreement,
+    rrfScore: candidate.rrfScore,
     rarityScore: candidate.rarityScore,
     proximityScore: candidate.proximityScore,
     bodyScore: candidate.bodyScore

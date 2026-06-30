@@ -1,6 +1,7 @@
 import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis, type SearchTokenChannel, type SearchTokenChannelTerms } from "../../core/search/analysis/index.js";
 import type { NormalizedSearchParams } from "../../core/search/internal-types.js";
 import { bm25BoundKey, exactDominanceLambda, type ExactDominanceBound } from "../../core/search/ranking/index.js";
+import { createLinkGraphView } from "../../core/search/retrieval/link.js";
 import {
   bm25TermScoreFromStatsLookup,
   buildSearchSnapshotFromSegments,
@@ -50,7 +51,7 @@ const searchExecutionStateCacheCounters = {
 export function cachedSearchExecutionStateFromHandle(
   handle: SearchExecutionSnapshotHandle
 ): { state: SearchExecutionState; cacheHit: boolean } {
-  const cacheKey = handle.snapshotId;
+  const cacheKey = searchExecutionStateCacheKey(handle);
   const cached = searchExecutionStateCache.get(cacheKey);
   if (cached) {
     searchExecutionStateCacheCounters.hits += 1;
@@ -79,13 +80,14 @@ export function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHa
       bytes: sharedBytes(segment.bytes)
     })),
     bm25Stats: handle.bm25Stats,
+    ...(handle.linkGraph ? { linkGraph: createLinkGraphView(handle.linkGraph) } : {}),
     validateProjection: false
   });
   return { snapshot };
 }
 
 export function searchExecutionStateFromShardHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
-  const cached = touchCachedState(handle.snapshotId);
+  const cached = touchCachedState(searchExecutionStateCacheKey(handle));
   if (!cached) return searchExecutionStateFromHandle(handle);
 
   const cachedBySegment = new Map(cached.snapshot.segments.map((segment) => [snapshotSegmentKey(segment), segment]));
@@ -101,7 +103,8 @@ export function searchExecutionStateFromShardHandle(handle: SearchExecutionSnaps
       snapshotId: handle.snapshotId,
       documentCount: segments.reduce((sum, segment) => sum + segment.projection.documentCount(), 0),
       segments,
-      bm25Stats: cached.snapshot.bm25Stats
+      bm25Stats: cached.snapshot.bm25Stats,
+      ...(cached.snapshot.linkGraph ? { linkGraph: cached.snapshot.linkGraph } : {})
     }
   };
 }
@@ -133,7 +136,7 @@ export function searchExecutionCacheStats(): SearchExecutionCacheStats {
     misses: searchExecutionStateCacheCounters.misses,
     evictions: searchExecutionStateCacheCounters.evictions,
     preloads: searchExecutionStateCacheCounters.preloads,
-    snapshotIds: [...searchExecutionStateCache.keys()]
+    snapshotIds: [...searchExecutionStateCache.values()].map((state) => state.snapshot.snapshotId)
   };
 }
 
@@ -218,6 +221,10 @@ function touchCachedState(snapshotId: string): SearchExecutionState | undefined 
   searchExecutionStateCache.delete(snapshotId);
   searchExecutionStateCache.set(snapshotId, cached);
   return cached;
+}
+
+function searchExecutionStateCacheKey(handle: SearchExecutionSnapshotHandle): string {
+  return handle.linkGraph ? `${handle.snapshotId}:${handle.linkGraph.linkGraphId}` : handle.snapshotId;
 }
 
 function snapshotSegmentKey(segment: { segmentId: string; partitionId: number }): string {

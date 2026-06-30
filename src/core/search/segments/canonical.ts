@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import type { SearchAnalyzerIdentity, SearchEmbeddingModelIdentity } from "../analyzer.js";
+import type { SearchAnalyzerIdentity } from "../analyzer.js";
 import type { SearchTokenChannel } from "../analysis/index.js";
 import type { RetrieverIdentity } from "../contracts.js";
 import { identityPhraseCandidates } from "../ranking/identity.js";
@@ -17,8 +17,7 @@ export const CANONICAL_SEGMENT_SECTION = {
   fieldTexts: 3,
   bm25: 4,
   docProjection: 5,
-  termDictionary: 6,
-  vectorBlock: 7
+  termDictionary: 6
 } as const;
 
 export const CANONICAL_BM25_STATS_SCHEMA_ID = 1;
@@ -26,8 +25,6 @@ export const CANONICAL_BM25_STATS_SCHEMA_ID = 1;
 export const CANONICAL_DOC_PROJECTION_SCHEMA_ID = 1;
 
 export const CANONICAL_TERM_DICTIONARY_SCHEMA_ID = 1;
-
-export const CANONICAL_VECTOR_BLOCK_SCHEMA_ID = 1;
 
 const DOC_PROJECTION_HEADER_FIXED_OFFSET_COUNT = 8;
 const DOC_PROJECTION_ROW_WORDS = 19;
@@ -94,12 +91,6 @@ export type CanonicalTermDictionaryEntry = {
   postingCount: number;
 };
 
-export type CanonicalVectorBlock = {
-  schemaId: typeof CANONICAL_VECTOR_BLOCK_SCHEMA_ID;
-  embeddingModel: null;
-  vectorCount: 0;
-};
-
 export type CanonicalDocProjectionDoc = {
   localDocId: number;
   documentId: string;
@@ -135,7 +126,6 @@ export type CanonicalSegment = {
   documents?: readonly CanonicalDocumentRecord[];
   fieldTexts?: readonly CanonicalFieldText[];
   bm25?: readonly CanonicalBm25FieldStats[];
-  vectorBlock?: CanonicalVectorBlock;
 };
 
 export type SearchSnapshotAnalyzerIdentity = {
@@ -156,7 +146,6 @@ export type SearchSegmentSchemaIdentity = {
     name: keyof typeof CANONICAL_SEGMENT_SECTION;
     id: number;
     schemaId?: number;
-    reserved?: boolean;
   }[];
 };
 
@@ -174,6 +163,7 @@ export type SearchScoringModelIdentity = {
       phrase: number;
       exact: number;
       dense: number;
+      link: number;
     };
   };
 };
@@ -184,7 +174,6 @@ export type SearchModelIdentity = {
   segmentSchema: SearchSegmentSchemaIdentity;
   corpusStatsSchema: SearchCorpusStatsSchemaIdentity;
   scoringModel: SearchScoringModelIdentity;
-  embeddingModel: SearchEmbeddingModelIdentity | null;
 };
 
 export type SnapshotIdentityTuple = {
@@ -195,6 +184,24 @@ export type SnapshotIdentityTuple = {
   searchSettingsHash: string;
   rankingFeatureVersion: string;
   searchModelIdentity: SearchModelIdentity;
+};
+
+export type LexicalCorpusIdentity = {
+  schemaVersion: 1;
+  buildVersion: string;
+  fieldSetVersion: string;
+  partitionBits: number;
+  analyzerIdentity: SearchSnapshotAnalyzerIdentity;
+  searchSettingsHash: string;
+  segmentSchema: SearchSegmentSchemaIdentity;
+  corpusStatsSchema: SearchCorpusStatsSchemaIdentity;
+  liveDocumentManifestHash: string;
+  tombstoneHash: string;
+  bm25StatsSchemaId: typeof CANONICAL_BM25_STATS_SCHEMA_ID;
+  corpusStats: readonly CanonicalBm25CorpusStats[];
+  bm25GlobalStatsRows: readonly CanonicalBm25GlobalStatsRow[];
+  bm25GlobalStatsHash: string;
+  partitions: readonly CanonicalPartitionDescriptor[];
 };
 
 export type CanonicalPartitionDescriptor = {
@@ -285,7 +292,6 @@ export function decodeCanonicalSegment(bytes: Uint8Array): CanonicalSegment {
   let postingsPayload: Uint8Array | undefined;
   let docProjectionPayload: Uint8Array | undefined;
   let termDictionaryPayload: Uint8Array | undefined;
-  let vectorBlockPayload: Uint8Array | undefined;
   for (const entry of entries) {
     if (entry.offset !== expectedPayloadOffset) throw new Error("canonical segment sections must be contiguous and sorted");
     expectedPayloadOffset += entry.length;
@@ -302,7 +308,6 @@ export function decodeCanonicalSegment(bytes: Uint8Array): CanonicalSegment {
     else if (entry.id === CANONICAL_SEGMENT_SECTION.bm25) segment.bm25 = decodeBm25Section(payload);
     else if (entry.id === CANONICAL_SEGMENT_SECTION.docProjection) docProjectionPayload = payload;
     else if (entry.id === CANONICAL_SEGMENT_SECTION.termDictionary) termDictionaryPayload = payload;
-    else if (entry.id === CANONICAL_SEGMENT_SECTION.vectorBlock) vectorBlockPayload = payload;
     else throw new Error(`unknown canonical segment section ${entry.id}`);
   }
   if (payloadStart + expectedPayloadOffset !== bytes.length) {
@@ -311,8 +316,6 @@ export function decodeCanonicalSegment(bytes: Uint8Array): CanonicalSegment {
   if (!postingsPayload) throw new Error("canonical segment missing postings section");
   if (!docProjectionPayload) throw new Error("canonical segment missing docProjection section");
   if (!termDictionaryPayload) throw new Error("canonical segment missing term dictionary section");
-  if (!vectorBlockPayload) throw new Error("canonical segment missing vectorBlock section");
-  segment.vectorBlock = decodeVectorBlockSection(vectorBlockPayload);
   validateDocProjectionSection(docProjectionPayload, segment.documents ?? [], segment.fieldTexts ?? [], segment.bm25 ?? []);
   validateTermDictionaryAgainstPostings(termDictionaryPayload, postingsPayload);
   return normalizeCanonicalSegment(segment);
@@ -368,6 +371,56 @@ export function canonicalSnapshotManifestBytes(manifest: CanonicalSnapshotManife
 
 export function snapshotIdFromManifest(manifest: CanonicalSnapshotManifest): string {
   return sha256(canonicalSnapshotManifestBytes(manifest));
+}
+
+export function lexicalCorpusIdentityFromManifest(manifest: CanonicalSnapshotManifest): LexicalCorpusIdentity {
+  return {
+    schemaVersion: 1,
+    buildVersion: manifest.identityTuple.buildVersion,
+    fieldSetVersion: manifest.identityTuple.fieldSetVersion,
+    partitionBits: manifest.identityTuple.partitionBits,
+    analyzerIdentity: lexicalAnalyzerIdentity(manifest.identityTuple.analyzerIdentity),
+    searchSettingsHash: manifest.identityTuple.searchSettingsHash,
+    segmentSchema: manifest.identityTuple.searchModelIdentity.segmentSchema,
+    corpusStatsSchema: manifest.identityTuple.searchModelIdentity.corpusStatsSchema,
+    liveDocumentManifestHash: manifest.liveDocumentManifestHash,
+    tombstoneHash: manifest.tombstoneHash,
+    bm25StatsSchemaId: manifest.bm25StatsSchemaId,
+    corpusStats: manifest.corpusStats.map((field) => ({
+      channel: field.channel,
+      fieldId: field.fieldId,
+      documentCount: field.documentCount,
+      totalFieldLength: field.totalFieldLength
+    })),
+    bm25GlobalStatsRows: manifest.bm25GlobalStatsRows.map((row) => [row[0], row[1], row[2], row[3]]),
+    bm25GlobalStatsHash: manifest.bm25GlobalStatsHash,
+    partitions: manifest.partitions.map((partition) => ({
+      partitionId: partition.partitionId,
+      documentIdStart: partition.documentIdStart,
+      documentIdEnd: partition.documentIdEnd,
+      segmentHash: partition.segmentHash,
+      documentCount: partition.documentCount,
+      byteLength: partition.byteLength
+    }))
+  };
+}
+
+export function corpusSnapshotIdFromManifest(manifest: CanonicalSnapshotManifest): string {
+  return sha256(canonicalValueBytes(lexicalCorpusIdentityFromManifest(manifest)));
+}
+
+function lexicalAnalyzerIdentity(identity: SearchSnapshotAnalyzerIdentity): SearchSnapshotAnalyzerIdentity {
+  const { embeddingModel: _embeddingModel, ...analyzer } = identity.analyzer;
+  return {
+    analyzer,
+    channels: [...identity.channels],
+    ngram: {
+      enabled: identity.ngram.enabled,
+      min: identity.ngram.min,
+      max: identity.ngram.max,
+      bodyBudget: identity.ngram.bodyBudget
+    }
+  };
 }
 
 export function canonicalValueBytes(value: unknown): Uint8Array {
@@ -537,8 +590,7 @@ function normalizeCanonicalSegment(segment: CanonicalSegment): CanonicalSegment 
     postings: normalizePostings(segment.postings),
     documents: normalizeDocuments(segment.documents ?? []),
     fieldTexts: normalizeFieldTexts(segment.fieldTexts ?? []),
-    bm25: normalizeBm25Stats(segment.bm25 ?? []),
-    vectorBlock: normalizeVectorBlock(segment.vectorBlock)
+    bm25: normalizeBm25Stats(segment.bm25 ?? [])
   };
 }
 
@@ -556,8 +608,7 @@ function canonicalSections(segment: CanonicalSegment): Section[] {
         bm25: segment.bm25 ?? []
       })
     },
-    { id: CANONICAL_SEGMENT_SECTION.termDictionary, bytes: encodeTermDictionarySection(postings.termDictionary) },
-    { id: CANONICAL_SEGMENT_SECTION.vectorBlock, bytes: encodeVectorBlockSection(segment.vectorBlock) }
+    { id: CANONICAL_SEGMENT_SECTION.termDictionary, bytes: encodeTermDictionarySection(postings.termDictionary) }
   ];
   if ((segment.documents?.length ?? 0) > 0) {
     sections.push({ id: CANONICAL_SEGMENT_SECTION.documents, bytes: encodeDocumentsSection(segment.documents ?? []) });
@@ -662,40 +713,6 @@ function normalizeBm25Stats(stats: readonly CanonicalBm25FieldStats[]): Canonica
   }).sort(compareBm25FieldStats);
   assertNoDuplicateStrings(normalized.map((field) => bm25FieldKey(field.channel, field.fieldId)), "BM25 channel+field row");
   return normalized;
-}
-
-function normalizeVectorBlock(block: CanonicalVectorBlock | undefined): CanonicalVectorBlock {
-  if (!block) return emptyVectorBlock();
-  if (block.schemaId !== CANONICAL_VECTOR_BLOCK_SCHEMA_ID) throw new Error(`unsupported vectorBlock schema ${block.schemaId}`);
-  if (block.embeddingModel !== null) throw new Error("canonical vectorBlock embedding model is reserved but not enabled");
-  if (block.vectorCount !== 0) throw new Error("canonical vectorBlock must be empty when no embedding model is configured");
-  return emptyVectorBlock();
-}
-
-function emptyVectorBlock(): CanonicalVectorBlock {
-  return {
-    schemaId: CANONICAL_VECTOR_BLOCK_SCHEMA_ID,
-    embeddingModel: null,
-    vectorCount: 0
-  };
-}
-
-function encodeVectorBlockSection(block: CanonicalVectorBlock | undefined): Uint8Array {
-  const normalized = normalizeVectorBlock(block);
-  const writer = new ByteWriter();
-  writer.writeUnsigned(normalized.schemaId);
-  writer.writeUnsigned(normalized.vectorCount);
-  return writer.bytes();
-}
-
-function decodeVectorBlockSection(bytes: Uint8Array): CanonicalVectorBlock {
-  const reader = new ByteReader(bytes);
-  const schemaId = reader.readUnsigned();
-  if (schemaId !== CANONICAL_VECTOR_BLOCK_SCHEMA_ID) throw new Error(`unsupported vectorBlock schema ${schemaId}`);
-  const vectorCount = reader.readUnsigned();
-  reader.assertDone();
-  if (vectorCount !== 0) throw new Error("canonical vectorBlock vectors are reserved but not enabled");
-  return emptyVectorBlock();
 }
 
 function encodePostingsSectionWithDictionary(postings: readonly CanonicalPosting[]): { bytes: Uint8Array; termDictionary: CanonicalTermDictionaryEntry[] } {

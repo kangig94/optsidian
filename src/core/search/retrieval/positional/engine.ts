@@ -1,4 +1,4 @@
-import type { CandidateSet, FeatureStore, Retriever, RetrievalQuery } from "../../contracts.js";
+import type { CandidateSet, FeatureStore, LinkGraphView, Retriever, RetrievalQuery } from "../../contracts.js";
 import type { SearchTokenChannel } from "../../analysis/index.js";
 import type { ProjectionReader } from "./segment-projection-reader.js";
 import type { CanonicalSegmentPostingsReader } from "./segment-postings-reader.js";
@@ -17,6 +17,7 @@ export type SearchSnapshot = {
   documentCount: number;
   segments: readonly SearchSnapshotSegment[];
   bm25Stats: PositionalBm25GlobalStats;
+  linkGraph?: LinkGraphView;
 };
 
 export type SearchSnapshotSegment = {

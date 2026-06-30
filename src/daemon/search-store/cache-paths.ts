@@ -13,9 +13,12 @@ export type SearchStoreCachePaths = {
   storeStatePath: string;
   segmentsDir: string;
   snapshotsDir: string;
+  retrievalsDir: string;
+  linkGraphsDir: string;
   activeDir: string;
   tmpDir: string;
   activePointerPath: string;
+  retrievalActivePointerPath: string;
 };
 
 export function searchStoreCachePaths(vaultRoot: string, env: NodeJS.ProcessEnv = process.env): SearchStoreCachePaths {
@@ -36,9 +39,12 @@ export function searchStoreCachePaths(vaultRoot: string, env: NodeJS.ProcessEnv 
     storeStatePath: path.join(rootDir, "store.json"),
     segmentsDir: path.join(rootDir, "segments"),
     snapshotsDir: path.join(rootDir, "snapshots"),
+    retrievalsDir: path.join(rootDir, "retrievals"),
+    linkGraphsDir: path.join(rootDir, "link-graphs"),
     activeDir,
     tmpDir: path.join(rootDir, "tmp"),
-    activePointerPath: path.join(activeDir, vaultStateHash)
+    activePointerPath: path.join(activeDir, vaultStateHash),
+    retrievalActivePointerPath: path.join(activeDir, `${vaultStateHash}.retrieval`)
   };
 }
 

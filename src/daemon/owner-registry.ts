@@ -16,7 +16,8 @@ export const OWNER_RECORD_FIELDS = [
   "binaryVersion",
   "protocolVersion",
   "nonce",
-  "socketPath",
+  "querySocketPath",
+  "controlSocketPath",
   "startedAt"
 ] as const;
 
@@ -128,8 +129,14 @@ export function desiredOwnerIdentity(binaryPath: string): DesiredOwnerIdentity {
   };
 }
 
-export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIdentity): string {
-  const name = `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
+export type OwnerSocketCapability = "query" | "control";
+
+export function socketPathForOwner(
+  runtimeDir: string,
+  desired: DesiredOwnerIdentity,
+  capability: OwnerSocketCapability = "query"
+): string {
+  const name = `optsidian-search-daemon-${capability}-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
   const candidate = path.join(runtimeDir, name);
   if (candidate.length < 100) return candidate;
   const socketDir = path.join(os.tmpdir(), `od-${desired.uid}-${sha256(path.resolve(runtimeDir)).slice(0, 12)}`);
@@ -137,13 +144,26 @@ export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIden
   return path.join(socketDir, name);
 }
 
+export function socketPathsForOwner(runtimeDir: string, desired: DesiredOwnerIdentity): {
+  querySocketPath: string;
+  controlSocketPath: string;
+} {
+  return {
+    querySocketPath: socketPathForOwner(runtimeDir, desired, "query"),
+    controlSocketPath: socketPathForOwner(runtimeDir, desired, "control")
+  };
+}
+
 export function createOwnerRecord(
   desired: DesiredOwnerIdentity,
-  socketPath: string,
+  socketPath: string | { querySocketPath: string; controlSocketPath: string },
   nonce: string,
   pid = process.pid,
   startedAt = new Date().toISOString()
 ): OwnerRecord {
+  const sockets = typeof socketPath === "string"
+    ? { querySocketPath: socketPath, controlSocketPath: socketPath }
+    : socketPath;
   return {
     pid,
     uid: desired.uid,
@@ -151,7 +171,8 @@ export function createOwnerRecord(
     binaryVersion: desired.binaryVersion,
     protocolVersion: desired.protocolVersion,
     nonce,
-    socketPath,
+    querySocketPath: sockets.querySocketPath,
+    controlSocketPath: sockets.controlSocketPath,
     startedAt
   };
 }
@@ -180,8 +201,9 @@ export function ownerPidIsLive(owner: OwnerRecord): boolean {
 
 export function socketOwnershipMatches(owner: OwnerRecord): boolean {
   try {
-    const stat = fs.statSync(owner.socketPath);
-    return stat.uid === owner.uid;
+    const query = fs.statSync(owner.querySocketPath);
+    const control = fs.statSync(owner.controlSocketPath);
+    return query.uid === owner.uid && control.uid === owner.uid;
   } catch {
     return false;
   }
@@ -204,7 +226,7 @@ export async function convergeOnCompatibleDaemonForTests(
     }
     const owner = createOwnerRecord(
       desired,
-      socketPathForOwner(registry.runtimeDir, desired),
+    socketPathsForOwner(registry.runtimeDir, desired),
       current?.nonce && current.nonce !== "stale" ? current.nonce : randomNonce(),
       process.pid
     );
@@ -220,7 +242,7 @@ export function createOwnerRegistryForTests(options: {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-owner-registry-test-"));
   const registry = createOwnerRegistry({ runtimeDir, desired: options.desired });
   const incompatible = (overrides: Partial<OwnerRecord>): OwnerRecord => ({
-    ...createOwnerRecord(options.desired, socketPathForOwner(runtimeDir, options.desired), "stale", 999999),
+    ...createOwnerRecord(options.desired, socketPathsForOwner(runtimeDir, options.desired), "stale", 999999),
     ...overrides
   });
 
@@ -231,7 +253,7 @@ export function createOwnerRegistryForTests(options: {
         protocolVersion: options.desired.protocolVersion + 1
       };
       createOwnerRegistry({ runtimeDir, desired: peerDesired }).writeOwner(
-        createOwnerRecord(peerDesired, socketPathForOwner(runtimeDir, peerDesired), "stale", 999999)
+        createOwnerRecord(peerDesired, socketPathsForOwner(runtimeDir, peerDesired), "stale", 999999)
       );
       break;
     }
@@ -242,7 +264,11 @@ export function createOwnerRegistryForTests(options: {
       registry.writeOwner(incompatible({ pid: 999999, nonce: "stale" }));
       break;
     case "orphaned-socket":
-      registry.writeOwner(incompatible({ socketPath: path.join(runtimeDir, "missing.sock"), nonce: "stale" }));
+      registry.writeOwner(incompatible({
+        querySocketPath: path.join(runtimeDir, "missing-query.sock"),
+        controlSocketPath: path.join(runtimeDir, "missing-control.sock"),
+        nonce: "stale"
+      }));
       break;
     case "auth-failure":
       registry.writeOwner(incompatible({ nonce: "auth-failure" }));

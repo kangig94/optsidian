@@ -430,6 +430,7 @@ function setup() {
     XDG_CONFIG_HOME: path.join(dir, "config"),
     XDG_CACHE_HOME: path.join(dir, "cache"),
     XDG_RUNTIME_DIR: path.join(dir, "runtime"),
+    OPTSIDIAN_SEARCH_VECTOR_INSTANCE: "memory",
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
   });
   return { dir, vault, env, log };
@@ -567,7 +568,7 @@ test("top-level and implemented command help stay local", async () => {
   assert.match(result.stdout, /optsidian <command> --help/);
   assert.match(result.stdout, /update\s+Update or repair the managed Optsidian install/);
   assert.match(result.stdout, /plugin:install\s+Install marketplace or custom Obsidian plugins/);
-  assert.match(result.stdout, /similarity\s+Vector similarity API contract/);
+  assert.match(result.stdout, /similarity\s+Retrieve-backed note and text similarity/);
   assert.match(result.stdout, /Native passthrough:/);
   assert.match(result.stdout, /files, links, version, dev:console/);
   assert.match(result.stdout, /MCP tools: command_map, command_run, write, edit, apply_patch/);
@@ -1334,12 +1335,34 @@ test("search ranks notes and renders CLI output", async () => {
   );
   fs.writeFileSync(path.join(vault, "body.md"), "project alpha is mentioned only in body\n");
 
+  // AC9 moved index build/publish to the control path; CLI search is Retrieve
+  // sugar over the read-only query path and must consume an already published snapshot.
+  const warm = run(["index", "warm", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  assert.equal(warm.status, 0, warm.stderr);
+
   let result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
+  assert.equal(payload.available, true);
+  assert.equal(payload.status, "ready");
+  assert.equal(payload.origin, "text");
   assert.match(payload.snapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
-  assert.deepEqual(Object.keys(payload).sort(), ["command", "debug", "matches", "ok", "snapshotId"]);
+  assert.match(payload.retrievalSnapshotId, new RegExp(`^${SNAPSHOT_ID_PATTERN}$`));
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "available",
+    "command",
+    "debug",
+    "matches",
+    "ok",
+    "origin",
+    "results",
+    "retrievalSnapshotId",
+    "schemaVersion",
+    "snapshotId",
+    "status"
+  ]);
+  assert.equal(payload.results.length, payload.matches.length);
   assert.deepEqual(payload.debug.query.terms, ["project", "alpha"]);
   assert.equal(payload.debug.reranker, "unified-scalar-ac4-v1");
   assert.equal(payload.matches[0].path, "Projects/Alpha.md");
@@ -1360,49 +1383,108 @@ test("search ranks notes and renders CLI output", async () => {
 
 });
 
-test("similarity command exposes vector contract with provider fallback", () => {
-  const { env } = setup();
-  const result = run([
+test("similarity command parses retrieve sugar", async () => {
+  const { parseArgs } = await import(path.resolve("src/cli/args.ts"));
+  const { normalizeSimilarityParams } = await import(path.resolve("src/core/similarity.ts"));
+  const { retrievePayloadFromSimilarity, similarityRequestFromArgs } = await import(
+    path.resolve("src/cli/commands/similarity.ts")
+  );
+
+  const request = normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
     "similarity",
-    "mode=global",
-    "frontmatter-key=type",
-    "frontmatter-value=project",
-    "path-glob=LLM-Wiki/*/index.md",
-    "field=title,body",
+    "mode=left",
+    "left=Projects/A.md",
+    "path=Projects",
     "top-k=5",
     "min-score=0.55",
     "model=bge-m3",
     "format=json"
-  ], { env });
-  assert.equal(result.status, 0, result.stderr);
+  ])));
+  assert.equal(request.mode, "left");
+  assert.equal(request.left.path, "Projects/A.md");
+  assert.equal(request.scope.path, "Projects");
+  assert.deepEqual(request.scope.paths, []);
+  assert.equal(request.topK, 5);
+  assert.equal(request.minScore, 0.55);
+  assert.equal(request.provider.model, "bge-m3");
+  assert.deepEqual(retrievePayloadFromSimilarity(request), {
+    origin: "note",
+    text: undefined,
+    sourcePath: "Projects/A.md",
+    path: "Projects",
+    left: { path: "Projects/A.md" },
+    right: undefined,
+    topK: 5,
+    limit: 5,
+    minScore: 0.55,
+    providerModel: "bge-m3",
+    query: undefined
+  });
 
-  const payload = JSON.parse(result.stdout);
-  assert.equal(payload.command, "similarity");
-  assert.equal(payload.schemaVersion, 1);
-  assert.equal(payload.available, false);
-  assert.equal(payload.status, "provider-unavailable");
-  assert.equal(payload.request.scope.pathGlob, "LLM-Wiki/*/index.md");
-  assert.deepEqual(payload.request.scope.paths, []);
-  assert.deepEqual(payload.request.scope.frontmatter, [{ key: "type", op: "eq", value: "project" }]);
-  assert.deepEqual(payload.request.projection.fields, ["title", "body"]);
-  assert.equal(payload.request.projection.version, "title-body-plain-strip-frontmatter-v1");
-  assert.equal(payload.request.topK, 5);
-  assert.equal(payload.request.minScore, 0.55);
-  assert.equal(payload.model.requested, "bge-m3");
-  assert.equal(payload.model.resolved, null);
-  assert.equal(payload.model.metric, "cosine");
-  assert.deepEqual(payload.results, []);
-  assert.equal(payload.fallback.strategy, "lexical");
-
-  const pair = run([
+  const pair = normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
     "similarity",
     "mode=pair",
     "left=Projects/A.md",
     "right=Projects/B.md",
     "format=json"
-  ], { env });
-  assert.equal(pair.status, 0, pair.stderr);
-  assert.equal(JSON.parse(pair.stdout).request.mode, "pair");
+  ])));
+  assert.equal(pair.mode, "pair");
+  assert.equal(retrievePayloadFromSimilarity(pair).origin, "pair");
+
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=global",
+      "path=Projects"
+    ])))),
+    /mode=global is not supported/
+  );
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=left",
+      "left=Projects/A.md",
+      "paths=Projects/A.md,Projects/B.md"
+    ])))),
+    /scope\.paths is not supported/
+  );
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=left",
+      "left=Projects/A.md",
+      "path-glob=LLM-Wiki/*/index.md"
+    ])))),
+    /path-glob is not supported/
+  );
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=left",
+      "left=Projects/A.md",
+      "frontmatter-key=type",
+      "frontmatter-value=project"
+    ])))),
+    /frontmatter filters are not supported/
+  );
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=left",
+      "left=Projects/A.md",
+      "field=title"
+    ])))),
+    /projection flags are not supported/
+  );
+  assert.throws(
+    () => retrievePayloadFromSimilarity(normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "mode=pair",
+      "left-text=alpha",
+      "right=Projects/B.md"
+    ])))),
+    /pair text inputs are not supported/
+  );
 
   const requestJson = JSON.stringify({
     mode: "left",
@@ -1414,19 +1496,27 @@ test("similarity command exposes vector contract with provider fallback", () => 
     projection: { fields: ["title"], stripFrontmatter: true },
     topK: 3
   });
-  const structured = run(["similarity", `request-json=${requestJson}`, "format=json"], { env });
-  assert.equal(structured.status, 0, structured.stderr);
-  assert.equal(JSON.parse(structured.stdout).request.left.id, "ad-hoc-left");
-  assert.deepEqual(JSON.parse(structured.stdout).request.scope.paths, ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"]);
-  assert.deepEqual(JSON.parse(structured.stdout).request.projection.fields, ["title"]);
+  const structured = normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+    "similarity",
+    `request-json=${requestJson}`,
+    "format=json"
+  ])));
+  assert.equal(structured.left.id, "ad-hoc-left");
+  assert.deepEqual(structured.scope.paths, ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"]);
+  assert.deepEqual(structured.projection.fields, ["title"]);
 
-  const invalid = run(["similarity", "mode=left", "format=json"], { env });
-  assert.equal(invalid.status, 2);
-  assert.match(invalid.stderr, /mode=left requires left/);
-
-  const invalidScope = run(["similarity", "path=Projects", "path-glob=LLM-Wiki/*/index.md"], { env });
-  assert.equal(invalidScope.status, 2);
-  assert.match(invalidScope.stderr, /Use only one/);
+  assert.throws(
+    () => normalizeSimilarityParams(similarityRequestFromArgs(parseArgs(["similarity", "mode=left", "format=json"]))),
+    /mode=left requires left/
+  );
+  assert.throws(
+    () => normalizeSimilarityParams(similarityRequestFromArgs(parseArgs([
+      "similarity",
+      "path=Projects",
+      "path-glob=LLM-Wiki/*/index.md"
+    ]))),
+    /Use only one/
+  );
 });
 
 test("index mutation rendering stays stable", async () => {

@@ -3,24 +3,29 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import type {
   CompactResult,
+  ControlDaemonMethod,
+  ControlDaemonRequest,
   ExplainRequestPayload,
   ExplainResult,
   PruneRequestPayload,
   RefreshResult,
-  SearchDaemonMethod,
-  SearchDaemonRequest,
+  QueryDaemonMethod,
+  QueryDaemonRequest,
+  RetrieveRequestPayload,
   SearchRequestPayload,
   ShutdownResult,
   StatusResult,
   VaultRequestPayload
 } from "./protocol.js";
 import {
-  deadlineFromNow,
+  controlDeadlineFromNow,
+  queryDeadlineFromNow,
   SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS,
   SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   vaultLifecycleDeadlineMs,
-  type SearchDaemonResultByMethod
+  type ControlDaemonResultByMethod,
+  type QueryDaemonResultByMethod
 } from "./protocol.js";
 import { connectRpc, type RpcConnection } from "./transport.js";
 import {
@@ -33,7 +38,7 @@ import {
   ownerSharesDesiredSlot,
   randomNonce,
   socketOwnershipMatches,
-  socketPathForOwner,
+  socketPathsForOwner,
   SearchDaemonOwnerError,
   type DesiredOwnerIdentity,
   type OwnerRecord,
@@ -43,6 +48,7 @@ import type {
   SearchIndexMutationResult,
   SearchIndexPruneResult,
   SearchIndexWarmResult,
+  RetrieveResult,
   SearchResult
 } from "../core/types.js";
 import { vaultRealpath, walkFiles } from "../core/path.js";
@@ -52,6 +58,7 @@ import {
 } from "./runtime-profile.js";
 
 export type SearchDaemonClient = {
+  retrieve(request: RetrieveClientRequest): Promise<RetrieveResult>;
   search(request: SearchClientRequest): Promise<SearchResult & { snapshotId?: string }>;
   explain(request: ExplainClientRequest): Promise<ExplainResult>;
   status(options?: ClientRequestOptions): Promise<StatusResult>;
@@ -72,6 +79,7 @@ export type ClientRequestOptions = {
 
 export type SearchClientRequest = SearchRequestPayload & ClientRequestOptions;
 export type ExplainClientRequest = ExplainRequestPayload & ClientRequestOptions;
+export type RetrieveClientRequest = RetrieveRequestPayload & ClientRequestOptions;
 export type VaultClientRequest = VaultRequestPayload & ClientRequestOptions;
 export type PruneClientRequest = PruneRequestPayload & ClientRequestOptions;
 
@@ -84,7 +92,7 @@ export type SearchDaemonClientOptions = {
   registry?: OwnerRegistry;
   runtimeProfile?: SearchRuntimeProfile;
   spawnDaemon?(record: OwnerRecord): Promise<{ pid?: number } | void> | { pid?: number } | void;
-  connect?(record: OwnerRecord): Promise<RpcConnection> | RpcConnection;
+  connect?(record: OwnerRecord, capability: "query" | "control"): Promise<RpcConnection> | RpcConnection;
 };
 
 export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}): SearchDaemonClient {
@@ -95,7 +103,8 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   const runtimeProfile = options.runtimeProfile ?? effectiveSearchRuntimeProfile(process.cwd(), env);
   const readyTimeoutMs = options.readyTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
   const ownerLockTimeoutMs = options.ownerLockTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
-  const connect = options.connect ?? ((owner: OwnerRecord) => connectRpc(owner.socketPath));
+  const connect = options.connect ?? ((owner: OwnerRecord, capability: "query" | "control" = "query") =>
+    connectRpc(capability === "query" ? owner.querySocketPath : owner.controlSocketPath));
   const spawnDaemon = options.spawnDaemon ?? ((record: OwnerRecord) => spawnDefaultDaemon(binaryPath, record, registry.runtimeDir, env));
   const strictOwnerChecks = options.connect === undefined;
 
@@ -126,7 +135,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     if (!ownerMatchesDesired(owner, desired)) return false;
     if (strictOwnerChecks) {
       if (!ownerPidIsLive(owner)) return false;
-      if (fs.existsSync(owner.socketPath) && !socketOwnershipMatches(owner)) return false;
+      if ((fs.existsSync(owner.querySocketPath) || fs.existsSync(owner.controlSocketPath)) && !socketOwnershipMatches(owner)) return false;
     }
     try {
       const status = await statusOnce(owner, 500);
@@ -158,7 +167,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
       if (status.nonce !== owner.nonce) {
         throw new SearchDaemonOwnerError("SEARCH_DAEMON_AUTH_FAILED", "search daemon owner nonce authentication failed");
       }
-      await requestOnce(owner, "Shutdown", { nonce: owner.nonce }, { deadlineMs: 1000 });
+      await requestOnce(owner, "control", "Shutdown", { nonce: owner.nonce }, { deadlineMs: 1000 });
       registry.removeOwner(owner);
     } catch (error) {
       if (isAuthError(error)) throw error;
@@ -169,7 +178,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   async function spawnOwner(): Promise<OwnerRecord> {
     const intended = createOwnerRecord(
       desired,
-      socketPathForOwner(registry.runtimeDir, desired),
+      socketPathsForOwner(registry.runtimeDir, desired),
       randomNonce(),
       0
     );
@@ -208,32 +217,73 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   }
 
   async function statusOnce(owner: OwnerRecord, deadlineMs: number): Promise<StatusResult> {
-    return requestOnce(owner, "Status", { nonce: owner.nonce }, { deadlineMs }) as Promise<StatusResult>;
+    return requestOnce(owner, "query", "Status", { nonce: owner.nonce }, { deadlineMs }) as Promise<StatusResult>;
   }
 
-  async function requestOnce<M extends SearchDaemonMethod>(
+  async function requestOnce<M extends QueryDaemonMethod>(
     owner: OwnerRecord,
+    capability: "query",
     method: M,
-    payload: SearchDaemonRequest["payload"],
+    payload: Extract<QueryDaemonRequest, { method: M }>["payload"],
+    options?: ClientRequestOptions
+  ): Promise<QueryDaemonResultByMethod[M]>;
+  async function requestOnce<M extends ControlDaemonMethod>(
+    owner: OwnerRecord,
+    capability: "control",
+    method: M,
+    payload: Extract<ControlDaemonRequest, { method: M }>["payload"],
+    options?: ClientRequestOptions
+  ): Promise<ControlDaemonResultByMethod[M]>;
+  async function requestOnce(
+    owner: OwnerRecord,
+    capability: "query" | "control",
+    method: QueryDaemonMethod | ControlDaemonMethod,
+    payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
     options: ClientRequestOptions = {}
-  ): Promise<SearchDaemonResultByMethod[M]> {
-    const connection = await connect(owner);
+  ): Promise<unknown> {
+    const connection = await connect(owner, capability);
     try {
-      const request = makeRpcRequest(owner, method, payload, options);
-      return await connection.request(request) as SearchDaemonResultByMethod[M];
+      const request = makeRpcRequest(owner, capability, method, payload, options);
+      return await connection.request(request);
     } finally {
       await connection.close();
     }
   }
 
-  async function requestReady<M extends SearchDaemonMethod>(
+  async function queryReady<M extends QueryDaemonMethod>(
     method: M,
-    payload: SearchDaemonRequest["payload"],
+    payload: Extract<QueryDaemonRequest, { method: M }>["payload"],
     options: ClientRequestOptions = {}
-  ): Promise<SearchDaemonResultByMethod[M]> {
+  ): Promise<QueryDaemonResultByMethod[M]> {
     const owner = await ensureReady();
     try {
-      return await requestOnce(owner, method, payload, options);
+      return (await requestOnce(
+        owner,
+        "query",
+        method as QueryDaemonMethod,
+        payload as Extract<QueryDaemonRequest, { method: QueryDaemonMethod }>["payload"],
+        options
+      )) as QueryDaemonResultByMethod[M];
+    } catch (error) {
+      if (isAuthError(error)) registry.removeOwner(owner);
+      throw error;
+    }
+  }
+
+  async function controlReady<M extends ControlDaemonMethod>(
+    method: M,
+    payload: Extract<ControlDaemonRequest, { method: M }>["payload"],
+    options: ClientRequestOptions = {}
+  ): Promise<ControlDaemonResultByMethod[M]> {
+    const owner = await ensureReady();
+    try {
+      return (await requestOnce(
+        owner,
+        "control",
+        method as ControlDaemonMethod,
+        payload as Extract<ControlDaemonRequest, { method: ControlDaemonMethod }>["payload"],
+        options
+      )) as ControlDaemonResultByMethod[M];
     } catch (error) {
       if (isAuthError(error)) registry.removeOwner(owner);
       throw error;
@@ -241,43 +291,60 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   }
 
   return {
+    retrieve(request) {
+      const { deadlineMs, cancellationId, traceId, ...payload } = request;
+      return queryReady("Retrieve", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
+    },
     search(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Search", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchResult & { snapshotId?: string }>;
+      return queryReady("Retrieve", withRuntimeProfile(searchPayloadToRetrieve(payload), runtimeProfile), { deadlineMs, cancellationId, traceId })
+        .then(searchResultFromRetrieve);
     },
     explain(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Explain", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<ExplainResult>;
+      return queryReady("Retrieve", withRuntimeProfile({ ...searchPayloadToRetrieve(payload), debug: true, explain: true }, runtimeProfile), { deadlineMs, cancellationId, traceId })
+        .then((result): ExplainResult => {
+          if (result.status !== "ready" || !result.explainTrace) {
+            throw Object.assign(new Error("explain requires a ready retrieve result with explain trace"), { code: "SEARCH_DAEMON_NOT_READY" });
+          }
+          return {
+            ok: true,
+            command: "explain",
+            snapshotId: result.snapshotId,
+            search: searchResultFromRetrieve(result),
+            trace: result.explainTrace
+          };
+        });
     },
     status(options = {}) {
-      return ensureReady().then((owner) => requestOnce(owner, "Status", { nonce: owner.nonce }, options) as Promise<StatusResult>);
+      return ensureReady().then((owner) => requestOnce(owner, "query", "Status", { nonce: owner.nonce }, options) as Promise<StatusResult>);
     },
     loadVault(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("LoadVault", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexWarmResult>;
+      return controlReady("LoadVault", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexWarmResult>;
     },
     rebuild(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Rebuild", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return controlReady("Rebuild", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
     },
     refresh(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Refresh", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<RefreshResult>;
+      return controlReady("Refresh", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<RefreshResult>;
     },
     compact(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Compact", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<CompactResult>;
+      return controlReady("Compact", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<CompactResult>;
     },
     clear(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return controlReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
     },
     prune(request = {}) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return requestReady("Prune", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexPruneResult>;
+      return controlReady("Prune", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexPruneResult>;
     },
     shutdown(options = {}) {
-      return ensureReady().then((owner) => requestOnce(owner, "Shutdown", { nonce: owner.nonce }, options) as Promise<ShutdownResult>);
+      return ensureReady().then((owner) => requestOnce(owner, "control", "Shutdown", { nonce: owner.nonce }, options) as Promise<ShutdownResult>);
     }
   };
 }
@@ -291,45 +358,79 @@ function withRuntimeProfile<T extends { profile?: SearchRuntimeProfile }>(payloa
 
 function makeRpcRequest(
   owner: OwnerRecord,
-  method: SearchDaemonMethod,
-  payload: SearchDaemonRequest["payload"],
+  capability: "query" | "control",
+  method: QueryDaemonMethod | ControlDaemonMethod,
+  payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
   options: ClientRequestOptions
-): SearchDaemonRequest {
+): QueryDaemonRequest | ControlDaemonRequest {
+  const deadline = capability === "query"
+    ? queryDeadlineFromNow(method as QueryDaemonMethod, requestDeadlineMs(capability, method, payload, options))
+    : controlDeadlineFromNow(method as ControlDaemonMethod, requestDeadlineMs(capability, method, payload, options));
   return {
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
     requestId: crypto.randomUUID(),
     method,
-    deadline: deadlineFromNow(method, requestDeadlineMs(method, payload, options)),
+    deadline,
     ...(options.cancellationId ? { cancellationId: options.cancellationId } : {}),
     ...(options.traceId ? { traceId: options.traceId } : {}),
     nonce: owner.nonce,
     payload
-  } as SearchDaemonRequest;
+  } as QueryDaemonRequest | ControlDaemonRequest;
 }
 
 function requestDeadlineMs(
-  method: SearchDaemonMethod,
-  payload: SearchDaemonRequest["payload"],
+  capability: "query" | "control",
+  method: QueryDaemonMethod | ControlDaemonMethod,
+  payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
   options: ClientRequestOptions
 ): number | undefined {
   if (options.deadlineMs !== undefined) return options.deadlineMs;
-  if ((method === "Search" || method === "Explain") && "vault" in payload && typeof payload.vault === "string") {
-    const stats = vaultMarkdownStats(payload.vault);
-    if (stats !== undefined) return Math.max(vaultLifecycleDeadlineMs(stats.fileCount, stats.byteCount), SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS);
+  if (capability === "query" && method === "Retrieve") {
+    return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
   }
-  if (isVaultLifecycleMethod(method) && "vault" in payload && typeof payload.vault === "string") {
+  if (capability === "control" && isVaultLifecycleMethod(method as ControlDaemonMethod) && "vault" in payload && typeof payload.vault === "string") {
     const stats = vaultMarkdownStats(payload.vault);
     if (stats !== undefined) return vaultLifecycleDeadlineMs(stats.fileCount, stats.byteCount);
   }
   return undefined;
 }
 
-function isVaultLifecycleMethod(method: SearchDaemonMethod): boolean {
+function isVaultLifecycleMethod(method: ControlDaemonMethod): boolean {
   return method === "LoadVault" ||
     method === "Rebuild" ||
     method === "Refresh" ||
     method === "Compact" ||
     method === "Clear";
+}
+
+function searchPayloadToRetrieve(payload: SearchRequestPayload): RetrieveRequestPayload {
+  return {
+    ...payload,
+    origin: "text",
+    text: payload.query,
+    query: payload.query
+  };
+}
+
+function searchResultFromRetrieve(result: RetrieveResult): SearchResult & { snapshotId?: string } {
+  return {
+    ok: true,
+    command: "search",
+    schemaVersion: 1,
+    available: result.available,
+    status: result.status,
+    origin: result.origin,
+    matches: result.matches,
+    results: result.results,
+    ...(result.status === "ready"
+      ? {
+          snapshotId: result.snapshotId,
+          retrievalSnapshotId: result.retrievalSnapshotId,
+          ...(result.debug ? { debug: result.debug } : {})
+        }
+      : {}),
+    ...(result.warnings ? { warnings: result.warnings } : {})
+  };
 }
 
 function vaultMarkdownStats(vault: string): { fileCount: number; byteCount: number } | undefined {
@@ -361,7 +462,8 @@ function spawnDefaultDaemon(
         OPTSIDIAN_SEARCH_DAEMON_UID: String(record.uid),
         OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH: record.runtimeHash,
         OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION: record.binaryVersion,
-        OPTSIDIAN_SEARCH_DAEMON_SOCKET: record.socketPath,
+        OPTSIDIAN_SEARCH_DAEMON_QUERY_SOCKET: record.querySocketPath,
+        OPTSIDIAN_SEARCH_DAEMON_CONTROL_SOCKET: record.controlSocketPath,
         OPTSIDIAN_SEARCH_DAEMON_NONCE: record.nonce
       }
     });

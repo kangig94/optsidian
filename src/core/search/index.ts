@@ -1,6 +1,7 @@
 export * from "./analysis/index.js";
 export * from "./constants.js";
 export * from "./contracts.js";
+export * from "./dense/index.js";
 export * from "./markdown.js";
 export * from "./params.js";
 export * from "./ranking/index.js";

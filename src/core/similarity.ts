@@ -8,48 +8,13 @@ import type {
   SimilarityMode,
   SimilarityParams,
   SimilarityProjectionField,
-  SimilarityReference,
-  SimilarityResult
+  SimilarityReference
 } from "./types.js";
 
-const SIMILARITY_SCHEMA_VERSION = 1;
 const DEFAULT_SIMILARITY_MODEL = "default";
 const DEFAULT_SIMILARITY_TOP_K = 10;
 const DEFAULT_SIMILARITY_MIN_SCORE = 0;
 const SIMILARITY_PROJECTION_FIELDS: readonly SimilarityProjectionField[] = ["title", "body", "aliases", "headings", "tags"];
-
-export function similarityUnavailableResult(_vaultRoot: string, params: SimilarityParams = {}): SimilarityResult {
-  const request = normalizeSimilarityParams(params);
-  const reason = "Vector similarity provider is not configured.";
-  return {
-    ok: true,
-    command: "similarity",
-    schemaVersion: SIMILARITY_SCHEMA_VERSION,
-    available: false,
-    status: "provider-unavailable",
-    request,
-    model: {
-      requested: request.provider.model,
-      resolved: null,
-      metric: "cosine"
-    },
-    provider: {
-      status: "unavailable",
-      reason
-    },
-    results: [],
-    cache: {
-      key: null,
-      hits: 0,
-      misses: 0
-    },
-    fallback: {
-      available: true,
-      strategy: "lexical",
-      reason: "Use existing lexical/search scoring until a vector provider is available."
-    }
-  };
-}
 
 export function normalizeSimilarityParams(params: SimilarityParams = {}): NormalizedSimilarityParams {
   if (!isRecord(params)) throw new UsageError("similarity request must be an object");

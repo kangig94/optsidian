@@ -13,7 +13,32 @@ import {
   type CanonicalBm25FieldStats
 } from "../../core/search/segments/index.js";
 import type { PositionalBm25GlobalStats } from "../../core/search/retrieval/positional/index.js";
-import type { PinnedSnapshot, SnapshotManifestView, SnapshotStore, SnapshotView } from "../../core/search/contracts.js";
+import type {
+  EmbeddingSetId,
+  LinkGraphId,
+  LinkGraphView,
+  PinnedSnapshot,
+  RetrieverIdentity,
+  RetrievalSnapshotId,
+  SnapshotManifestView,
+  SnapshotStore,
+  SnapshotView
+} from "../../core/search/contracts.js";
+import {
+  FakeProvider,
+  buildFakeEmbeddingSet,
+  type EmbeddingProviderIdentity,
+  type EmbeddingRecipeIdentity,
+  type EmbeddingSetRecord
+} from "../../core/search/dense/index.js";
+import { DENSE_RETRIEVER_VERSION } from "../../core/search/dense/retriever.js";
+import { computeRetrieverPlanIdentity, DEFAULT_RRF_K, type FusionParameters } from "../../core/search/retrieval/fusion.js";
+import {
+  LINK_ADJACENCY_DIRECT_SCORE,
+  LINK_ADJACENCY_RETRIEVER_VERSION,
+  LINK_ADJACENCY_SCORING_VERSION
+} from "../../core/search/retrieval/link.js";
+import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
 import { recordVaultAccess, recentVaultAccessRoots } from "../../core/vault-access.js";
 import { vaultRelative, walkFiles } from "../../core/path.js";
 import { readOptsidianSettings, searchNgramEnabled } from "../../core/settings.js";
@@ -32,10 +57,32 @@ import {
   type DurableRename
 } from "./publication.js";
 import {
+  buildLinkGraphSidecar,
+  LINK_GRAPH_RESOLVER_VERSION,
+  linkGraphSidecarExists,
+  loadLinkGraphView,
+  storeLinkGraphSidecar,
+  sweepLinkGraphSidecars
+} from "./link-graph.js";
+import {
+  RetrievalFreshnessStore,
+  readActiveVectorPointer,
+  storeVectorGenerationMetadata,
+  VectorGenerationPool,
+  vectorStoreCachePaths,
+  writeActiveVectorPointer,
+  type CoralEmbeddingSpec,
+  type VectorGenerationMetadata
+} from "../vector-store/index.js";
+import type { CoralChunkRecord, VectorStoreKey } from "../vector-store/types.js";
+import {
   SNAPSHOT_PERSISTENCE_VERSION,
   type ActivePointer,
   type BuiltSnapshot,
   type PersistedDocumentRecord,
+  type RetrievalActivePointer,
+  type RetrievalEmbeddingSetEnvelope,
+  type RetrievalSnapshotEnvelope,
   type SnapshotEnvelope
 } from "./types.js";
 import { SearchCacheCatalog, type SearchCachePruneOptions } from "./cache-catalog.js";
@@ -46,6 +93,7 @@ export type DaemonSnapshotStoreOptions = {
   countCap?: number;
   byteCap?: number;
   retentionCount?: number;
+  profileHash?: string;
   analyzer?: SearchAnalyzer;
   analyzerIdentity?: SearchAnalyzerIdentity;
   searchSettings?: Partial<IndexAffectingSearchSettings>;
@@ -55,6 +103,9 @@ export type DaemonSnapshotStoreOptions = {
   durableRenameSegment?: DurableRename;
   durableRenameManifest?: DurableRename;
   durableRenameActivePointer?: DurableRename;
+  durableRenameRetrievalPointer?: DurableRename;
+  durableRenameLinkGraph?: DurableRename;
+  vectorPool?: VectorGenerationPool;
 };
 
 export type LoadVaultResult = {
@@ -93,6 +144,7 @@ type LoadedSnapshot = {
   snapshotId: string;
   envelope: SnapshotEnvelope;
   view: SnapshotView;
+  linkGraph: LinkGraphView;
   documentsByDocumentId: Map<string, PersistedDocumentRecord>;
   documentBytes: Uint8Array;
   segmentBytes: Map<string, Uint8Array>;
@@ -103,9 +155,41 @@ type LoadedSnapshot = {
   lastAccessMs: number;
 };
 
+export type PinnedRetrievalSnapshot = PinnedSnapshot & {
+  retrievalSnapshotId: RetrievalSnapshotId;
+  corpusSnapshotId: string;
+  linkGraphId: LinkGraphId;
+  embeddingSetId: EmbeddingSetId;
+  retrieverPlanIdentity: string;
+  rankingFeatureVersion: string;
+  embeddingSet: RetrievalEmbeddingSetEnvelope;
+  vector: RetrievalSnapshotEnvelope["vector"];
+  vectorKey: VectorStoreKey;
+};
+
+export type RetrievalPinNotReadyReason =
+  | "no-active-retrieval-snapshot"
+  | "retrieval-envelope-missing"
+  | "retrieval-state-dirty"
+  | "retrieval-state-building"
+  | "retrieval-state-failed"
+  | "retrieval-state-stale"
+  | "corpus-missing"
+  | "link-graph-missing"
+  | "vector-active-spec-missing"
+  | "vector-active-spec-mismatched"
+  | "embedding-set-mismatched"
+  | "retrieval-snapshot-mismatched";
+
+export type RetrievalPinResult =
+  | { status: "ready"; pin: PinnedRetrievalSnapshot }
+  | { status: "index-not-ready"; reason: RetrievalPinNotReadyReason };
+
 type GcRoots = {
   snapshotIds: Set<string>;
   segmentHashes: Set<string>;
+  linkGraphIds: Set<LinkGraphId>;
+  retrievalSnapshotIds: Set<RetrievalSnapshotId>;
 };
 
 const DEFAULT_COUNT_CAP = 8;
@@ -118,6 +202,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly countCap: number;
   private readonly byteCap: number;
   private readonly retentionCount: number;
+  private readonly profileHash: string;
   private readonly partitionBits: number;
   private readonly analyzer: SearchAnalyzer | undefined;
   private readonly analyzerIdentity: SearchAnalyzerIdentity;
@@ -127,9 +212,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly renameSegment: DurableRename;
   private readonly renameManifest: DurableRename;
   private readonly renameActive: DurableRename;
+  private readonly renameRetrieval: DurableRename;
+  private readonly renameLinkGraph: DurableRename;
+  private readonly vectorPool: VectorGenerationPool | undefined;
   private readonly loaded = new Map<string, LoadedSnapshot>();
   private readonly activeByVault = new Map<string, string>();
   private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
+  private readonly inFlightPublishLinkGraphs = new Set<LinkGraphId>();
   private readonly lifecycleStoreRefs = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
 
@@ -152,6 +241,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       envNumber(this.env.OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT) ??
       DEFAULT_RETENTION_COUNT
     );
+    this.profileHash = options.profileHash ?? "default";
     this.partitionBits = options.partitionBits ?? DEFAULT_PARTITION_BITS;
     const settings = readOptsidianSettings(process.cwd(), this.env);
     this.searchSettings = normalizeIndexAffectingSearchSettings(
@@ -165,6 +255,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.renameSegment = options.durableRenameSegment ?? durableRename;
     this.renameManifest = options.durableRenameManifest ?? durableRename;
     this.renameActive = options.durableRenameActivePointer ?? durableRename;
+    this.renameRetrieval = options.durableRenameRetrievalPointer ?? durableRename;
+    this.renameLinkGraph = options.durableRenameLinkGraph ?? durableRename;
+    this.vectorPool = options.vectorPool;
   }
 
   searchAnalyzerIdentity(): SearchAnalyzerIdentity {
@@ -238,6 +331,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     await this.withLifecycleStore(paths, async () => {
       await this.recoverVault(paths);
       fs.rmSync(paths.activePointerPath, { force: true });
+      fs.rmSync(paths.retrievalActivePointerPath, { force: true });
       fsyncDirSync(paths.activeDir);
       const pinned = new Set(
         [...this.loaded.values()]
@@ -289,6 +383,138 @@ export class DaemonSnapshotStore implements SnapshotStore {
     };
   }
 
+  async pinActiveOnly(vaultRoot: string): Promise<PinnedRetrievalSnapshot> {
+    const result = await this.tryPinActiveRetrievalSnapshot(vaultRoot);
+    if (result.status !== "ready") {
+      throw Object.assign(new Error(`retrieval index is not ready: ${result.reason}`), {
+        code: "SEARCH_DAEMON_NOT_READY",
+        reason: result.reason
+      });
+    }
+    return result.pin;
+  }
+
+  async tryPinActiveRetrievalSnapshot(vaultRoot: string): Promise<RetrievalPinResult> {
+    const paths = this.paths(vaultRoot);
+    const active = this.readRetrievalActivePointer(paths);
+    if (!active) return { status: "index-not-ready", reason: "no-active-retrieval-snapshot" };
+    const retrieval = this.readRetrievalSnapshotEnvelope(paths, active.retrievalSnapshotId);
+    if (!retrieval) return { status: "index-not-ready", reason: "retrieval-envelope-missing" };
+    if (!retrievalEnvelopeMatchesPointer(retrieval, active)) {
+      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
+    }
+    const envelope = this.readSnapshotEnvelope(paths, retrieval.snapshotId);
+    if (!envelope || envelope.corpusSnapshotId !== retrieval.corpusSnapshotId) {
+      return { status: "index-not-ready", reason: "corpus-missing" };
+    }
+    const currentIdentity = currentRetrievalIdentity({
+      linkGraphId: retrieval.linkGraphId,
+      rankingFeatureVersion: String(envelope.manifest.identityTuple.rankingFeatureVersion)
+    });
+    if (
+      retrieval.retrieverPlanIdentity !== currentIdentity.retrieverPlanIdentity ||
+      retrieval.rankingFeatureVersion !== currentIdentity.rankingFeatureVersion
+    ) {
+      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
+    }
+    if (
+      retrieval.embeddingSet.model !== currentIdentity.provider.model ||
+      retrieval.embeddingSet.dim !== currentIdentity.provider.dim ||
+      retrieval.embeddingSet.recipe.provider.id !== currentIdentity.provider.id ||
+      retrieval.embeddingSet.recipe.provider.model !== currentIdentity.provider.model ||
+      retrieval.embeddingSet.recipe.provider.dim !== currentIdentity.provider.dim ||
+      retrieval.embeddingSet.recipe.provider.version !== currentIdentity.provider.version
+    ) {
+      return { status: "index-not-ready", reason: "embedding-set-mismatched" };
+    }
+    const expectedCurrentRetrievalSnapshotId = computeRetrievalSnapshotId({
+      corpusSnapshotId: retrieval.corpusSnapshotId,
+      linkGraphId: retrieval.linkGraphId,
+      embeddingSetId: retrieval.embeddingSetId,
+      retrieverPlanIdentity: currentIdentity.retrieverPlanIdentity,
+      rankingFeatureVersion: currentIdentity.rankingFeatureVersion
+    });
+    if (expectedCurrentRetrievalSnapshotId !== retrieval.retrievalSnapshotId) {
+      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
+    }
+    const freshness = new RetrievalFreshnessStore({
+      paths: vectorStoreCachePaths({
+        vaultRoot: paths.vaultRoot,
+        profileHash: this.profileHash,
+        embeddingSetId: retrieval.embeddingSetId,
+        env: this.env
+      })
+    }).read();
+    if (freshness.state !== "fresh") {
+      return { status: "index-not-ready", reason: freshnessStateReason(freshness.state) };
+    }
+    if (
+      freshness.published?.retrievalSnapshotId !== retrieval.retrievalSnapshotId ||
+      freshness.published?.embeddingSetId !== retrieval.embeddingSetId ||
+      freshness.published?.linkGraphId !== retrieval.linkGraphId ||
+      freshness.published?.corpusSnapshotId !== retrieval.corpusSnapshotId ||
+      freshness.published?.vectorGenerationId !== retrieval.vector.generationId ||
+      freshness.corpusRevision !== retrieval.freshness.corpusRevision
+    ) {
+      return { status: "index-not-ready", reason: "retrieval-state-stale" };
+    }
+    if (envelope.linkGraphId !== retrieval.linkGraphId || !linkGraphSidecarExists(paths, retrieval.linkGraphId)) {
+      return { status: "index-not-ready", reason: "link-graph-missing" };
+    }
+    const vectorPaths = vectorStoreCachePaths({
+      vaultRoot: paths.vaultRoot,
+      profileHash: this.profileHash,
+      embeddingSetId: retrieval.embeddingSetId,
+      env: this.env
+    });
+    const activeVector = readActiveVectorPointer(vectorPaths);
+    if (!activeVector) return { status: "index-not-ready", reason: "vector-active-spec-missing" };
+    if (
+      activeVector.generationId !== retrieval.vector.generationId ||
+      activeVector.embeddingSetId !== retrieval.embeddingSetId ||
+      activeVector.specId !== retrieval.vector.specId ||
+      activeVector.dbPath !== retrieval.vector.dbPath
+    ) {
+      return { status: "index-not-ready", reason: "vector-active-spec-mismatched" };
+    }
+    if (retrieval.embeddingSet.embeddingSetId !== retrieval.embeddingSetId) {
+      return { status: "index-not-ready", reason: "embedding-set-mismatched" };
+    }
+    const expectedRetrievalSnapshotId = computeRetrievalSnapshotId({
+      corpusSnapshotId: retrieval.corpusSnapshotId,
+      linkGraphId: retrieval.linkGraphId,
+      embeddingSetId: retrieval.embeddingSetId,
+      retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+      rankingFeatureVersion: retrieval.rankingFeatureVersion
+    });
+    if (expectedRetrievalSnapshotId !== retrieval.retrievalSnapshotId) {
+      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
+    }
+
+    const loaded = await this.ensureLoaded(paths, retrieval.snapshotId, { touchCache: false });
+    loaded.refCount += 1;
+    loaded.lastAccessMs = Date.now();
+    const pinToken = `${paths.vaultStateHash}:${retrieval.retrievalSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    loaded.pinTokens.add(pinToken);
+    return {
+      status: "ready",
+      pin: {
+        snapshotId: retrieval.snapshotId,
+        view: loaded.view,
+        pinToken,
+        retrievalSnapshotId: retrieval.retrievalSnapshotId,
+        corpusSnapshotId: retrieval.corpusSnapshotId,
+        linkGraphId: retrieval.linkGraphId,
+        embeddingSetId: retrieval.embeddingSetId,
+        retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+        rankingFeatureVersion: retrieval.rankingFeatureVersion,
+        embeddingSet: retrieval.embeddingSet,
+        vector: retrieval.vector,
+        vectorKey: vectorPaths.key
+      }
+    };
+  }
+
   async load(snapshotId: string): Promise<SnapshotView | undefined> {
     assertValidSnapshotId(snapshotId);
     for (const snapshot of this.loaded.values()) {
@@ -303,7 +529,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     snapshot.refCount = Math.max(0, snapshot.refCount - 1);
     snapshot.lastAccessMs = Date.now();
     this.enforceBudget();
-    this.markSweepGc(this.paths(snapshot.vaultRoot));
   }
 
   snapshotHandleForPin(pin: PinnedSnapshot): SearchExecutionSnapshotHandle {
@@ -313,6 +538,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       pinToken: pin.pinToken,
       bm25Stats: snapshot.bm25Stats,
       documents: sharedHandle(snapshot.documentBytes),
+      linkGraph: linkGraphData(snapshot.linkGraph),
       segments: envelopePartitionsBySegmentId(snapshot.envelope).map((partition) => {
         const bytes = snapshot.segmentBytes.get(partition.segmentHash);
         if (!bytes) throw new Error(`loaded snapshot is missing segment bytes for ${partition.segmentHash}`);
@@ -422,7 +648,21 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.ensureDirs(paths);
     const envelope = snapshotEnvelope(built);
     this.inFlightPublishManifests.set(built.snapshotId, envelope);
+    this.inFlightPublishLinkGraphs.add(built.linkGraphId);
     try {
+      const linkGraphSidecar = buildLinkGraphSidecar({
+        corpusSnapshotId: built.corpusSnapshotId,
+        edges: built.linkEdges
+      });
+      if (linkGraphSidecar.linkGraphId !== built.linkGraphId) {
+        throw new Error(`built snapshot linkGraphId mismatch for ${built.snapshotId}`);
+      }
+      await storeLinkGraphSidecar(
+        paths,
+        linkGraphSidecar,
+        { durableRenameLinkGraph: this.renameLinkGraph }
+      );
+
       for (const segment of built.segments) {
         const target = path.join(paths.segmentsDir, segment.hash);
         if (fs.existsSync(target)) {
@@ -458,27 +698,149 @@ export class DaemonSnapshotStore implements SnapshotStore {
       await this.renameActive(activeTmp, paths.activePointerPath);
       fsyncDirSync(paths.activeDir);
 
+      await this.publishRetrievalSnapshot(paths, built, envelope);
+
       await this.recoverVault(paths);
       this.markSweepGc(paths);
     } finally {
       this.inFlightPublishManifests.delete(built.snapshotId);
+      this.inFlightPublishLinkGraphs.delete(built.linkGraphId);
     }
   }
 
-  private async ensureLoaded(paths: SearchStoreCachePaths, snapshotId: string): Promise<LoadedSnapshot> {
+  private async publishRetrievalSnapshot(
+    paths: SearchStoreCachePaths,
+    built: BuiltSnapshot,
+    envelope: SnapshotEnvelope
+  ): Promise<void> {
+    const provider = new FakeProvider();
+    const embeddingSet = await buildFakeEmbeddingSet({
+      provider,
+      documents: denseDocumentsForBuiltSnapshot(built)
+    });
+    const vectorPaths = vectorStoreCachePaths({
+      vaultRoot: paths.vaultRoot,
+      profileHash: this.profileHash,
+      embeddingSetId: embeddingSet.embeddingSetId,
+      env: this.env
+    });
+    const spec: CoralEmbeddingSpec = {
+      specId: embeddingSpecId(embeddingSet.embeddingSetId, provider.identity.model, provider.identity.dim),
+      provider: provider.identity.id,
+      model: provider.identity.model,
+      dims: provider.identity.dim,
+      normalization: "l2",
+      createdAt: new Date(0).toISOString()
+    };
+    const generationId = `gen-${embeddingSet.embeddingSetId.slice(0, 24)}`;
+    const generation: VectorGenerationMetadata = {
+      schemaVersion: 1,
+      key: vectorPaths.key,
+      generationId,
+      dbPath: path.join(vectorPaths.generationsDir, generationId, "vectors.duckdb"),
+      spec,
+      chunkCount: embeddingSet.records.length,
+      builtEngine: "auto",
+      createdAt: new Date(0).toISOString(),
+      embeddingSetId: embeddingSet.embeddingSetId
+    };
+    if (this.vectorPool) {
+      const builtGeneration = await this.vectorPool.buildStagingGeneration({
+        paths: vectorPaths,
+        spec,
+        chunks: vectorChunksForEmbeddingSet(embeddingSet.records, spec),
+        generationId
+      });
+      await this.vectorPool.promoteBuiltGeneration(vectorPaths, builtGeneration.metadata);
+      generation.dbPath = builtGeneration.metadata.dbPath;
+      generation.chunkCount = builtGeneration.metadata.chunkCount;
+      generation.builtEngine = builtGeneration.metadata.builtEngine;
+      generation.createdAt = builtGeneration.metadata.createdAt;
+    } else {
+      await storeVectorGenerationMetadata(vectorPaths, generation);
+      await writeActiveVectorPointer(vectorPaths, generation);
+    }
+
+    const { retrieverPlanIdentity, rankingFeatureVersion } = currentRetrievalIdentity({
+      linkGraphId: built.linkGraphId,
+      rankingFeatureVersion: String(built.identityTuple.rankingFeatureVersion),
+      provider
+    });
+    const retrievalSnapshotId = computeRetrievalSnapshotId({
+      corpusSnapshotId: built.corpusSnapshotId,
+      linkGraphId: built.linkGraphId,
+      embeddingSetId: embeddingSet.embeddingSetId,
+      retrieverPlanIdentity,
+      rankingFeatureVersion
+    });
+    const retrievalEnvelope: RetrievalSnapshotEnvelope = {
+      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+      retrievalSnapshotId,
+      snapshotId: built.snapshotId,
+      corpusSnapshotId: built.corpusSnapshotId,
+      linkGraphId: built.linkGraphId,
+      embeddingSetId: embeddingSet.embeddingSetId,
+      retrieverPlanIdentity,
+      rankingFeatureVersion,
+      canonicalManifestSha256: envelope.canonicalManifestSha256,
+      embeddingSet: retrievalEmbeddingSetEnvelope(embeddingSet),
+      vector: {
+        embeddingSetId: embeddingSet.embeddingSetId,
+        generationId,
+        specId: spec.specId,
+        dbPath: generation.dbPath,
+        key: vectorPaths.key
+      },
+      freshness: {
+        state: "fresh",
+        corpusRevision: built.corpusSnapshotId
+      }
+    };
+    await storeRetrievalSnapshotEnvelope(paths, retrievalEnvelope);
+    await new RetrievalFreshnessStore({ paths: vectorPaths }).markFresh({
+      corpusRevision: built.corpusSnapshotId,
+      corpusSnapshotId: built.corpusSnapshotId,
+      linkGraphId: built.linkGraphId,
+      embeddingSetId: embeddingSet.embeddingSetId,
+      retrievalSnapshotId,
+      vectorGenerationId: generationId
+    });
+
+    const active: RetrievalActivePointer = {
+      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+      retrievalSnapshotId,
+      snapshotId: built.snapshotId,
+      corpusSnapshotId: built.corpusSnapshotId,
+      linkGraphId: built.linkGraphId,
+      embeddingSetId: embeddingSet.embeddingSetId,
+      vectorGenerationId: generationId
+    };
+    const activeTmp = path.join(paths.tmpDir, `${retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
+    writePrivateFileSync(activeTmp, `${JSON.stringify(active)}\n`, "Optsidian retrieval active pointer");
+    fsyncFileSync(activeTmp);
+    await this.renameRetrieval(activeTmp, paths.retrievalActivePointerPath);
+    fsyncDirSync(paths.activeDir);
+  }
+
+  private async ensureLoaded(
+    paths: SearchStoreCachePaths,
+    snapshotId: string,
+    options: { touchCache?: boolean } = {}
+  ): Promise<LoadedSnapshot> {
+    const touchCache = options.touchCache !== false;
     assertValidSnapshotId(snapshotId);
     const key = loadedKey(paths.vaultStateHash, snapshotId);
     const existing = this.loaded.get(key);
     if (existing) {
       existing.lastAccessMs = Date.now();
-      this.cacheCatalog.touchUsed(paths, { snapshotId });
+      if (touchCache) this.cacheCatalog.touchUsed(paths, { snapshotId });
       return existing;
     }
     const envelope = this.readSnapshotEnvelope(paths, snapshotId);
     if (!envelope) throw new Error(`snapshot ${snapshotId} is not available for vault ${paths.vaultRoot}`);
     const loaded = this.loadEnvelope(paths, envelope);
     this.loaded.set(key, loaded);
-    this.cacheCatalog.touchUsed(paths, { snapshotId });
+    if (touchCache) this.cacheCatalog.touchUsed(paths, { snapshotId });
     return loaded;
   }
 
@@ -502,13 +864,16 @@ export class DaemonSnapshotStore implements SnapshotStore {
       segmentBytes.set(partition.segmentHash, shared);
     }
     const bm25Stats = verifyBm25StatsFromVerifiedSegments(envelope.manifest, segmentStats);
-    const view = this.createSnapshotView(envelope, segmentBytes);
+    const linkGraph = loadLinkGraphView(paths, envelope.linkGraphId);
+    if (!linkGraph) throw new Error(`link graph sidecar is missing for snapshot ${envelope.snapshotId}: ${envelope.linkGraphId}`);
+    const view = this.createSnapshotView(envelope, segmentBytes, linkGraph);
     return {
       vaultRoot: paths.vaultRoot,
       vaultKey: paths.vaultStateHash,
       snapshotId: envelope.snapshotId,
       envelope,
       view,
+      linkGraph,
       documentsByDocumentId,
       documentBytes,
       segmentBytes,
@@ -522,7 +887,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private createSnapshotView(
     envelope: SnapshotEnvelope,
-    segmentBytes: Map<string, Uint8Array>
+    segmentBytes: Map<string, Uint8Array>,
+    linkGraph: LinkGraphView
   ): SnapshotView {
     const manifest: SnapshotManifestView = {
       snapshotId: envelope.snapshotId,
@@ -534,11 +900,16 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return {
       snapshotId: envelope.snapshotId,
       manifest,
+      linkGraphId: linkGraph.linkGraphId,
+      linkGraph,
       segmentBytes: (segmentId) => segmentBytes.get(segmentId),
       segmentManifest: (segmentId) => {
         const bytes = segmentBytes.get(segmentId);
         return bytes ? decodeCanonicalSegment(bytes) : undefined;
-      }
+      },
+      outlinks: (documentId) => linkGraph.outlinks(documentId),
+      inlinks: (documentId) => linkGraph.inlinks(documentId),
+      neighbors: (documentId) => linkGraph.neighbors(documentId)
     };
   }
 
@@ -561,32 +932,52 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private markSweepGc(paths: SearchStoreCachePaths): void {
     this.ensureDirs(paths);
     const roots = this.gcRoots(paths);
+    for (const file of safeReadDir(paths.retrievalsDir)) {
+      if (!roots.retrievalSnapshotIds.has(file)) fs.rmSync(path.join(paths.retrievalsDir, file), { force: true });
+    }
     for (const file of safeReadDir(paths.snapshotsDir)) {
       if (!roots.snapshotIds.has(file)) fs.rmSync(path.join(paths.snapshotsDir, file), { force: true });
     }
     for (const file of safeReadDir(paths.segmentsDir)) {
       if (!roots.segmentHashes.has(file)) fs.rmSync(path.join(paths.segmentsDir, file), { force: true });
     }
+    sweepLinkGraphSidecars(paths, roots.linkGraphIds);
     sweepStaleTmpDir(paths.tmpDir);
   }
 
   private gcRoots(paths: SearchStoreCachePaths): GcRoots {
     const snapshotIds = new Set<string>();
     const segmentHashes = new Set<string>();
+    const linkGraphIds = new Set<LinkGraphId>();
+    const retrievalSnapshotIds = new Set<RetrievalSnapshotId>();
+    const activeRetrieval = this.readRetrievalActivePointer(paths);
+    if (activeRetrieval) {
+      retrievalSnapshotIds.add(activeRetrieval.retrievalSnapshotId);
+      const retrieval = this.readRetrievalSnapshotEnvelope(paths, activeRetrieval.retrievalSnapshotId);
+      if (retrieval) {
+        snapshotIds.add(retrieval.snapshotId);
+        linkGraphIds.add(retrieval.linkGraphId);
+      }
+    }
     const active = this.readActivePointer(paths);
     if (active) {
       snapshotIds.add(active.snapshotId);
       const envelope = this.readSnapshotEnvelope(paths, active.snapshotId);
       if (envelope) {
+        linkGraphIds.add(envelope.linkGraphId);
         for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
       }
     }
     for (const [snapshotId, envelope] of this.inFlightPublishManifests) {
       snapshotIds.add(snapshotId);
+      linkGraphIds.add(envelope.linkGraphId);
       for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
     }
+    for (const linkGraphId of this.inFlightPublishLinkGraphs) linkGraphIds.add(linkGraphId);
     for (const snapshot of this.loaded.values()) {
-      if (snapshot.vaultKey !== paths.vaultStateHash || snapshot.refCount <= 0) continue;
+      if (snapshot.vaultKey !== paths.vaultStateHash) continue;
+      linkGraphIds.add(snapshot.linkGraph.linkGraphId);
+      if (snapshot.refCount <= 0) continue;
       snapshotIds.add(snapshot.snapshotId);
       for (const partition of snapshot.envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
     }
@@ -594,9 +985,17 @@ export class DaemonSnapshotStore implements SnapshotStore {
       const envelope = this.readSnapshotEnvelope(paths, file);
       if (!envelope) continue;
       snapshotIds.add(envelope.snapshotId);
+      linkGraphIds.add(envelope.linkGraphId);
       for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
     }
-    return { snapshotIds, segmentHashes };
+    for (const file of retainedSnapshotFiles(paths.retrievalsDir, this.retentionCount)) {
+      const retrieval = this.readRetrievalSnapshotEnvelope(paths, file);
+      if (!retrieval) continue;
+      retrievalSnapshotIds.add(retrieval.retrievalSnapshotId);
+      snapshotIds.add(retrieval.snapshotId);
+      linkGraphIds.add(retrieval.linkGraphId);
+    }
+    return { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds };
   }
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
@@ -621,6 +1020,16 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
+  private readRetrievalActivePointer(paths: SearchStoreCachePaths): RetrievalActivePointer | undefined {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(paths.retrievalActivePointerPath, "utf8")) as unknown;
+      if (!isRetrievalActivePointer(parsed)) return undefined;
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
   private readSnapshotEnvelope(paths: SearchStoreCachePaths, snapshotId: string): SnapshotEnvelope | undefined {
     if (!isValidSnapshotId(snapshotId)) return undefined;
     try {
@@ -628,9 +1037,24 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (!isSnapshotEnvelope(parsed)) return undefined;
       const actual = snapshotIdFromManifest(parsed.manifest);
       if (actual !== parsed.snapshotId || parsed.snapshotId !== snapshotId) return undefined;
+      if (!linkGraphSidecarExists(paths, parsed.linkGraphId)) return undefined;
       for (const partition of parsed.manifest.partitions) {
         if (!fs.existsSync(path.join(paths.segmentsDir, partition.segmentHash))) return undefined;
       }
+      return parsed;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readRetrievalSnapshotEnvelope(
+    paths: SearchStoreCachePaths,
+    retrievalSnapshotId: string
+  ): RetrievalSnapshotEnvelope | undefined {
+    if (!isValidSnapshotId(retrievalSnapshotId)) return undefined;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(paths.retrievalsDir, retrievalSnapshotId), "utf8")) as unknown;
+      if (!isRetrievalSnapshotEnvelope(parsed)) return undefined;
       return parsed;
     } catch {
       return undefined;
@@ -664,6 +1088,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     ensurePrivateDirSync(paths.rootDir, "Optsidian search store directory");
     ensurePrivateDirSync(paths.segmentsDir, "Optsidian search segments directory");
     ensurePrivateDirSync(paths.snapshotsDir, "Optsidian search snapshots directory");
+    ensurePrivateDirSync(paths.retrievalsDir, "Optsidian retrieval snapshot directory");
+    ensurePrivateDirSync(paths.linkGraphsDir, "Optsidian search link graph directory");
     ensurePrivateDirSync(paths.activeDir, "Optsidian search active directory");
     ensurePrivateDirSync(paths.tmpDir, "Optsidian search tmp directory");
   }
@@ -709,10 +1135,165 @@ function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
   return {
     schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
     snapshotId: built.snapshotId,
+    corpusSnapshotId: built.corpusSnapshotId,
+    linkGraphId: built.linkGraphId,
     manifest: built.manifest,
     canonicalManifestSha256: built.canonicalManifestSha256,
     documents: built.documents,
     diagnostics: built.diagnostics
+  };
+}
+
+export function computeRetrievalSnapshotId(input: {
+  corpusSnapshotId: string;
+  linkGraphId: string;
+  embeddingSetId: string;
+  retrieverPlanIdentity: string;
+  rankingFeatureVersion: string;
+}): RetrievalSnapshotId {
+  return sha256(canonicalValueBytes({
+    schemaVersion: 1,
+    corpusSnapshotId: input.corpusSnapshotId,
+    linkGraphId: input.linkGraphId,
+    embeddingSetId: input.embeddingSetId,
+    retrieverPlanIdentity: input.retrieverPlanIdentity,
+    rankingFeatureVersion: input.rankingFeatureVersion
+  }));
+}
+
+function denseDocumentsForBuiltSnapshot(built: BuiltSnapshot) {
+  return built.documents.map((document) => ({
+    documentId: document.documentId,
+    shardDocRef: {
+      segmentId: "",
+      partitionId: document.partitionId,
+      localDocId: 0,
+      documentId: document.documentId
+    },
+    path: document.path,
+    text: denseTextForDocument(document),
+    contentHash: document.contentHash
+  }));
+}
+
+function denseTextForDocument(document: PersistedDocumentRecord): string {
+  const snippets = document.snippetCorpus.lines.map((line) => line.text).join("\n");
+  const tags = document.tags.length > 0 ? `\n${document.tags.join(" ")}` : "";
+  return `${document.title}\n${document.path}\n${snippets}${tags}`.trim();
+}
+
+function retrievalEmbeddingSetEnvelope(embeddingSet: {
+  embeddingSetId: EmbeddingSetId;
+  recipe: EmbeddingRecipeIdentity;
+  model: string;
+  dim: number;
+  records: readonly EmbeddingSetRecord[];
+}): RetrievalEmbeddingSetEnvelope {
+  return {
+    schemaVersion: 1,
+    embeddingSetId: embeddingSet.embeddingSetId,
+    recipe: embeddingSet.recipe,
+    model: embeddingSet.model,
+    dim: embeddingSet.dim,
+    records: embeddingSet.records.map(({ shardDocRef: _shardDocRef, ...record }) => record)
+  };
+}
+
+function vectorChunksForEmbeddingSet(
+  records: readonly EmbeddingSetRecord[],
+  spec: CoralEmbeddingSpec
+): CoralChunkRecord[] {
+  return records.map((record) => ({
+    id: `${record.documentId}:0`,
+    entryId: record.documentId,
+    entryKind: "note",
+    chunkIndex: 0,
+    text: record.text,
+    contentHash: record.contentHash,
+    vector: record.vector,
+    specId: spec.specId
+  }));
+}
+
+function currentRetrievalIdentity(input: {
+  linkGraphId: LinkGraphId;
+  rankingFeatureVersion: string;
+  provider?: { identity: EmbeddingProviderIdentity };
+}): {
+  provider: EmbeddingProviderIdentity;
+  retrieverPlanIdentity: string;
+  rankingFeatureVersion: string;
+} {
+  const provider = input.provider?.identity ?? new FakeProvider().identity;
+  return {
+    provider,
+    retrieverPlanIdentity: retrievalPlanIdentityFor({
+      linkGraphId: input.linkGraphId,
+      denseModel: provider.model
+    }),
+    rankingFeatureVersion: input.rankingFeatureVersion
+  };
+}
+
+function retrievalPlanIdentityFor(input: { linkGraphId: LinkGraphId; denseModel: string }): string {
+  const retrievers: RetrieverIdentity[] = [
+    POSITIONAL_RETRIEVER_IDENTITY,
+    {
+      id: "dense",
+      version: DENSE_RETRIEVER_VERSION,
+      parameters: { model: input.denseModel, metric: "cosine" }
+    },
+    {
+      id: "link-adjacency",
+      version: LINK_ADJACENCY_RETRIEVER_VERSION,
+      parameters: {
+        linkGraphId: input.linkGraphId,
+        resolverVersion: LINK_GRAPH_RESOLVER_VERSION,
+        scoring: LINK_ADJACENCY_SCORING_VERSION,
+        directScore: LINK_ADJACENCY_DIRECT_SCORE
+      }
+    }
+  ];
+  const parameters: FusionParameters = {
+    algorithm: "rrf",
+    k: DEFAULT_RRF_K,
+    weights: retrievers.map((identity) => ({ retrieverId: identity.id, weight: 1 }))
+  };
+  return computeRetrieverPlanIdentity(retrievers, parameters);
+}
+
+async function storeRetrievalSnapshotEnvelope(
+  paths: SearchStoreCachePaths,
+  envelope: RetrievalSnapshotEnvelope
+): Promise<void> {
+  ensurePrivateDirSync(paths.retrievalsDir, "Optsidian retrieval snapshot directory");
+  ensurePrivateDirSync(paths.tmpDir, "Optsidian search tmp directory");
+  const target = path.join(paths.retrievalsDir, envelope.retrievalSnapshotId);
+  const tmp = path.join(paths.tmpDir, `${envelope.retrievalSnapshotId}.${process.pid}.retrieval.tmp`);
+  writePrivateFileSync(tmp, `${JSON.stringify(envelope)}\n`, "Optsidian retrieval snapshot envelope");
+  fsyncFileSync(tmp);
+  await durableRename(tmp, target);
+  fsyncDirSync(paths.retrievalsDir);
+}
+
+function embeddingSpecId(embeddingSetId: EmbeddingSetId, model: string, dim: number): string {
+  return sha256(canonicalValueBytes({
+    schemaVersion: 1,
+    embeddingSetId,
+    model,
+    dim,
+    ann: "derived"
+  }));
+}
+
+function linkGraphData(linkGraph: LinkGraphView) {
+  return {
+    schemaVersion: linkGraph.schemaVersion,
+    linkGraphId: linkGraph.linkGraphId,
+    corpusSnapshotId: linkGraph.corpusSnapshotId,
+    resolverVersion: linkGraph.resolverVersion,
+    edges: linkGraph.edges,
+    backlinks: linkGraph.backlinks
   };
 }
 
@@ -897,6 +1478,7 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
     isRecord(value) &&
     value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
     typeof value.snapshotId === "string" &&
+    typeof value.linkGraphId === "string" &&
     isRecord(value.manifest) &&
     typeof value.canonicalManifestSha256 === "string" &&
     Array.isArray(value.documents) &&
@@ -913,6 +1495,56 @@ function isActivePointer(value: unknown): value is ActivePointer {
     typeof value.snapshotId === "string" &&
     typeof value.canonicalManifestSha256 === "string"
   );
+}
+
+function isRetrievalActivePointer(value: unknown): value is RetrievalActivePointer {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    typeof value.retrievalSnapshotId === "string" &&
+    typeof value.snapshotId === "string" &&
+    typeof value.corpusSnapshotId === "string" &&
+    typeof value.linkGraphId === "string" &&
+    typeof value.embeddingSetId === "string" &&
+    typeof value.vectorGenerationId === "string"
+  );
+}
+
+function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshotEnvelope {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    typeof value.retrievalSnapshotId === "string" &&
+    typeof value.snapshotId === "string" &&
+    typeof value.corpusSnapshotId === "string" &&
+    typeof value.linkGraphId === "string" &&
+    typeof value.embeddingSetId === "string" &&
+    typeof value.retrieverPlanIdentity === "string" &&
+    typeof value.rankingFeatureVersion === "string" &&
+    typeof value.canonicalManifestSha256 === "string" &&
+    isRecord(value.embeddingSet) &&
+    isRecord(value.vector) &&
+    isRecord(value.freshness)
+  );
+}
+
+function retrievalEnvelopeMatchesPointer(
+  envelope: RetrievalSnapshotEnvelope,
+  pointer: RetrievalActivePointer
+): boolean {
+  return envelope.retrievalSnapshotId === pointer.retrievalSnapshotId &&
+    envelope.snapshotId === pointer.snapshotId &&
+    envelope.corpusSnapshotId === pointer.corpusSnapshotId &&
+    envelope.linkGraphId === pointer.linkGraphId &&
+    envelope.embeddingSetId === pointer.embeddingSetId &&
+    envelope.vector.generationId === pointer.vectorGenerationId;
+}
+
+function freshnessStateReason(state: string): RetrievalPinNotReadyReason {
+  if (state === "dirty") return "retrieval-state-dirty";
+  if (state === "building") return "retrieval-state-building";
+  if (state === "failed") return "retrieval-state-failed";
+  return "retrieval-state-stale";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

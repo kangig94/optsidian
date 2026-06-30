@@ -5,7 +5,8 @@ import {
   MAX_SEARCH_QUERY_TERMS_PER_CHANNEL,
   RANK_BUCKET,
   SEARCH_SCORING_LAMBDAS,
-  SEARCH_TOKEN_CHANNEL_WEIGHT
+  SEARCH_TOKEN_CHANNEL_WEIGHT,
+  type SearchScoringLambdas
 } from "../constants.js";
 import type { RankedCandidate } from "../internal-types.js";
 import { SEARCH_FIELD_CHANNEL_BOOST } from "../schema.js";
@@ -32,7 +33,9 @@ export type CandidateRankSignals = {
   lexicalScore: number;
   identityScore: number;
   exactLambda: number;
-  denseAgreement: number;
+  denseAgreement?: number;
+  linkAgreement?: number;
+  rrfScore?: number;
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;
@@ -76,14 +79,16 @@ export function rerankCandidatesWithSignals(
   _queryTerms: string[],
   hits: Array<{ document: RankDocument; score: number }>,
   _fields: SearchField[] | undefined,
-  signals: Map<string, CandidateRankSignals>
+  signals: Map<string, CandidateRankSignals>,
+  options: { lambdas?: Partial<SearchScoringLambdas> } = {}
 ): RankedCandidate[] {
-  return rerankCandidates(hits, signals);
+  return rerankCandidates(hits, signals, options);
 }
 
 function rerankCandidates(
   hits: Array<{ document: RankDocument; score: number }>,
-  signals: Map<string, CandidateRankSignals>
+  signals: Map<string, CandidateRankSignals>,
+  options: { lambdas?: Partial<SearchScoringLambdas> }
 ): RankedCandidate[] {
   const candidates = hits.map((hit, index) => {
     const signal = requiredRankSignals(hit.document, signals);
@@ -93,21 +98,26 @@ function rerankCandidates(
   return candidates
     .map((candidate) => ({
       ...candidate,
-      score: rerankScore(candidate)
+      score: rerankScore(candidate, options.lambdas)
     }))
     .sort(compareRankedMatches);
 }
 
-const FINITE_RANK_SIGNAL_KEYS = [
+const REQUIRED_FINITE_RANK_SIGNAL_KEYS = [
   "coverageTerms",
   "coverageFieldScore",
   "lexicalScore",
   "identityScore",
   "exactLambda",
-  "denseAgreement",
   "rarityScore",
   "proximityScore",
   "bodyScore"
+] as const satisfies readonly (keyof CandidateRankSignals)[];
+
+const OPTIONAL_FINITE_RANK_SIGNAL_KEYS = [
+  "denseAgreement",
+  "linkAgreement",
+  "rrfScore"
 ] as const satisfies readonly (keyof CandidateRankSignals)[];
 
 function requiredRankSignals(doc: RankDocument, signals: ReadonlyMap<string, CandidateRankSignals>): CandidateRankSignals {
@@ -115,8 +125,13 @@ function requiredRankSignals(doc: RankDocument, signals: ReadonlyMap<string, Can
   if (!signal) throw new Error(`missing rank signals for document ${doc.id} (${doc.path})`);
   if (!isRankPriority(signal.exactPriority)) throw new Error(`incomplete rank signals for document ${doc.id}: exactPriority`);
   if (!isRankPriority(signal.phrasePriority)) throw new Error(`incomplete rank signals for document ${doc.id}: phrasePriority`);
-  for (const key of FINITE_RANK_SIGNAL_KEYS) {
+  for (const key of REQUIRED_FINITE_RANK_SIGNAL_KEYS) {
     if (typeof signal[key] !== "number" || !Number.isFinite(signal[key])) {
+      throw new Error(`incomplete rank signals for document ${doc.id}: ${key}`);
+    }
+  }
+  for (const key of OPTIONAL_FINITE_RANK_SIGNAL_KEYS) {
+    if (signal[key] !== undefined && (typeof signal[key] !== "number" || !Number.isFinite(signal[key]))) {
       throw new Error(`incomplete rank signals for document ${doc.id}: ${key}`);
     }
   }
@@ -172,6 +187,8 @@ function rankedCandidate(
     identityScore: finiteNumber(signals.identityScore),
     exactLambda: finiteNumber(signals.exactLambda),
     denseAgreement: finiteNumber(signals.denseAgreement),
+    linkAgreement: finiteNumber(signals.linkAgreement),
+    rrfScore: finiteNumber(signals.rrfScore),
     rarityScore: finiteNumber(signals.rarityScore),
     proximityScore: finiteNumber(signals.proximityScore),
     bodyScore: finiteNumber(signals.bodyScore)
@@ -190,11 +207,16 @@ function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms
   return RANK_BUCKET.base;
 }
 
-export function rerankScore(candidate: Pick<RankedCandidate, "lexicalScore" | "proximityScore" | "identityScore" | "exactLambda" | "denseAgreement">): number {
+export function rerankScore(
+  candidate: Pick<RankedCandidate, "lexicalScore" | "proximityScore" | "identityScore" | "exactLambda"> & Partial<Pick<RankedCandidate, "denseAgreement" | "linkAgreement">>,
+  lambdas: Partial<SearchScoringLambdas> = {}
+): number {
+  const effective = { ...SEARCH_SCORING_LAMBDAS, ...lambdas };
   return finiteNumber(candidate.lexicalScore) +
-    SEARCH_SCORING_LAMBDAS.phrase * finiteNumber(candidate.proximityScore) +
+    effective.phrase * finiteNumber(candidate.proximityScore) +
     finiteNumber(candidate.exactLambda) * finiteNumber(candidate.identityScore) +
-    SEARCH_SCORING_LAMBDAS.dense * finiteNumber(candidate.denseAgreement);
+    effective.dense * finiteNumber(candidate.denseAgreement) +
+    effective.link * finiteNumber(candidate.linkAgreement ?? 0);
 }
 
 export function exactDominanceLambda(input: ExactDominanceBoundInput): ExactDominanceBound {
@@ -229,6 +251,6 @@ function assertFiniteNonNegative(value: number, label: string): void {
   if (!Number.isFinite(value) || value < 0) throw new Error(`${label} must be a finite non-negative number`);
 }
 
-function finiteNumber(value: number): number {
-  return Number.isFinite(value) ? value : 0;
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }

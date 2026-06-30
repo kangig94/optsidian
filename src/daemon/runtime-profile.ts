@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
+import { DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS } from "../core/search/constants.js";
 import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
 import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
 
-export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 2;
+export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
 export type SearchRuntimeProfile = {
   schemaVersion: typeof SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION;
@@ -19,6 +20,14 @@ export type SearchRuntimeProfile = {
     };
   };
   index: IndexAffectingSearchSettings;
+  embedding: {
+    model: "bge-m3" | "multilingual-e5-small";
+  };
+  ranking: {
+    denseLambda: number;
+    linkLambda: number;
+    rrfK: number;
+  };
   workers: {
     query: number;
     index: number;
@@ -65,6 +74,14 @@ export function effectiveSearchRuntimeProfile(
     index: {
       ngram: searchNgramEnabled(env, settings)
     },
+    embedding: {
+      model: embeddingModel(env, settings)
+    },
+    ranking: {
+      denseLambda: nonNegativeFloatEnv(env, "OPTSIDIAN_SEARCH_DENSE_LAMBDA") ?? settings.search?.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense,
+      linkLambda: nonNegativeFloatEnv(env, "OPTSIDIAN_SEARCH_LINK_LAMBDA") ?? settings.search?.linkLambda ?? SEARCH_SCORING_LAMBDAS.link,
+      rrfK: positiveIntEnv(env, "OPTSIDIAN_SEARCH_RRF_K") ?? settings.search?.rrfK ?? DEFAULT_RRF_K
+    },
     workers: {
       query: queryWorkers,
       index: indexWorkers,
@@ -99,6 +116,8 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
   if (!isRecord(value)) throw new Error("search runtime profile must be an object");
   const analyzer = asRecord(value.analyzer, "search runtime profile analyzer");
   const index = optionalRecord(value.index, "search runtime profile index");
+  const embedding = optionalRecord(value.embedding, "search runtime profile embedding");
+  const ranking = optionalRecord(value.ranking, "search runtime profile ranking");
   const workers = asRecord(value.workers, "search runtime profile workers");
   const cache = asRecord(value.cache, "search runtime profile cache");
   const memory = asRecord(value.memory, "search runtime profile memory");
@@ -118,6 +137,14 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
     },
     index: {
       ngram: booleanValue(index.ngram ?? false, "search runtime ngram")
+    },
+    embedding: {
+      model: normalizeEmbeddingModel(embedding.model ?? "bge-m3", "search runtime embedding model")
+    },
+    ranking: {
+      denseLambda: nonNegativeFloat(ranking.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense, "dense lambda"),
+      linkLambda: nonNegativeFloat(ranking.linkLambda ?? SEARCH_SCORING_LAMBDAS.link, "link lambda"),
+      rrfK: positiveInt(ranking.rrfK ?? DEFAULT_RRF_K, "RRF k")
     },
     workers: {
       query: positiveInt(workers.query, "query workers"),
@@ -155,6 +182,10 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     OPTSIDIAN_SEARCH_ANALYZER: normalized.analyzer.mode,
     OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(","),
     OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
+    OPTSIDIAN_SEARCH_EMBEDDING_MODEL: normalized.embedding.model,
+    OPTSIDIAN_SEARCH_DENSE_LAMBDA: String(normalized.ranking.denseLambda),
+    OPTSIDIAN_SEARCH_LINK_LAMBDA: String(normalized.ranking.linkLambda),
+    OPTSIDIAN_SEARCH_RRF_K: String(normalized.ranking.rrfK),
     OPTSIDIAN_SEARCH_QUERY_WORKERS: String(normalized.workers.query),
     OPTSIDIAN_SEARCH_INDEX_WORKERS: String(normalized.workers.index),
     OPTSIDIAN_SEARCH_WORKERS: String(normalized.workers.searchExecution),
@@ -187,7 +218,11 @@ export function settingsForSearchRuntimeProfile(profile: SearchRuntimeProfile): 
     executionWorkers: normalized.workers.searchExecution,
     snapshotRetentionCount: normalized.cache.snapshotRetention,
     queryCacheSize: normalized.cache.queryAnalysisEntries,
-    daemonIdleMs: normalized.daemon.idleMs
+    daemonIdleMs: normalized.daemon.idleMs,
+    embeddingModel: normalized.embedding.model,
+    denseLambda: normalized.ranking.denseLambda,
+    linkLambda: normalized.ranking.linkLambda,
+    rrfK: normalized.ranking.rrfK
   };
   if (normalized.memory.snapshotCountCap !== undefined) search.memoryBudgetCount = normalized.memory.snapshotCountCap;
   if (normalized.memory.snapshotByteCap !== undefined) search.memoryBudgetBytes = normalized.memory.snapshotByteCap;
@@ -207,6 +242,10 @@ function extraLangs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string
   return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+function embeddingModel(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "bge-m3" | "multilingual-e5-small" {
+  return normalizeEmbeddingModel(env.OPTSIDIAN_SEARCH_EMBEDDING_MODEL ?? settings.search?.embeddingModel ?? "bge-m3", "search embedding model");
+}
+
 function optionalRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === undefined || value === null) return {};
   return asRecord(value, label);
@@ -220,6 +259,10 @@ function nonNegativeIntEnv(env: NodeJS.ProcessEnv, key: string): number | undefi
   return optionalNonNegativeInt(env[key], key);
 }
 
+function nonNegativeFloatEnv(env: NodeJS.ProcessEnv, key: string): number | undefined {
+  return optionalNonNegativeFloat(env[key], key);
+}
+
 function optionalPositiveInt(value: unknown, label: string): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   return positiveInt(value, label);
@@ -228,6 +271,11 @@ function optionalPositiveInt(value: unknown, label: string): number | undefined 
 function optionalNonNegativeInt(value: unknown, label: string): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   return nonNegativeInt(value, label);
+}
+
+function optionalNonNegativeFloat(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return nonNegativeFloat(value, label);
 }
 
 function positiveInt(value: unknown, label: string): number {
@@ -240,6 +288,21 @@ function nonNegativeInt(value: unknown, label: string): number {
   const number = typeof value === "number" ? value : Number(String(value).trim());
   if (!Number.isInteger(number) || number < 0) throw new Error(`${label} must be a non-negative integer`);
   return number;
+}
+
+function nonNegativeFloat(value: unknown, label: string): number {
+  const number = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isFinite(number) || number < 0) throw new Error(`${label} must be a non-negative number`);
+  return number;
+}
+
+function normalizeEmbeddingModel(value: unknown, label: string): "bge-m3" | "multilingual-e5-small" {
+  const raw = stringValue(String(value), label).trim().toLowerCase();
+  if (raw === "bge" || raw === "bge-m3" || raw === "baai/bge-m3") return "bge-m3";
+  if (raw === "e5" || raw === "e5-small" || raw === "multilingual-e5-small" || raw === "intfloat/multilingual-e5-small") {
+    return "multilingual-e5-small";
+  }
+  throw new Error(`${label} must be bge-m3 or multilingual-e5-small`);
 }
 
 function stringList(value: unknown): string[] {

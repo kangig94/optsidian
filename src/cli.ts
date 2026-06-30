@@ -108,7 +108,7 @@ async function runMain(argv: string[]): Promise<void> {
       await runSearch(args, vaultRoot);
       return;
     case "similarity":
-      runSimilarity(args, vaultRoot);
+      await runSimilarity(args, vaultRoot);
       return;
     case "index":
       await runIndex(args, vaultRoot);

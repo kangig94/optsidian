@@ -2,6 +2,7 @@ import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../analysis/i
 import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1 } from "../../constants.js";
 import { CanonicalSegmentPostingsReader } from "./segment-postings-reader.js";
 import { ProjectionReader } from "./segment-projection-reader.js";
+import type { LinkGraphView } from "../../contracts.js";
 import type { SearchSnapshot, SearchSnapshotSegment } from "./engine.js";
 import { POSITIONAL_SEARCH_FIELDS } from "./types.js";
 
@@ -55,6 +56,7 @@ export function buildSearchSnapshotFromSegments(input: {
   snapshotId: string;
   segments: readonly PositionalSnapshotSegmentInput[];
   bm25Stats: PositionalBm25GlobalStats;
+  linkGraph?: LinkGraphView;
   validateProjection?: boolean;
 }): SearchSnapshot {
   const segments = input.segments.map((segment) => {
@@ -71,7 +73,8 @@ export function buildSearchSnapshotFromSegments(input: {
     snapshotId: input.snapshotId,
     documentCount: segments.reduce((sum, segment) => sum + segment.projection.documentCount(), 0),
     segments,
-    bm25Stats: input.bm25Stats
+    bm25Stats: input.bm25Stats,
+    ...(input.linkGraph ? { linkGraph: input.linkGraph } : {})
   };
 }
 

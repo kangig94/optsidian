@@ -8,6 +8,7 @@ import test from "node:test";
 import { unpack } from "msgpackr";
 
 const repoRoot = process.cwd();
+process.env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE = "memory";
 const AC17_PUBLICATION_STEPS = [
   "tmpSegmentWrite",
   "fsyncSegmentFile",
@@ -32,7 +33,8 @@ const AC18_OWNER_FIELDS = [
   "binaryVersion",
   "protocolVersion",
   "nonce",
-  "socketPath",
+  "querySocketPath",
+  "controlSocketPath",
   "startedAt"
 ];
 
@@ -1125,7 +1127,7 @@ test("search store loadVault preloads the active snapshot into search workers", 
       return [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }];
     }
   };
-  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, {}, {}, fakeSearchExecution, { queryCacheSize: 1 });
 
   const result = await service.loadVault(vault, {
     deadline: Date.now() + 1000,
@@ -1179,7 +1181,7 @@ test("search store loadVault warms exact-bound cache for the query planner", asy
   const fakeSearchExecution = {
     preloadSnapshot: async () => [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }]
   };
-  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, {}, {}, fakeSearchExecution, { queryCacheSize: 1 });
 
   await service.loadVault(vault, {
     deadline: Date.now() + 10_000,
@@ -1226,7 +1228,7 @@ test("search store loadVault can skip search worker preload", async () => {
       throw new Error("preload should be skipped");
     }
   };
-  const service = new DaemonSearchStoreService(fakeStore, {}, fakeSearchExecution, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, {}, {}, fakeSearchExecution, { queryCacheSize: 1 });
 
   const result = await service.loadVault(vault, {
     deadline: Date.now() + 1000,
@@ -1262,7 +1264,7 @@ test("search store loadVault can warm the query analyzer alongside preload", asy
       return [{ snapshotId: snapshot.snapshotId, cacheHit: false, cache: { entries: 1, limit: 2, hits: 0, misses: 1, evictions: 0, preloads: 1, snapshotIds: [snapshot.snapshotId] } }];
     }
   };
-  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, {}, fakeSearchExecution, { queryCacheSize: 1 });
 
   await service.loadVault(vault, {
     deadline: Date.now() + 1000,
@@ -1332,7 +1334,7 @@ test("search store service metadata path uses loaded documents for a pinned snap
     release: (inputPin) => calls.push(["release", inputPin.pinToken]),
     searchAnalyzerIdentity: () => analyzer.identity
   };
-  const service = new DaemonSearchStoreService(fakeStore, {}, {}, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, {}, {}, {}, { queryCacheSize: 1 });
 
   const result = await service.search({
     vault,
@@ -1384,7 +1386,7 @@ test("search store service analyzes non-Hangul queries inline without warming Ki
     }
   };
   const fakeSearchExecution = {};
-  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, {}, fakeSearchExecution, { queryCacheSize: 4 });
 
   const result = await service.search(
     { vault, query: "scifact evidence running studies", limit: 1, debug: true },
@@ -1435,7 +1437,7 @@ test("search store service keeps Hangul query analysis on the analyzer worker", 
     }
   };
   const fakeSearchExecution = {};
-  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 4 });
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, {}, fakeSearchExecution, { queryCacheSize: 4 });
 
   const result = await service.search(
     { vault, query: "한국어 검색", limit: 1, debug: true },
@@ -1477,7 +1479,7 @@ test("search store service rejects excessive analyzed query terms per channel", 
       throw new Error("search execution should not run after analysis cap failure");
     }
   };
-  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, fakeSearchExecution, { queryCacheSize: 1 });
+  const service = new DaemonSearchStoreService(fakeStore, fakeAnalyzer, {}, fakeSearchExecution, { queryCacheSize: 1 });
 
   await assert.rejects(
     () => service.search(
@@ -1528,11 +1530,11 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
         request: { protocolVersion: 2, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
       },
       {
-        label: "search-primitive-payload",
+        label: "retrieve-primitive-payload",
         request: {
           protocolVersion: 2,
-          requestId: "search-primitive-payload",
-          method: "Search",
+          requestId: "retrieve-primitive-payload",
+          method: "Retrieve",
           nonce: owner.nonce,
           deadline: Date.now() + 1000,
           payload: 1
@@ -1541,11 +1543,11 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
     ];
 
     for (const { label, request } of malformed) {
-      const rejected = await requestRawRpc(owner.socketPath, encodeFrame, request);
+      const rejected = await requestRawRpc(owner.querySocketPath, encodeFrame, request);
       assert.equal(rejected.ok, false, label);
       assert.equal(rejected.error.code, "BAD_REQUEST", label);
 
-      const alive = await requestRawRpc(owner.socketPath, encodeFrame, statusRequest(`alive-${label}`));
+      const alive = await requestRawRpc(owner.querySocketPath, encodeFrame, statusRequest(`alive-${label}`));
       assert.equal(alive.ok, true, label);
       assert.equal(alive.result.ready, true, label);
     }
@@ -1860,65 +1862,38 @@ test("AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
 // TODO: AC4 shutdown/removeOwner failure and AC12 owner cleanup on warmup failure
 // require daemon construction hooks that are not exposed to tests without editing src/.
 
-test("AC1 protocol method coverage includes Clear", async () => {
-  const { SEARCH_DAEMON_METHODS, SEARCH_DAEMON_PROTOCOL_VERSION } = await futureImport("src/daemon/protocol.ts");
-  const serverSource = fs.readFileSync(path.join(repoRoot, "src/daemon/server.ts"), "utf8");
-  const dispatchCases = [...serverSource.matchAll(/case "([^"]+)":/g)].map((match) => match[1]);
+test("AC1 protocol method coverage is split by query and control capability", async () => {
+  const {
+    CONTROL_DAEMON_METHODS,
+    QUERY_DAEMON_METHODS,
+    SEARCH_DAEMON_PROTOCOL_VERSION
+  } = await futureImport("src/daemon/protocol.ts");
 
-  assert.deepEqual([...SEARCH_DAEMON_METHODS].sort(), [...new Set(dispatchCases)].sort());
-  assert.equal(SEARCH_DAEMON_METHODS.includes("Clear"), true);
-  assert.equal(SEARCH_DAEMON_METHODS.includes("Prune"), true);
+  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ["Retrieve", "Status"]);
+  assert.deepEqual([...CONTROL_DAEMON_METHODS].sort(), [
+    "Clear",
+    "Compact",
+    "LoadVault",
+    "Prune",
+    "Rebuild",
+    "Refresh",
+    "Shutdown",
+    "Status"
+  ]);
+  for (const mutating of ["LoadVault", "Rebuild", "Refresh", "Compact", "Clear", "Prune", "Shutdown"]) {
+    assert.equal(QUERY_DAEMON_METHODS.includes(mutating), false);
+    assert.equal(CONTROL_DAEMON_METHODS.includes(mutating), true);
+  }
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
   assert.ok(SEARCH_DAEMON_PROTOCOL_VERSION > 0);
 });
 
-test("search daemon preloads execution snapshots only for query searches", async () => {
-  const {
-    searchRequestNeedsExecutionPreload,
-    searchRequestNeedsQueryAnalyzerWarmup
-  } = await futureImport("src/daemon/server.ts");
-  const base = {
-    protocolVersion: 2,
-    requestId: "preload-policy",
-    deadline: Date.now() + 1000,
-    nonce: "nonce"
-  };
-
-  assert.equal(searchRequestNeedsExecutionPreload({
-    ...base,
-    method: "Search",
-    payload: { vault: tempRoot(), query: "needle", limit: 1 }
-  }), true);
-  assert.equal(searchRequestNeedsQueryAnalyzerWarmup({
-    ...base,
-    method: "Search",
-    payload: { vault: tempRoot(), query: "needle", limit: 1 }
-  }), false);
-  assert.equal(searchRequestNeedsQueryAnalyzerWarmup({
-    ...base,
-    method: "Search",
-    payload: { vault: tempRoot(), query: "한국어 검색", limit: 1 }
-  }), true);
-  assert.equal(searchRequestNeedsExecutionPreload({
-    ...base,
-    method: "Search",
-    payload: { vault: tempRoot(), tags: ["alpha"], limit: 1 }
-  }), false);
-  assert.equal(searchRequestNeedsExecutionPreload({
-    ...base,
-    method: "Explain",
-    payload: { vault: tempRoot(), query: "needle", limit: 1 }
-  }), true);
-  assert.equal(searchRequestNeedsExecutionPreload({
-    ...base,
-    method: "Status",
-    payload: {}
-  }), false);
-});
-
 test("lifecycle deadlines scale with vault markdown count and bytes", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
-  const { vaultLifecycleDeadlineMs } = await futureImport("src/daemon/protocol.ts");
+  const {
+    SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
+    vaultLifecycleDeadlineMs
+  } = await futureImport("src/daemon/protocol.ts");
   const vault = tempRoot();
   const alpha = "# Alpha\n";
   const beta = `# Beta\n\n${"x".repeat(1024 * 1024)}\n`;
@@ -1940,8 +1915,19 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
         }
-        if (request.method === "Search") {
-          return { ok: true, command: "search", matches: [], snapshotId: "snap-a" };
+        if (request.method === "Retrieve") {
+          return {
+            ok: true,
+            command: "retrieve",
+            schemaVersion: 1,
+            available: true,
+            status: "ready",
+            origin: request.payload.origin,
+            matches: [],
+            results: [],
+            snapshotId: "snap-a",
+            retrievalSnapshotId: "retrieval-a"
+          };
         }
         throw new Error(`unexpected method ${request.method}`);
       },
@@ -1958,9 +1944,10 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
   assert.ok(loadRequest.deadline <= Date.now() + expected + 1000);
 
   await client.search({ vault, query: "alpha", limit: 1 });
-  const searchRequest = requests.find((request) => request.method === "Search");
+  const searchRequest = requests.find((request) => request.method === "Retrieve");
   assert.ok(searchRequest);
-  assert.ok(searchRequest.deadline >= before + expected - 100);
+  assert.equal(searchRequest.payload.origin, "text");
+  assert.ok(searchRequest.deadline >= Date.now() + SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS - 1000);
 });
 
 test("daemon client sends prune as a global cache request", async () => {
@@ -2352,7 +2339,21 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const responses = [
     { method: "Status", result: { ready: false, phase: "starting" } },
     { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: 2 } },
-    { method: "Search", result: { ok: true, snapshotId: "snap-a", matches: [{ path: "Alpha.md", snippets: [] }] } }
+    {
+      method: "Retrieve",
+      result: {
+        ok: true,
+        command: "retrieve",
+        schemaVersion: 1,
+        available: true,
+        status: "ready",
+        origin: "text",
+        snapshotId: "snap-a",
+        retrievalSnapshotId: "retrieval-a",
+        matches: [{ path: "Alpha.md", snippets: [] }],
+        results: [{ path: "Alpha.md", score: 1, snippets: [] }]
+      }
+    }
   ];
 
   const client = createSearchDaemonClient({
@@ -2368,7 +2369,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
         const next = responses.shift();
         assert.equal(request.method, next.method);
         if (next.method === "Status" && next.result.ready) next.result.nonce = spawns[0].nonce;
-        if (next.method === "Search") assert.equal(request.nonce, spawns[0].nonce);
+        if (next.method === "Retrieve") assert.equal(request.nonce, spawns[0].nonce);
         return next.result;
       },
       close: async () => {}
@@ -2378,7 +2379,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const result = await client.search({ vault: runtimeDir, query: "alpha", limit: 5, deadlineMs: 1000 });
 
   assert.equal(spawns.length, 1);
-  assert.deepEqual(calls.map((call) => call.method), ["Status", "Status", "Search"]);
+  assert.deepEqual(calls.map((call) => call.method), ["Status", "Status", "Retrieve"]);
   assert.equal(result.snapshotId, "snap-a");
   assert.deepEqual(result.matches.map((match) => match.path), ["Alpha.md"]);
 
@@ -2418,16 +2419,28 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
         if (request.method === "Status") {
           return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, owner: { nonce: request.nonce } };
         }
-        assert.equal(request.method, "Search");
+        // AC5/AC8 route search sugar through the read-only Retrieve method.
+        assert.equal(request.method, "Retrieve");
         assert.equal(typeof request.nonce, "string");
-        return { ok: true, command: "search", snapshotId: "snap-a", matches: [] };
+        return {
+          ok: true,
+          command: "retrieve",
+          schemaVersion: 1,
+          available: true,
+          status: "ready",
+          origin: request.payload.origin,
+          snapshotId: "snap-a",
+          retrievalSnapshotId: "retrieval-a",
+          matches: [],
+          results: []
+        };
       },
       close: async () => {}
     })
   });
 
   await client.search({ vault: runtimeDir, query: "alpha", limit: 1 });
-  assert.deepEqual(seen.map((request) => request.method), ["Status", "Search"]);
+  assert.deepEqual(seen.map((request) => request.method), ["Status", "Retrieve"]);
   assert.equal(seen[0].nonce, seen[1].nonce);
 
   const mismatched = createSearchDaemonClient({
@@ -2471,9 +2484,21 @@ test("daemon client sends runtime profile per request even when owner is reused"
       if (request.method === "Status") {
         return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2 };
       }
-      assert.equal(request.method, "Search");
+      // AC5/AC8 route search sugar through the read-only Retrieve method.
+      assert.equal(request.method, "Retrieve");
       searchRequests.push(request);
-      return { ok: true, command: "search", snapshotId: "snap-a", matches: [] };
+      return {
+        ok: true,
+        command: "retrieve",
+        schemaVersion: 1,
+        available: true,
+        status: "ready",
+        origin: request.payload.origin,
+        snapshotId: "snap-a",
+        retrievalSnapshotId: "retrieval-a",
+        matches: [],
+        results: []
+      };
     },
     close: async () => {}
   });
@@ -2516,7 +2541,7 @@ test("daemon client sends runtime profile per request even when owner is reused"
   );
 });
 
-test("profile manager unloads idle runtimes after request release", async () => {
+test("profile manager keeps idle runtimes resident after request release", async () => {
   const { ProfileManager } = await futureImport("src/daemon/profile-manager.ts");
   const {
     effectiveSearchRuntimeProfile,
@@ -2544,11 +2569,15 @@ test("profile manager unloads idle runtimes after request release", async () => 
     const active = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-status-active" });
     assert.ok(active[profileHash]);
     assert.equal(active[profileHash].activeRequests, 0);
-    assert.equal(typeof active[profileHash].idleDeadline, "string");
+    // AC11 removed daemon/profile idle unload; zero-footprint-at-rest applies
+    // to the model session, not the resident daemon runtime.
+    assert.equal(active[profileHash].idleDeadline, undefined);
 
     await new Promise((resolve) => setTimeout(resolve, 120));
     const idle = await manager.status({ deadline: Date.now() + 1000, cancellationId: "profile-status-idle" });
-    assert.deepEqual(Object.keys(idle), []);
+    assert.ok(idle[profileHash]);
+    assert.equal(idle[profileHash].activeRequests, 0);
+    assert.equal(idle[profileHash].idleDeadline, undefined);
   } finally {
     await manager.close();
   }
@@ -2758,7 +2787,9 @@ test("daemon readiness handshake authenticates owner nonce over RPC integration"
     assert.equal(status.ready, true);
     assert.equal(status.protocolVersion, 2);
     assert.equal(status.owner.nonce, status.nonce);
-    assert.equal(status.owner.socketPath.endsWith(".sock"), true);
+    assert.equal(status.owner.querySocketPath.endsWith(".sock"), true);
+    assert.equal(status.owner.controlSocketPath.endsWith(".sock"), true);
+    assert.notEqual(status.owner.querySocketPath, status.owner.controlSocketPath);
   } finally {
     await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
   }
@@ -2785,7 +2816,7 @@ test("daemon Status without nonce returns public health only", async () => {
 
   try {
     const authenticated = await client.status({ deadlineMs: 5000 });
-    const response = await requestRawRpc(authenticated.owner.socketPath, encodeFrame, {
+    const response = await requestRawRpc(authenticated.owner.querySocketPath, encodeFrame, {
       protocolVersion: 2,
       requestId: "public-status",
       method: "Status",

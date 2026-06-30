@@ -1,5 +1,6 @@
 import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis, type SearchTokenChannel } from "../../core/search/analysis/index.js";
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
+import type { SearchScoringLambdas } from "../../core/search/constants.js";
 import { matchesPathFilter } from "../../core/search/params.js";
 import type { ExactDominanceBound } from "../../core/search/ranking/index.js";
 import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/index.js";
@@ -14,7 +15,9 @@ import type { NormalizedSearchParams, PathFilter } from "../../core/search/inter
 import type { SearchField } from "../../core/types.js";
 import { compareByteStrings } from "./finalist-order.js";
 import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "./result-shaping.js";
+import type { DenseVectorSearchHit } from "../search-execution.js";
 import { exactDominanceBoundForSearchHandle } from "./search-execution-state.js";
+import type { RetrievalEmbeddingSetEnvelope } from "./types.js";
 
 export type SearchQueryPlanInput = {
   vault: string;
@@ -23,6 +26,14 @@ export type SearchQueryPlanInput = {
   analysis: SearchTextAnalysis;
   analyzerIdentity: SearchAnalyzerIdentity;
   snapshot: SearchExecutionSnapshotHandle;
+  denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
+  queryVector?: readonly number[];
+  denseSearchResults?: readonly DenseVectorSearchHit[];
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  rrfK?: number;
+  scoringLambdas?: Partial<SearchScoringLambdas>;
   deadline: number;
   cancellationId: string;
   explain?: boolean;
@@ -35,6 +46,14 @@ export type ShardTaskPlan = {
   analysis: SearchTextAnalysis;
   analyzerIdentity: SearchAnalyzerIdentity;
   snapshot: SearchExecutionSnapshotHandle;
+  denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
+  queryVector?: readonly number[];
+  denseSearchResults?: readonly DenseVectorSearchHit[];
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  rrfK?: number;
+  scoringLambdas?: Partial<SearchScoringLambdas>;
   channels: readonly SearchTokenChannel[];
   requestedLimit: number;
   workEstimate: number;
@@ -82,6 +101,8 @@ export function partitionJobPlans(
   input: SearchQueryPlanInput,
   channels: readonly SearchTokenChannel[]
 ): ShardTaskPlan[] {
+  const needsDenseFanout = Boolean(input.queryVector && input.denseEmbeddingSet);
+  const needsLinkFanout = Boolean(input.sourceDocumentId || input.sourcePath);
   return [...input.snapshot.segments]
     .filter((segment) => segmentMatchesPathFilter(segment, input.pathFilter))
     .sort(compareSegments)
@@ -89,7 +110,7 @@ export function partitionJobPlans(
       segment,
       workEstimate: estimateSegmentWork(segment, input.analysis, input.search.fields, channels)
     }))
-    .filter((entry) => entry.workEstimate > 0)
+    .filter((entry) => entry.workEstimate > 0 || needsDenseFanout || needsLinkFanout)
     .map((entry): ShardTaskPlan => ({
       vault: input.vault,
       search: input.search,
@@ -101,11 +122,20 @@ export function partitionJobPlans(
         pinToken: input.snapshot.pinToken,
         bm25Stats: input.snapshot.bm25Stats,
         documents: EMPTY_DOCUMENTS_HANDLE,
+        linkGraph: input.snapshot.linkGraph,
         segments: [entry.segment]
       },
+      denseEmbeddingSet: input.denseEmbeddingSet,
+      queryVector: input.queryVector,
+      denseSearchResults: input.denseSearchResults,
+      sourceDocumentId: input.sourceDocumentId,
+      sourcePath: input.sourcePath,
+      excludeDocumentIds: input.excludeDocumentIds,
+      rrfK: input.rrfK,
+      scoringLambdas: input.scoringLambdas,
       channels,
       requestedLimit: input.search.limit,
-      workEstimate: entry.workEstimate,
+      workEstimate: needsDenseFanout || needsLinkFanout ? Math.max(1, entry.workEstimate) : entry.workEstimate,
       deadline: input.deadline,
       cancellationId: input.cancellationId,
       explain: input.explain,

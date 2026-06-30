@@ -57,6 +57,9 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
+  if (result.status === "index-not-ready") {
+    return "Search index not ready.\n";
+  }
   const warnings = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
   if (result.matches.length === 0) {
     return `${warnings.length > 0 ? `${warnings.join("\n")}\n` : ""}No matches found.\n`;
@@ -80,14 +83,23 @@ export function renderSimilarity(result: SimilarityResult, format: OutputFormat)
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
-  return [
-    "Vector similarity provider unavailable.",
-    `mode: ${result.request.mode}`,
-    `projection: ${result.request.projection.fields.join(", ")} (${result.request.projection.markdown}, ${result.request.projection.stripFrontmatter ? "frontmatter excluded" : "frontmatter included"})`,
-    `model: ${result.model.requested}`,
-    `fallback: ${result.fallback.strategy}`,
-    ""
-  ].join("\n");
+  if (result.status === "index-not-ready") {
+    return `Similarity index not ready${result.reason ? `: ${result.reason}` : ""}.\n`;
+  }
+  if (result.results.length === 0) return "No similar notes found.\n";
+  const out: string[] = [];
+  result.results.forEach((match, index) => {
+    out.push(`${index + 1}. ${match.path}`);
+    out.push(`score: ${formatScore(match.score)}`);
+    out.push(`title: ${match.title}`);
+    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
+    if (match.snippets.length > 0) {
+      out.push("snippets:");
+      for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
+    }
+    out.push("");
+  });
+  return out.join("\n");
 }
 
 export function renderFrontmatterRead(result: FrontmatterReadResult, format: OutputFormat): string {
@@ -186,6 +198,11 @@ function formatBytes(bytes: number): string {
   }
   const rounded = unit === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 1 : 2).replace(/\.0+$|(\.\d*[1-9])0+$/, "$1");
   return `${rounded} ${units[unit]}`;
+}
+
+function formatScore(score: number): string {
+  if (!Number.isFinite(score)) return "0";
+  return score.toFixed(6).replace(/\.?0+$/u, "");
 }
 
 function renderIndexProgress(progress: NonNullable<StatusResult["vaults"][number]["progress"]>): string {

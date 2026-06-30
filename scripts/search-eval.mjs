@@ -848,6 +848,8 @@ function replayOfflineExplainTrace(trace) {
     const lexicalScore = featureLexicalScore(feature, config);
     const identityScore = identityScoreFromExactPriority(exactPriority);
     const proximityScore = featureProximityScore(feature);
+    const denseAgreement = numberOrZero(feature.denseAgreement ?? feature.retrieverSignals?.dense?.normalizedScore);
+    const linkAgreement = numberOrZero(feature.linkAgreement ?? feature.retrieverSignals?.link?.normalizedScore);
     return {
       path: candidate.path ?? feature.candidate?.path ?? candidate.documentId,
       bucket: rankBucket(exactPriority, phrasePriority, coverageTerms, config),
@@ -860,7 +862,9 @@ function replayOfflineExplainTrace(trace) {
       lexicalScore,
       identityScore,
       exactLambda: config.exactLambda,
-      denseAgreement: 0,
+      denseAgreement,
+      linkAgreement,
+      rrfScore: numberOrZero(feature.rrfScore),
       rarityScore: 0,
       proximityScore,
       bodyScore: 0
@@ -877,12 +881,13 @@ function replayOfflineExplainTrace(trace) {
 
 function normalizeRankingConfig(config) {
   const constants = config.constants ?? {};
-  const lambdas = constants.SEARCH_SCORING_LAMBDAS ?? { phrase: 0.06, exact: 0, dense: 0 };
+  const lambdas = constants.SEARCH_SCORING_LAMBDAS ?? { phrase: 0.06, exact: 0, dense: 0, link: 0 };
   return {
     lambdas: {
       phrase: numberOrZero(lambdas.phrase),
       exact: numberOrZero(lambdas.exact),
-      dense: numberOrZero(lambdas.dense)
+      dense: numberOrZero(lambdas.dense),
+      link: numberOrZero(lambdas.link)
     },
     exactLambda: numberOrZero(config.exactDominanceBound?.lambdaExact ?? lambdas.exact),
     tokenChannelWeights: constants.SEARCH_TOKEN_CHANNEL_WEIGHT ?? { morph: 1, surface: 0.65, ngram: 0.3 },
@@ -948,7 +953,8 @@ function rerankScore(candidate, config) {
   return numberOrZero(candidate.lexicalScore) +
     numberOrZero(config.lambdas.phrase) * numberOrZero(candidate.proximityScore) +
     numberOrZero(candidate.exactLambda) * numberOrZero(candidate.identityScore) +
-    numberOrZero(config.lambdas.dense) * numberOrZero(candidate.denseAgreement);
+    numberOrZero(config.lambdas.dense) * numberOrZero(candidate.denseAgreement) +
+    numberOrZero(config.lambdas.link) * numberOrZero(candidate.linkAgreement);
 }
 
 function compareRankedMatches(left, right) {
@@ -970,6 +976,8 @@ function rankedOutputCandidate(candidate) {
     identityScore: candidate.identityScore,
     exactLambda: candidate.exactLambda,
     denseAgreement: candidate.denseAgreement,
+    linkAgreement: candidate.linkAgreement,
+    rrfScore: candidate.rrfScore,
     rarityScore: candidate.rarityScore,
     proximityScore: candidate.proximityScore,
     bodyScore: candidate.bodyScore

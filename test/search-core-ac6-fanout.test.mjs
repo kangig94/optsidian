@@ -81,6 +81,14 @@ function snapshotHandle(built, pinToken = "pin-ac6") {
     pinToken,
     bm25Stats: bm25StatsFromManifest(built.manifest),
     documents: sharedHandle(new TextEncoder().encode(JSON.stringify(built.documents))),
+    linkGraph: {
+      schemaVersion: 1,
+      linkGraphId: built.linkGraphId,
+      corpusSnapshotId: built.corpusSnapshotId,
+      resolverVersion: "test-link-resolver",
+      edges: built.linkEdges,
+      backlinks: built.linkEdges
+    },
     segments: built.segments.map((segment) => ({
       segmentId: segment.hash,
       partitionId: segment.partitionId,
@@ -331,6 +339,53 @@ test("AC6 shard finalist equal-score tie-break follows path, segment, then local
   ]);
 });
 
+test("AC6 sharded fanout preserves link adjacency candidates", async () => {
+  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, "src/daemon/search-store/builder.ts"));
+  const { executeSearchShardJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
+  const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
+  const { SearchQueryPlanner } = await import(path.join(repoRoot, "src/daemon/search-store/query-planner.ts"));
+  const { SearchQueryScheduler } = await import(path.join(repoRoot, "src/daemon/search-store/query-scheduler.ts"));
+  const vault = tempRoot();
+  writeVaultFile(vault, "Source.md", "# Source\n\nsourceonly [[Target]]\n");
+  writeVaultFile(vault, "Target.md", "# Target\n\nlinked-only content without the query term\n");
+  for (let index = 0; index < 10; index += 1) {
+    writeVaultFile(vault, `Filler-${index}.md`, `# Filler ${index}\n\nbackground content ${index}\n`);
+  }
+  const analyzer = testAnalyzer();
+  const built = await buildCanonicalSearchSnapshot({ vaultRoot: vault, analyzer, partitionBits: 4 });
+  assert.ok(built.segments.length >= 2);
+  const source = built.documents.find((document) => document.path === "Source.md");
+  const target = built.documents.find((document) => document.path === "Target.md");
+  assert.ok(source);
+  assert.ok(target);
+  assert.ok(built.linkEdges.some((edge) =>
+    edge.sourceDocumentId === source.documentId && edge.targetDocumentId === target.documentId
+  ));
+
+  const search = normalizeSearchParams({ query: "sourceonly", limit: 5, debug: true });
+  const input = {
+    vault,
+    search,
+    analysis: testQueryAnalysis(search.query),
+    analyzerIdentity: analyzer.identity,
+    snapshot: snapshotHandle(built, "pin-link-fanout"),
+    sourceDocumentId: source.documentId,
+    sourcePath: source.path,
+    excludeDocumentIds: [source.documentId],
+    deadline: Date.now() + 10_000,
+    cancellationId: `ac6-link-${crypto.randomUUID()}`
+  };
+  const planner = new SearchQueryPlanner();
+  const plan = planner.plan(input);
+  assert.equal(plan.tasks.length, built.segments.length);
+  const pool = new ControlledLeasePool([1, 2], async (job) => executeSearchShardJob(job));
+  const result = await new SearchQueryScheduler(pool).execute({ ...input, plan });
+  assert.equal(pool.runCalls.every((call) => call.job.snapshot.linkGraph), true);
+  const linked = result.matches.find((match) => match.path === "Target.md");
+  assert.ok(linked, "linked target should survive sharded fanout");
+  assert.ok((linked.debug?.linkAgreement ?? 0) > 0);
+});
+
 test("AC6 scheduler grouping invariance matches the monolithic oracle for non-identity queries", { timeout: 240_000 }, async () => {
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
   const { normalizeSearchParams } = await import(path.join(repoRoot, "src/core/search/params.ts"));
@@ -418,6 +473,7 @@ test("AC6 scheduler shard failure cancels active leases and releases the search 
         analysis: testQueryAnalysis(raw)
       })
     },
+    {},
     fakeSearchExecution,
     { queryCacheSize: 1 }
   );

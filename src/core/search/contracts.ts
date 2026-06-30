@@ -1,4 +1,5 @@
 import type { SearchTextAnalysis, SearchTokenChannel } from "./analysis/index.js";
+import type { EmbeddingVector } from "./dense/index.js";
 import type { SearchField } from "../types.js";
 
 export const SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION = 1;
@@ -21,6 +22,43 @@ export type RetrieverIdentity = {
   parameters?: Record<string, unknown>;
 };
 
+export type CorpusSnapshotId = string;
+export type LinkGraphId = string;
+export type EmbeddingSetId = string;
+export type RetrieverPlanIdentity = string;
+export type RankingFeatureVersion = string;
+export type RetrievalSnapshotId = string;
+
+export type LinkGraphEdge = {
+  sourcePath: string;
+  targetPath: string;
+  sourceDocumentId: DocumentId;
+  targetDocumentId: DocumentId;
+};
+
+export type LinkGraphNeighbor = {
+  documentId: DocumentId;
+  path?: string;
+  score: number;
+  directions: readonly ("outlink" | "inlink")[];
+  edges: readonly LinkGraphEdge[];
+};
+
+export type LinkGraphData = {
+  schemaVersion: 1;
+  linkGraphId: LinkGraphId;
+  corpusSnapshotId: CorpusSnapshotId;
+  resolverVersion: string;
+  edges: readonly LinkGraphEdge[];
+  backlinks: readonly LinkGraphEdge[];
+};
+
+export interface LinkGraphView extends LinkGraphData {
+  outlinks(documentId: DocumentId): readonly LinkGraphEdge[];
+  inlinks(documentId: DocumentId): readonly LinkGraphEdge[];
+  neighbors(documentId: DocumentId): readonly LinkGraphNeighbor[];
+}
+
 export type CandidateRef = {
   candidateId: CandidateId;
   documentId: DocumentId;
@@ -38,6 +76,9 @@ export type RetrievalQuery = {
   channels?: readonly SearchTokenChannel[];
   proximityWindow?: number;
   snapshotId?: SnapshotId;
+  sourceDocumentId?: DocumentId;
+  sourcePath?: string;
+  queryVector?: EmbeddingVector;
 };
 
 export type CandidateChannelRank = {
@@ -74,9 +115,29 @@ export type CandidateProximityMatch = {
   };
 };
 
+export type RetrieverSignal = {
+  retrieverId: string;
+  retrieverIdentity: RetrieverIdentity;
+  rank: number;
+  rawScore: number;
+  normalizedScore: number;
+  contribution: number;
+};
+
+export type CandidateRetrieverSignals = {
+  lexical?: RetrieverSignal;
+  dense?: RetrieverSignal;
+  link?: RetrieverSignal;
+  all: readonly RetrieverSignal[];
+};
+
 export type RetrievalCandidate = CandidateRef & {
   rank: number;
   retrievalScore: number;
+  retrieverSignals?: CandidateRetrieverSignals;
+  denseAgreement?: number;
+  linkAgreement?: number;
+  rrfScore?: number;
   channels: readonly CandidateChannelRank[];
   phraseMatches: readonly CandidatePhraseMatch[];
   proximityMatches: readonly CandidateProximityMatch[];
@@ -86,6 +147,7 @@ export type CandidateSet = {
   schemaVersion: 1;
   snapshotId?: SnapshotId;
   retrieverIdentity: RetrieverIdentity;
+  retrieverPlanIdentity?: RetrieverPlanIdentity;
   complete: boolean;
   candidates: readonly RetrievalCandidate[];
 };
@@ -132,6 +194,10 @@ export type CandidateIdentityFeature = {
 
 export type CandidateFeaturePayload = {
   candidate: CandidateRef;
+  retrieverSignals?: CandidateRetrieverSignals;
+  denseAgreement?: number;
+  linkAgreement?: number;
+  rrfScore?: number;
   bm25: readonly CandidateBm25Feature[];
   phrasePositions: readonly CandidatePhraseMatch[];
   proximity: readonly CandidateProximityMatch[];
@@ -156,8 +222,13 @@ export type SnapshotManifestView = {
 export interface SnapshotView {
   readonly snapshotId: SnapshotId;
   readonly manifest: SnapshotManifestView;
+  readonly linkGraphId: LinkGraphId;
+  readonly linkGraph: LinkGraphView;
   segmentBytes(segmentId: SegmentId): Uint8Array | undefined | Promise<Uint8Array | undefined>;
   segmentManifest(segmentId: SegmentId): unknown | undefined | Promise<unknown | undefined>;
+  outlinks(documentId: DocumentId): readonly LinkGraphEdge[];
+  inlinks(documentId: DocumentId): readonly LinkGraphEdge[];
+  neighbors(documentId: DocumentId): readonly LinkGraphNeighbor[];
 }
 
 export type PinnedSnapshot = {

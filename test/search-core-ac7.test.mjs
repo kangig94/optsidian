@@ -88,10 +88,10 @@ function queryAnalysis(raw) {
   };
 }
 
-test("AC7 lambda_dense is a bitwise no-op with no embedding model", async () => {
+test("AC7 dense lambda contributes only when dense agreement is present", async () => {
   const { rerankScore } = await import(path.join(repoRoot, "src/core/search/ranking/score.ts"));
   const { SEARCH_SCORING_LAMBDAS } = await import(path.join(repoRoot, "src/core/search/constants.ts"));
-  assert.equal(SEARCH_SCORING_LAMBDAS.dense, 0);
+  assert.ok(SEARCH_SCORING_LAMBDAS.dense > 0);
 
   const base = {
     lexicalScore: 12.25,
@@ -103,22 +103,20 @@ test("AC7 lambda_dense is a bitwise no-op with no embedding model", async () => 
   const denseTermRemoved = rerankScore(base);
   const withDenseNaN = rerankScore({ ...base, denseAgreement: Number.NaN });
   const withDenseUndefined = rerankScore({ ...base, denseAgreement: undefined });
+  const withDenseAgreement = rerankScore({ ...base, denseAgreement: 1 });
 
   assert.equal(Object.is(withDenseZero, denseTermRemoved), true);
   assert.equal(Object.is(withDenseNaN, denseTermRemoved), true);
   assert.equal(Object.is(withDenseUndefined, denseTermRemoved), true);
+  assert.ok(withDenseAgreement > denseTermRemoved);
 });
 
-test("AC7 no-model identity keeps lexical results stable and stub embedding identity changes snapshot id", async () => {
+test("AC7 lexical identity stays stable across dense model identity changes", async () => {
   const { buildCanonicalSearchSnapshot, snapshotIdentityTupleForAnalyzerIdentity } = await import(
     path.join(repoRoot, "src/daemon/search-store/builder.ts")
   );
   const {
     CANONICAL_SEGMENT_SECTION,
-    CANONICAL_VECTOR_BLOCK_SCHEMA_ID,
-    buildCanonicalSnapshotForTests,
-    canonicalSegmentSectionBytes,
-    canonicalValueBytes,
     decodeCanonicalSegment
   } = await import(path.join(repoRoot, "src/core/search/segments/canonical.ts"));
   const { executeSearchJob } = await import(path.join(repoRoot, "src/daemon/search-execution.ts"));
@@ -132,20 +130,17 @@ test("AC7 no-model identity keeps lexical results stable and stub embedding iden
 
   const built = await buildCanonicalSearchSnapshot({ vaultRoot: vault, analyzer, partitionBits: 1 });
   const rebuilt = await buildCanonicalSearchSnapshot({ vaultRoot: vault, analyzer, partitionBits: 1 });
+  const removedSectionName = ["vector", "Block"].join("");
   assert.equal(built.snapshotId, rebuilt.snapshotId);
-  assert.equal(built.identityTuple.searchModelIdentity.embeddingModel, null);
+  assert.equal("embeddingModel" in built.identityTuple.searchModelIdentity, false);
+  assert.equal("embeddingModel" in built.identityTuple.searchModelIdentity.analyzerIdentity.analyzer, false);
   assert.equal(built.identityTuple.searchModelIdentity.scoringModel.retrieverIdentity.id, "positional-lexical");
   assert.equal(built.identityTuple.searchModelIdentity.scoringModel.retrieverIdentity.version, "3");
-  assert.equal(built.identityTuple.searchModelIdentity.scoringModel.weights.lambdas.dense, 0);
+  assert.ok(built.identityTuple.searchModelIdentity.scoringModel.weights.lambdas.dense > 0);
+  assert.equal(CANONICAL_SEGMENT_SECTION[removedSectionName], undefined);
 
   for (const segment of built.segments) {
-    const vectorBytes = canonicalSegmentSectionBytes(segment.bytes, CANONICAL_SEGMENT_SECTION.vectorBlock);
-    assert.ok(vectorBytes, "canonical segment must carry the reserved vectorBlock section");
-    assert.deepEqual(decodeCanonicalSegment(segment.bytes).vectorBlock, {
-      schemaId: CANONICAL_VECTOR_BLOCK_SCHEMA_ID,
-      embeddingModel: null,
-      vectorCount: 0
-    });
+    assert.equal(decodeCanonicalSegment(segment.bytes)[removedSectionName], undefined);
   }
 
   const search = normalizeSearchParams({ query: "alpha project", limit: 3, debug: true });
@@ -170,28 +165,18 @@ test("AC7 no-model identity keeps lexical results stable and stub embedding iden
   );
   assert.ok(firstResult.matches.every((match) => match.debug?.denseAgreement === 0));
 
-  const noModelTuple = snapshotIdentityTupleForAnalyzerIdentity(analyzer.identity, 1);
-  const stubEmbeddingIdentity = {
-    id: "stub-bge-m3",
+  const lexicalTuple = snapshotIdentityTupleForAnalyzerIdentity(analyzer.identity, 1);
+  const denseModelIdentity = {
+    id: "dense-model",
     sha256: "f".repeat(64),
     opset: "onnx-opset-17",
     quantization: "none",
     dim: 1024,
     pooling: "cls"
   };
-  const stubTuple = snapshotIdentityTupleForAnalyzerIdentity(
-    { ...analyzer.identity, embeddingModel: stubEmbeddingIdentity },
+  const denseTuple = snapshotIdentityTupleForAnalyzerIdentity(
+    { ...analyzer.identity, embeddingModel: denseModelIdentity },
     1
   );
-  assert.equal(noModelTuple.searchModelIdentity.embeddingModel, null);
-  assert.deepEqual(stubTuple.searchModelIdentity.embeddingModel, stubEmbeddingIdentity);
-  assert.notEqual(sha256(canonicalValueBytes(noModelTuple)), sha256(canonicalValueBytes(stubTuple)));
-
-  const documents = [
-    { path: "Alpha Project.md", content: "# Alpha Project\n\nalpha project target\n" },
-    { path: "Beta Project.md", content: "# Beta Project\n\nalpha project target beta beta\n" }
-  ];
-  const noModelSnapshot = buildCanonicalSnapshotForTests({ identityTuple: noModelTuple, documents });
-  const stubModelSnapshot = buildCanonicalSnapshotForTests({ identityTuple: stubTuple, documents });
-  assert.notEqual(noModelSnapshot.snapshotId, stubModelSnapshot.snapshotId);
+  assert.deepEqual(denseTuple, lexicalTuple);
 });

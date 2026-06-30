@@ -6,22 +6,34 @@ import {
   type ParsedArgs
 } from "../args.js";
 import { parseFormat, renderSimilarity } from "../render.js";
-import { similarityUnavailableResult } from "../../core/similarity.js";
+import { normalizeSimilarityParams } from "../../core/similarity.js";
+import { createSearchDaemonClient } from "../../daemon/client.js";
 import type {
+  RetrieveOrigin,
+  RetrieveResult,
   SimilarityFilterValue,
   SimilarityFrontmatterFilter,
   SimilarityMarkdownProjection,
   SimilarityMode,
   SimilarityParams,
   SimilarityProjectionField,
-  SimilarityReference
+  SimilarityReference,
+  SimilarityResult
 } from "../../core/types.js";
 import { UsageError } from "../../errors.js";
 
 const SIMILARITY_FIELDS = ["title", "body", "aliases", "headings", "tags"] as const;
+const DEFAULT_RETRIEVE_PROJECTION_VERSION = "title-body-plain-strip-frontmatter-v1";
 
-export function runSimilarity(args: ParsedArgs, vaultRoot: string): void {
-  const result = similarityUnavailableResult(vaultRoot, similarityRequestFromArgs(args));
+export async function runSimilarity(args: ParsedArgs, vaultRoot: string): Promise<void> {
+  const request = normalizeSimilarityParams(similarityRequestFromArgs(args));
+  const result = similarityResultFromRetrieve(
+    await createSearchDaemonClient().retrieve({
+      vault: vaultRoot,
+      ...retrievePayloadFromSimilarity(request)
+    }),
+    request
+  );
   process.stdout.write(renderSimilarity(result, parseFormat(getValue(args, "format"))));
 }
 
@@ -213,4 +225,74 @@ function parseScore(value: string | undefined, name: string): number | undefined
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new UsageError(`${name} must be a number`);
   return parsed;
+}
+
+export function retrievePayloadFromSimilarity(request: ReturnType<typeof normalizeSimilarityParams>) {
+  assertRetrieveSupportedSimilarityRequest(request);
+  const origin: RetrieveOrigin = request.mode === "left"
+    ? request.left?.text !== undefined ? "text" : "note"
+    : request.mode === "pair" ? "pair" : "global";
+  return {
+    origin,
+    text: request.left?.text,
+    sourcePath: request.left?.path,
+    path: request.scope.path,
+    left: request.left,
+    right: request.right,
+    topK: request.topK,
+    limit: request.topK,
+    minScore: request.minScore,
+    providerModel: request.provider.model === "default" ? undefined : request.provider.model,
+    query: request.left?.text
+  };
+}
+
+function assertRetrieveSupportedSimilarityRequest(request: ReturnType<typeof normalizeSimilarityParams>): void {
+  if (request.mode === "global") {
+    throw new UsageError("similarity mode=global is not supported by Retrieve yet; use mode=left or mode=pair");
+  }
+  if (request.scope.paths.length > 0) {
+    throw new UsageError("similarity scope.paths is not supported by Retrieve yet; use path=<directory-or-file>");
+  }
+  if (request.scope.pathGlob) {
+    throw new UsageError("similarity path-glob is not supported by Retrieve yet; use path=<directory-or-file>");
+  }
+  if (request.scope.frontmatter.length > 0) {
+    throw new UsageError("similarity frontmatter filters are not supported by Retrieve yet");
+  }
+  if (request.projection.version !== DEFAULT_RETRIEVE_PROJECTION_VERSION) {
+    throw new UsageError("similarity projection flags are not supported by Retrieve yet; use the default title+body plain projection");
+  }
+  if (request.mode === "pair" && (request.left?.text !== undefined || request.right?.text !== undefined)) {
+    throw new UsageError("similarity mode=pair requires left=<path> and right=<path>; pair text inputs are not supported by Retrieve yet");
+  }
+}
+
+export function similarityResultFromRetrieve(
+  retrieve: RetrieveResult,
+  request: ReturnType<typeof normalizeSimilarityParams>
+): SimilarityResult {
+  return {
+    ok: true,
+    command: "similarity",
+    schemaVersion: 1,
+    available: retrieve.available,
+    status: retrieve.status,
+    origin: retrieve.origin,
+    request,
+    matches: retrieve.matches,
+    results: retrieve.results.map((result) => ({
+      path: result.path,
+      title: result.title,
+      score: result.score,
+      tags: result.tags,
+      snippets: result.snippets,
+      ...(result.debug ? { debug: result.debug } : {})
+    })),
+    ...(retrieve.status === "ready" ? {
+      snapshotId: retrieve.snapshotId,
+      retrievalSnapshotId: retrieve.retrievalSnapshotId
+    } : { reason: retrieve.reason }),
+    ...(retrieve.warnings ? { warnings: retrieve.warnings } : {})
+  };
 }

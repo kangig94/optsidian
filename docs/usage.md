@@ -42,7 +42,7 @@ optsidian raw read path=README.md
 Command routing in V1:
 
 - CLI-only: `read`, `search`, `grep`, `index`, `config`, `copy`, `mkdir`, `open-gui`, `update`, `frontmatter`, `plugin:install`
-- MCP tools: `command_map`, `write`, `edit`, `apply_patch`
+- MCP tools: `command_map`, `command_run`, `write`, `edit`, `apply_patch`
 
 Marketplace plugin installs stay native:
 
@@ -136,9 +136,9 @@ optsidian read path=note.md format=json
 
 Only one of `lines=`, `head=`, `tail=`, and `around=` may be used at a time. `read`, `edit`, and direct-file `grep` reject vault files larger than 25MB; directory `grep` skips files above that per-file cap.
 
-## Search and Grep
+## Search, Similarity, and Grep
 
-`search` ranks notes. `grep` finds exact line evidence.
+`search` ranks notes. `similarity` retrieves notes by dense/link similarity. `grep` finds exact line evidence.
 
 ```bash
 optsidian search "alpha rollout"
@@ -151,6 +151,9 @@ optsidian search "#project alpha" format=json
 optsidian search "project alpha" format=json debug=true
 optsidian search "project alpha" --approximate budget-shards=8
 optsidian search "project alpha" mode=approximate budget-work=25000 format=json
+optsidian similarity mode=left left=Projects/Alpha.md top-k=5 min-score=0.25 format=json
+optsidian similarity mode=left left-text="semantic project handoff" path=Projects top-k=5
+optsidian similarity mode=pair left=Projects/Alpha.md right=Projects/Beta.md format=json
 ```
 
 Search returns only note path, title, tags, and body-focused snippets. Frontmatter participates in ranking but is not returned as snippet evidence; `keywords` / `keyword` frontmatter values are indexed through the alias search surface. `query=` is still accepted as a compatibility form. `field=` is only valid when a query is present. Add `debug=true` with `format=json` to include analyzer tokens, matched token channels, and ranking diagnostics. Search indexes morph analyzer tokens and normalized surface tokens by default. Korean 2/3-gram tokens are not part of the default search path; they are opt-in through `search.ngram=true` or `OPTSIDIAN_SEARCH_NGRAM=true` for manual comparison or targeted Korean tokenization experiments. Surface tokens preserve the compact form and also expand common path/title compounds such as `HumanoidMotionTracking`, `DDPMScheduler`, and `Sim2Real` into searchable parts. Candidate retrieval runs per channel and fuses channel ranks with explicit weights before metadata reranking. The reranker prioritizes exact note identity, phrase matches, metadata coverage, candidate-local term rarity, and term proximity; if strict retrieval finds no candidates, it can run a narrow Latin fuzzy retry for 5+ character alphanumeric terms with edit distance 1. With Kiwi enabled, compact Korean query compounds also reuse the morph split as an identity phrase candidate, so `정책학습` can receive the same phrase ranking signals as `정책 학습`. The default analyzer uses `Intl.Segmenter` plus Latin-only diacritic folding and ASCII stemming, so CJK text has a useful zero-config baseline without a language-specific model.
@@ -159,7 +162,54 @@ With `format=json`, the search envelope carries a top-level `snapshotId` alongsi
 
 Search defaults to `mode=exhaustive`, which schedules all matching shard work for the pinned snapshot before ranking the final result. `mode=approximate` or `--approximate` opts into a bounded shard/work prefix with `budget-shards=<n>` and/or `budget-work=<n>`. Approximate results always include a top-level `warnings` array containing `approximate`; text output renders this as `warning: approximate`. `budget-time-ms=<n>` is best-effort and can vary with runtime scheduling, so it also returns the exact warning label `non-reproducible`. Budgets are accepted only in approximate mode; combining `mode=exhaustive` with any `budget-*` flag is an error.
 
-The search daemon stores immutable positional snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with a durable active pointer. Each snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, and line snippet data. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query. Candidate retrieval uses positional postings only; phrase, proximity, rarity, and coverage signals come from snapshot-resident postings and feature payloads. CLI and MCP searches are daemon RPC calls only: if the daemon cannot start or become ready, search fails clearly instead of falling back to in-process indexing. `index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index warm`, and `index clear` are daemon RPC mutations.
+The search daemon stores immutable corpus and retrieval snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with durable active pointers. Each corpus snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, resolved link graph data, and line snippet data. Each retrieval snapshot binds that corpus snapshot to an embedding recipe/provider, link resolver/scoring identity, retriever plan, ranking feature version, and promoted built vector generation. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query.
+
+The daemon is resident and uses separate query/control sockets. Query RPC exposes `Retrieve`; CLI `search`, `similarity`, and `explain` are adapters over that public Retrieve path. Control RPC owns `index rebuild`, `index warm`, `index clear`, `index prune`, and maintenance GC. Query release is refcount-only and does not delete cache files. Dense retrieval queries the active built vector generation through the vector generation pool; link retrieval uses the snapshot link graph; lexical scores stay stable when dense/link signals are absent. If the daemon cannot start, the retrieval snapshot is stale, or a built vector generation is missing, commands fail clearly or return `status=index-not-ready` instead of falling back to in-process indexing.
+
+With `format=json`, similarity returns the Retrieve-derived envelope:
+
+```json
+{
+  "ok": true,
+  "command": "similarity",
+  "schemaVersion": 1,
+  "available": true,
+  "status": "ready",
+  "origin": "note",
+  "snapshotId": "64-hex-corpus-snapshot",
+  "retrievalSnapshotId": "64-hex-retrieval-snapshot",
+  "results": [
+    {
+      "path": "Projects/Beta.md",
+      "title": "Beta",
+      "score": 0.87,
+      "tags": ["project"],
+      "snippets": []
+    }
+  ],
+  "matches": []
+}
+```
+
+The underlying daemon `Retrieve` payload supports `origin=text`, `origin=note`, and `origin=pair`, plus `path`, `topK`/`limit`, `minScore`, `providerModel`, `debug`, and `explain`. `debug=true` includes per-match ranking fields such as `denseAgreement`, `linkAgreement`, and `rrfScore`; `explain=true` includes a typed `explainTrace`. An unready retrieval snapshot returns:
+
+```json
+{
+  "ok": true,
+  "command": "retrieve",
+  "schemaVersion": 1,
+  "available": false,
+  "status": "index-not-ready",
+  "origin": "text",
+  "reason": "retrieval-snapshot-mismatched",
+  "matches": [],
+  "results": []
+}
+```
+
+`similarity` currently supports `mode=left` with `left=<path>` or `left-text=<text|@file>`, `mode=pair` with note paths, `path=<dir|file>` candidate scope, `top-k`, `min-score`, and `model=<id>`. The model id must match the active built retrieval generation. Historical `paths=`, `path-glob=`, frontmatter filter, projection, and pair text flags are rejected with a UsageError rather than ignored.
+
+`index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index warm`, and `index clear` are daemon RPC mutations.
 
 ```bash
 optsidian index status
@@ -170,7 +220,7 @@ optsidian index clear
 
 `index warm` loads or refreshes daemon snapshots for discovered vaults. It reads Obsidian's vault registry from `OBSIDIAN_CONFIG` when set, otherwise from the standard Obsidian config locations such as `$XDG_CONFIG_HOME/obsidian/obsidian.json`, `~/.config/obsidian/obsidian.json`, Flatpak's Obsidian config path, macOS Application Support, or `%APPDATA%\obsidian\obsidian.json`. `vault-path=<path>` limits warmup to one vault.
 
-`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools. The Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. `search.analyzer=intl|kiwi` selects the analyzer policy, `search.ngram=true|false` controls the opt-in Korean ngram channel, `search.queryWorkers` and `search.indexWorkers` size the latency and indexing analyzer pools, and `search.executionWorkers` sizes the search execution pool. Search execution defaults to one worker per four logical CPU cores, capped at 4 workers and never below 1. Request timeouts are controlled at the daemon RPC/request layer. Search query history is not persisted. Repeated query analysis is cached only in daemon memory, capped at 64 entries by default, and can be disabled with `search.queryCacheSize=0` or `OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE=0`.
+`OPTSIDIAN_SEARCH_EXTRA_LANGS=ko` or `search.extraLangs=ko` enables Kiwi Korean analysis in daemon worker pools. The Kiwi model is downloaded lazily into `$XDG_CACHE_HOME/optsidian/kiwi/`. `search.analyzer=intl|kiwi` selects the analyzer policy, `search.ngram=true|false` controls the opt-in Korean ngram channel, `search.queryWorkers` and `search.indexWorkers` size the latency and indexing analyzer pools, and `search.executionWorkers` sizes the search execution pool. Search execution defaults to one worker per four logical CPU cores, capped at 4 workers and never below 1. Request timeouts are controlled at the daemon RPC/request layer. The daemon process remains resident after request release; embedding model sessions unload on their own model lifecycle when idle. Search query history is not persisted. Repeated query analysis is cached only in daemon memory, capped at 64 entries by default, and can be disabled with `search.queryCacheSize=0` or `OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE=0`.
 
 Global settings are written to `$XDG_CONFIG_HOME/optsidian/settings.json`, or `~/.config/optsidian/settings.json` when `XDG_CONFIG_HOME` is unset. A project-local `.optsidian/settings.json` is read as an override when present, but the `config` command does not create or edit it. Environment variables still override file settings:
 
@@ -185,7 +235,6 @@ optsidian config set search.snapshotRetentionCount=8
 optsidian config set search.queryCacheSize=64
 optsidian config set search.memoryBudgetCount=8
 optsidian config set search.memoryBudgetBytes=268435456
-optsidian config set search.daemonIdleMs=300000
 optsidian config get search.extraLangs
 optsidian config unset search.extraLangs
 ```

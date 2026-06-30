@@ -63,6 +63,8 @@ function rankSignal(overrides = {}) {
     identityScore: 0,
     exactLambda: 0,
     denseAgreement: 0,
+    linkAgreement: 0,
+    rrfScore: 0,
     rarityScore: 0,
     proximityScore: 0,
     bodyScore: 0,
@@ -210,10 +212,8 @@ test("search text analysis keeps ngram disabled by default", async () => {
   assert.deepEqual(enabled.channels.ngram, ["한국", "국어", "어검", "검색", "한국어", "국어검", "어검색"]);
 });
 
-test("similarity contract normalizes vector request and unavailable fallback", async () => {
-  const { normalizeSimilarityParams, similarityUnavailableResult } = await core();
-  const vault = tempVault();
-
+test("similarity contract normalizes vector request", async () => {
+  const { normalizeSimilarityParams } = await core();
   const normalized = normalizeSimilarityParams({
     mode: "global",
     scope: {
@@ -250,18 +250,6 @@ test("similarity contract normalizes vector request and unavailable fallback", a
     scope: { paths: ["LLM-Wiki/a/index.md", " LLM-Wiki/b/index.md ", "LLM-Wiki/a/index.md"] }
   });
   assert.deepEqual(exactPaths.scope.paths, ["LLM-Wiki/a/index.md", "LLM-Wiki/b/index.md"]);
-
-  const result = similarityUnavailableResult(vault, {
-    mode: "left",
-    left: { path: "Projects/Alpha.md" },
-    scope: { frontmatter: [{ key: "type", op: "eq", value: "project" }] }
-  });
-  assert.equal(result.command, "similarity");
-  assert.equal(result.available, false);
-  assert.equal(result.status, "provider-unavailable");
-  assert.equal(result.model.metric, "cosine");
-  assert.deepEqual(result.results, []);
-  assert.equal(result.fallback.strategy, "lexical");
 
   assert.throws(() => normalizeSimilarityParams({ mode: "left" }), /mode=left requires left/);
   assert.throws(() => normalizeSimilarityParams({ mode: "pair", left: { path: "a.md" } }), /mode=pair requires left and right/);

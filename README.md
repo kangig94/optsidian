@@ -155,6 +155,21 @@ Regex grep/edit uses a pinned RE2 wasm runtime. The wasm package is downloaded
 on demand without credentials, verified by embedded hashes, and cached under the
 optsidian cache root.
 
+## Dense Search GPU Runtime
+
+Dense semantic search uses ONNX Runtime. On Linux, GPU acceleration requires the
+CUDA 12.x runtime and cuDNN 9 built for CUDA 12. For example:
+
+```bash
+sudo apt install cudnn9-cuda-12
+sudo ldconfig
+```
+
+cuDNN 9 must be the cu12 build to match `onnxruntime-node`'s CUDA execution
+provider. If CUDA or that cuDNN build is missing, optsidian falls back
+gracefully to CPU-only dense search. macOS uses the CoreML/Metal execution
+provider and does not require cuDNN.
+
 ## Native Commands And Plugins
 
 Optsidian delegates native Obsidian commands when Obsidian already handles them

@@ -16,6 +16,10 @@ export type SearchSettings = {
   memoryBudgetCount?: number;
   memoryBudgetBytes?: number;
   daemonIdleMs?: number;
+  embeddingModel?: "bge-m3" | "multilingual-e5-small";
+  denseLambda?: number;
+  linkLambda?: number;
+  rrfK?: number;
 };
 
 export type OptsidianSettings = {
@@ -196,6 +200,18 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     if (value.search.daemonIdleMs !== undefined) {
       settings.search.daemonIdleMs = normalizeNonNegativeInteger(value.search.daemonIdleMs, "search.daemonIdleMs");
     }
+    if (value.search.embeddingModel !== undefined) {
+      settings.search.embeddingModel = normalizeEmbeddingModel(value.search.embeddingModel);
+    }
+    if (value.search.denseLambda !== undefined) {
+      settings.search.denseLambda = normalizeNonNegativeNumber(value.search.denseLambda, "search.denseLambda");
+    }
+    if (value.search.linkLambda !== undefined) {
+      settings.search.linkLambda = normalizeNonNegativeNumber(value.search.linkLambda, "search.linkLambda");
+    }
+    if (value.search.rrfK !== undefined) {
+      settings.search.rrfK = normalizePositiveInteger(value.search.rrfK, "search.rrfK");
+    }
   }
   return settings;
 }
@@ -224,6 +240,14 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.memoryBudgetBytes;
     case "search.daemonIdleMs":
       return settings.search?.daemonIdleMs;
+    case "search.embeddingModel":
+      return settings.search?.embeddingModel ?? "bge-m3";
+    case "search.denseLambda":
+      return settings.search?.denseLambda;
+    case "search.linkLambda":
+      return settings.search?.linkLambda;
+    case "search.rrfK":
+      return settings.search?.rrfK;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -265,6 +289,18 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
     case "search.daemonIdleMs":
       settings.search.daemonIdleMs = normalizeNonNegativeInteger(value, key);
       return;
+    case "search.embeddingModel":
+      settings.search.embeddingModel = normalizeEmbeddingModel(value);
+      return;
+    case "search.denseLambda":
+      settings.search.denseLambda = normalizeNonNegativeNumber(value, key);
+      return;
+    case "search.linkLambda":
+      settings.search.linkLambda = normalizeNonNegativeNumber(value, key);
+      return;
+    case "search.rrfK":
+      settings.search.rrfK = normalizePositiveInteger(value, key);
+      return;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -305,6 +341,18 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
     case "search.daemonIdleMs":
       if (settings.search) delete settings.search.daemonIdleMs;
       return;
+    case "search.embeddingModel":
+      if (settings.search) delete settings.search.embeddingModel;
+      return;
+    case "search.denseLambda":
+      if (settings.search) delete settings.search.denseLambda;
+      return;
+    case "search.linkLambda":
+      if (settings.search) delete settings.search.linkLambda;
+      return;
+    case "search.rrfK":
+      if (settings.search) delete settings.search.rrfK;
+      return;
     default:
       throw new UsageError(knownSettingMessage());
   }
@@ -328,6 +376,21 @@ function normalizeStringList(value: unknown, key: string): string[] {
   return [...new Set(raw.map((item) => String(item).trim().toLowerCase()).filter(Boolean))].sort((left, right) =>
     left.localeCompare(right)
   );
+}
+
+function normalizeEmbeddingModel(value: unknown): "bge-m3" | "multilingual-e5-small" {
+  if (typeof value !== "string") throw new UsageError("search.embeddingModel must be bge-m3 or multilingual-e5-small");
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "bge" || normalized === "bge-m3" || normalized === "baai/bge-m3") return "bge-m3";
+  if (
+    normalized === "e5" ||
+    normalized === "e5-small" ||
+    normalized === "multilingual-e5-small" ||
+    normalized === "intfloat/multilingual-e5-small"
+  ) {
+    return "multilingual-e5-small";
+  }
+  throw new UsageError("search.embeddingModel must be bge-m3 or multilingual-e5-small");
 }
 
 function normalizeBoolean(value: unknown, key: string): boolean {
@@ -356,6 +419,12 @@ function normalizeNonNegativeInteger(value: unknown, key: string): number {
   return parsed;
 }
 
+function normalizeNonNegativeNumber(value: unknown, key: string): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 0) throw new UsageError(`${key} must be a non-negative number`);
+  return parsed;
+}
+
 function writeSettingsFile(file: string, settings: OptsidianSettings): void {
   writePrivateFileSync(file, `${JSON.stringify(settings, null, 2)}\n`, "Optsidian settings file");
 }
@@ -365,7 +434,7 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 }
 
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.executionWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs";
+  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.executionWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs, search.embeddingModel, search.denseLambda, search.linkLambda, search.rrfK";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

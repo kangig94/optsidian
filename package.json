@@ -16,6 +16,7 @@
     "build": "node scripts/build-bundle.mjs",
     "search:eval:ir-vault": "node scripts/generate-search-eval-ir-dataset.mjs",
     "search:eval": "node --import tsx scripts/search-eval.mjs",
+    "retrieval:tune": "node scripts/retrieval-tuning-fixture.mjs",
     "package:release": "node scripts/package-release.mjs",
     "test:slow": "node --import tsx --test test/*.slow.mjs",
     "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
@@ -30,9 +31,11 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "^0.1.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "kiwi-nlp": "^0.23.0",
     "msgpackr": "^2.0.4",
+    "onnxruntime-node": "^1.27.0",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   }

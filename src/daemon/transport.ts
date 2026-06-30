@@ -3,14 +3,26 @@ import {
   FrameDecoder,
   encodeFrame,
   rpcError,
-  type SearchDaemonRequest,
-  type SearchDaemonResponse,
-  type SearchDaemonResultByMethod,
-  type SearchDaemonMethod
+  type DaemonRequestBase,
+  type SearchDaemonRpcError
 } from "./protocol.js";
 
-export type RpcConnection = {
-  request(request: SearchDaemonRequest): Promise<unknown>;
+export type RpcRequestLike = DaemonRequestBase<string, unknown>;
+
+export type RpcResponseLike<Result = unknown> =
+  | {
+      requestId: string;
+      ok: true;
+      result: Result;
+    }
+  | {
+      requestId: string;
+      ok: false;
+      error: SearchDaemonRpcError;
+    };
+
+export type RpcConnection<Request extends RpcRequestLike = RpcRequestLike> = {
+  request(request: Request): Promise<unknown>;
   close(): Promise<void>;
 };
 
@@ -18,9 +30,13 @@ export type RpcServer = {
   close(): Promise<void>;
 };
 
-export type RpcServerOptions = {
+export type RpcServerOptions<Request extends RpcRequestLike = RpcRequestLike, Response extends RpcResponseLike = RpcResponseLike> = {
   socketPath: string;
-  handleRequest(request: SearchDaemonRequest): unknown | Promise<unknown>;
+  capability?: string;
+  isRequest?(message: unknown): message is Request;
+  handleRequest(request: Request): unknown | Promise<unknown>;
+  responseForResult?(request: Request, result: unknown): Response;
+  responseForError?(requestId: string, error: SearchDaemonRpcError): Response;
   onConnectionClosed?(requestIds: readonly string[]): void;
   socketIdleTimeoutMs?: number;
 };
@@ -32,7 +48,7 @@ type PendingRequest = {
 
 const RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000;
 
-export async function connectRpc(socketPath: string): Promise<RpcConnection> {
+export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike>(socketPath: string): Promise<RpcConnection<Request>> {
   const socket = await openSocket(socketPath);
   const decoder = new FrameDecoder();
   const pending = new Map<string, PendingRequest>();
@@ -41,7 +57,7 @@ export async function connectRpc(socketPath: string): Promise<RpcConnection> {
   socket.on("data", (chunk) => {
     try {
       for (const message of decoder.push(bufferChunk(chunk))) {
-        const response = message as SearchDaemonResponse;
+        const response = message as RpcResponseLike;
         const waiter = pending.get(response.requestId);
         if (!waiter) continue;
         pending.delete(response.requestId);
@@ -94,7 +110,9 @@ export async function connectRpc(socketPath: string): Promise<RpcConnection> {
   };
 }
 
-export async function createRpcServer(options: RpcServerOptions): Promise<RpcServer> {
+export async function createRpcServer<Request extends RpcRequestLike = RpcRequestLike, Response extends RpcResponseLike = RpcResponseLike>(
+  options: RpcServerOptions<Request, Response>
+): Promise<RpcServer> {
   const sockets = new Set<net.Socket>();
   const activeRequestsBySocket = new Map<net.Socket, Set<string>>();
   const socketIdleTimeoutMs = options.socketIdleTimeoutMs ?? RPC_SOCKET_IDLE_TIMEOUT_MS;
@@ -126,26 +144,31 @@ export async function createRpcServer(options: RpcServerOptions): Promise<RpcSer
       }
 
       for (const message of messages) {
-        if (!isSearchDaemonRequest(message)) {
+        const isRequest = options.isRequest ?? isRpcRequestLike;
+        if (!isRequest(message)) {
           writeBadRequestAndDestroy(socket, "RPC request must be an object with string requestId and method");
           return;
         }
-        const request = message as SearchDaemonRequest;
+        const request = message as Request;
         activeRequestsBySocket.get(socket)?.add(request.requestId);
         void Promise.resolve()
           .then(() => options.handleRequest(request))
           .then((result) => {
             if (socket.destroyed) return;
-            writeResponse(socket, {
+            writeResponse(socket, options.responseForResult?.(request, result) ?? {
               requestId: request.requestId,
               ok: true,
-              result: result as SearchDaemonResultByMethod[SearchDaemonMethod]
-            } satisfies SearchDaemonResponse);
+              result
+            } satisfies RpcResponseLike);
           })
           .catch((error) => {
             if (socket.destroyed) return;
             const responseError = errorToRpcError(error);
-            writeResponse(socket, { requestId: request.requestId, ok: false, error: responseError } satisfies SearchDaemonResponse);
+            writeResponse(socket, options.responseForError?.(request.requestId, responseError) ?? {
+              requestId: request.requestId,
+              ok: false,
+              error: responseError
+            } satisfies RpcResponseLike);
           })
           .finally(() => {
             activeRequestsBySocket.get(socket)?.delete(request.requestId);
@@ -182,7 +205,7 @@ export async function createRpcServer(options: RpcServerOptions): Promise<RpcSer
   };
 }
 
-function writeResponse(socket: net.Socket, response: SearchDaemonResponse, onComplete?: () => void): void {
+function writeResponse(socket: net.Socket, response: RpcResponseLike, onComplete?: () => void): void {
   if (socket.destroyed) {
     onComplete?.();
     return;
@@ -198,10 +221,10 @@ function writeBadRequestAndDestroy(socket: net.Socket, message: string): void {
     requestId: "invalid-frame",
     ok: false,
     error: rpcError("BAD_REQUEST", message)
-  } satisfies SearchDaemonResponse, () => socket.destroy());
+  } satisfies RpcResponseLike, () => socket.destroy());
 }
 
-function isSearchDaemonRequest(message: unknown): message is SearchDaemonRequest {
+export function isRpcRequestLike(message: unknown): message is RpcRequestLike {
   return message !== null &&
     typeof message === "object" &&
     typeof (message as { requestId?: unknown }).requestId === "string" &&

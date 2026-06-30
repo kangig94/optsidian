@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { vaultRelative, vaultRealpath, walkFiles } from "../../core/path.js";
+import { resolveVaultPath, vaultRelative, vaultRealpath, walkFiles } from "../../core/path.js";
 import type { SearchAnalyzer } from "../../core/search/analyzer.js";
 import {
   BODY_INDEX_BUDGET_IDENTITY,
@@ -15,6 +15,7 @@ import {
   type BodyIndexBudget,
   type SearchTokenChannel
 } from "../../core/search/analysis/index.js";
+import { parseNoteLinks } from "../../core/search/analysis/links.js";
 import { MIN_NGRAM, MAX_NGRAM } from "../../core/search/analysis/korean.js";
 import { RANKING_CONSTANTS, SEARCH_SCORING_LAMBDAS } from "../../core/search/constants.js";
 import {
@@ -30,10 +31,10 @@ import {
   CANONICAL_SEGMENT_SECTION,
   CANONICAL_SEGMENT_VERSION,
   CANONICAL_TERM_DICTIONARY_SCHEMA_ID,
-  CANONICAL_VECTOR_BLOCK_SCHEMA_ID,
   canonicalSegmentHash,
   canonicalSnapshotManifestBytes,
   canonicalValueBytes,
+  corpusSnapshotIdFromManifest,
   encodeCanonicalSegment,
   partitionIdForDocument,
   reduceCanonicalBm25GlobalStats,
@@ -53,6 +54,7 @@ import type { SearchField, SearchSnippet } from "../../core/types.js";
 import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/index.js";
 import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
 import type { SearchIndexProgressUpdate } from "../protocol.js";
+import { buildLinkGraphSidecar } from "./link-graph.js";
 import {
   SNAPSHOT_PERSISTENCE_VERSION,
   type BuiltSegment,
@@ -60,6 +62,7 @@ import {
   type ParsedBuildDocument,
   type ParsedSnippetCorpus,
   type PersistedDocumentRecord,
+  type ResolvedLinkEdge,
   type SnapshotSnippetLine
 } from "./types.js";
 
@@ -72,7 +75,7 @@ export const DEFAULT_PARTITION_BITS = 4;
 // (fieldSetVersion = sha256(schema), rankingFeatureVersion = sha256(RANKING_CONSTANTS))
 // do not already capture. NEVER derive it from the binary hash: index identity is
 // deliberately decoupled from the build so unrelated code changes don't force a reindex.
-export const INDEX_BUILD_VERSION = "daemon-positional-build-v5";
+export const INDEX_BUILD_VERSION = "daemon-positional-build-v7";
 export { INDEX_AFFECTING_SEARCH_SETTINGS_HASH, indexAffectingSearchSettingsHash };
 
 type BuildInput = {
@@ -106,6 +109,8 @@ export type ReduceBuildSegmentInput = {
 };
 
 export type BuildSnapshotFromSegmentsInput = {
+  vaultRoot?: string;
+  scannedPaths?: readonly string[];
   analyzerIdentity: SearchAnalyzer["identity"];
   partitionBits?: number;
   searchSettings?: Partial<IndexAffectingSearchSettings>;
@@ -122,6 +127,8 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
   const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
   const builtSegments = reduceBuildSegments(partitionEntries, input.progress);
   return buildCanonicalSearchSnapshotFromSegments({
+    vaultRoot: scan.root,
+    scannedPaths: scan.files,
     analyzerIdentity: input.analyzer.identity,
     partitionBits,
     searchSettings,
@@ -136,6 +143,9 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
   const identityTuple = snapshotIdentityTupleForAnalyzerIdentity(input.analyzerIdentity, partitionBits, searchSettings);
   const documents = input.documents;
   const builtSegments = input.segments;
+  const linkEdges = input.vaultRoot
+    ? resolveParsedDocumentLinkEdges(input.vaultRoot, documents, input.scannedPaths ?? documents.map((document) => document.path))
+    : [];
   assertParsedDocumentsSortedByDocumentId(documents);
   assertBuiltSegmentsSortedByPartitionId(builtSegments);
   const bm25GlobalStats = reduceBuiltSegmentBm25Stats(builtSegments);
@@ -166,6 +176,8 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
   };
   const canonicalManifestBytes = canonicalSnapshotManifestBytes(manifest);
   const snapshotId = sha256(canonicalManifestBytes);
+  const corpusSnapshotId = corpusSnapshotIdFromManifest(manifest);
+  const linkGraphId = buildLinkGraphSidecar({ corpusSnapshotId, edges: linkEdges }).linkGraphId;
   const segmentByDocumentId = new Map<string, string>();
   for (const segment of builtSegments) {
     for (const documentId of segment.documentIds) segmentByDocumentId.set(documentId, segment.hash);
@@ -189,12 +201,15 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
 
   return {
     snapshotId,
+    corpusSnapshotId,
     identityTuple,
     manifest,
     canonicalManifestBytes,
     canonicalManifestSha256: snapshotId,
     segments: builtSegments,
     documents: persistedDocuments,
+    linkGraphId,
+    linkEdges,
     diagnostics: {
       schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
       analyzer: input.analyzerIdentity
@@ -233,8 +248,9 @@ function snapshotAnalyzerIdentityFor(
   analyzerIdentity: SearchAnalyzer["identity"],
   searchSettings: IndexAffectingSearchSettings
 ): SearchSnapshotAnalyzerIdentity {
+  const { embeddingModel: _embeddingModel, ...lexicalAnalyzerIdentity } = analyzerIdentity;
   return {
-    analyzer: analyzerIdentity,
+    analyzer: lexicalAnalyzerIdentity,
     channels: [...SEARCH_TOKEN_CHANNELS],
     ngram: {
       enabled: searchSettings.ngram,
@@ -261,13 +277,7 @@ function searchModelIdentity(
         { name: "fieldTexts", id: CANONICAL_SEGMENT_SECTION.fieldTexts },
         { name: "bm25", id: CANONICAL_SEGMENT_SECTION.bm25, schemaId: CANONICAL_BM25_STATS_SCHEMA_ID },
         { name: "docProjection", id: CANONICAL_SEGMENT_SECTION.docProjection, schemaId: CANONICAL_DOC_PROJECTION_SCHEMA_ID },
-        { name: "termDictionary", id: CANONICAL_SEGMENT_SECTION.termDictionary, schemaId: CANONICAL_TERM_DICTIONARY_SCHEMA_ID },
-        {
-          name: "vectorBlock",
-          id: CANONICAL_SEGMENT_SECTION.vectorBlock,
-          schemaId: CANONICAL_VECTOR_BLOCK_SCHEMA_ID,
-          reserved: true
-        }
+        { name: "termDictionary", id: CANONICAL_SEGMENT_SECTION.termDictionary, schemaId: CANONICAL_TERM_DICTIONARY_SCHEMA_ID }
       ]
     },
     corpusStatsSchema: {
@@ -282,11 +292,11 @@ function searchModelIdentity(
         lambdas: {
           phrase: SEARCH_SCORING_LAMBDAS.phrase,
           exact: SEARCH_SCORING_LAMBDAS.exact,
-          dense: SEARCH_SCORING_LAMBDAS.dense
+          dense: SEARCH_SCORING_LAMBDAS.dense,
+          link: SEARCH_SCORING_LAMBDAS.link
         }
       }
-    },
-    embeddingModel: analyzerIdentity.analyzer.embeddingModel ?? null
+    }
   };
 }
 
@@ -339,6 +349,31 @@ export async function parseBuildDocumentBatch(
     analyzerIdentity: analyzer.identity,
     documents
   };
+}
+
+export function resolveParsedDocumentLinkEdges(
+  vaultRoot: string,
+  documents: readonly ParsedBuildDocument[],
+  scannedPaths: readonly string[]
+): ResolvedLinkEdge[] {
+  const targetIndex = buildLinkTargetIndex(scannedPaths);
+  const edges = new Map<string, ResolvedLinkEdge>();
+  const sortedDocuments = [...documents].sort((left, right) => compareUtf8(left.path, right.path));
+  for (const document of sortedDocuments) {
+    for (const link of document.unresolvedLinks) {
+      const targetPath = resolveLinkTarget(vaultRoot, document.path, link.targetPath, targetIndex);
+      if (!targetPath) continue;
+      const key = `${document.path}\u0000${targetPath}`;
+      if (edges.has(key)) continue;
+      edges.set(key, {
+        sourcePath: document.path,
+        targetPath,
+        sourceDocumentId: document.documentId,
+        targetDocumentId: sha256(utf8(targetPath))
+      });
+    }
+  }
+  return [...edges.values()].sort(compareResolvedLinkEdges);
 }
 
 export function sortParsedBuildDocuments(documents: readonly ParsedBuildDocument[]): ParsedBuildDocument[] {
@@ -405,25 +440,31 @@ async function parseBuildDocument(
     return undefined;
   }
   const note = parseMarkdownNote(relPath, text);
+  const parsedLinks = parseNoteLinks(note.body);
+  const renderedNote = {
+    ...note,
+    body: parsedLinks.renderedText
+  };
   const lineSpans = lineSpanEntries(text);
-  const bodyBudget = bodyIndexBudgetForText(note.body);
-  const snippetLineInputs = snippetLineAnalysisInputs(lineSpans, bodyBudget);
+  const renderedLineSpans = renderedLineSpanEntries(lineSpans);
+  const bodyBudget = bodyIndexBudgetForText(renderedNote.body);
+  const snippetLineInputs = snippetLineAnalysisInputs(lineSpans, bodyBudget, renderedLineSpans);
   const tokenized = await analyzer.tokenizeBatch([
-    note.path,
-    note.title,
-    note.aliases.join(" "),
-    note.tags.join(" "),
-    note.headings.join(" "),
+    renderedNote.path,
+    renderedNote.title,
+    renderedNote.aliases.join(" "),
+    renderedNote.tags.join(" "),
+    renderedNote.headings.join(" "),
     bodyBudget.bodyLexicalText,
     ...snippetLineInputs.map((line) => line.analysisText)
   ]);
   const bodyMorphTokens = normalizeTokenSequence(tokenized[5] ?? []).slice(0, bodyBudget.bodyMorphMaxTokens);
   const fields = {
-    path: searchFieldTokenTexts(note.path, tokenized[0] ?? [], { ngram: searchSettings.ngram }),
-    title: searchFieldTokenTexts(note.title, tokenized[1] ?? [], { ngram: searchSettings.ngram }),
-    aliases: searchFieldTokenTexts(note.aliases.join(" "), tokenized[2] ?? [], { ngram: searchSettings.ngram }),
-    tags: searchFieldTokenTexts(note.tags.join(" "), tokenized[3] ?? [], { ngram: searchSettings.ngram }),
-    headings: searchFieldTokenTexts(note.headings.join(" "), tokenized[4] ?? [], { ngram: searchSettings.ngram }),
+    path: searchFieldTokenTexts(renderedNote.path, tokenized[0] ?? [], { ngram: searchSettings.ngram }),
+    title: searchFieldTokenTexts(renderedNote.title, tokenized[1] ?? [], { ngram: searchSettings.ngram }),
+    aliases: searchFieldTokenTexts(renderedNote.aliases.join(" "), tokenized[2] ?? [], { ngram: searchSettings.ngram }),
+    tags: searchFieldTokenTexts(renderedNote.tags.join(" "), tokenized[3] ?? [], { ngram: searchSettings.ngram }),
+    headings: searchFieldTokenTexts(renderedNote.headings.join(" "), tokenized[4] ?? [], { ngram: searchSettings.ngram }),
     body: searchFieldTokenTexts(bodyBudget.bodyLexicalText, bodyMorphTokens, {
       morphMaxTerms: bodyBudget.bodyMorphMaxTokens,
       surfaceMaxTerms: bodyBudget.bodySurfaceMaxTerms,
@@ -433,7 +474,7 @@ async function parseBuildDocument(
     })
   };
   const searchDocument: SearchBuildDocument = {
-    ...note,
+    ...renderedNote,
     pathTokens: fields.path.morph,
     titleTokens: fields.title.morph,
     aliasesTokens: fields.aliases.morph,
@@ -480,6 +521,7 @@ async function parseBuildDocument(
     documentId,
     path: normalizedPath,
     contentHash: canonicalRecord.contentHash,
+    unresolvedLinks: parsedLinks.unresolvedLinks,
     searchDocument,
     positionTokens,
     canonicalRecord,
@@ -716,6 +758,13 @@ function normalizeTokenSequence(tokens: readonly string[]): string[] {
   return tokens.map((token) => token.normalize("NFC").trim()).filter(Boolean);
 }
 
+type LinkTargetIndex = {
+  byPath: Map<string, string>;
+  byPathNoMarkdownExtension: Map<string, string[]>;
+  byBasename: Map<string, string[]>;
+  byBasenameNoMarkdownExtension: Map<string, string[]>;
+};
+
 type LineSpanEntry = SearchSnippet & {
   byteStart: number;
   byteEnd: number;
@@ -743,6 +792,13 @@ function lineSpanEntries(content: string): LineSpanEntry[] {
   }
   if (lines.length === 0) lines.push({ line: 1, text: "", byteStart: 0, byteEnd: 0 });
   return lines;
+}
+
+function renderedLineSpanEntries(lines: readonly LineSpanEntry[]): LineSpanEntry[] {
+  return lines.map((line) => ({
+    ...line,
+    text: parseNoteLinks(line.text).renderedText
+  }));
 }
 
 function lineSnippetEntries(
@@ -840,13 +896,14 @@ function snippetCorpusFallbackLine(
 
 function snippetLineAnalysisInputs(
   lines: readonly LineSpanEntry[],
-  budget: BodyIndexBudget
+  budget: BodyIndexBudget,
+  analysisLines: readonly LineSpanEntry[] = lines
 ): SnippetLineAnalysisInput[] {
   const maxLines = budget.snippetDocMaxAnalyzedLines ?? lines.length;
   const initialSelected = lines.length <= maxLines ? lines.map((_, index) => index) : evenSampledIndices(lines.length, maxLines);
   const maxChars = budget.snippetDocMaxAnalyzedChars ?? Number.POSITIVE_INFINITY;
   const selected = fitSnippetLineIndicesToCharBudget(
-    lines,
+    analysisLines,
     initialSelected,
     maxChars,
     budget.snippetLineAnalysisMaxChars
@@ -856,9 +913,10 @@ function snippetLineAnalysisInputs(
   for (const index of selected) {
     const line = lines[index];
     if (!line) continue;
+    const analysisLine = analysisLines[index] ?? line;
     const remaining = maxChars - usedChars;
     if (remaining <= 0) break;
-    const analysisText = line.text.slice(0, Math.min(budget.snippetLineAnalysisMaxChars, remaining));
+    const analysisText = analysisLine.text.slice(0, Math.min(budget.snippetLineAnalysisMaxChars, remaining));
     usedChars += analysisText.length;
     output.push({ source: line, analysisText });
   }
@@ -909,6 +967,119 @@ function channelTerms(value: string): string[] {
 
 function lineSpanSource(content: string): string {
   return content.split(/\r?\n/u).map((line, index) => `${index + 1}:${utf8(line).length}`).join("\n");
+}
+
+function buildLinkTargetIndex(scannedPaths: readonly string[]): LinkTargetIndex {
+  const paths = [...new Set(scannedPaths.map(normalizeVaultRelativePath).filter(Boolean))].sort(compareUtf8);
+  const byPath = new Map<string, string>();
+  const byPathNoMarkdownExtension = new Map<string, string[]>();
+  const byBasename = new Map<string, string[]>();
+  const byBasenameNoMarkdownExtension = new Map<string, string[]>();
+  for (const relPath of paths) {
+    byPath.set(relPath, relPath);
+    addLinkTargetAlias(byPathNoMarkdownExtension, stripMarkdownExtension(relPath), relPath);
+    const basename = path.posix.basename(relPath);
+    addLinkTargetAlias(byBasename, basename, relPath);
+    addLinkTargetAlias(byBasenameNoMarkdownExtension, stripMarkdownExtension(basename), relPath);
+  }
+  return { byPath, byPathNoMarkdownExtension, byBasename, byBasenameNoMarkdownExtension };
+}
+
+function addLinkTargetAlias(index: Map<string, string[]>, alias: string, relPath: string): void {
+  const normalized = normalizeVaultRelativePath(alias);
+  if (!normalized) return;
+  const entries = index.get(normalized) ?? [];
+  if (!entries.includes(relPath)) entries.push(relPath);
+  index.set(normalized, entries.sort(compareUtf8));
+}
+
+function resolveLinkTarget(
+  vaultRoot: string,
+  sourcePath: string,
+  rawTargetPath: string,
+  targetIndex: LinkTargetIndex
+): string | undefined {
+  const targetPath = decodeLinkTargetPath(rawTargetPath).trim();
+  if (!targetPath) return targetIndex.byPath.get(sourcePath);
+  if (isExternalLinkTarget(targetPath)) return undefined;
+
+  const candidates = linkPathCandidates(vaultRoot, sourcePath, targetPath);
+  for (const candidate of candidates) {
+    const resolved = lookupLinkTarget(candidate, targetIndex);
+    if (resolved) return resolved;
+  }
+
+  if (!targetPath.includes("/") && !targetPath.includes("\\")) {
+    const basename = normalizeVaultRelativePath(targetPath);
+    return uniqueLinkTarget(targetIndex.byBasename.get(basename)) ??
+      uniqueLinkTarget(targetIndex.byBasenameNoMarkdownExtension.get(stripMarkdownExtension(basename)));
+  }
+  return undefined;
+}
+
+function decodeLinkTargetPath(targetPath: string): string {
+  try {
+    return decodeURIComponent(targetPath);
+  } catch {
+    return targetPath;
+  }
+}
+
+function isExternalLinkTarget(targetPath: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(targetPath) || targetPath.startsWith("//");
+}
+
+function linkPathCandidates(vaultRoot: string, sourcePath: string, targetPath: string): string[] {
+  const sourceDir = path.posix.dirname(sourcePath);
+  const normalizedSourceDir = sourceDir === "." ? "" : sourceDir;
+  const normalizedTarget = targetPath.replace(/\\/g, "/");
+  const rawCandidates: string[] = [];
+  if (normalizedTarget.startsWith("/")) {
+    rawCandidates.push(normalizedTarget.slice(1));
+  } else if (normalizedTarget.startsWith("./") || normalizedTarget.startsWith("../")) {
+    rawCandidates.push(path.posix.join(normalizedSourceDir, normalizedTarget));
+  } else if (normalizedTarget.includes("/")) {
+    rawCandidates.push(normalizedTarget, path.posix.join(normalizedSourceDir, normalizedTarget));
+  } else {
+    rawCandidates.push(path.posix.join(normalizedSourceDir, normalizedTarget), normalizedTarget);
+  }
+
+  const candidates: string[] = [];
+  for (const raw of rawCandidates) {
+    const candidate = safeCanonicalVaultRelativePath(vaultRoot, raw);
+    if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+function safeCanonicalVaultRelativePath(vaultRoot: string, candidate: string): string | undefined {
+  try {
+    return normalizeVaultRelativePath(resolveVaultPath(vaultRoot, candidate, { mustExist: false }).rel);
+  } catch {
+    return undefined;
+  }
+}
+
+function lookupLinkTarget(candidate: string, targetIndex: LinkTargetIndex): string | undefined {
+  const normalized = normalizeVaultRelativePath(candidate);
+  return targetIndex.byPath.get(normalized) ??
+    targetIndex.byPath.get(`${normalized}.md`) ??
+    uniqueLinkTarget(targetIndex.byPathNoMarkdownExtension.get(stripMarkdownExtension(normalized)));
+}
+
+function uniqueLinkTarget(targets: readonly string[] | undefined): string | undefined {
+  return targets?.length === 1 ? targets[0] : undefined;
+}
+
+function stripMarkdownExtension(value: string): string {
+  return value.toLocaleLowerCase().endsWith(".md") ? value.slice(0, -3) : value;
+}
+
+function compareResolvedLinkEdges(left: ResolvedLinkEdge, right: ResolvedLinkEdge): number {
+  return compareUtf8(left.sourcePath, right.sourcePath) ||
+    compareUtf8(left.targetPath, right.targetPath) ||
+    compareUtf8(left.sourceDocumentId, right.sourceDocumentId) ||
+    compareUtf8(left.targetDocumentId, right.targetDocumentId);
 }
 
 function normalizeVaultRelativePath(value: string): string {

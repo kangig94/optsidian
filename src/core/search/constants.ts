@@ -4,11 +4,20 @@ import { SEARCH_BOOST, SEARCH_FIELD_CHANNEL_BOOST } from "./schema.js";
 export const CANDIDATE_LIMIT_MIN = 50;
 export const CANDIDATE_LIMIT_MULTIPLIER = 10;
 export const RANK_FINAL_SORT_POLICY = "unified-score-path-v1";
-export const SEARCH_SCORING_LAMBDAS = {
+export type SearchScoringLambdas = {
+  phrase: number;
+  exact: number;
+  dense: number;
+  link: number;
+};
+
+export const SEARCH_SCORING_LAMBDAS: SearchScoringLambdas = {
   phrase: 0.06,
   exact: 0,
-  dense: 0
-} as const;
+  dense: 0.25,
+  link: 0.2
+};
+export const DEFAULT_RRF_K = 60;
 export const EXACT_DOMINANCE_EPSILON = 1e-9;
 export const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
 export const SEARCH_BM25_K1 = 1.2;
@@ -132,5 +141,6 @@ export const RANKING_CONSTANTS = {
   SEARCH_BM25_D,
   SEARCH_FUZZY_WEIGHT_MULTIPLIER,
   CANDIDATE_LIMIT_MIN,
-  CANDIDATE_LIMIT_MULTIPLIER
+  CANDIDATE_LIMIT_MULTIPLIER,
+  DEFAULT_RRF_K
 } as const;

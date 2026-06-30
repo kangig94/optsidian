@@ -6,10 +6,11 @@ fs.mkdirSync(new URL("../dist", import.meta.url), { recursive: true });
 
 await Promise.all([
   bundle("src/cli.ts", "dist/optsidian"),
-  bundle("src/mcp.ts", "dist/optsidian-mcp")
+  bundle("src/mcp.ts", "dist/optsidian-mcp"),
+  bundle("src/daemon/vector-store/process-entry.ts", "dist/daemon/vector-store/process-entry.js", { executable: false })
 ]);
 
-function bundle(entryPoint, outfile) {
+function bundle(entryPoint, outfile, options = {}) {
   return esbuild
     .build({
       entryPoints: [entryPoint],
@@ -27,6 +28,6 @@ function bundle(entryPoint, outfile) {
       logLevel: "info"
     })
     .then(() => {
-      fs.chmodSync(outfile, 0o755);
+      if (options.executable !== false) fs.chmodSync(outfile, 0o755);
     });
 }

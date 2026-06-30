@@ -43,6 +43,8 @@ export type RankedCandidate = {
   identityScore: number;
   exactLambda: number;
   denseAgreement: number;
+  linkAgreement: number;
+  rrfScore: number;
   rarityScore: number;
   proximityScore: number;
   bodyScore: number;

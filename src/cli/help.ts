@@ -70,40 +70,29 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
     ]
   },
   similarity: {
-    summary: "Vector similarity API contract for note and text comparisons",
+    summary: "Retrieve-backed note and text similarity",
     usage: [
-      "optsidian similarity mode=global [frontmatter-key=<key> frontmatter-value=<value>] [path=<dir|file>|paths=<path,...>|path-glob=<glob>] [field=<field,...>] [top-k=<n>] [min-score=<0..1>] [model=<id>] [format=text|json]",
-      "optsidian similarity mode=left left=<path>|left-text=<text|@file> [frontmatter-key=<key> frontmatter-value=<value>] [top-k=<n>] [format=text|json]",
-      "optsidian similarity mode=pair left=<path>|left-text=<text|@file> right=<path>|right-text=<text|@file> [format=text|json]",
+      "optsidian similarity mode=left left=<path>|left-text=<text|@file> [path=<dir|file>] [top-k=<n>] [min-score=<0..1>] [model=<id>] [format=text|json]",
+      "optsidian similarity mode=pair left=<path> right=<path> [min-score=<0..1>] [model=<id>] [format=text|json]",
       "optsidian similarity request-json=<json|@file> [format=text|json]"
     ],
     options: [
-      { name: "mode=global|left|pair", description: "Comparison mode; global is the default" },
-      { name: "frontmatter-key=<key>", description: "Top-level frontmatter key used to filter candidate notes" },
-      { name: "frontmatter-value=<value>", description: "String frontmatter value for equality filtering" },
-      { name: "frontmatter-value-json=<json>", description: "Typed scalar frontmatter value, or @file" },
-      { name: "path=<dir|file>", description: "Vault-relative candidate scope" },
-      { name: "paths=<path,...>", description: "Exact vault-relative candidate paths" },
-      { name: "paths-json=<json>", description: "Exact candidate paths as a JSON string array, or @file" },
-      { name: "path-glob=<glob>", description: "Vault-relative glob candidate scope, e.g. LLM-Wiki/*/index.md" },
-      { name: "field=<field,...>", description: "Projection fields: title, body, aliases, headings, tags (default: title,body)" },
-      { name: "strip-frontmatter=true|false", description: "Exclude YAML frontmatter from body projection by default" },
-      { name: "markdown=plain|raw", description: "Projection markdown handling; plain is the default contract" },
+      { name: "mode=left|pair", description: "Comparison mode; left finds notes similar to one note or text, pair scores one note against another" },
+      { name: "path=<dir|file>", description: "Vault-relative candidate scope for left mode" },
       { name: "left=<path>", description: "Left note path for left and pair modes" },
-      { name: "left-text=<text|@file>", description: "Inline left text instead of a note path" },
+      { name: "left-text=<text|@file>", description: "Inline left text for left mode" },
       { name: "right=<path>", description: "Right note path for pair mode" },
-      { name: "right-text=<text|@file>", description: "Inline right text instead of a note path" },
-      { name: "top-k=<n>", description: "Nearest-neighbor result cap for global and left modes (default: 10)" },
-      { name: "min-score=<0..1>", description: "Minimum cosine similarity score threshold (default: 0)" },
-      { name: "model=<id>", description: "Requested embedding model id; default defers to provider" },
-      { name: "request-json=<json|@file>", description: "Full structured request object for future multi-filter contracts" },
+      { name: "top-k=<n>", description: "Nearest-neighbor result cap for left mode (default: 10)" },
+      { name: "min-score=<0..1>", description: "Minimum Retrieve score threshold (default: 0)" },
+      { name: "model=<id>", description: "Requested embedding model id; must match the active built retrieval generation" },
+      { name: "request-json=<json|@file>", description: "Structured request object using the same supported Retrieve-backed subset" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
-      "Similarity is CLI-only and currently returns available=false until an embedding provider is configured.",
-      "The default projection is title plus frontmatter-excluded body.",
-      "frontmatter filters select candidates but are not embedded as projection text.",
-      "Use only one path selector: path, paths, or path-glob."
+      "Similarity is CLI-only and is backed by the daemon Retrieve path over the active retrieval snapshot.",
+      "The retrieval snapshot must have a promoted built vector generation; otherwise the command returns index-not-ready.",
+      "Only path= candidate scope is supported in Retrieve today. paths=, path-glob=, frontmatter filters, projection flags, and pair text inputs are rejected instead of ignored.",
+      "Dense and link signals appear in JSON debug output when those retrievers contributed to the score."
     ]
   },
   index: {
@@ -148,7 +137,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.queryCacheSize=<n>", description: "In-memory query-analysis cache entry cap; default 64, 0 disables" },
       { name: "search.memoryBudgetCount=<n>", description: "Loaded snapshot count cap" },
       { name: "search.memoryBudgetBytes=<n>", description: "Loaded snapshot byte cap" },
-      { name: "search.daemonIdleMs=<ms>", description: "Search daemon idle shutdown delay; 0 disables idle shutdown" },
+      { name: "search.daemonIdleMs=<ms>", description: "Compatibility profile value; the daemon remains resident, while model sessions unload on their own idle lifecycle" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [

@@ -92,7 +92,10 @@ test("AC5 parallel index build is byte-identical to one-worker build and reports
     oneWorker.built.segments.map((segment) => Buffer.from(segment.bytes).toString("hex")),
     fourWorkers.built.segments.map((segment) => Buffer.from(segment.bytes).toString("hex"))
   );
-  assert.equal(oneWorker.built.identityTuple.buildVersion, "daemon-positional-build-v5");
+  // P1/P2 intentionally bumped the index identity for link-rendered lexical
+  // projection and retrieval-substrate identity fields; determinism is covered
+  // by the byte-identical snapshot/manifest/segment assertions above.
+  assert.equal(oneWorker.built.identityTuple.buildVersion, INDEX_BUILD_VERSION);
   assert.equal(fourWorkers.built.identityTuple.buildVersion, INDEX_BUILD_VERSION);
 
   const orderedStats = reduceCanonicalBm25GlobalStats(

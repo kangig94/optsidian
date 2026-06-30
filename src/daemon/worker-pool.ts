@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Worker, type TransferListItem } from "node:worker_threads";
 import type { SearchIndexProgressUpdate } from "./protocol.js";
 
-export type DaemonWorkerKind = "analyzer" | "search";
+export type DaemonWorkerKind = "analyzer" | "search" | "embedding" | "vector";
 
 export type DaemonWorkerRequest = {
   type: string;
@@ -33,6 +33,7 @@ export type WorkerPoolOptions = {
   heapGuardBytes?: number;
   rssGuardBytes?: number;
   rssGuardStrikes?: number;
+  rssGuardExempt?: boolean;
   microbatchSize?: number;
   autoWarmup?: boolean;
 };
@@ -159,6 +160,7 @@ export class DaemonWorkerPool {
       heapGuardBytes,
       rssGuardBytes: options.rssGuardBytes ?? envBytes(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB") ?? 0,
       rssGuardStrikes: options.rssGuardStrikes ?? envNumber(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES") ?? DEFAULT_RSS_GUARD_STRIKES,
+      rssGuardExempt: options.rssGuardExempt ?? false,
       size
     };
     for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(0));
@@ -316,6 +318,7 @@ export class DaemonWorkerPool {
       heapGuardBytes: this.options.heapGuardBytes,
       rssGuardBytes: this.options.rssGuardBytes || undefined,
       rssGuardStrikes: this.options.rssGuardBytes > 0 ? this.options.rssGuardStrikes : undefined,
+      rssGuardExempt: this.options.rssGuardExempt || undefined,
       restarts: this.restartCount,
       lastRestartReason: this.lastRestartReason,
       lastRestartAt: this.lastRestartAt,
@@ -696,6 +699,7 @@ function memoryRestartReason(
     return `heap guard exceeded (${heapUsed} > ${options.heapGuardBytes})`;
   }
   const rss = message.memory?.rss ?? message.memoryRss;
+  if (options.rssGuardExempt) return undefined;
   if (options.rssGuardBytes <= 0 || rss <= options.rssGuardBytes) {
     slot.rssGuardStrikes = 0;
     return undefined;

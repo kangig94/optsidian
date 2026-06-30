@@ -2,13 +2,16 @@ import { pack, unpack } from "msgpackr";
 import type {
   SearchIndexMutationResult,
   SearchIndexPruneResult,
-  SearchIndexStatusResult,
   SearchIndexWarmResult,
+  RetrieveResult,
+  RetrieveOrigin,
   SearchParams,
   SearchResult
 } from "../core/types.js";
 import type { ExplainTrace } from "../core/search/contracts.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { EmbeddingInputKind, EmbeddingVector } from "../core/search/dense/index.js";
+import type { LocalOnnxModelKey, OnnxExecutionProviderPreference } from "../core/search/dense/index.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import type { SearchRuntimeProfile } from "./runtime-profile.js";
 import type {
@@ -21,11 +24,21 @@ import type {
   SearchShardExecutionResult
 } from "./search-execution.js";
 import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
+import type {
+  CoralChunkRecord,
+  CoralEmbeddingSpec,
+  CoralSearchResult,
+  CoralStoreStats,
+  VectorStoreKey
+} from "./vector-store/types.js";
 
 export const SEARCH_DAEMON_PROTOCOL_VERSION = 2;
-export const SEARCH_DAEMON_METHODS = [
-  "Search",
-  "Explain",
+export const QUERY_DAEMON_METHODS = [
+  "Status",
+  "Retrieve"
+] as const;
+
+export const CONTROL_DAEMON_METHODS = [
   "Status",
   "LoadVault",
   "Rebuild",
@@ -35,6 +48,10 @@ export const SEARCH_DAEMON_METHODS = [
   "Prune",
   "Shutdown"
 ] as const;
+
+export const QUERY_DAEMON_CAPABILITY = "query" as const;
+export const CONTROL_DAEMON_CAPABILITY = "control" as const;
+export const SEARCH_DAEMON_CAPABILITIES = [QUERY_DAEMON_CAPABILITY, CONTROL_DAEMON_CAPABILITY] as const;
 
 export const SEARCH_DAEMON_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS = 15000;
@@ -46,7 +63,11 @@ export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS = 750;
 export const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_MIB_DEADLINE_MS = 5000;
 export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS;
 
-export type SearchDaemonMethod = (typeof SEARCH_DAEMON_METHODS)[number];
+export type SearchDaemonCapability = (typeof SEARCH_DAEMON_CAPABILITIES)[number];
+export type QueryDaemonMethod = (typeof QUERY_DAEMON_METHODS)[number];
+export type ControlDaemonMethod = (typeof CONTROL_DAEMON_METHODS)[number];
+export type MutatingControlDaemonMethod = Exclude<ControlDaemonMethod, "Status">;
+export type AnyDaemonMethod = QueryDaemonMethod | ControlDaemonMethod;
 
 export type SearchDaemonErrorCode =
   | "BAD_REQUEST"
@@ -64,7 +85,7 @@ export type SearchDaemonRpcError = {
   details?: unknown;
 };
 
-export type SearchDaemonRequestBase<M extends SearchDaemonMethod, P> = {
+export type DaemonRequestBase<M extends string, P> = {
   protocolVersion: number;
   requestId: string;
   method: M;
@@ -128,6 +149,85 @@ export type ReduceBuildSegmentWorkerPayload = {
 
 export type ReduceBuildSegmentWorkerResult = BuiltSegment;
 
+export type FakeModelProviderPayload = {
+  kind: "fake";
+  model?: string;
+  dim?: number;
+  fixtures?: readonly [string, EmbeddingVector][];
+};
+
+export type LocalOnnxModelProviderPayload = {
+  kind: "local-onnx";
+  model?: LocalOnnxModelKey;
+  executionProvider?: OnnxExecutionProviderPreference;
+};
+
+export type ModelProviderPayload = FakeModelProviderPayload | LocalOnnxModelProviderPayload;
+
+export type ModelEncodeWorkerPayload = {
+  texts: readonly string[];
+  provider: ModelProviderPayload;
+  inputKind?: EmbeddingInputKind;
+};
+
+export type ModelEncodeWorkerResult = {
+  provider: {
+    id: string;
+    model: string;
+    dim: number;
+    version: string;
+  };
+  vectors: EmbeddingVector[];
+};
+
+export type ModelUnloadWorkerResult = {
+  unloaded: true;
+};
+
+export type ModelStatsWorkerResult = {
+  loaded: boolean;
+};
+
+export type VectorWorkerBasePayload = {
+  key: VectorStoreKey;
+  generationId: string;
+  dbPath: string;
+};
+
+export type VectorUpsertWorkerPayload = VectorWorkerBasePayload & {
+  spec: CoralEmbeddingSpec;
+  chunks: readonly CoralChunkRecord[];
+};
+
+export type VectorBuildWorkerPayload = VectorWorkerBasePayload & {
+  spec: CoralEmbeddingSpec;
+  chunks?: readonly CoralChunkRecord[];
+  engineName?: "auto" | string;
+};
+
+export type VectorPrewarmWorkerPayload = VectorWorkerBasePayload & {
+  spec: CoralEmbeddingSpec;
+  engineName?: "auto" | string;
+};
+
+export type VectorSearchActiveBuiltIndexWorkerPayload = VectorWorkerBasePayload & {
+  spec: CoralEmbeddingSpec;
+  queryVector: EmbeddingVector;
+  candidateK: number;
+};
+
+export type VectorCloseWorkerPayload = Partial<VectorWorkerBasePayload>;
+
+export type VectorWorkerResult = {
+  ok: true;
+  generationId: string;
+};
+
+export type VectorSearchActiveBuiltIndexWorkerResult = {
+  generationId: string;
+  results: CoralSearchResult[];
+};
+
 export type SearchDaemonWorkerJob =
   | { type: "warmup" }
   | { type: "analyzeQuery"; payload: AnalyzeQueryWorkerPayload }
@@ -138,7 +238,16 @@ export type SearchDaemonWorkerJob =
   | { type: "search"; payload: SearchExecutionJob }
   | { type: "searchShard"; payload: SearchShardExecutionJob }
   | { type: "preloadSnapshot"; payload: SearchExecutionSnapshotHandle }
-  | { type: "searchExecutionStats" };
+  | { type: "searchExecutionStats" }
+  | { type: "modelEncode"; payload: ModelEncodeWorkerPayload }
+  | { type: "modelUnload" }
+  | { type: "modelStats" }
+  | { type: "vectorUpsert"; payload: VectorUpsertWorkerPayload }
+  | { type: "vectorBuild"; payload: VectorBuildWorkerPayload }
+  | { type: "vectorPrewarm"; payload: VectorPrewarmWorkerPayload }
+  | { type: "vectorSearchActiveBuiltIndex"; payload: VectorSearchActiveBuiltIndexWorkerPayload }
+  | { type: "vectorClose"; payload?: VectorCloseWorkerPayload }
+  | { type: "vectorStats"; payload?: VectorCloseWorkerPayload };
 
 export type SearchDaemonWorkerResultByType = {
   warmup: WorkerWarmupResult;
@@ -151,6 +260,15 @@ export type SearchDaemonWorkerResultByType = {
   searchShard: SearchShardExecutionResult;
   preloadSnapshot: SearchExecutionPreloadResult;
   searchExecutionStats: SearchExecutionCacheStats;
+  modelEncode: ModelEncodeWorkerResult;
+  modelUnload: ModelUnloadWorkerResult;
+  modelStats: ModelStatsWorkerResult;
+  vectorUpsert: VectorWorkerResult;
+  vectorBuild: VectorWorkerResult;
+  vectorPrewarm: VectorWorkerResult;
+  vectorSearchActiveBuiltIndex: VectorSearchActiveBuiltIndexWorkerResult;
+  vectorClose: VectorWorkerResult;
+  vectorStats: CoralStoreStats;
 };
 
 export type SearchRequestPayload = SearchParams & ProfiledPayload & {
@@ -159,6 +277,26 @@ export type SearchRequestPayload = SearchParams & ProfiledPayload & {
 };
 
 export type ExplainRequestPayload = SearchRequestPayload;
+
+export type RetrieveReference = {
+  path?: string;
+  text?: string;
+  id?: string;
+};
+
+export type RetrieveRequestPayload = SearchParams & ProfiledPayload & {
+  vault: string;
+  origin: RetrieveOrigin;
+  text?: string;
+  sourcePath?: string;
+  left?: RetrieveReference;
+  right?: RetrieveReference;
+  topK?: number;
+  minScore?: number;
+  providerModel?: string;
+  explain?: boolean;
+  snapshotId?: string;
+};
 
 export type VaultRequestPayload = ProfiledPayload & {
   vault: string;
@@ -177,17 +315,24 @@ export type ShutdownRequestPayload = {
   nonce: string;
 };
 
-export type SearchDaemonRequest =
-  | SearchDaemonRequestBase<"Search", SearchRequestPayload>
-  | SearchDaemonRequestBase<"Explain", ExplainRequestPayload>
-  | SearchDaemonRequestBase<"Status", StatusRequestPayload>
-  | SearchDaemonRequestBase<"LoadVault", VaultRequestPayload>
-  | SearchDaemonRequestBase<"Rebuild", VaultRequestPayload>
-  | SearchDaemonRequestBase<"Refresh", VaultRequestPayload>
-  | SearchDaemonRequestBase<"Compact", VaultRequestPayload>
-  | SearchDaemonRequestBase<"Clear", VaultRequestPayload>
-  | SearchDaemonRequestBase<"Prune", PruneRequestPayload>
-  | SearchDaemonRequestBase<"Shutdown", ShutdownRequestPayload>;
+export type QueryDaemonRequest =
+  | DaemonRequestBase<"Status", StatusRequestPayload>
+  | DaemonRequestBase<"Retrieve", RetrieveRequestPayload>;
+
+export type ControlDaemonRequest =
+  | DaemonRequestBase<"Status", StatusRequestPayload>
+  | DaemonRequestBase<"LoadVault", VaultRequestPayload>
+  | DaemonRequestBase<"Rebuild", VaultRequestPayload>
+  | DaemonRequestBase<"Refresh", VaultRequestPayload>
+  | DaemonRequestBase<"Compact", VaultRequestPayload>
+  | DaemonRequestBase<"Clear", VaultRequestPayload>
+  | DaemonRequestBase<"Prune", PruneRequestPayload>
+  | DaemonRequestBase<"Shutdown", ShutdownRequestPayload>;
+
+export type DaemonRequestByCapability = {
+  query: QueryDaemonRequest;
+  control: ControlDaemonRequest;
+};
 
 export type OwnerStatus = {
   pid: number;
@@ -196,7 +341,8 @@ export type OwnerStatus = {
   binaryVersion: string;
   protocolVersion: number;
   nonce: string;
-  socketPath: string;
+  querySocketPath: string;
+  controlSocketPath: string;
   startedAt: string;
 };
 
@@ -276,9 +422,12 @@ export type ShutdownResult = {
   shuttingDown: true;
 };
 
-export type SearchDaemonResultByMethod = {
-  Search: SearchResult & { snapshotId?: string };
-  Explain: ExplainResult;
+export type QueryDaemonResultByMethod = {
+  Status: PublicStatusResult | StatusResult;
+  Retrieve: RetrieveResult;
+};
+
+export type ControlDaemonResultByMethod = {
   Status: PublicStatusResult | StatusResult;
   LoadVault: SearchIndexWarmResult;
   Rebuild: SearchIndexMutationResult;
@@ -289,11 +438,40 @@ export type SearchDaemonResultByMethod = {
   Shutdown: ShutdownResult;
 };
 
+export type DaemonResultByCapability = {
+  query: QueryDaemonResultByMethod;
+  control: ControlDaemonResultByMethod;
+};
+
+export type QueryDaemonResponse =
+  | {
+      requestId: string;
+      ok: true;
+      result: QueryDaemonResultByMethod[QueryDaemonMethod];
+    }
+  | {
+      requestId: string;
+      ok: false;
+      error: SearchDaemonRpcError;
+    };
+
+export type ControlDaemonResponse =
+  | {
+      requestId: string;
+      ok: true;
+      result: ControlDaemonResultByMethod[ControlDaemonMethod];
+    }
+  | {
+      requestId: string;
+      ok: false;
+      error: SearchDaemonRpcError;
+    };
+
 export type SearchDaemonResponse =
   | {
       requestId: string;
       ok: true;
-      result: SearchDaemonResultByMethod[SearchDaemonMethod];
+      result: QueryDaemonResultByMethod[QueryDaemonMethod] | ControlDaemonResultByMethod[ControlDaemonMethod];
     }
   | {
       requestId: string;
@@ -336,9 +514,13 @@ export function encodeFrame(message: unknown): Buffer {
   return frame;
 }
 
-export function methodDefaultDeadlineMs(method: SearchDaemonMethod): number {
-  if (method === "Search") return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
-  if (method === "Explain") return SEARCH_DAEMON_DEFAULT_EXPLAIN_DEADLINE_MS;
+export function queryMethodDefaultDeadlineMs(method: QueryDaemonMethod): number {
+  if (method === "Retrieve") return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
+  if (method === "Status") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
+  return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
+}
+
+export function controlMethodDefaultDeadlineMs(method: ControlDaemonMethod): number {
   if (method === "Status") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
 }
@@ -351,16 +533,24 @@ export function vaultLifecycleDeadlineMs(fileCount: number, byteCount = 0): numb
     Math.ceil((safeBytes / (1024 * 1024)) * SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_MIB_DEADLINE_MS);
 }
 
-export function deadlineFromNow(method: SearchDaemonMethod, deadlineMs?: number, now = Date.now()): number {
-  return now + Math.max(0, deadlineMs ?? methodDefaultDeadlineMs(method));
+export function queryDeadlineFromNow(method: QueryDaemonMethod, deadlineMs?: number, now = Date.now()): number {
+  return now + Math.max(0, deadlineMs ?? queryMethodDefaultDeadlineMs(method));
+}
+
+export function controlDeadlineFromNow(method: ControlDaemonMethod, deadlineMs?: number, now = Date.now()): number {
+  return now + Math.max(0, deadlineMs ?? controlMethodDefaultDeadlineMs(method));
 }
 
 export function remainingDeadlineMs(deadline: number, now = Date.now()): number {
   return Math.max(0, deadline - now);
 }
 
-export function isSearchDaemonMethod(value: unknown): value is SearchDaemonMethod {
-  return typeof value === "string" && SEARCH_DAEMON_METHODS.includes(value as SearchDaemonMethod);
+export function isQueryDaemonMethod(value: unknown): value is QueryDaemonMethod {
+  return typeof value === "string" && QUERY_DAEMON_METHODS.includes(value as QueryDaemonMethod);
+}
+
+export function isControlDaemonMethod(value: unknown): value is ControlDaemonMethod {
+  return typeof value === "string" && CONTROL_DAEMON_METHODS.includes(value as ControlDaemonMethod);
 }
 
 export function rpcError(code: SearchDaemonErrorCode, message: string, details?: unknown): SearchDaemonRpcError {
