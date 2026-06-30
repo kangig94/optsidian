@@ -2,6 +2,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureCoralNeedleBinding } from "./artifact.js";
 import type {
   CoralChunkRecord,
   CoralEmbeddingSpec,
@@ -34,6 +35,8 @@ type PendingCall = {
 export type CoralNeedleProcessFactoryOptions = {
   scriptPath?: string;
   env?: NodeJS.ProcessEnv;
+  bindingPath?: string;
+  ensureBinding?: typeof ensureCoralNeedleBinding;
 };
 
 export function createCoralNeedleProcessInstanceFactory(
@@ -41,7 +44,15 @@ export function createCoralNeedleProcessInstanceFactory(
 ): CoralNeedleInstanceFactory {
   return {
     async create(input) {
-      return new CoralNeedleProcessInstance(input, options);
+      const baseEnv = options.env ?? process.env;
+      const bindingPath = options.bindingPath ?? await (options.ensureBinding ?? ensureCoralNeedleBinding)(baseEnv);
+      return new CoralNeedleProcessInstance(input, {
+        ...options,
+        env: {
+          ...baseEnv,
+          OPTSIDIAN_CORAL_NEEDLE_BINDING: bindingPath
+        }
+      });
     }
   };
 }

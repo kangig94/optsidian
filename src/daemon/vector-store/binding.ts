@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { coralNeedleManagedBindingPath } from "./artifact.js";
 import type {
   CoralChunkRecord,
   CoralEmbeddingSpec,
@@ -77,9 +78,20 @@ function adaptNativeBinding(native: NativeCoralNeedleBinding): CoralNeedleBindin
 
 function coralNeedleCandidates(): string[] {
   const root = path.resolve(process.cwd(), "..", "coral-needle");
-  return [
+  const candidates = [
+    process.env.OPTSIDIAN_CORAL_NEEDLE_BINDING?.trim(),
+    managedBindingCandidate(),
     path.join(root, "build", "coral-needle.node"),
     path.join(root, "build", "Release", "coral-needle.node"),
     path.join(root, "dist", "coral-needle.node")
   ];
+  return candidates.filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+}
+
+function managedBindingCandidate(): string | undefined {
+  try {
+    return coralNeedleManagedBindingPath(process.env);
+  } catch {
+    return undefined;
+  }
 }
