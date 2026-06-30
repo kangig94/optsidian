@@ -1,21 +1,73 @@
+import crypto from "node:crypto";
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import type { SearchTokenChannelTerms, UnresolvedNoteLink } from "../../core/search/analysis/index.js";
 import type { CorpusSnapshotId, EmbeddingSetId, LinkGraphEdge, LinkGraphId, RetrieverPlanIdentity, RetrievalSnapshotId } from "../../core/search/contracts.js";
 import type { EmbeddingRecipeIdentity, EmbeddingSetRecord } from "../../core/search/dense/index.js";
 import type { VectorStoreKey } from "../vector-store/types.js";
-import type {
-  CanonicalBm25FieldStats,
-  CanonicalSnapshotManifest,
-  CanonicalDocumentRecord,
-  SnapshotIdentityTuple
+import {
+  canonicalValueBytes,
+  type CanonicalBm25FieldStats,
+  type CanonicalDocumentRecord,
+  type CanonicalSnapshotManifest,
+  type SnapshotIdentityTuple
 } from "../../core/search/segments/index.js";
 import type { SearchBuildDocument } from "../../core/search/markdown.js";
 import type { SearchField, SearchSnippet } from "../../core/types.js";
 
-// One persistence-format version gates every on-disk snapshot artifact (envelope
-// + active pointer). Bump when the snapshot envelope or active-pointer layout
-// changes so an old artifact is refused at the read boundary.
-export const SNAPSHOT_PERSISTENCE_VERSION = 2;
+export const SNAPSHOT_PERSISTENCE_SCHEMA = {
+  name: "optsidian.search-store.persistence",
+  snapshotEnvelope: {
+    fields: [
+      "schemaHash",
+      "snapshotId",
+      "corpusSnapshotId?",
+      "linkGraphId",
+      "manifest",
+      "canonicalManifestSha256",
+      "documents",
+      "diagnostics"
+    ],
+    diagnostics: ["schemaHash", "analyzer", "warnings?"],
+    document: ["documentId", "path", "contentHash", "partitionId", "title", "tags", "snippetCorpus"],
+    snippetCorpus: ["bodyStartLine", "lines", "fallback"],
+    snippetFallback: ["kind", "snippetId?", "line?"],
+    snippetLine: ["snippetId", "segmentId", "documentId", "byteStart", "byteEnd", "line", "text", "channels"]
+  },
+  activePointer: ["schemaHash", "snapshotId", "canonicalManifestSha256"],
+  retrievalEmbeddingSetEnvelope: {
+    fields: ["schemaHash", "embeddingSetId", "recipe", "model", "dim", "records"],
+    record: ["documentId", "path?", "text", "contentHash", "vectorProjectionHash"]
+  },
+  retrievalVectorSpecEnvelope: ["embeddingSetId", "generationId", "specId", "dbPath", "key?"],
+  retrievalSnapshotEnvelope: [
+    "schemaHash",
+    "retrievalSnapshotId",
+    "snapshotId",
+    "corpusSnapshotId",
+    "linkGraphId",
+    "embeddingSetId",
+    "retrieverPlanIdentity",
+    "rankingFeatureVersion",
+    "canonicalManifestSha256",
+    "embeddingSet",
+    "vector",
+    "freshness"
+  ],
+  retrievalActivePointer: [
+    "schemaHash",
+    "retrievalSnapshotId",
+    "snapshotId",
+    "corpusSnapshotId",
+    "linkGraphId",
+    "embeddingSetId",
+    "vectorGenerationId"
+  ]
+} as const;
+
+export const SNAPSHOT_PERSISTENCE_SCHEMA_HASH = crypto
+  .createHash("sha256")
+  .update(canonicalValueBytes(SNAPSHOT_PERSISTENCE_SCHEMA))
+  .digest("hex");
 
 export type PersistedDocumentRecord = {
   documentId: string;
@@ -28,13 +80,13 @@ export type PersistedDocumentRecord = {
 };
 
 export type SnapshotDiagnostics = {
-  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
+  schemaHash: string;
   analyzer: SearchAnalyzerIdentity;
   warnings?: readonly string[];
 };
 
 export type SnapshotEnvelope = {
-  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
+  schemaHash: string;
   snapshotId: string;
   corpusSnapshotId?: CorpusSnapshotId;
   linkGraphId: LinkGraphId;
@@ -45,18 +97,18 @@ export type SnapshotEnvelope = {
 };
 
 export type ActivePointer = {
-  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
+  schemaHash: string;
   snapshotId: string;
   canonicalManifestSha256: string;
 };
 
 export type RetrievalEmbeddingSetEnvelope = {
-  schemaVersion: 1;
+  schemaHash: string;
   embeddingSetId: EmbeddingSetId;
   recipe: EmbeddingRecipeIdentity;
   model: string;
   dim: number;
-  records: readonly Omit<EmbeddingSetRecord, "shardDocRef">[];
+  records: readonly Omit<EmbeddingSetRecord, "shardDocRef" | "vector">[];
 };
 
 export type RetrievalVectorSpecEnvelope = {
@@ -68,7 +120,7 @@ export type RetrievalVectorSpecEnvelope = {
 };
 
 export type RetrievalSnapshotEnvelope = {
-  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
+  schemaHash: string;
   retrievalSnapshotId: RetrievalSnapshotId;
   snapshotId: string;
   corpusSnapshotId: CorpusSnapshotId;
@@ -86,7 +138,7 @@ export type RetrievalSnapshotEnvelope = {
 };
 
 export type RetrievalActivePointer = {
-  schemaVersion: typeof SNAPSHOT_PERSISTENCE_VERSION;
+  schemaHash: string;
   retrievalSnapshotId: RetrievalSnapshotId;
   snapshotId: string;
   corpusSnapshotId: CorpusSnapshotId;

@@ -56,7 +56,7 @@ import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/posit
 import type { SearchIndexProgressUpdate } from "../protocol.js";
 import { buildLinkGraphSidecar } from "./link-graph.js";
 import {
-  SNAPSHOT_PERSISTENCE_VERSION,
+  SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
   type BuiltSegment,
   type BuiltSnapshot,
   type ParsedBuildDocument,
@@ -212,7 +212,7 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
     linkGraphId,
     linkEdges,
     diagnostics: {
-      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+      schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
       analyzer: input.analyzerIdentity
     }
   };

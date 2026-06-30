@@ -901,6 +901,8 @@ test("AC9 retrieval envelope protects sidecar roots through compact", async () =
   assert.equal(pin.linkGraphId, envelope.linkGraphId);
   assert.equal(pin.embeddingSetId, envelope.embeddingSetId);
   assert.ok(pin.embeddingSet.records.length > 0);
+  assert.equal("vector" in envelope.embeddingSet.records[0], false);
+  assert.equal("vector" in pin.embeddingSet.records[0], false);
   harness.store.release(pin);
 
   await harness.service.compact(harness.vault, context());

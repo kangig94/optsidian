@@ -89,7 +89,7 @@ import {
 } from "../vector-store/index.js";
 import type { CoralChunkRecord, VectorStoreKey } from "../vector-store/types.js";
 import {
-  SNAPSHOT_PERSISTENCE_VERSION,
+  SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
   type ActivePointer,
   type BuiltSnapshot,
   type PersistedDocumentRecord,
@@ -869,7 +869,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       fsyncDirSync(paths.snapshotsDir);
 
       const activePointer: ActivePointer = {
-        schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+        schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
         snapshotId: built.snapshotId,
         canonicalManifestSha256: built.canonicalManifestSha256
       };
@@ -984,7 +984,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       rankingFeatureVersion
     });
     const retrievalEnvelope: RetrievalSnapshotEnvelope = {
-      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+      schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
       retrievalSnapshotId,
       snapshotId: source.snapshotId,
       corpusSnapshotId: source.corpusSnapshotId,
@@ -1007,7 +1007,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       }
     };
     const active: RetrievalActivePointer = {
-      schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+      schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
       retrievalSnapshotId,
       snapshotId: source.snapshotId,
       corpusSnapshotId: source.corpusSnapshotId,
@@ -1470,7 +1470,7 @@ export function createConfiguredEmbeddingSetBuilder(
 
 function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
   return {
-    schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+    schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
     snapshotId: built.snapshotId,
     corpusSnapshotId: built.corpusSnapshotId,
     linkGraphId: built.linkGraphId,
@@ -1489,7 +1489,6 @@ export function computeRetrievalSnapshotId(input: {
   rankingFeatureVersion: string;
 }): RetrievalSnapshotId {
   return sha256(canonicalValueBytes({
-    schemaVersion: 1,
     corpusSnapshotId: input.corpusSnapshotId,
     linkGraphId: input.linkGraphId,
     embeddingSetId: input.embeddingSetId,
@@ -1537,12 +1536,12 @@ function retrievalEmbeddingSetEnvelope(embeddingSet: {
   records: readonly EmbeddingSetRecord[];
 }): RetrievalEmbeddingSetEnvelope {
   return {
-    schemaVersion: 1,
+    schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
     embeddingSetId: embeddingSet.embeddingSetId,
     recipe: embeddingSet.recipe,
     model: embeddingSet.model,
     dim: embeddingSet.dim,
-    records: embeddingSet.records.map(({ shardDocRef: _shardDocRef, ...record }) => record)
+    records: embeddingSet.records.map(({ shardDocRef: _shardDocRef, vector: _vector, ...record }) => record)
   };
 }
 
@@ -1639,7 +1638,6 @@ async function storeRetrievalSnapshotEnvelope(
 
 function embeddingSpecId(embeddingSetId: EmbeddingSetId, model: string, dim: number): string {
   return sha256(canonicalValueBytes({
-    schemaVersion: 1,
     embeddingSetId,
     model,
     dim,
@@ -1869,14 +1867,14 @@ function compareCodePoint(left: string, right: string): number {
 function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
   return (
     isRecord(value) &&
-    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     typeof value.snapshotId === "string" &&
     typeof value.linkGraphId === "string" &&
     isRecord(value.manifest) &&
     typeof value.canonicalManifestSha256 === "string" &&
     Array.isArray(value.documents) &&
     isRecord(value.diagnostics) &&
-    value.diagnostics.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    value.diagnostics.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     !("documents" in value.diagnostics)
   );
 }
@@ -1884,7 +1882,7 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
 function isActivePointer(value: unknown): value is ActivePointer {
   return (
     isRecord(value) &&
-    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     typeof value.snapshotId === "string" &&
     typeof value.canonicalManifestSha256 === "string"
   );
@@ -1893,7 +1891,7 @@ function isActivePointer(value: unknown): value is ActivePointer {
 function isRetrievalActivePointer(value: unknown): value is RetrievalActivePointer {
   return (
     isRecord(value) &&
-    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     typeof value.retrievalSnapshotId === "string" &&
     typeof value.snapshotId === "string" &&
     typeof value.corpusSnapshotId === "string" &&
@@ -1906,7 +1904,7 @@ function isRetrievalActivePointer(value: unknown): value is RetrievalActivePoint
 function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshotEnvelope {
   return (
     isRecord(value) &&
-    value.schemaVersion === SNAPSHOT_PERSISTENCE_VERSION &&
+    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     typeof value.retrievalSnapshotId === "string" &&
     typeof value.snapshotId === "string" &&
     typeof value.corpusSnapshotId === "string" &&
@@ -1916,6 +1914,7 @@ function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshot
     typeof value.rankingFeatureVersion === "string" &&
     typeof value.canonicalManifestSha256 === "string" &&
     isRecord(value.embeddingSet) &&
+    value.embeddingSet.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     isRecord(value.vector) &&
     isRecord(value.freshness)
   );

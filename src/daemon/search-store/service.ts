@@ -90,6 +90,39 @@ export class DaemonSearchStoreService {
     );
   }
 
+  private async encodeRetrieveQueryVector(
+    queryText: string,
+    payload: RetrieveRequestPayload,
+    pin: PinnedRetrievalSnapshot,
+    context: DaemonRequestContext,
+    warnings: string[]
+  ): Promise<readonly number[] | undefined> {
+    if (remainingDeadlineMs(context.deadline) <= 100) {
+      warnings.push("dense query encode skipped because the request deadline was too close");
+      return undefined;
+    }
+    try {
+      const encoded = await this.embedding.encode({
+        texts: [queryText],
+        inputKind: "query",
+        provider: modelProviderPayloadForEmbeddingSet(pin.embeddingSet)
+      }, {
+        deadline: context.deadline,
+        cancellationId: context.cancellationId,
+        requestId: context.requestId,
+        vault: payload.vault
+      });
+      return encoded.vectors[0];
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+      if (code === "DEADLINE_EXCEEDED") {
+        warnings.push("dense query encode skipped because the request deadline expired");
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async loadVault(vault: string, context: DaemonRequestContext, options: LoadVaultOptions = {}) {
     const queryAnalyzerWarmup = options.warmupQueryAnalyzer
       ? this.latencyAnalyzer.warmup(1)
@@ -387,26 +420,23 @@ export class DaemonSearchStoreService {
     const search = normalizeSearchParams(searchPayload);
     const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
     const documents = this.documentsForPin(pin);
-    const records = new Map(pin.embeddingSet.records.map((record) => [record.documentId, record]));
     const excluded = new Set(resolved.excludeDocumentIds ?? []);
     const matchesWithScore: Array<{ match: SearchMatch; score: number }> = [];
     for (const [index, result] of denseResults.entries()) {
-      const embeddingRecord = records.get(result.entryId);
-      if (!embeddingRecord || excluded.has(embeddingRecord.documentId)) continue;
-      const document = documents?.get(embeddingRecord.documentId);
-      const relPath = document?.path ?? embeddingRecord.path;
-      if (!relPath) continue;
+      const document = documents?.get(result.entryId);
+      if (!document || excluded.has(document.documentId)) continue;
+      const relPath = document.path;
       if (pathFilter && !matchesPathFilter(relPath, pathFilter)) continue;
-      const tags = document?.tags ?? [];
+      const tags = document.tags;
       if (!matchesTagFilter(tags, search.tags)) continue;
       const score = denseAgreementFromCosine(result.similarity);
       matchesWithScore.push({
         score,
         match: {
           path: relPath,
-          title: document?.title ?? titleFromPath(relPath),
+          title: document.title ?? titleFromPath(relPath),
           tags,
-          snippets: document ? snippetsForDocument(document, emptySearchTokenChannels()) : [],
+          snippets: snippetsForDocument(document, emptySearchTokenChannels()),
           ...(search.debug
             ? {
                 debug: {
@@ -565,30 +595,7 @@ export class DaemonSearchStoreService {
     if (payload.origin === "text") {
       const queryText = (payload.text ?? payload.query ?? "").trim();
       if (!queryText) throw Object.assign(new Error("origin=text requires text or query"), { code: "BAD_REQUEST" });
-      if (remainingDeadlineMs(context.deadline) <= 100) {
-        warnings.push("dense query encode skipped because the request deadline was too close");
-        return { queryText, warnings };
-      }
-      try {
-        const encoded = await this.embedding.encode({
-          texts: [queryText],
-          inputKind: "query",
-          provider: modelProviderPayloadForEmbeddingSet(pin.embeddingSet)
-        }, {
-          deadline: context.deadline,
-          cancellationId: context.cancellationId,
-          requestId: context.requestId,
-          vault: payload.vault
-        });
-        return { queryText, queryVector: encoded.vectors[0], warnings };
-      } catch (error) {
-        const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-        if (code === "DEADLINE_EXCEEDED") {
-          warnings.push("dense query encode skipped because the request deadline expired");
-          return { queryText, warnings };
-        }
-        throw error;
-      }
+      return { queryText, queryVector: await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings), warnings };
     }
     if (payload.origin === "note") {
       const sourcePath = payload.sourcePath ?? payload.path ?? payload.left?.path;
@@ -597,7 +604,7 @@ export class DaemonSearchStoreService {
       if (!source) throw Object.assign(new Error(`source note is not embedded: ${sourcePath}`), { code: "SEARCH_DAEMON_NOT_READY" });
       return {
         queryText: source.text,
-        queryVector: source.vector,
+        queryVector: await this.encodeRetrieveQueryVector(source.text, payload, pin, context, warnings),
         sourceDocumentId: source.documentId,
         sourcePath: source.path,
         excludeDocumentIds: [source.documentId],
@@ -612,7 +619,7 @@ export class DaemonSearchStoreService {
       if (!left) throw Object.assign(new Error(`left note is not embedded: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
       return {
         queryText: left.text,
-        queryVector: left.vector,
+        queryVector: await this.encodeRetrieveQueryVector(left.text, payload, pin, context, warnings),
         sourceDocumentId: left.documentId,
         sourcePath: left.path,
         warnings
@@ -686,7 +693,7 @@ function titleFromPath(relPath: string): string {
   return relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
 }
 
-function recordByPath(records: readonly { path?: string; documentId: string; text: string; vector: readonly number[] }[], relPath: string) {
+function recordByPath(records: readonly { path?: string; documentId: string; text: string }[], relPath: string) {
   const normalized = normalizeRelPath(relPath);
   return records.find((record) => record.path && normalizeRelPath(record.path) === normalized);
 }

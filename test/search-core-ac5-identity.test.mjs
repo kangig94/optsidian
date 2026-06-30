@@ -46,12 +46,17 @@ test("AC5 schema digest identity changes from the pre-change baseline and stale 
   const { createDaemonSnapshotStore } = await import(path.join(repoRoot, "src/daemon/search-store/snapshot-store.ts"));
   const { searchStoreCachePaths } = await import(path.join(repoRoot, "src/daemon/search-store/cache-paths.ts"));
   const {
+    canonicalValueBytes,
     canonicalSnapshotManifestBytes,
     snapshotIdFromManifest
   } = await import(path.join(repoRoot, "src/core/search/segments/canonical.ts"));
-  const { SNAPSHOT_PERSISTENCE_VERSION } = await import(path.join(repoRoot, "src/daemon/search-store/types.ts"));
+  const {
+    SNAPSHOT_PERSISTENCE_SCHEMA,
+    SNAPSHOT_PERSISTENCE_SCHEMA_HASH
+  } = await import(path.join(repoRoot, "src/daemon/search-store/types.ts"));
 
   assert.equal(SEARCH_SCHEMA_DIGEST, sha256(JSON.stringify(SEARCH_DB_SCHEMA)));
+  assert.equal(SNAPSHOT_PERSISTENCE_SCHEMA_HASH, sha256(canonicalValueBytes(SNAPSHOT_PERSISTENCE_SCHEMA)));
   assert.notEqual(SEARCH_SCHEMA_DIGEST, PRE_CHANGE_SCHEMA_DIGEST);
 
   assert.deepEqual(Object.keys(SEARCH_DB_SCHEMA).sort(), [
@@ -126,7 +131,7 @@ test("AC5 schema digest identity changes from the pre-change baseline and stale 
   };
   persistJson(path.join(paths.snapshotsDir, staleSnapshotId), staleEnvelope);
   persistJson(paths.activePointerPath, {
-    schemaVersion: SNAPSHOT_PERSISTENCE_VERSION,
+    schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
     snapshotId: staleSnapshotId,
     canonicalManifestSha256: staleCanonicalManifestSha256
   });
@@ -146,7 +151,7 @@ test("AC5 snapshot envelope validator rejects old diagnostics.documents shape at
   const { SEARCH_SCHEMA_DIGEST } = await import(path.join(repoRoot, "src/core/search/schema.ts"));
   const { createDaemonSnapshotStore } = await import(path.join(repoRoot, "src/daemon/search-store/snapshot-store.ts"));
   const { searchStoreCachePaths } = await import(path.join(repoRoot, "src/daemon/search-store/cache-paths.ts"));
-  const { SNAPSHOT_PERSISTENCE_VERSION } = await import(path.join(repoRoot, "src/daemon/search-store/types.ts"));
+  const { SNAPSHOT_PERSISTENCE_SCHEMA_HASH } = await import(path.join(repoRoot, "src/daemon/search-store/types.ts"));
 
   const cacheRoot = tempRoot();
   const vault = tempRoot();
@@ -167,8 +172,10 @@ test("AC5 snapshot envelope validator rejects old diagnostics.documents shape at
   const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
   const envelopePath = path.join(paths.snapshotsDir, active.snapshotId);
   const envelope = JSON.parse(fs.readFileSync(envelopePath, "utf8"));
-  assert.equal(envelope.schemaVersion, SNAPSHOT_PERSISTENCE_VERSION);
-  assert.equal(envelope.diagnostics.schemaVersion, SNAPSHOT_PERSISTENCE_VERSION);
+  assert.equal(envelope.schemaHash, SNAPSHOT_PERSISTENCE_SCHEMA_HASH);
+  assert.equal(envelope.diagnostics.schemaHash, SNAPSHOT_PERSISTENCE_SCHEMA_HASH);
+  assert.equal("schemaVersion" in envelope, false);
+  assert.equal("schemaVersion" in envelope.diagnostics, false);
   assert.equal(envelope.manifest.identityTuple.fieldSetVersion, SEARCH_SCHEMA_DIGEST);
   assert.equal(store.readSnapshotEnvelope(paths, active.snapshotId)?.snapshotId, active.snapshotId);
   for (const partition of envelope.manifest.partitions) {
