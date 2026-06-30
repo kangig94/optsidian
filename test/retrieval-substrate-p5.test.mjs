@@ -231,7 +231,7 @@ function createSearchExecutionPool() {
   };
 }
 
-function createFakeVectorFactory() {
+function createFakeVectorFactory(options = {}) {
   const chunksByGeneration = new Map();
   const calls = {
     create: [],
@@ -268,6 +268,7 @@ function createFakeVectorFactory() {
           },
           async buildIndex(engineName = "auto") {
             calls.buildIndex.push({ role: input.role, generationId: input.generationId, engineName });
+            await options.onBuildIndex?.({ role: input.role, generationId: input.generationId, dbPath: input.dbPath });
           },
           async searchVector(vector, candidateK) {
             calls.searchVector.push({ role: input.role, generationId: input.generationId, candidateK });
@@ -308,7 +309,7 @@ function createHarness(options = {}) {
   };
   const analyzer = testAnalyzer();
   let buildCount = 0;
-  const vector = createFakeVectorFactory();
+  const vector = createFakeVectorFactory(options.vectorFactoryOptions);
   const vectorPool = new VectorGenerationPool({ factory: vector.factory });
   const store = new DaemonSnapshotStore({
     env,
@@ -386,6 +387,19 @@ function readJson(file) {
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
+}
+
+async function eventually(assertion, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assertion();
 }
 
 function activeRetrieval(paths) {
@@ -908,6 +922,57 @@ test("AC9 retrieval envelope protects sidecar roots through compact", async () =
   await harness.service.compact(harness.vault, context());
   assert.ok(fs.existsSync(retrievalPath));
   assert.ok(fs.existsSync(linkGraphPath));
+});
+
+test("AC9 vector GC protects in-flight generations during publish", async () => {
+  let harness;
+  let sweepRan = false;
+  harness = createHarness({
+    vectorFactoryOptions: {
+      async onBuildIndex(call) {
+        if (call.role !== "staging" || sweepRan) return;
+        sweepRan = true;
+        assert.equal(fs.existsSync(path.dirname(call.dbPath)), true);
+        harness.store.markSweepGc(searchStoreCachePaths(harness.vault, harness.env));
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(fs.existsSync(path.dirname(call.dbPath)), true);
+      }
+    }
+  });
+  writeSampleVault(harness.vault);
+  const loaded = await harness.service.loadVault(harness.vault, context(), { preload: false, warmupQueryAnalyzer: false });
+  assert.equal(loaded.vaults[0].status, "ready");
+  assert.equal(sweepRan, true);
+  const { envelope } = await ensureActiveRetrieval(harness);
+  const activeVectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
+  assert.equal(fs.existsSync(path.join(activeVectorPaths.generationsDir, envelope.vector.generationId)), true);
+});
+
+test("AC9 vector GC keeps rooted generations and removes stale vector stores", async () => {
+  const harness = await readyHarness();
+  const { envelope } = await ensureActiveRetrieval(harness);
+  const activeVectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
+  const activeGenerationDir = path.join(activeVectorPaths.generationsDir, envelope.vector.generationId);
+  assert.equal(fs.existsSync(activeGenerationDir), true);
+
+  const staleGenerationDir = path.join(activeVectorPaths.generationsDir, "gen-stale");
+  fs.mkdirSync(staleGenerationDir, { recursive: true });
+  fs.writeFileSync(path.join(staleGenerationDir, "vectors.duckdb"), "stale");
+  assert.equal(fs.existsSync(staleGenerationDir), true);
+
+  const orphanVectorPaths = retrievalVectorPaths(harness, "orphan-embedding-set");
+  const orphanGenerationDir = path.join(orphanVectorPaths.generationsDir, "gen-orphan");
+  fs.mkdirSync(orphanGenerationDir, { recursive: true });
+  fs.writeFileSync(path.join(orphanGenerationDir, "vectors.duckdb"), "orphan");
+  assert.equal(fs.existsSync(orphanGenerationDir), true);
+
+  await harness.service.compact(harness.vault, context());
+
+  assert.equal(fs.existsSync(activeGenerationDir), true);
+  await eventually(() => {
+    assert.equal(fs.existsSync(staleGenerationDir), false);
+    assert.equal(fs.existsSync(orphanVectorPaths.rootDir), false);
+  });
 });
 
 test("AC9 hybrid search requests Retrieve on query capability", async () => {

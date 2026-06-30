@@ -78,6 +78,19 @@ export class VectorCacheCatalog {
     this.upsert(paths, record);
   }
 
+  removeStoreIds(storeIds: readonly string[]): void {
+    if (storeIds.length === 0) return;
+    const removed = new Set(storeIds);
+    const catalog = this.readCatalog();
+    const records = catalog.records.filter((record) => !removed.has(record.storeId));
+    if (records.length === catalog.records.length) return;
+    this.writeCatalog({
+      schemaVersion: VECTOR_CACHE_CATALOG_SCHEMA_VERSION,
+      updatedAtMs: Date.now(),
+      records
+    });
+  }
+
   readCatalog(): VectorCacheCatalogFile {
     this.ensureCatalogDirs();
     const catalogPath = this.catalogPath();

@@ -60,7 +60,7 @@ import {
 } from "../protocol.js";
 import type { EmbeddingWorkerPool } from "../pools.js";
 import { buildCanonicalSearchSnapshot, DEFAULT_PARTITION_BITS, snapshotIdentityTuple, snapshotIdentityTupleForAnalyzerIdentity } from "./builder.js";
-import { searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
+import { safeStoreFileName, searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
 import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "../search-execution.js";
 import {
   durableRename,
@@ -78,10 +78,12 @@ import {
 } from "./link-graph.js";
 import {
   RetrievalFreshnessStore,
+  VectorCacheCatalog,
   readActiveVectorPointer,
   storeVectorGenerationMetadata,
   VectorGenerationPool,
   vectorStoreCachePaths,
+  vectorStoreId,
   writeActiveVectorPointer,
   type CoralEmbeddingSpec,
   type VectorStoreCachePaths,
@@ -174,6 +176,7 @@ type RetrievalSnapshotPublication = {
   envelope: RetrievalSnapshotEnvelope;
   active: RetrievalActivePointer;
   vectorPaths: VectorStoreCachePaths;
+  vectorGenerationGcKey: string;
 };
 
 type SnapshotContentDelta = {
@@ -235,6 +238,7 @@ type GcRoots = {
   segmentHashes: Set<string>;
   linkGraphIds: Set<LinkGraphId>;
   retrievalSnapshotIds: Set<RetrievalSnapshotId>;
+  vectorGenerationKeys: Set<string>;
 };
 
 const DEFAULT_COUNT_CAP = 8;
@@ -265,7 +269,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly activeByVault = new Map<string, string>();
   private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
   private readonly inFlightPublishLinkGraphs = new Set<LinkGraphId>();
+  private readonly inFlightVectorGenerations = new Set<string>();
+  private readonly queuedVectorGcVaults = new Set<string>();
+  private readonly runningVectorGcByVault = new Map<string, Promise<void>>();
   private readonly lifecycleStoreRefs = new Map<string, number>();
+  private readonly pinnedVectorGenerations = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
 
   constructor(options: DaemonSnapshotStoreOptions = {}) {
@@ -605,22 +613,24 @@ export class DaemonSnapshotStore implements SnapshotStore {
     loaded.lastAccessMs = Date.now();
     const pinToken = `${paths.vaultStateHash}:${retrieval.retrievalSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
     loaded.pinTokens.add(pinToken);
+    const pin: PinnedRetrievalSnapshot = {
+      snapshotId: retrieval.snapshotId,
+      view: loaded.view,
+      pinToken,
+      retrievalSnapshotId: retrieval.retrievalSnapshotId,
+      corpusSnapshotId: retrieval.corpusSnapshotId,
+      linkGraphId: retrieval.linkGraphId,
+      embeddingSetId: retrieval.embeddingSetId,
+      retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+      rankingFeatureVersion: retrieval.rankingFeatureVersion,
+      embeddingSet: retrieval.embeddingSet,
+      vector: retrieval.vector,
+      vectorKey: vectorPaths.key
+    };
+    this.retainPinnedVectorGeneration(pin);
     return {
       status: "ready",
-      pin: {
-        snapshotId: retrieval.snapshotId,
-        view: loaded.view,
-        pinToken,
-        retrievalSnapshotId: retrieval.retrievalSnapshotId,
-        corpusSnapshotId: retrieval.corpusSnapshotId,
-        linkGraphId: retrieval.linkGraphId,
-        embeddingSetId: retrieval.embeddingSetId,
-        retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
-        rankingFeatureVersion: retrieval.rankingFeatureVersion,
-        embeddingSet: retrieval.embeddingSet,
-        vector: retrieval.vector,
-        vectorKey: vectorPaths.key
-      }
+      pin
     };
   }
 
@@ -634,8 +644,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   release(pin: PinnedSnapshot): void {
     const snapshot = this.loadedForPin(pin);
-    snapshot.pinTokens.delete(pin.pinToken);
-    snapshot.refCount = Math.max(0, snapshot.refCount - 1);
+    if (snapshot.pinTokens.delete(pin.pinToken)) {
+      if (isPinnedRetrievalSnapshot(pin)) this.releasePinnedVectorGeneration(pin);
+      snapshot.refCount = Math.max(0, snapshot.refCount - 1);
+    }
     snapshot.lastAccessMs = Date.now();
     this.enforceBudget();
   }
@@ -778,14 +790,26 @@ export class DaemonSnapshotStore implements SnapshotStore {
       total: built.segments.length,
       completed: 0
     });
-    await this.publishBuiltSnapshot(paths, built, context, envelope);
-    this.cacheCatalog.recordIndexed(paths, {
-      snapshotId: built.snapshotId,
-      documentCount: built.documents.length
-    });
-    this.activeByVault.set(paths.vaultStateHash, built.snapshotId);
-    if (retrievalPublicationPromise) {
-      await this.publishRetrievalSnapshotPublication(paths, await retrievalPublicationPromise);
+    let retrievalPublished = false;
+    try {
+      await this.publishBuiltSnapshot(paths, built, context, envelope);
+      this.cacheCatalog.recordIndexed(paths, {
+        snapshotId: built.snapshotId,
+        documentCount: built.documents.length
+      });
+      this.activeByVault.set(paths.vaultStateHash, built.snapshotId);
+      if (retrievalPublicationPromise) {
+        await this.publishRetrievalSnapshotPublication(paths, await retrievalPublicationPromise);
+        retrievalPublished = true;
+      }
+    } catch (error) {
+      if (retrievalPublicationPromise && !retrievalPublished) {
+        void retrievalPublicationPromise.then((publication) => {
+          this.inFlightVectorGenerations.delete(publication.vectorGenerationGcKey);
+          this.queueVectorGc(paths);
+        }, () => undefined);
+      }
+      throw error;
     }
     context.progress?.({
       phase: "publishing",
@@ -929,6 +953,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
       createdAt: new Date(0).toISOString()
     };
     const generationId = `gen-${embeddingSet.embeddingSetId.slice(0, 24)}`;
+    const vectorGcKey = vectorGenerationGcKeyForVectorKey(vectorPaths.key, generationId);
+    this.inFlightVectorGenerations.add(vectorGcKey);
     const generation: VectorGenerationMetadata = {
       schemaVersion: 1,
       key: vectorPaths.key,
@@ -940,102 +966,112 @@ export class DaemonSnapshotStore implements SnapshotStore {
       createdAt: new Date(0).toISOString(),
       embeddingSetId: embeddingSet.embeddingSetId
     };
-    if (this.vectorPool) {
-      const builtGeneration = await this.vectorPool.buildStagingGeneration({
-        paths: vectorPaths,
-        spec,
-        chunks: vectorChunksForEmbeddingSet(embeddingSet.records, spec),
-        generationId,
-        progress: context.progress
-      });
-      await this.vectorPool.promoteBuiltGeneration(vectorPaths, builtGeneration.metadata);
-      generation.dbPath = builtGeneration.metadata.dbPath;
-      generation.chunkCount = builtGeneration.metadata.chunkCount;
-      generation.builtEngine = builtGeneration.metadata.builtEngine;
-      generation.createdAt = builtGeneration.metadata.createdAt;
-    } else {
-      context.progress?.({
-        phase: "vector-indexing",
-        total: embeddingSet.records.length,
-        completed: 0,
-        current: generationId
-      });
-      await storeVectorGenerationMetadata(vectorPaths, generation);
-      await writeActiveVectorPointer(vectorPaths, generation);
-      context.progress?.({
-        phase: "vector-indexing",
-        total: embeddingSet.records.length,
-        completed: embeddingSet.records.length,
-        current: generationId,
-        message: "stored"
-      });
-    }
-
-    const { retrieverPlanIdentity, rankingFeatureVersion } = currentRetrievalIdentity({
-      linkGraphId: source.linkGraphId,
-      rankingFeatureVersion: String(source.identityTuple.rankingFeatureVersion),
-      provider
-    });
-    const retrievalSnapshotId = computeRetrievalSnapshotId({
-      corpusSnapshotId: source.corpusSnapshotId,
-      linkGraphId: source.linkGraphId,
-      embeddingSetId: embeddingSet.embeddingSetId,
-      retrieverPlanIdentity,
-      rankingFeatureVersion
-    });
-    const retrievalEnvelope: RetrievalSnapshotEnvelope = {
-      schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
-      retrievalSnapshotId,
-      snapshotId: source.snapshotId,
-      corpusSnapshotId: source.corpusSnapshotId,
-      linkGraphId: source.linkGraphId,
-      embeddingSetId: embeddingSet.embeddingSetId,
-      retrieverPlanIdentity,
-      rankingFeatureVersion,
-      canonicalManifestSha256: envelope.canonicalManifestSha256,
-      embeddingSet: retrievalEmbeddingSetEnvelope(embeddingSet),
-      vector: {
-        embeddingSetId: embeddingSet.embeddingSetId,
-        generationId,
-        specId: spec.specId,
-        dbPath: generation.dbPath,
-        key: vectorPaths.key
-      },
-      freshness: {
-        state: "fresh",
-        corpusRevision: source.corpusSnapshotId
+    try {
+      if (this.vectorPool) {
+        const builtGeneration = await this.vectorPool.buildStagingGeneration({
+          paths: vectorPaths,
+          spec,
+          chunks: vectorChunksForEmbeddingSet(embeddingSet.records, spec),
+          generationId,
+          progress: context.progress
+        });
+        await this.vectorPool.promoteBuiltGeneration(vectorPaths, builtGeneration.metadata);
+        generation.dbPath = builtGeneration.metadata.dbPath;
+        generation.chunkCount = builtGeneration.metadata.chunkCount;
+        generation.builtEngine = builtGeneration.metadata.builtEngine;
+        generation.createdAt = builtGeneration.metadata.createdAt;
+      } else {
+        context.progress?.({
+          phase: "vector-indexing",
+          total: embeddingSet.records.length,
+          completed: 0,
+          current: generationId
+        });
+        await storeVectorGenerationMetadata(vectorPaths, generation);
+        await writeActiveVectorPointer(vectorPaths, generation);
+        context.progress?.({
+          phase: "vector-indexing",
+          total: embeddingSet.records.length,
+          completed: embeddingSet.records.length,
+          current: generationId,
+          message: "stored"
+        });
       }
-    };
-    const active: RetrievalActivePointer = {
-      schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
-      retrievalSnapshotId,
-      snapshotId: source.snapshotId,
-      corpusSnapshotId: source.corpusSnapshotId,
-      linkGraphId: source.linkGraphId,
-      embeddingSetId: embeddingSet.embeddingSetId,
-      vectorGenerationId: generationId
-    };
-    return { envelope: retrievalEnvelope, active, vectorPaths };
+
+      const { retrieverPlanIdentity, rankingFeatureVersion } = currentRetrievalIdentity({
+        linkGraphId: source.linkGraphId,
+        rankingFeatureVersion: String(source.identityTuple.rankingFeatureVersion),
+        provider
+      });
+      const retrievalSnapshotId = computeRetrievalSnapshotId({
+        corpusSnapshotId: source.corpusSnapshotId,
+        linkGraphId: source.linkGraphId,
+        embeddingSetId: embeddingSet.embeddingSetId,
+        retrieverPlanIdentity,
+        rankingFeatureVersion
+      });
+      const retrievalEnvelope: RetrievalSnapshotEnvelope = {
+        schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
+        retrievalSnapshotId,
+        snapshotId: source.snapshotId,
+        corpusSnapshotId: source.corpusSnapshotId,
+        linkGraphId: source.linkGraphId,
+        embeddingSetId: embeddingSet.embeddingSetId,
+        retrieverPlanIdentity,
+        rankingFeatureVersion,
+        canonicalManifestSha256: envelope.canonicalManifestSha256,
+        embeddingSet: retrievalEmbeddingSetEnvelope(embeddingSet),
+        vector: {
+          embeddingSetId: embeddingSet.embeddingSetId,
+          generationId,
+          specId: spec.specId,
+          dbPath: generation.dbPath,
+          key: vectorPaths.key
+        },
+        freshness: {
+          state: "fresh",
+          corpusRevision: source.corpusSnapshotId
+        }
+      };
+      const active: RetrievalActivePointer = {
+        schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
+        retrievalSnapshotId,
+        snapshotId: source.snapshotId,
+        corpusSnapshotId: source.corpusSnapshotId,
+        linkGraphId: source.linkGraphId,
+        embeddingSetId: embeddingSet.embeddingSetId,
+        vectorGenerationId: generationId
+      };
+      return { envelope: retrievalEnvelope, active, vectorPaths, vectorGenerationGcKey: vectorGcKey };
+    } catch (error) {
+      this.inFlightVectorGenerations.delete(vectorGcKey);
+      throw error;
+    }
   }
 
   private async publishRetrievalSnapshotPublication(
     paths: SearchStoreCachePaths,
     publication: RetrievalSnapshotPublication
   ): Promise<void> {
-    await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
-    await new RetrievalFreshnessStore({ paths: publication.vectorPaths }).markFresh({
-      corpusRevision: publication.envelope.corpusSnapshotId,
-      corpusSnapshotId: publication.envelope.corpusSnapshotId,
-      linkGraphId: publication.envelope.linkGraphId,
-      embeddingSetId: publication.envelope.embeddingSetId,
-      retrievalSnapshotId: publication.envelope.retrievalSnapshotId,
-      vectorGenerationId: publication.active.vectorGenerationId
-    });
-    const activeTmp = path.join(paths.tmpDir, `${publication.active.retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
-    writePrivateFileSync(activeTmp, `${JSON.stringify(publication.active)}\n`, "Optsidian retrieval active pointer");
-    fsyncFileSync(activeTmp);
-    await this.renameRetrieval(activeTmp, paths.retrievalActivePointerPath);
-    fsyncDirSync(paths.activeDir);
+    try {
+      await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
+      await new RetrievalFreshnessStore({ paths: publication.vectorPaths }).markFresh({
+        corpusRevision: publication.envelope.corpusSnapshotId,
+        corpusSnapshotId: publication.envelope.corpusSnapshotId,
+        linkGraphId: publication.envelope.linkGraphId,
+        embeddingSetId: publication.envelope.embeddingSetId,
+        retrievalSnapshotId: publication.envelope.retrievalSnapshotId,
+        vectorGenerationId: publication.active.vectorGenerationId
+      });
+      const activeTmp = path.join(paths.tmpDir, `${publication.active.retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
+      writePrivateFileSync(activeTmp, `${JSON.stringify(publication.active)}\n`, "Optsidian retrieval active pointer");
+      fsyncFileSync(activeTmp);
+      await this.renameRetrieval(activeTmp, paths.retrievalActivePointerPath);
+      fsyncDirSync(paths.activeDir);
+      this.markSweepGc(paths);
+    } finally {
+      this.inFlightVectorGenerations.delete(publication.vectorGenerationGcKey);
+    }
   }
 
   private async ensureLoaded(
@@ -1158,6 +1194,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (!roots.segmentHashes.has(file)) fs.rmSync(path.join(paths.segmentsDir, file), { force: true });
     }
     sweepLinkGraphSidecars(paths, roots.linkGraphIds);
+    this.queueVectorGc(paths);
     sweepStaleTmpDir(paths.tmpDir);
   }
 
@@ -1166,6 +1203,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const segmentHashes = new Set<string>();
     const linkGraphIds = new Set<LinkGraphId>();
     const retrievalSnapshotIds = new Set<RetrievalSnapshotId>();
+    const vectorGenerationKeys = new Set<string>();
     const activeRetrieval = this.readRetrievalActivePointer(paths);
     if (activeRetrieval) {
       retrievalSnapshotIds.add(activeRetrieval.retrievalSnapshotId);
@@ -1173,6 +1211,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (retrieval) {
         snapshotIds.add(retrieval.snapshotId);
         linkGraphIds.add(retrieval.linkGraphId);
+        addRetrievalVectorGcRoot(vectorGenerationKeys, paths, this.profileHash, retrieval);
       }
     }
     const active = this.readActivePointer(paths);
@@ -1210,8 +1249,116 @@ export class DaemonSnapshotStore implements SnapshotStore {
       retrievalSnapshotIds.add(retrieval.retrievalSnapshotId);
       snapshotIds.add(retrieval.snapshotId);
       linkGraphIds.add(retrieval.linkGraphId);
+      addRetrievalVectorGcRoot(vectorGenerationKeys, paths, this.profileHash, retrieval);
     }
-    return { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds };
+    const vaultVectorPrefix = vectorGenerationGcPrefix(this.profileHash, paths.vaultStateHash);
+    for (const key of this.inFlightVectorGenerations) {
+      if (key.startsWith(vaultVectorPrefix)) vectorGenerationKeys.add(key);
+    }
+    for (const key of this.pinnedVectorGenerations.keys()) {
+      if (key.startsWith(vaultVectorPrefix)) vectorGenerationKeys.add(key);
+    }
+    return { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds, vectorGenerationKeys };
+  }
+
+  private queueVectorGc(paths: SearchStoreCachePaths): void {
+    const vaultKey = paths.vaultStateHash;
+    if (this.queuedVectorGcVaults.has(vaultKey)) return;
+    this.queuedVectorGcVaults.add(vaultKey);
+    const scheduled = setImmediate(() => {
+      this.queuedVectorGcVaults.delete(vaultKey);
+      const previous = this.runningVectorGcByVault.get(vaultKey) ?? Promise.resolve();
+      const run = previous
+        .catch(() => undefined)
+        .then(() => this.markSweepVectorGc(paths))
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.runningVectorGcByVault.get(vaultKey) === run) this.runningVectorGcByVault.delete(vaultKey);
+        });
+      this.runningVectorGcByVault.set(vaultKey, run);
+    });
+    scheduled.unref?.();
+  }
+
+  private async markSweepVectorGc(paths: SearchStoreCachePaths): Promise<void> {
+    const probe = vectorStoreCachePaths({
+      vaultRoot: paths.vaultRoot,
+      profileHash: this.profileHash,
+      embeddingSetId: "__gc_probe__",
+      env: this.env
+    });
+    const removedStoreIds: string[] = [];
+    for (const embeddingSetDir of await safeReadDirAsync(probe.vaultDir)) {
+      const storeRoot = path.join(probe.vaultDir, embeddingSetDir);
+      if (!(await isDirectoryPathAsync(storeRoot))) continue;
+      const vectorPaths = vectorStoreCachePaths({
+        vaultRoot: paths.vaultRoot,
+        profileHash: this.profileHash,
+        embeddingSetId: embeddingSetDir,
+        env: this.env
+      });
+      for (const generationDir of await safeReadDirAsync(vectorPaths.generationsDir)) {
+        const generationPath = path.join(vectorPaths.generationsDir, generationDir);
+        if (!(await isDirectoryPathAsync(generationPath))) continue;
+        const key = vectorGenerationGcKey({
+          profileHash: this.profileHash,
+          vaultStateHash: paths.vaultStateHash,
+          embeddingSetId: embeddingSetDir,
+          generationId: generationDir
+        });
+        if (this.vectorGenerationIsProtected(paths, key)) continue;
+        await fs.promises.rm(generationPath, { recursive: true, force: true });
+      }
+      let hasGenerations = false;
+      for (const entry of await safeReadDirAsync(vectorPaths.generationsDir)) {
+        if (await isDirectoryPathAsync(path.join(vectorPaths.generationsDir, entry))) {
+          hasGenerations = true;
+          break;
+        }
+      }
+      if (!hasGenerations && !this.vectorStoreHasProtectedGeneration(paths, embeddingSetDir)) {
+        await fs.promises.rm(vectorPaths.rootDir, { recursive: true, force: true });
+        removedStoreIds.push(vectorStoreId(vectorPaths));
+      }
+    }
+    if (removedStoreIds.length > 0) {
+      new VectorCacheCatalog({ env: this.env }).removeStoreIds(removedStoreIds);
+    }
+  }
+
+  private vectorGenerationIsProtected(paths: SearchStoreCachePaths, key: string): boolean {
+    return this.gcRoots(paths).vectorGenerationKeys.has(key);
+  }
+
+  private vectorStoreHasProtectedGeneration(paths: SearchStoreCachePaths, embeddingSetId: string): boolean {
+    return hasProtectedVectorStoreGeneration(
+      this.gcRoots(paths).vectorGenerationKeys,
+      this.profileHash,
+      paths.vaultStateHash,
+      embeddingSetId
+    );
+  }
+
+  private retainPinnedVectorGeneration(pin: PinnedRetrievalSnapshot): void {
+    const key = vectorGenerationGcKey({
+      profileHash: pin.vectorKey.profileHash,
+      vaultStateHash: pin.vectorKey.vaultStateHash,
+      embeddingSetId: pin.vectorKey.embeddingSetId,
+      generationId: pin.vector.generationId
+    });
+    this.pinnedVectorGenerations.set(key, (this.pinnedVectorGenerations.get(key) ?? 0) + 1);
+  }
+
+  private releasePinnedVectorGeneration(pin: PinnedRetrievalSnapshot): void {
+    const key = vectorGenerationGcKey({
+      profileHash: pin.vectorKey.profileHash,
+      vaultStateHash: pin.vectorKey.vaultStateHash,
+      embeddingSetId: pin.vectorKey.embeddingSetId,
+      generationId: pin.vector.generationId
+    });
+    const next = (this.pinnedVectorGenerations.get(key) ?? 1) - 1;
+    if (next > 0) this.pinnedVectorGenerations.set(key, next);
+    else this.pinnedVectorGenerations.delete(key);
   }
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
@@ -1727,6 +1874,82 @@ function loadedKey(vaultKey: string, snapshotId: string): string {
   return `${vaultKey}:${snapshotId}`;
 }
 
+function addRetrievalVectorGcRoot(
+  roots: Set<string>,
+  paths: SearchStoreCachePaths,
+  profileHash: string,
+  retrieval: RetrievalSnapshotEnvelope
+): void {
+  const vectorKey = retrieval.vector.key;
+  roots.add(vectorGenerationGcKey({
+    profileHash: vectorKey?.profileHash ?? profileHash,
+    vaultStateHash: vectorKey?.vaultStateHash ?? paths.vaultStateHash,
+    embeddingSetId: vectorKey?.embeddingSetId ?? retrieval.vector.embeddingSetId,
+    generationId: retrieval.vector.generationId
+  }));
+}
+
+function vectorGenerationGcKey(input: {
+  profileHash: string;
+  vaultStateHash: string;
+  embeddingSetId: string;
+  generationId: string;
+}): string {
+  return [
+    safeStoreFileName(input.profileHash),
+    safeStoreFileName(input.vaultStateHash),
+    safeStoreFileName(input.embeddingSetId),
+    safeStoreFileName(input.generationId)
+  ].join(":");
+}
+
+function vectorGenerationGcKeyForVectorKey(key: VectorStoreKey, generationId: string): string {
+  return vectorGenerationGcKey({
+    profileHash: key.profileHash,
+    vaultStateHash: key.vaultStateHash,
+    embeddingSetId: key.embeddingSetId,
+    generationId
+  });
+}
+
+function vectorGenerationGcPrefix(profileHash: string, vaultStateHash: string): string {
+  return [
+    safeStoreFileName(profileHash),
+    safeStoreFileName(vaultStateHash),
+    ""
+  ].join(":");
+}
+
+function vectorStoreGenerationGcPrefix(profileHash: string, vaultStateHash: string, embeddingSetId: string): string {
+  return [
+    safeStoreFileName(profileHash),
+    safeStoreFileName(vaultStateHash),
+    safeStoreFileName(embeddingSetId),
+    ""
+  ].join(":");
+}
+
+function hasProtectedVectorStoreGeneration(
+  roots: ReadonlySet<string>,
+  profileHash: string,
+  vaultStateHash: string,
+  embeddingSetId: string
+): boolean {
+  const prefix = vectorStoreGenerationGcPrefix(profileHash, vaultStateHash, embeddingSetId);
+  for (const key of roots) {
+    if (key.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+function isPinnedRetrievalSnapshot(pin: PinnedSnapshot): pin is PinnedRetrievalSnapshot {
+  return "retrievalSnapshotId" in pin &&
+    "vector" in pin &&
+    "vectorKey" in pin &&
+    isRecord((pin as { vector?: unknown }).vector) &&
+    isRecord((pin as { vectorKey?: unknown }).vectorKey);
+}
+
 function protectedStoreIdsForPrune(
   loaded: ReadonlyMap<string, LoadedSnapshot>,
   lifecycleStoreRefs: ReadonlyMap<string, number>,
@@ -1758,6 +1981,22 @@ function safeReadDir(dirPath: string): string[] {
     return fs.readdirSync(dirPath).sort(compareCodePoint);
   } catch {
     return [];
+  }
+}
+
+async function safeReadDirAsync(dirPath: string): Promise<string[]> {
+  try {
+    return (await fs.promises.readdir(dirPath)).sort(compareCodePoint);
+  } catch {
+    return [];
+  }
+}
+
+async function isDirectoryPathAsync(filePath: string): Promise<boolean> {
+  try {
+    return (await fs.promises.stat(filePath)).isDirectory();
+  } catch {
+    return false;
   }
 }
 
