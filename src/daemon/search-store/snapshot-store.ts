@@ -176,6 +176,13 @@ type RetrievalSnapshotPublication = {
   vectorPaths: VectorStoreCachePaths;
 };
 
+type SnapshotContentDelta = {
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  changedCount: number;
+};
+
 type LoadedSnapshot = {
   vaultRoot: string;
   vaultKey: string;
@@ -691,9 +698,18 @@ export class DaemonSnapshotStore implements SnapshotStore {
   ): Promise<{ snapshotId: string; rebuilt: boolean }> {
     await this.recoverVault(paths);
     const active = this.readActivePointer(paths);
-    if (active && this.snapshotIsFresh(paths, active.snapshotId) && this.snapshotIdentityMatches(paths, active.snapshotId)) {
-      try {
-        await this.ensureLoaded(paths, active.snapshotId);
+    if (active && this.snapshotIdentityMatches(paths, active.snapshotId)) {
+      const delta = this.snapshotContentDelta(paths, active.snapshotId);
+      if (delta?.changedCount === 0) {
+        try {
+          await this.ensureLoaded(paths, active.snapshotId);
+        } catch {
+          this.loaded.delete(loadedKey(paths.vaultStateHash, active.snapshotId));
+          return {
+            snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true }),
+            rebuilt: true
+          };
+        }
         this.activeByVault.set(paths.vaultStateHash, active.snapshotId);
         const retrievalPrepared = await this.prepareRetrievalSnapshotForSnapshot(paths, active.snapshotId, context);
         if (!retrievalPrepared) {
@@ -705,9 +721,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
           });
         }
         return { snapshotId: active.snapshotId, rebuilt: false };
-      } catch {
-        this.loaded.delete(loadedKey(paths.vaultStateHash, active.snapshotId));
       }
+      if (delta) reportRefreshDelta(context, delta);
     }
     return {
       snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true }),
@@ -1263,14 +1278,35 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private snapshotIsFresh(paths: SearchStoreCachePaths, snapshotId: string): boolean {
+    const delta = this.snapshotContentDelta(paths, snapshotId);
+    return delta !== undefined && delta.changedCount === 0;
+  }
+
+  private snapshotContentDelta(paths: SearchStoreCachePaths, snapshotId: string): SnapshotContentDelta | undefined {
     const envelope = this.readSnapshotEnvelope(paths, snapshotId);
-    if (!envelope) return false;
+    if (!envelope) return undefined;
     const current = currentContentHashes(paths.vaultRoot);
-    if (current.size !== envelope.documents.length) return false;
-    for (const document of envelope.documents) {
-      if (current.get(document.path) !== document.contentHash) return false;
+    const previous = new Map(envelope.documents.map((document) => [document.path, document.contentHash]));
+    const added: string[] = [];
+    const modified: string[] = [];
+    const deleted: string[] = [];
+    for (const [rel, hash] of current) {
+      const before = previous.get(rel);
+      if (before === undefined) added.push(rel);
+      else if (before !== hash) modified.push(rel);
     }
-    return true;
+    for (const document of envelope.documents) {
+      if (!current.has(document.path)) deleted.push(document.path);
+    }
+    added.sort(compareCodePoint);
+    modified.sort(compareCodePoint);
+    deleted.sort(compareCodePoint);
+    return {
+      added,
+      modified,
+      deleted,
+      changedCount: added.length + modified.length + deleted.length
+    };
   }
 
   private snapshotIdentityMatches(paths: SearchStoreCachePaths, snapshotId: string): boolean {
@@ -1757,6 +1793,33 @@ function currentContentHashes(vaultRoot: string): Map<string, string> {
     hashes.set(rel, sha256(fs.readFileSync(abs)));
   }
   return hashes;
+}
+
+function reportRefreshDelta(context: SnapshotRequestContext, delta: SnapshotContentDelta): void {
+  context.progress?.({
+    phase: "scanning",
+    total: delta.changedCount,
+    completed: 0,
+    current: firstRefreshDeltaPath(delta),
+    message: refreshDeltaMessage(delta)
+  });
+}
+
+function firstRefreshDeltaPath(delta: SnapshotContentDelta): string | undefined {
+  return delta.added[0] ?? delta.modified[0] ?? delta.deleted[0];
+}
+
+function refreshDeltaMessage(delta: SnapshotContentDelta): string {
+  const parts = [
+    countLabel(delta.added.length, "added"),
+    countLabel(delta.modified.length, "modified"),
+    countLabel(delta.deleted.length, "deleted")
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : "already fresh";
+}
+
+function countLabel(count: number, label: string): string | undefined {
+  return count > 0 ? `${count} ${label}` : undefined;
 }
 
 function positiveCap(value: number): number {

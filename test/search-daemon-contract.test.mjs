@@ -3345,8 +3345,17 @@ test("refresh after mutation makes new files visible and removed files disappear
   assert.deepEqual(await searchPaths(), []);
 
   writeVaultFile(vault, "New.md", "# New\n\nmutationtarget appears after refresh\n");
-  const refreshed = await store.refresh(vault);
+  const progress = [];
+  const refreshed = await store.refresh(vault, {
+    progress: (update) => progress.push(update)
+  });
   assert.equal(refreshed.rebuilt, true);
+  assert.ok(progress.some((update) =>
+    update.phase === "scanning" &&
+    update.total === 1 &&
+    update.completed === 0 &&
+    update.message === "1 added"
+  ));
   assert.deepEqual(await searchPaths(), ["New.md"]);
 
   fs.rmSync(path.join(vault, "New.md"));
@@ -3456,6 +3465,56 @@ test("refresh repairs missing retrieval without rebuilding a fresh corpus snapsh
   assert.equal(retrievalBuilds, 2);
   assert.ok(fs.existsSync(paths.retrievalActivePointerPath));
   assert.ok(progress.some((update) => update.phase === "vector-indexing"));
+});
+
+test("refresh surfaces retrieval repair failures without rebuilding a fresh corpus snapshot", async () => {
+  const { buildCanonicalSearchSnapshot } = await futureImport("src/daemon/search-store/builder.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const { createDaemonSnapshotStore } = await futureImport("src/daemon/search-store/snapshot-store.ts");
+  const cacheRoot = tempRoot();
+  const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+  const vault = tempRoot();
+  writeVaultFile(vault, "Stable.md", "# Stable\n\nordinary content\n");
+  const analyzer = testAnalyzer();
+  const embedding = createDeterministicEmbeddingSetBuilder();
+  let corpusBuilds = 0;
+  let retrievalBuilds = 0;
+  let failRetrieval = false;
+  const store = createDaemonSnapshotStore(snapshotStoreOptions({
+    env,
+    analyzerIdentity: analyzer.identity,
+    partitionBits: 1,
+    snapshotBuilder: async (input) => {
+      corpusBuilds += 1;
+      return buildCanonicalSearchSnapshot({
+        vaultRoot: input.vaultRoot,
+        analyzer,
+        partitionBits: input.partitionBits,
+        searchSettings: input.searchSettings,
+        progress: input.progress
+      });
+    },
+    embeddingSetBuilder: {
+      providerIdentity: embedding.providerIdentity,
+      build: async (input) => {
+        retrievalBuilds += 1;
+        if (failRetrieval) throw new Error("embedding unavailable");
+        return embedding.build(input);
+      }
+    }
+  }));
+
+  await store.rebuild(vault);
+  const paths = searchStoreCachePaths(vault, env);
+  fs.rmSync(paths.retrievalActivePointerPath, { force: true });
+  failRetrieval = true;
+
+  await assert.rejects(
+    () => store.refresh(vault),
+    /embedding unavailable/
+  );
+  assert.equal(corpusBuilds, 1);
+  assert.equal(retrievalBuilds, 2);
 });
 
 test("query-analysis cache key is deterministic and does not become result identity", async () => {
