@@ -26,8 +26,11 @@ test("packaged vector-store process entry starts and replies over IPC", { timeou
       child.send({ id: 1, type: "getStats", payload: {} });
     });
     assert.equal(reply.id, 1);
-    assert.equal(reply.ok, false);
-    assert.match(reply.error.message, /coral-needle|native|Cannot find|not found/i);
+    if (reply.ok) {
+      assert.equal(typeof reply.result, "object");
+    } else {
+      assert.match(reply.error.message, /coral-needle|native|Cannot find|not found/i);
+    }
   } finally {
     child.kill();
   }

@@ -1337,10 +1337,10 @@ test("search ranks notes and renders CLI output", async () => {
 
   // AC9 moved index build/publish to the control path; CLI search is Retrieve
   // sugar over the read-only query path and must consume an already published snapshot.
-  const warm = run(["index", "warm", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  const warm = run(["index", "warm", `vault-path=${vault}`, "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(warm.status, 0, warm.stderr);
 
-  let result = run(["search", "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  let result = run(["search", `vault-path=${vault}`, "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
@@ -1374,7 +1374,7 @@ test("search ranks notes and renders CLI output", async () => {
   assert.equal(payload.matches[0].debug.snapshotId, payload.snapshotId);
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
-  result = run(["search", "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  result = run(["search", `vault-path=${vault}`, "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /1\. Projects\/Alpha\.md/);
   assert.match(result.stdout, /title: Alpha/);

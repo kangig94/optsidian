@@ -112,6 +112,38 @@ process.exit(0);
   fs.chmodSync(file, 0o755);
 }
 
+function writeCredentialProbeBin(dir, logFile) {
+  const binDir = path.join(dir, "credential-probe-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  for (const tool of ["gh", "git"]) {
+    const file = path.join(binDir, tool);
+    const script = `#!${process.execPath}
+const fs = require("node:fs");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({
+    tool: ${JSON.stringify(tool)},
+    args: process.argv.slice(2),
+    input,
+    env: {
+      GH_PROMPT_DISABLED: process.env.GH_PROMPT_DISABLED || "",
+      GCM_INTERACTIVE: process.env.GCM_INTERACTIVE || "",
+      GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT || ""
+    }
+  }) + "\\n");
+  process.exit(1);
+});
+`;
+    fs.writeFileSync(file, script);
+    fs.chmodSync(file, 0o755);
+  }
+  return binDir;
+}
+
 function writeFakeWc(binDir, bytes) {
   const file = path.join(binDir, "wc");
   const script = `#!${process.execPath}
@@ -708,6 +740,36 @@ test("network requests reject direct streamed responses over the byte cap", asyn
       () => requestBuffer(server.url, { ...NO_PROXY_ENV }, { maxBytes: 3 }),
       /exceeded 3B limit \(4B\)/
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("network auth token lookup disables interactive credential prompts", async () => {
+  const { requestBuffer } = await import(path.resolve("src/net/github.ts"));
+  const server = await startBodyServer({ body: Buffer.from("ok") });
+  const dir = tempRoot();
+  const credentialLog = path.join(dir, "credentials.log");
+  const binDir = writeCredentialProbeBin(dir, credentialLog);
+
+  try {
+    const response = await requestBuffer(server.url, {
+      ...NO_PROXY_ENV,
+      PATH: binDir
+    });
+    assert.equal(response.body.toString("utf8"), "ok");
+
+    const calls = fs.readFileSync(credentialLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const ghCall = calls.find((call) => call.tool === "gh");
+    const gitCall = calls.find((call) => call.tool === "git");
+    assert.deepEqual(ghCall.args, ["auth", "token", "--hostname", new URL(server.url).host]);
+    assert.deepEqual(gitCall.args, ["credential", "fill"]);
+    assert.match(gitCall.input, new RegExp(`host=${new URL(server.url).host}`));
+    for (const call of calls) {
+      assert.equal(call.env.GH_PROMPT_DISABLED, "1");
+      assert.equal(call.env.GCM_INTERACTIVE, "Never");
+      assert.equal(call.env.GIT_TERMINAL_PROMPT, "0");
+    }
   } finally {
     await server.close();
   }

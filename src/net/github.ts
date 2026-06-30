@@ -531,14 +531,15 @@ function resolveGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): str
 }
 
 function readLocalGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | null {
+  const credentialEnv = nonInteractiveCredentialEnv(env);
   const ghArgs = credentialHost === "github.com" ? ["auth", "token"] : ["auth", "token", "--hostname", credentialHost];
-  const gh = spawnSync("gh", ghArgs, { env, encoding: "utf8" });
+  const gh = spawnSync("gh", ghArgs, { env: credentialEnv, encoding: "utf8" });
   if (!gh.error && (gh.status ?? 1) === 0) {
     const token = (gh.stdout ?? "").trim();
     if (token) return token;
   }
   const cred = spawnSync("git", ["credential", "fill"], {
-    env,
+    env: credentialEnv,
     encoding: "utf8",
     input: `protocol=https\nhost=${credentialHost}\n\n`
   });
@@ -548,6 +549,15 @@ function readLocalGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): s
     if (token) return token;
   }
   return null;
+}
+
+function nonInteractiveCredentialEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    GH_PROMPT_DISABLED: "1",
+    GCM_INTERACTIVE: "Never",
+    GIT_TERMINAL_PROMPT: "0"
+  };
 }
 
 function credentialHostForUrl(url: URL): string {
