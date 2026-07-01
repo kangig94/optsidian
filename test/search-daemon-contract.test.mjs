@@ -9,7 +9,6 @@ import { unpack } from "msgpackr";
 import { createDeterministicEmbeddingSetBuilder, DeterministicHashProvider } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
-process.env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE = "memory";
 const AC17_PUBLICATION_STEPS = [
   "tmpSegmentWrite",
   "fsyncSegmentFile",
@@ -92,6 +91,16 @@ async function waitFor(predicate, timeoutMs = 1000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(predicate(), true);
+}
+
+function pidIsLive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function futureImport(relativePath) {
@@ -2907,6 +2916,107 @@ test("daemon Status without nonce returns public health only", async () => {
     assert.equal("searchStore" in response.result, false);
     assert.equal("profiles" in response.result, false);
     assert.equal("vaults" in response.result, false);
+  } finally {
+    await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
+  }
+});
+
+test("daemon idle shutdown uses configured timeout and next client call auto-boots", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const runtimeDir = tempRoot();
+  const env = {
+    ...process.env,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "50"
+  };
+  const client = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    readyTimeoutMs: 30000,
+    env
+  });
+
+  const first = await client.status({ deadlineMs: 5000 });
+  assert.equal(first.ready, true);
+  const firstPid = first.owner.pid;
+  await waitFor(() => !pidIsLive(firstPid), 5000);
+
+  const second = await client.status({ deadlineMs: 5000 });
+  try {
+    assert.equal(second.ready, true);
+    assert.equal(pidIsLive(second.owner.pid), true);
+  } finally {
+    await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
+  }
+});
+
+test("daemon boot recovery resets building retrieval freshness and sweeps staging", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport("src/daemon/runtime-profile.ts");
+  const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
+  const { RetrievalFreshnessStore, vectorStoreCachePaths } = await futureImport("src/daemon/vector-store/index.ts");
+  const runtimeDir = tempRoot();
+  const cacheRoot = tempRoot("optsidian-boot-recovery-cache-");
+  const vault = tempRoot("optsidian-boot-recovery-vault-");
+  fs.writeFileSync(path.join(vault, "Recovery.md"), "recovery\n");
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: cacheRoot,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "1000"
+  };
+  const profileHash = searchRuntimeProfileHash(effectiveSearchRuntimeProfile(repoRoot, env));
+  const vectorPaths = vectorStoreCachePaths({
+    vaultRoot: vault,
+    profileHash,
+    embeddingSetId: "boot-embedding",
+    env
+  });
+  const searchPaths = searchStoreCachePaths(vault, env);
+  const freshness = new RetrievalFreshnessStore({ paths: vectorPaths });
+  await freshness.write({
+    schemaVersion: 1,
+    state: "building",
+    corpusRevision: "rev-boot",
+    published: {
+      corpusRevision: "rev-prev",
+      embeddingSetId: vectorPaths.key.embeddingSetId,
+      vectorGenerationId: "gen-prev"
+    },
+    updatedAt: new Date().toISOString()
+  });
+  fs.mkdirSync(vectorPaths.stagingDir, { recursive: true });
+  fs.writeFileSync(path.join(vectorPaths.stagingDir, "orphan.vector"), "x");
+  fs.mkdirSync(searchPaths.tmpDir, { recursive: true });
+  fs.writeFileSync(path.join(searchPaths.tmpDir, "orphan.lexical"), "x");
+  fs.writeFileSync(path.join(searchPaths.tmpDir, "orphan.link-graph"), "x");
+
+  const client = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    readyTimeoutMs: 30000,
+    env
+  });
+  try {
+    const status = await client.status({ deadlineMs: 5000 });
+    assert.equal(status.ready, true);
+    await waitFor(() => {
+      const current = new RetrievalFreshnessStore({ paths: vectorPaths }).read();
+      return current.state === "dirty" &&
+        fs.existsSync(vectorPaths.stagingDir) &&
+        fs.readdirSync(vectorPaths.stagingDir).length === 0 &&
+        fs.existsSync(searchPaths.tmpDir) &&
+        fs.readdirSync(searchPaths.tmpDir).length === 0;
+    }, 5000);
+    const recovered = new RetrievalFreshnessStore({ paths: vectorPaths }).read();
+    assert.equal(recovered.state, "dirty");
+    assert.equal(recovered.corpusRevision, "rev-boot");
   } finally {
     await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
   }

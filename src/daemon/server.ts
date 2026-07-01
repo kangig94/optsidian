@@ -33,6 +33,7 @@ import {
 import { createRequestScheduler } from "./scheduler.js";
 import { ProfileManager, type ProfileRuntime } from "./profile-manager.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
+import { recoverRetrievalStartupState } from "./vector-store/freshness.js";
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -113,6 +114,7 @@ class SearchDaemon {
   private readonly queryServer: CapabilityDispatchServer;
   private readonly controlServer: CapabilityDispatchServer;
   private readonly idleMs: number;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly activeCancellationIds = new Map<string, string>();
   private idleTimer: NodeJS.Timeout | undefined;
 
@@ -122,7 +124,8 @@ class SearchDaemon {
     queryRpcServer: RpcServer,
     controlRpcServer: RpcServer,
     profiles: ProfileManager,
-    idleMs: number
+    idleMs: number,
+    env: NodeJS.ProcessEnv
   ) {
     this.registry = registry;
     this.owner = owner;
@@ -130,6 +133,7 @@ class SearchDaemon {
     this.controlRpcServer = controlRpcServer;
     this.profiles = profiles;
     this.idleMs = idleMs;
+    this.env = env;
     this.queryServer = createQueryServer(queryRegistry(), this);
     this.controlServer = createControlServer(controlRegistry(), this);
     this.shutdownPromise = new Promise((resolve) => {
@@ -186,7 +190,7 @@ class SearchDaemon {
           }
         }
       });
-      daemon = new SearchDaemon(registry, owner, queryRpcServer, controlRpcServer, profiles, daemonIdleMs(options.env, settings));
+      daemon = new SearchDaemon(registry, owner, queryRpcServer, controlRpcServer, profiles, daemonIdleMs(options.env, settings), options.env);
       daemon.initialize();
       return daemon;
     } catch (error) {
@@ -221,6 +225,13 @@ class SearchDaemon {
 
   private initialize(): void {
     this.phase = "ready";
+    this.armIdleTimer();
+    const recovery = setTimeout(() => {
+      void recoverRetrievalStartupState({ env: this.env }).catch((error: unknown) => {
+        logSearchDaemonProcessError("retrieval startup recovery failed", error);
+      });
+    }, 0);
+    recovery.unref();
   }
 
   private async handleQueryRequest(request: RpcRequestLike): Promise<unknown> {
@@ -465,6 +476,14 @@ class SearchDaemon {
 
   private armIdleTimer(): void {
     this.clearIdleTimer();
+    if (this.phase !== "ready") return;
+    if (this.metrics.snapshot().activeRequests > 0) return;
+    this.idleTimer = setTimeout(() => {
+      void this.shutdown().catch((error: unknown) => {
+        logSearchDaemonProcessError("idle shutdown failed", error);
+      });
+    }, this.idleMs);
+    this.idleTimer.unref();
   }
 
   private clearIdleTimer(): void {
@@ -564,7 +583,7 @@ function snapshotIdFromResult(result: unknown): string | undefined {
 }
 
 function daemonIdleMs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
-  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_IDLE_MS, settings.search?.daemonIdleMs) ?? 5 * 60 * 1000;
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_IDLE_MS, settings.search?.daemonIdleMs) ?? 6 * 60 * 60 * 1000;
 }
 
 function settingNumber(raw: string | undefined, fallback: number | undefined): number | undefined {

@@ -140,7 +140,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.queryCacheSize=<n>", description: "In-memory query-analysis cache entry cap; default 64, 0 disables" },
       { name: "search.memoryBudgetCount=<n>", description: "Loaded snapshot count cap" },
       { name: "search.memoryBudgetBytes=<n>", description: "Loaded snapshot byte cap" },
-      { name: "search.daemonIdleMs=<ms>", description: "Compatibility profile value; the daemon remains resident, while model sessions unload on their own idle lifecycle" },
+      { name: "search.daemonIdleMs=<ms>", description: "Daemon idle shutdown timeout; defaults to 6 hours, while model sessions keep their own idle lifecycle" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [

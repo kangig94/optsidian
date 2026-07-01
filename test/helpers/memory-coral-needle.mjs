@@ -1,24 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import type {
-  CoralChunkRecord,
-  CoralEmbeddingSpec,
-  CoralNeedleInstance,
-  CoralNeedleInstanceFactory,
-  CoralSearchResult,
-  CoralStoreStats,
-  VectorStoreKey,
-  VectorStoreRole
-} from "./types.js";
 
-type PersistedMemoryStore = {
-  schemaVersion: 1;
-  spec: CoralEmbeddingSpec | null;
-  engineName: string;
-  chunks: CoralChunkRecord[];
-};
-
-export function createMemoryCoralNeedleInstanceFactory(): CoralNeedleInstanceFactory {
+export function createMemoryCoralNeedleInstanceFactory() {
   return {
     async create(input) {
       return new MemoryCoralNeedleInstance(input);
@@ -26,25 +9,18 @@ export function createMemoryCoralNeedleInstanceFactory(): CoralNeedleInstanceFac
   };
 }
 
-class MemoryCoralNeedleInstance implements CoralNeedleInstance {
-  readonly instanceId: string;
-  readonly role: VectorStoreRole;
-  readonly key: VectorStoreKey;
-  readonly generationId: string;
-  readonly dbPath: string;
-
-  private store: PersistedMemoryStore = emptyStore();
-  private closed = false;
-
-  constructor(input: { role: VectorStoreRole; key: VectorStoreKey; generationId: string; dbPath: string }) {
+class MemoryCoralNeedleInstance {
+  constructor(input) {
     this.role = input.role;
     this.key = input.key;
     this.generationId = input.generationId;
     this.dbPath = input.dbPath;
     this.instanceId = `memory:${input.role}:${input.key.profileHash}:${input.key.vaultStateHash}:${input.key.embeddingSetId}:${input.generationId}`;
+    this.store = emptyStore();
+    this.closed = false;
   }
 
-  initStore(dbPath: string): void {
+  initStore(dbPath) {
     this.assertOpen();
     if (dbPath !== this.dbPath) throw new Error(`memory vector instance dbPath mismatch: ${dbPath}`);
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true, mode: 0o700 });
@@ -52,13 +28,13 @@ class MemoryCoralNeedleInstance implements CoralNeedleInstance {
     this.persist();
   }
 
-  setActiveSpec(spec: CoralEmbeddingSpec): void {
+  setActiveSpec(spec) {
     this.assertOpen();
     this.store = { ...this.store, spec };
     this.persist();
   }
 
-  upsertChunks(chunks: readonly CoralChunkRecord[]): void {
+  upsertChunks(chunks) {
     this.assertOpen();
     const byId = new Map(this.store.chunks.map((chunk) => [chunk.id, chunk]));
     for (const chunk of chunks) byId.set(chunk.id, normalizeChunk(chunk));
@@ -66,13 +42,13 @@ class MemoryCoralNeedleInstance implements CoralNeedleInstance {
     this.persist();
   }
 
-  buildIndex(engineName: "auto" | string = "auto"): void {
+  buildIndex(engineName = "auto") {
     this.assertOpen();
     this.store = { ...this.store, engineName };
     this.persist();
   }
 
-  searchVector(queryVector: readonly number[] | Float32Array, candidateK: number): CoralSearchResult[] {
+  searchVector(queryVector, candidateK) {
     this.assertOpen();
     const limit = Math.max(0, Math.trunc(candidateK));
     if (limit <= 0) return [];
@@ -87,13 +63,13 @@ class MemoryCoralNeedleInstance implements CoralNeedleInstance {
       .slice(0, limit);
   }
 
-  close(): void {
+  close() {
     if (this.closed) return;
     this.persist();
     this.closed = true;
   }
 
-  getStats(): CoralStoreStats {
+  getStats() {
     return {
       chunkCount: this.store.chunks.length,
       specId: this.store.spec?.specId ?? null,
@@ -102,17 +78,17 @@ class MemoryCoralNeedleInstance implements CoralNeedleInstance {
     };
   }
 
-  private persist(): void {
+  persist() {
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(this.dbPath, `${JSON.stringify(this.store)}\n`, { mode: 0o600 });
   }
 
-  private assertOpen(): void {
+  assertOpen() {
     if (this.closed) throw Object.assign(new Error("memory vector instance is closed"), { code: "INTERNAL" });
   }
 }
 
-function emptyStore(): PersistedMemoryStore {
+function emptyStore() {
   return {
     schemaVersion: 1,
     spec: null,
@@ -121,29 +97,29 @@ function emptyStore(): PersistedMemoryStore {
   };
 }
 
-function readStore(dbPath: string): PersistedMemoryStore {
+function readStore(dbPath) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(dbPath, "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(dbPath, "utf8"));
     if (!isRecord(parsed) || parsed.schemaVersion !== 1 || !Array.isArray(parsed.chunks)) return emptyStore();
     return {
       schemaVersion: 1,
-      spec: isRecord(parsed.spec) ? parsed.spec as CoralEmbeddingSpec : null,
+      spec: isRecord(parsed.spec) ? parsed.spec : null,
       engineName: typeof parsed.engineName === "string" ? parsed.engineName : "auto",
-      chunks: parsed.chunks.map((chunk) => normalizeChunk(chunk as CoralChunkRecord)).sort(compareChunks)
+      chunks: parsed.chunks.map((chunk) => normalizeChunk(chunk)).sort(compareChunks)
     };
   } catch {
     return emptyStore();
   }
 }
 
-function normalizeChunk(chunk: CoralChunkRecord): CoralChunkRecord {
+function normalizeChunk(chunk) {
   return {
     ...chunk,
     vector: Array.from(chunk.vector)
   };
 }
 
-function cosine(left: readonly number[], right: readonly number[]): number {
+function cosine(left, right) {
   if (left.length !== right.length || left.length === 0) return 0;
   let dot = 0;
   let leftNorm = 0;
@@ -159,14 +135,14 @@ function cosine(left: readonly number[], right: readonly number[]): number {
   return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }
 
-function finite(value: number): number {
+function finite(value) {
   return Number.isFinite(value) ? value : 0;
 }
 
-function compareChunks(left: CoralChunkRecord, right: CoralChunkRecord): number {
+function compareChunks(left, right) {
   return left.entryId.localeCompare(right.entryId) || left.id.localeCompare(right.id);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

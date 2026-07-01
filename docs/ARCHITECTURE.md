@@ -97,6 +97,9 @@ resident: it does not idle-exit after request release. Embedding model sessions 
 unload lifecycle inside workers, so zero-footprint-at-rest applies to loaded model sessions rather
 than to the daemon process.
 
+For the full runtime lifecycle — daemon birth/death, model session load/unload, per-mode request
+flow, and cache/index build/publish/GC — see [`lifecycle.md`](lifecycle.md).
+
 | Process | Hidden verb | Module | Transport & lifecycle |
 |---------|-------------|--------|-----------------------|
 | Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; separate query/control Unix domain sockets under the runtime search-daemon directory. Query RPC exposes `Status`, `Search`, and `Retrieve`; CLI `search` uses `Search` for default lexical search and switches to `Retrieve` for vector/hybrid retrieval, while `explain` uses `Retrieve`. Control RPC exposes `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, and `Shutdown`. The daemon owns snapshot MVCC, retrieval generations, worker pools, query caches, and loaded vault state. |

@@ -111,7 +111,7 @@ export function effectiveSearchRuntimeProfile(
       ...optionalNumber("workerRssGuardStrikes", positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES"))
     },
     daemon: {
-      idleMs: nonNegativeIntEnv(env, "OPTSIDIAN_SEARCH_DAEMON_IDLE_MS") ?? settings.search?.daemonIdleMs ?? 5 * 60 * 1000
+      idleMs: nonNegativeIntEnv(env, "OPTSIDIAN_SEARCH_DAEMON_IDLE_MS") ?? settings.search?.daemonIdleMs ?? 6 * 60 * 60 * 1000
     }
   });
 }

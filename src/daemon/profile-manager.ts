@@ -2,8 +2,7 @@ import { createDaemonPools, type DaemonPools } from "./pools.js";
 import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from "./protocol.js";
 import { createDaemonSnapshotStore, createWorkerEmbeddingSetBuilder, DaemonSearchStoreService } from "./search-store/index.js";
 import { SearchCacheCatalog } from "./search-store/cache-catalog.js";
-import { createMemoryCoralNeedleInstanceFactory, VectorGenerationPool } from "./vector-store/index.js";
-import type { CoralNeedleInstanceFactory } from "./vector-store/types.js";
+import { VectorGenerationPool } from "./vector-store/index.js";
 import type { SearchIndexPruneResult } from "../core/types.js";
 import {
   DeterministicHashProvider,
@@ -74,7 +73,7 @@ export class ProfileRuntime {
     const env = envForSearchRuntimeProfile(normalized, baseEnv);
     const settings = settingsForSearchRuntimeProfile(normalized);
     const pools = await createDaemonPools(env, settings);
-    const vectorPool = new VectorGenerationPool({ factory: vectorInstanceFactory(env) });
+    const vectorPool = new VectorGenerationPool();
     const embeddingProvider = normalized.embedding.provider === "deterministic-hash"
       ? new DeterministicHashProvider()
       : createLocalOnnxProviderFromConfig(settings, env);
@@ -143,14 +142,6 @@ export class ProfileRuntime {
       vaults: this.vaults.list()
     };
   }
-}
-
-function vectorInstanceFactory(env: NodeJS.ProcessEnv): CoralNeedleInstanceFactory | undefined {
-  const mode = env.OPTSIDIAN_SEARCH_VECTOR_INSTANCE?.trim().toLowerCase();
-  if (mode === "memory" || env.OPTSIDIAN_TEST_FAKE_CORAL_NEEDLE === "1") {
-    return createMemoryCoralNeedleInstanceFactory();
-  }
-  return undefined;
 }
 
 export class ProfileManager {

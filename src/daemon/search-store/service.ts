@@ -604,7 +604,7 @@ export class DaemonSearchStoreService {
       if (!source) throw Object.assign(new Error(`source note is not embedded: ${sourcePath}`), { code: "SEARCH_DAEMON_NOT_READY" });
       return {
         queryText: source.text,
-        queryVector: await this.encodeRetrieveQueryVector(source.text, payload, pin, context, warnings),
+        queryVector: storedVectorForRecord(source, sourcePath),
         sourceDocumentId: source.documentId,
         sourcePath: source.path,
         excludeDocumentIds: [source.documentId],
@@ -613,15 +613,37 @@ export class DaemonSearchStoreService {
     }
     if (payload.origin === "pair") {
       const leftPath = payload.left?.path ?? payload.sourcePath ?? payload.path;
+      const leftText = payload.left?.text ?? payload.text ?? payload.query;
       const rightPath = payload.right?.path;
-      if (!leftPath || !rightPath) throw Object.assign(new Error("origin=pair requires left.path and right.path"), { code: "BAD_REQUEST" });
+      const rightText = payload.right?.text;
+      if (rightPath) {
+        if (!leftPath && !leftText) {
+          throw Object.assign(new Error("origin=pair requires left.path or left.text when right.path is provided"), { code: "BAD_REQUEST" });
+        }
+        const left = leftPath ? recordByPath(records, leftPath) : undefined;
+        if (leftPath && !left) throw Object.assign(new Error(`left note is not embedded: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+        const queryText = left?.text ?? leftText?.trim() ?? "";
+        if (!queryText) throw Object.assign(new Error("origin=pair requires non-empty left.text when left.path is absent"), { code: "BAD_REQUEST" });
+        return {
+          queryText,
+          queryVector: left
+            ? storedVectorForRecord(left, left.path ?? leftPath ?? "left note")
+            : await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings),
+          sourceDocumentId: left?.documentId,
+          sourcePath: left?.path,
+          warnings
+        };
+      }
+      if (!leftPath || rightText === undefined) {
+        throw Object.assign(new Error("origin=pair requires one side to be a note path and the other side to be a note path or text"), { code: "BAD_REQUEST" });
+      }
       const left = recordByPath(records, leftPath);
       if (!left) throw Object.assign(new Error(`left note is not embedded: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+      const queryText = rightText.trim();
+      if (!queryText) throw Object.assign(new Error("origin=pair requires non-empty right.text when right.path is absent"), { code: "BAD_REQUEST" });
       return {
-        queryText: left.text,
-        queryVector: await this.encodeRetrieveQueryVector(left.text, payload, pin, context, warnings),
-        sourceDocumentId: left.documentId,
-        sourcePath: left.path,
+        queryText,
+        queryVector: await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings),
         warnings
       };
     }
@@ -638,7 +660,9 @@ export class DaemonSearchStoreService {
 
 function retrieveSearchPayload(payload: RetrieveRequestPayload, queryText: string): SearchRequestPayload {
   const limit = payload.limit ?? payload.topK;
-  const pairRightPath = payload.origin === "pair" ? payload.right?.path : undefined;
+  const pairRightPath = payload.origin === "pair"
+    ? payload.right?.path ?? (payload.right?.text !== undefined ? payload.left?.path ?? payload.sourcePath : undefined)
+    : undefined;
   return {
     vault: payload.vault,
     query: queryText || payload.query || undefined,
@@ -693,9 +717,14 @@ function titleFromPath(relPath: string): string {
   return relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
 }
 
-function recordByPath(records: readonly { path?: string; documentId: string; text: string }[], relPath: string) {
+function recordByPath(records: readonly { path?: string; documentId: string; text: string; vector?: readonly number[] }[], relPath: string) {
   const normalized = normalizeRelPath(relPath);
   return records.find((record) => record.path && normalizeRelPath(record.path) === normalized);
+}
+
+function storedVectorForRecord(record: { vector?: readonly number[] }, relPath: string): readonly number[] {
+  if (Array.isArray(record.vector)) return record.vector;
+  throw Object.assign(new Error(`stored vector is missing for note: ${relPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
 }
 
 function normalizeRelPath(value: string): string {

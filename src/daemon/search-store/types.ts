@@ -36,7 +36,7 @@ export const SNAPSHOT_PERSISTENCE_SCHEMA = {
   activePointer: ["schemaHash", "snapshotId", "canonicalManifestSha256"],
   retrievalEmbeddingSetEnvelope: {
     fields: ["schemaHash", "embeddingSetId", "recipe", "model", "dim", "records"],
-    record: ["documentId", "path?", "text", "contentHash", "vectorProjectionHash"]
+    record: ["documentId", "path?", "text", "contentHash", "vector", "vectorProjectionHash"]
   },
   retrievalVectorSpecEnvelope: ["embeddingSetId", "generationId", "specId", "dbPath", "key?"],
   retrievalSnapshotEnvelope: [
@@ -108,7 +108,7 @@ export type RetrievalEmbeddingSetEnvelope = {
   recipe: EmbeddingRecipeIdentity;
   model: string;
   dim: number;
-  records: readonly Omit<EmbeddingSetRecord, "shardDocRef" | "vector">[];
+  records: readonly Omit<EmbeddingSetRecord, "shardDocRef">[];
 };
 
 export type RetrievalVectorSpecEnvelope = {

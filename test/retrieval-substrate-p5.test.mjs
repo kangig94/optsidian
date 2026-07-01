@@ -517,6 +517,48 @@ test("public Retrieve dense path uses the active built vector generation", async
   assert.ok(result.results.some((entry) => (entry.debug?.denseAgreement ?? 0) > 0));
 });
 
+test("Retrieve origin=note uses the stored vector without loading the model", async () => {
+  const harness = await readyHarness();
+  await ensureActiveRetrieval(harness);
+  assert.equal(harness.embedding.calls.encode, 0);
+  const result = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "note",
+    sourcePath: "Projects/Alpha.md",
+    limit: 2,
+    debug: true
+  }, context());
+  assert.equal(result.status, "ready");
+  assert.equal(harness.embedding.calls.encode, 0);
+  assert.ok(harness.vector.calls.searchVector.length > 0);
+  assert.equal(result.results.some((entry) => entry.path === "Projects/Alpha.md"), false);
+});
+
+test("Retrieve origin=pair uses stored note vectors and encodes only raw-text sides", async () => {
+  const harness = await readyHarness();
+  await ensureActiveRetrieval(harness);
+  assert.equal(harness.embedding.calls.encode, 0);
+  const notePair = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "pair",
+    left: { path: "Projects/Alpha.md" },
+    right: { path: "Projects/Beta.md" },
+    topK: 2
+  }, context());
+  assert.equal(notePair.status, "ready");
+  assert.equal(harness.embedding.calls.encode, 0);
+
+  const rawPair = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "pair",
+    left: { text: "raw alpha text" },
+    right: { path: "Projects/Beta.md" },
+    topK: 1
+  }, context());
+  assert.equal(rawPair.status, "ready");
+  assert.equal(harness.embedding.calls.encode, 1);
+});
+
 test("Retrieve origin=text reuses lifecycle cold-load and unload closes the model session", async () => {
   const embedding = createLifecycleEmbeddingPool();
   const harness = await readyHarness({ embedding });
@@ -916,8 +958,8 @@ test("AC9 retrieval envelope protects sidecar roots through compact", async () =
   assert.equal(pin.linkGraphId, envelope.linkGraphId);
   assert.equal(pin.embeddingSetId, envelope.embeddingSetId);
   assert.ok(pin.embeddingSet.records.length > 0);
-  assert.equal("vector" in envelope.embeddingSet.records[0], false);
-  assert.equal("vector" in pin.embeddingSet.records[0], false);
+  assert.equal(Array.isArray(envelope.embeddingSet.records[0].vector), true);
+  assert.equal(Array.isArray(pin.embeddingSet.records[0].vector), true);
   harness.store.release(pin);
 
   await harness.service.compact(harness.vault, context());

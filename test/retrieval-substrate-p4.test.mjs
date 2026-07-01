@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { DeterministicHashProvider } from "../src/core/search/dense/index.ts";
 import { ModelSessionLifecycle } from "../src/daemon/model-session/index.ts";
+import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
 import {
   EmbedOnSaveIndexPlane,
   RetrievalFreshnessStore,
@@ -231,6 +232,26 @@ test("AC7 Test B P4 no active built vector spec returns index-not-ready without 
   assert.deepEqual(result, { status: "index-not-ready", reason: "no-active-built-spec" });
   assert.equal(fake.calls.searchVector.length, 0);
   assert.equal(fake.calls.buildIndex.length, 0);
+  await pool.close();
+});
+
+test("P4 test-only memory coral double is injected through VectorGenerationPool", async () => {
+  const vault = tempRoot();
+  fs.writeFileSync(path.join(vault, "Memory.md"), "memory vector\n");
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
+  const pool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
+  await publishGeneration(pool, paths, spec, "gen-memory", [
+    makeChunk("near", [1, 0, 0], spec),
+    makeChunk("far", [0, 1, 0], spec)
+  ]);
+  const result = await pool.searchActiveBuiltIndex({
+    key: paths.key,
+    queryVector: [1, 0, 0],
+    candidateK: 2
+  });
+  assert.equal(result.status, "ready");
+  assert.deepEqual(result.results.map((entry) => entry.entryId), ["near", "far"]);
   await pool.close();
 });
 

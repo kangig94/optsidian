@@ -6,10 +6,28 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import test, { after } from "node:test";
+import { ensureCoralNeedleBinding } from "../src/daemon/vector-store/artifact.ts";
 
 const cli = path.resolve("dist/optsidian");
 const SNAPSHOT_ID_PATTERN = "[a-f0-9]{64}";
 const searchDaemonCleanupEnvs = new Map();
+let realCoralNeedleBinding;
+let realCoralNeedleError;
+
+async function realCoralNeedleEnv(t) {
+  if (realCoralNeedleBinding === undefined && realCoralNeedleError === undefined) {
+    try {
+      realCoralNeedleBinding = await ensureCoralNeedleBinding(process.env);
+    } catch (error) {
+      realCoralNeedleError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (!realCoralNeedleBinding) {
+    t.skip(`real coral-needle binding unavailable: ${realCoralNeedleError}`);
+    return undefined;
+  }
+  return { OPTSIDIAN_CORAL_NEEDLE_BINDING: realCoralNeedleBinding };
+}
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-"));
@@ -430,7 +448,6 @@ function setup() {
     XDG_CONFIG_HOME: path.join(dir, "config"),
     XDG_CACHE_HOME: path.join(dir, "cache"),
     XDG_RUNTIME_DIR: path.join(dir, "runtime"),
-    OPTSIDIAN_SEARCH_VECTOR_INSTANCE: "memory",
     OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: "deterministic-hash",
     OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: path.join(dir, "runtime", "search-daemon")
   });
@@ -1344,7 +1361,9 @@ test("grep is markdown-first and supports context", () => {
   assert.doesNotMatch(result.stdout, /ignored/);
 });
 
-test("search ranks notes and renders CLI output", async () => {
+test("search ranks notes and renders CLI output", async (t) => {
+  const coralEnv = await realCoralNeedleEnv(t);
+  if (!coralEnv) return;
   const { vault, env } = setup();
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
   fs.mkdirSync(path.join(vault, "Projects"), { recursive: true });
@@ -1356,10 +1375,10 @@ test("search ranks notes and renders CLI output", async () => {
 
   // Warm publishes the lexical snapshot. Default CLI search stays lexical and
   // does not require a retrieval snapshot or vector model.
-  const warm = run(["index", "warm", `vault-path=${vault}`, "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  const warm = run(["index", "warm", `vault-path=${vault}`, "format=json"], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
   assert.equal(warm.status, 0, warm.stderr);
 
-  let result = run(["search", `vault-path=${vault}`, "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  let result = run(["search", `vault-path=${vault}`, "query=project alpha", "format=json", "limit=2", "debug=true"], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.command, "search");
@@ -1382,7 +1401,7 @@ test("search ranks notes and renders CLI output", async () => {
   assert.equal(payload.matches[0].debug.snapshotId, payload.snapshotId);
   assert.doesNotMatch(payload.matches[0].snippets.map((snippet) => snippet.text).join("\n"), /title:|tags:|aliases:/i);
 
-  result = run(["search", `vault-path=${vault}`, "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  result = run(["search", `vault-path=${vault}`, "query=project alpha", "path=Projects", "limit=2"], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /1\. Projects\/Alpha\.md/);
   assert.match(result.stdout, /title: Alpha/);
@@ -1569,7 +1588,9 @@ test("index mutation rendering stays stable", async () => {
   ].join("\n"));
 });
 
-test("index warm prepares discovered Obsidian registry vaults", async () => {
+test("index warm prepares discovered Obsidian registry vaults", async (t) => {
+  const coralEnv = await realCoralNeedleEnv(t);
+  if (!coralEnv) return;
   const { dir, vault, env } = setup();
   const secondVault = path.join(dir, "second-vault");
   fs.mkdirSync(path.join(vault, "Notes"), { recursive: true });
@@ -1590,7 +1611,7 @@ test("index warm prepares discovered Obsidian registry vaults", async () => {
   );
 
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cli-cache-"));
-  let result = run(["index", "warm", "format=json"], { env: { ...env, XDG_CACHE_HOME: cache } });
+  let result = run(["index", "warm", "format=json"], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.action, "warm");

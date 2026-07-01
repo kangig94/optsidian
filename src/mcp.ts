@@ -2,6 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RuntimeError, isCliError } from "./errors.js";
 import { recordVaultAccess } from "./core/vault-access.js";
+import { createSearchDaemonClient } from "./daemon/client.js";
 import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
 import { createOptsidianMcpServer } from "./mcp/server.js";
 import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./native/obsidian.js";
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
 
   const resolveVaultRoot = createMcpVaultResolver(config);
   const server = createOptsidianMcpServer({ resolveVaultRoot });
+  warmBootSearchDaemon();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -41,6 +43,12 @@ function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => 
 function rememberVaultAccess(vaultRoot: string): string {
   recordVaultAccess(vaultRoot);
   return vaultRoot;
+}
+
+function warmBootSearchDaemon(): void {
+  void createSearchDaemonClient({ readyTimeoutMs: 1000 })
+    .status({ deadlineMs: 1000 })
+    .catch(() => {});
 }
 
 main().catch((error: unknown) => {

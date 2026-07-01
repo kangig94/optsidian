@@ -1766,7 +1766,7 @@ function retrievalEmbeddingSetEnvelope(embeddingSet: {
     recipe: embeddingSet.recipe,
     model: embeddingSet.model,
     dim: embeddingSet.dim,
-    records: embeddingSet.records.map(({ shardDocRef: _shardDocRef, vector: _vector, ...record }) => record)
+    records: embeddingSet.records.map(({ shardDocRef: _shardDocRef, ...record }) => record)
   };
 }
 
