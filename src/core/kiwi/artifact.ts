@@ -4,6 +4,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { RuntimeError } from "../../errors.js";
 import { optsidianCacheRoot } from "../cache-root.js";
+import { installArtifact, type ArtifactVerifyDepth } from "../lifecycle/artifact-install.js";
 import { ensurePrivateDirSync, writePrivateFileSync } from "../private-path.js";
 
 export const KIWI_NLP_VERSION = "0.23.0";
@@ -131,16 +132,10 @@ export type KiwiWasmArtifactInstallResult =
 const KIWI_MODEL_DIR_NAME = "cong-base";
 const KIWI_MODEL_MANIFEST_FILE = "manifest.json";
 const KIWI_WASM_MANIFEST_FILE = "manifest.json";
-const KIWI_INSTALL_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
-const KIWI_INSTALL_LOCK_STALE_MS = 30 * 60 * 1000;
-const KIWI_INSTALL_LOCK_POLL_MS = 25;
+const KIWI_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const KIWI_INSTALL_POLL_MS = 25;
 const TAR_BLOCK_SIZE = 512;
 const TAR_FILE_TYPES = new Set(["0", ""]);
-let kiwiInstallLockStaleMs = KIWI_INSTALL_LOCK_STALE_MS;
-
-export function __setKiwiInstallLockStaleMsForTests(value: number | undefined): void {
-  kiwiInstallLockStaleMs = value ?? KIWI_INSTALL_LOCK_STALE_MS;
-}
 
 export function kiwiDataDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), "kiwi");
@@ -233,29 +228,36 @@ export async function ensureKiwiModelArtifact(
 ): Promise<KiwiModelArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
   ensureKiwiDataDir(env);
-  let release: (() => void) | undefined;
   try {
-    release = await acquireInstallLock(path.join(dataDir, "install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
-    if (options.forceInstall !== true) {
-      const current = inspectKiwiModelArtifact(env, { verifyFiles: options.verifyFiles ?? "digest" });
-      if (current.installed) {
-        return {
-          status: "already_installed",
-          method: "github-release",
-          version: KIWI_MODEL_VERSION,
-          targetDir: current.targetDir
-        };
+    const verifyDepth = options.verifyFiles ?? "digest";
+    let acceptExisting = options.forceInstall !== true;
+    const installed = await installArtifact<KiwiModelArtifactState, typeof verifyDepth>({
+      artifactDir: kiwiModelDir(env),
+      claimDir: path.join(dataDir, "install.claim"),
+      stagingRoot: path.join(dataDir, "staging"),
+      verifyDepth,
+      timeoutMs: KIWI_INSTALL_TIMEOUT_MS,
+      pollMs: KIWI_INSTALL_POLL_MS,
+      verifyInstalled: (_artifactDir, depth) => acceptExisting ? installedKiwiModelArtifact(env, depth) : undefined,
+      stage: (stagingDir) => stageDownloadedModel(stagingDir),
+      computeChecksum: (stagingDir) => verifyStagedKiwiModel(stagingDir),
+      activate: (stagingDir, artifactDir) => {
+        acceptExisting = true;
+        replaceArtifactDir(stagingDir, artifactDir);
       }
-    }
-    return await installDownloadedModel(env);
+    });
+    return {
+      status: installed.activated ? "installed" : "already_installed",
+      method: "github-release",
+      version: KIWI_MODEL_VERSION,
+      targetDir: installed.artifact.targetDir
+    };
   } catch (error) {
     return {
       status: "error",
       code: errorCode(error),
       message: errorMessage(error)
     };
-  } finally {
-    release?.();
   }
 }
 
@@ -265,29 +267,36 @@ export async function ensureKiwiWasmArtifact(
 ): Promise<KiwiWasmArtifactInstallResult> {
   const dataDir = kiwiDataDir(env);
   ensureKiwiDataDir(env);
-  let release: (() => void) | undefined;
   try {
-    release = await acquireInstallLock(path.join(dataDir, "wasm-install.lock"), KIWI_INSTALL_LOCK_TIMEOUT_MS);
-    if (options.forceInstall !== true) {
-      const current = inspectKiwiWasmArtifact(env, { verifyFile: options.verifyFile ?? "digest" });
-      if (current.installed) {
-        return {
-          status: "already_installed",
-          method: "npm-tarball",
-          version: KIWI_NLP_VERSION,
-          targetDir: current.targetDir
-        };
+    const verifyDepth = options.verifyFile ?? "digest";
+    let acceptExisting = options.forceInstall !== true;
+    const installed = await installArtifact<KiwiWasmArtifactState, typeof verifyDepth>({
+      artifactDir: kiwiWasmDir(env),
+      claimDir: path.join(dataDir, "wasm-install.claim"),
+      stagingRoot: path.join(dataDir, "staging"),
+      verifyDepth,
+      timeoutMs: KIWI_INSTALL_TIMEOUT_MS,
+      pollMs: KIWI_INSTALL_POLL_MS,
+      verifyInstalled: (_artifactDir, depth) => acceptExisting ? installedKiwiWasmArtifact(env, depth) : undefined,
+      stage: (stagingDir) => stageDownloadedWasm(stagingDir),
+      computeChecksum: (stagingDir) => verifyStagedKiwiWasm(stagingDir),
+      activate: (stagingDir, artifactDir) => {
+        acceptExisting = true;
+        replaceArtifactDir(stagingDir, artifactDir);
       }
-    }
-    return await installDownloadedWasm(env);
+    });
+    return {
+      status: installed.activated ? "installed" : "already_installed",
+      method: "npm-tarball",
+      version: KIWI_NLP_VERSION,
+      targetDir: installed.artifact.targetDir
+    };
   } catch (error) {
     return {
       status: "error",
       code: errorCode(error),
       message: errorMessage(error)
     };
-  } finally {
-    release?.();
   }
 }
 
@@ -340,7 +349,21 @@ function isKiwiWasmArtifactManifest(value: unknown): value is KiwiWasmArtifactMa
   );
 }
 
-async function installDownloadedModel(env: NodeJS.ProcessEnv): Promise<KiwiModelArtifactInstallResult> {
+function installedKiwiModelArtifact(env: NodeJS.ProcessEnv, verifyDepth: ArtifactVerifyDepth): KiwiModelArtifactState | undefined {
+  const current = inspectKiwiModelArtifact(env, { verifyFiles: kiwiVerifyDepth(verifyDepth) });
+  return current.installed ? current : undefined;
+}
+
+function installedKiwiWasmArtifact(env: NodeJS.ProcessEnv, verifyDepth: ArtifactVerifyDepth): KiwiWasmArtifactState | undefined {
+  const current = inspectKiwiWasmArtifact(env, { verifyFile: kiwiVerifyDepth(verifyDepth) });
+  return current.installed ? current : undefined;
+}
+
+function kiwiVerifyDepth(depth: ArtifactVerifyDepth): "digest" | "metadata" {
+  return depth === "metadata" ? "metadata" : "digest";
+}
+
+async function stageDownloadedModel(stagingDir: string): Promise<void> {
   const archive = await downloadBuffer(KIWI_MODEL_URL);
   if (archive.length !== KIWI_MODEL_ARCHIVE_SIZE_BYTES) {
     throw new RuntimeError(`Kiwi model archive size mismatch: expected ${KIWI_MODEL_ARCHIVE_SIZE_BYTES}, got ${archive.length}`);
@@ -351,16 +374,10 @@ async function installDownloadedModel(env: NodeJS.ProcessEnv): Promise<KiwiModel
   }
 
   const modelFiles = extractKiwiModelFiles(archive);
-  writeModelFilesAtomic(env, modelFiles);
-  return {
-    status: "installed",
-    method: "github-release",
-    version: KIWI_MODEL_VERSION,
-    targetDir: kiwiModelDir(env)
-  };
+  writeModelFiles(stagingDir, modelFiles);
 }
 
-async function installDownloadedWasm(env: NodeJS.ProcessEnv): Promise<KiwiWasmArtifactInstallResult> {
+async function stageDownloadedWasm(stagingDir: string): Promise<void> {
   const archive = await downloadBuffer(KIWI_WASM_NPM_TARBALL_URL);
   const wasm = extractKiwiWasmFile(archive);
   if (wasm.length !== KIWI_WASM_SIZE_BYTES) {
@@ -371,13 +388,7 @@ async function installDownloadedWasm(env: NodeJS.ProcessEnv): Promise<KiwiWasmAr
     throw new RuntimeError(`Kiwi wasm digest mismatch: expected ${KIWI_WASM_SHA256}, got ${digest}`);
   }
 
-  writeWasmFileAtomic(env, wasm);
-  return {
-    status: "installed",
-    method: "npm-tarball",
-    version: KIWI_NLP_VERSION,
-    targetDir: kiwiWasmDir(env)
-  };
+  writeWasmFile(stagingDir, wasm);
 }
 
 async function downloadBuffer(url: string): Promise<Buffer> {
@@ -525,46 +536,61 @@ function kiwiWasmDigest(content: Uint8Array): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-function writeWasmFileAtomic(env: NodeJS.ProcessEnv, wasm: Buffer): void {
-  const targetDir = kiwiWasmDir(env);
-  const parentDir = path.dirname(targetDir);
-  const stagingDir = path.join(parentDir, `.wasm-${process.pid}-${Date.now()}.part`);
-  ensureKiwiArtifactParentDir(env, parentDir);
-  fs.rmSync(stagingDir, { recursive: true, force: true });
-  ensurePrivateDirSync(stagingDir, "Optsidian Kiwi wasm staging directory");
-
-  try {
-    writePrivateFileSync(path.join(stagingDir, KIWI_WASM_FILE_NAME), wasm, "Optsidian Kiwi wasm file");
-    writePrivateFileSync(path.join(stagingDir, KIWI_WASM_MANIFEST_FILE), `${JSON.stringify(createWasmManifest(), null, 2)}\n`, "Optsidian Kiwi wasm manifest");
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(stagingDir, targetDir);
-  } catch (error) {
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
-  }
+function writeWasmFile(targetDir: string, wasm: Buffer): void {
+  writePrivateFileSync(path.join(targetDir, KIWI_WASM_FILE_NAME), wasm, "Optsidian Kiwi wasm file");
+  writePrivateFileSync(path.join(targetDir, KIWI_WASM_MANIFEST_FILE), `${JSON.stringify(createWasmManifest(), null, 2)}\n`, "Optsidian Kiwi wasm manifest");
 }
 
-function writeModelFilesAtomic(env: NodeJS.ProcessEnv, modelFiles: ReadonlyMap<KiwiModelFileName, Buffer>): void {
-  const targetDir = kiwiModelDir(env);
-  const parentDir = path.dirname(targetDir);
-  const stagingDir = path.join(parentDir, `.cong-base-${process.pid}-${Date.now()}.part`);
-  ensureKiwiArtifactParentDir(env, parentDir);
-  fs.rmSync(stagingDir, { recursive: true, force: true });
-  ensurePrivateDirSync(stagingDir, "Optsidian Kiwi model staging directory");
-
-  try {
-    for (const fileName of KIWI_MODEL_FILES) {
-      const content = modelFiles.get(fileName);
-      if (!content) throw new RuntimeError(`Kiwi model file ${fileName} was not extracted`);
-      writePrivateFileSync(path.join(stagingDir, fileName), content, "Optsidian Kiwi model file");
-    }
-    writePrivateFileSync(path.join(stagingDir, KIWI_MODEL_MANIFEST_FILE), `${JSON.stringify(createManifest(), null, 2)}\n`, "Optsidian Kiwi model manifest");
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(stagingDir, targetDir);
-  } catch (error) {
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
+function writeModelFiles(targetDir: string, modelFiles: ReadonlyMap<KiwiModelFileName, Buffer>): void {
+  for (const fileName of KIWI_MODEL_FILES) {
+    const content = modelFiles.get(fileName);
+    if (!content) throw new RuntimeError(`Kiwi model file ${fileName} was not extracted`);
+    writePrivateFileSync(path.join(targetDir, fileName), content, "Optsidian Kiwi model file");
   }
+  writePrivateFileSync(path.join(targetDir, KIWI_MODEL_MANIFEST_FILE), `${JSON.stringify(createManifest(), null, 2)}\n`, "Optsidian Kiwi model manifest");
+}
+
+function verifyStagedKiwiModel(stagingDir: string): string {
+  for (const fileName of KIWI_MODEL_FILES) {
+    const filePath = path.join(stagingDir, fileName);
+    let content: Buffer;
+    try {
+      content = fs.readFileSync(filePath);
+    } catch (error) {
+      throw new RuntimeError(`Kiwi model staged file ${fileName} is not readable: ${errorMessage(error)}`);
+    }
+    const digest = kiwiModelFileDigest(content);
+    if (digest !== KIWI_MODEL_FILE_SHA256[fileName]) {
+      throw new RuntimeError(`Kiwi model staged file ${fileName} digest mismatch: expected ${KIWI_MODEL_FILE_SHA256[fileName]}, got ${digest}`);
+    }
+  }
+  return crypto.createHash("sha256").update(JSON.stringify(
+    KIWI_MODEL_FILES.map((fileName) => [fileName, KIWI_MODEL_FILE_SHA256[fileName]])
+  )).digest("hex");
+}
+
+function verifyStagedKiwiWasm(stagingDir: string): string {
+  const filePath = path.join(stagingDir, KIWI_WASM_FILE_NAME);
+  let content: Buffer;
+  try {
+    content = fs.readFileSync(filePath);
+  } catch (error) {
+    throw new RuntimeError(`Kiwi staged wasm is not readable: ${errorMessage(error)}`);
+  }
+  if (content.length !== KIWI_WASM_SIZE_BYTES) {
+    throw new RuntimeError(`Kiwi staged wasm size mismatch: expected ${KIWI_WASM_SIZE_BYTES}, got ${content.length}`);
+  }
+  const digest = kiwiWasmDigest(content);
+  if (digest !== KIWI_WASM_SHA256) {
+    throw new RuntimeError(`Kiwi staged wasm digest mismatch: expected ${KIWI_WASM_SHA256}, got ${digest}`);
+  }
+  return digest;
+}
+
+function replaceArtifactDir(stagingDir: string, artifactDir: string): void {
+  ensurePrivateDirSync(path.dirname(artifactDir), "Optsidian Kiwi artifact directory");
+  fs.rmSync(artifactDir, { recursive: true, force: true });
+  fs.renameSync(stagingDir, artifactDir);
 }
 
 function createManifest(): KiwiModelArtifactManifest {
@@ -593,69 +619,9 @@ function createWasmManifest(): KiwiWasmArtifactManifest {
   };
 }
 
-async function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<() => void> {
-  const startedAt = Date.now();
-  while (true) {
-    try {
-      fs.mkdirSync(lockDir, { recursive: false, mode: 0o700 });
-      ensurePrivateDirSync(lockDir, "Optsidian Kiwi install lock directory");
-      writeInstallLockOwner(lockDir);
-      return () => fs.rmSync(lockDir, { recursive: true, force: true });
-    } catch (error) {
-      if (!isPathExistsError(error)) throw error;
-      if (removeStaleInstallLock(lockDir)) continue;
-      if (Date.now() - startedAt >= timeoutMs) {
-        throw new RuntimeError(`Timed out waiting for Kiwi model install lock: ${lockDir}`);
-      }
-      await sleep(KIWI_INSTALL_LOCK_POLL_MS);
-    }
-  }
-}
-
-function writeInstallLockOwner(lockDir: string): void {
-  try {
-    writePrivateFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
-      pid: process.pid,
-      startedAt: new Date().toISOString()
-    }, null, 2)}\n`, "Optsidian Kiwi install lock owner");
-  } catch {
-    // The lock itself is the directory; owner metadata is best-effort diagnostics.
-  }
-}
-
-function removeStaleInstallLock(lockDir: string): boolean {
-  if (kiwiInstallLockStaleMs < 1) return false;
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(lockDir);
-  } catch (error) {
-    if (isNoEntryError(error)) return true;
-    throw error;
-  }
-  if (Date.now() - stat.mtimeMs < kiwiInstallLockStaleMs) return false;
-  fs.rmSync(lockDir, { recursive: true, force: true });
-  return true;
-}
-
 function ensureKiwiDataDir(env: NodeJS.ProcessEnv): void {
   ensurePrivateDirSync(optsidianCacheRoot(env), "Optsidian cache directory");
   ensurePrivateDirSync(kiwiDataDir(env), "Optsidian Kiwi cache directory");
-}
-
-function ensureKiwiArtifactParentDir(env: NodeJS.ProcessEnv, parentDir: string): void {
-  ensureKiwiDataDir(env);
-  const kiwiRoot = kiwiDataDir(env);
-  let current = parentDir;
-  const stack: string[] = [];
-  while (current !== kiwiRoot && current.startsWith(`${kiwiRoot}${path.sep}`)) {
-    stack.push(current);
-    current = path.dirname(current);
-  }
-  for (const dir of stack.reverse()) ensurePrivateDirSync(dir, "Optsidian Kiwi artifact directory");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function tarFieldToString(buffer: Buffer): string {
@@ -677,12 +643,4 @@ function errorCode(error: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isPathExistsError(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST";
-}
-
-function isNoEntryError(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }

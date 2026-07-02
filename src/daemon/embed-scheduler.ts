@@ -30,6 +30,10 @@ export type EmbedSchedulerOptions = {
   now?: () => number;
 };
 
+export type EmbedSchedulerDrainOptions = {
+  cancel?: boolean;
+};
+
 type SchedulerJob<T> = {
   lane: EmbedSchedulerLane;
   options: WorkerPoolRunOptions;
@@ -85,6 +89,7 @@ export class EmbedScheduler {
   private readonly querySingleFlights = new Map<string, QueryEncodeFlight>();
   private running = false;
   private runningLane: EmbedSchedulerLane | undefined;
+  private runningJob: SchedulerJob<unknown> | undefined;
   private nextQueryFlightId = 1;
   private closing = false;
   private closed = false;
@@ -166,7 +171,7 @@ export class EmbedScheduler {
         resolve: resolve as (value: unknown) => void,
         reject
       });
-      this.drain();
+      this.pump();
     });
   }
 
@@ -201,8 +206,7 @@ export class EmbedScheduler {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closing = true;
-    this.drain();
-    await this.waitForDrained();
+    await this.drain();
     try {
       await this.embedding.unload({
         deadline: this.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
@@ -230,7 +234,13 @@ export class EmbedScheduler {
     };
   }
 
-  private drain(): void {
+  async drain(options: EmbedSchedulerDrainOptions = {}): Promise<void> {
+    if (options.cancel) this.cancelQueuedWork();
+    this.pump();
+    await this.waitForDrained();
+  }
+
+  private pump(): void {
     if (this.running || this.closed) return;
     const job = this.dequeue();
     if (!job) {
@@ -239,16 +249,17 @@ export class EmbedScheduler {
     }
     if (this.cancelled.has(job.options.cancellationId)) {
       job.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
-      this.drain();
+      this.pump();
       return;
     }
     if (this.now() >= job.options.deadline) {
       job.reject(Object.assign(new Error("embed scheduler deadline expired before execution"), { code: "DEADLINE_EXCEEDED" }));
-      this.drain();
+      this.pump();
       return;
     }
     this.running = true;
     this.runningLane = job.lane;
+    this.runningJob = job;
     this.activeLaneCounts[job.lane] += 1;
     Promise.resolve()
       .then(() => this.activeLaneContext.run(job.lane, () => job.task()))
@@ -257,7 +268,8 @@ export class EmbedScheduler {
         this.activeLaneCounts[job.lane] = Math.max(0, this.activeLaneCounts[job.lane] - 1);
         this.running = false;
         this.runningLane = undefined;
-        this.drain();
+        this.runningJob = undefined;
+        this.pump();
       });
   }
 
@@ -281,6 +293,32 @@ export class EmbedScheduler {
       };
       flight.waiters.add(waiter);
     });
+  }
+
+  private cancelQueuedWork(): void {
+    if (this.runningJob) {
+      rememberCancelled(this.cancelled, this.runningJob.options.cancellationId);
+      this.embedding.cancel(this.runningJob.options.cancellationId);
+    }
+    for (const flight of this.querySingleFlights.values()) {
+      rememberCancelled(this.cancelled, flight.schedulerCancellationId);
+      this.embedding.cancel(flight.schedulerCancellationId);
+      for (const waiter of flight.waiters) {
+        waiter.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+      }
+      flight.waiters.clear();
+    }
+    this.querySingleFlights.clear();
+
+    for (const lane of LANE_ORDER) {
+      const jobs = this.lanes[lane].splice(0);
+      for (const job of jobs) {
+        rememberCancelled(this.cancelled, job.options.cancellationId);
+        this.embedding.cancel(job.options.cancellationId);
+        job.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+      }
+    }
+    this.resolveDrainWaitersIfIdle();
   }
 
   private cancelQueryEncodeWaiters(cancellationId: string): void {

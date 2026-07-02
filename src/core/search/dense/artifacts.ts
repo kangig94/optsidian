@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { optsidianCacheRoot } from "../../cache-root.js";
+import { installArtifact } from "../../lifecycle/artifact-install.js";
 import { ensurePrivateDirSync, writePrivateFileSync } from "../../private-path.js";
 import { downloadFileStreaming } from "../../../net/github.js";
 import { RuntimeError } from "../../../errors.js";
@@ -83,9 +84,8 @@ export type LocalOnnxArtifactInstallResult =
     };
 
 const LOCAL_ONNX_ARTIFACT_SCHEMA_VERSION = "dense-onnx-artifacts-v1";
-const LOCAL_ONNX_INSTALL_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
-const LOCAL_ONNX_INSTALL_LOCK_POLL_MS = 25;
-const LOCAL_ONNX_INSTALL_LOCK_STALE_MS = 30 * 60 * 1000;
+const LOCAL_ONNX_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const LOCAL_ONNX_INSTALL_POLL_MS = 25;
 
 export const LOCAL_ONNX_RENDERED_TEXT_PROJECTION_VERSION = "rendered-text-projection-v1";
 export const LOCAL_ONNX_RECIPE_VERSION = "local-onnx-embedding-recipe-v1";
@@ -301,30 +301,31 @@ export async function ensureLocalOnnxModelArtifact(
 ): Promise<LocalOnnxArtifactInstallResult> {
   const descriptor = options.descriptor ?? localOnnxModelDescriptor(model);
   ensureLocalOnnxDataDir(env);
-  let release: (() => void) | undefined;
   try {
-    release = await acquireInstallLock(
-      path.join(localOnnxDataDir(env), `${descriptor.key}.install.lock`),
-      options.lockTimeoutMs ?? LOCAL_ONNX_INSTALL_LOCK_TIMEOUT_MS,
-      options.lockPollMs ?? LOCAL_ONNX_INSTALL_LOCK_POLL_MS
-    );
-    if (options.forceInstall !== true) {
-      const current = inspectLocalOnnxModelArtifact(descriptor.key, env, { verifyFiles: options.verifyFiles ?? "metadata" });
-      if (current.installed) {
-        return {
-          status: "already_installed",
-          method: "huggingface-resolve",
-          modelKey: descriptor.key,
-          targetDir: current.targetDir
-        };
+    const verifyDepth = options.verifyFiles ?? "metadata";
+    let acceptExisting = options.forceInstall !== true;
+    const installed = await installArtifact<LocalOnnxArtifactState, typeof verifyDepth>({
+      artifactDir: localOnnxModelDir(descriptor.key, env),
+      claimDir: path.join(localOnnxDataDir(env), `${descriptor.key}.install.claim`),
+      stagingRoot: path.join(localOnnxDataDir(env), "staging"),
+      verifyDepth,
+      timeoutMs: options.lockTimeoutMs ?? LOCAL_ONNX_INSTALL_TIMEOUT_MS,
+      pollMs: options.lockPollMs ?? LOCAL_ONNX_INSTALL_POLL_MS,
+      verifyInstalled: (_artifactDir, depth) => acceptExisting
+        ? installedLocalOnnxModelArtifact(descriptor, env, depth)
+        : undefined,
+      stage: (stagingDir) => stageDownloadedModel(descriptor, env, options.downloadFile ?? downloadFileStreaming, stagingDir),
+      computeChecksum: (stagingDir) => verifyStagedLocalOnnxModel(descriptor, stagingDir),
+      activate: (stagingDir, artifactDir) => {
+        acceptExisting = true;
+        replaceArtifactDir(stagingDir, artifactDir);
       }
-    }
-    await installDownloadedModel(descriptor, env, options.downloadFile ?? downloadFileStreaming);
+    });
     return {
-      status: "installed",
+      status: installed.activated ? "installed" : "already_installed",
       method: "huggingface-resolve",
       modelKey: descriptor.key,
-      targetDir: localOnnxModelDir(descriptor.key, env)
+      targetDir: installed.artifact.targetDir
     };
   } catch (error) {
     return {
@@ -332,8 +333,6 @@ export async function ensureLocalOnnxModelArtifact(
       code: errorCode(error),
       message: errorMessage(error)
     };
-  } finally {
-    release?.();
   }
 }
 
@@ -372,39 +371,35 @@ function isLocalOnnxArtifactManifest(value: unknown, descriptor: LocalOnnxModelD
   ));
 }
 
-async function installDownloadedModel(
+function installedLocalOnnxModelArtifact(
   descriptor: LocalOnnxModelDescriptor,
   env: NodeJS.ProcessEnv,
-  downloadFile: typeof downloadFileStreaming
-): Promise<void> {
-  const targetDir = localOnnxModelDir(descriptor.key, env);
-  const parentDir = path.dirname(targetDir);
-  const stagingDir = path.join(parentDir, `.${descriptor.key}-${process.pid}-${Date.now()}.part`);
-  ensureLocalOnnxArtifactParentDir(env, parentDir);
-  fs.rmSync(stagingDir, { recursive: true, force: true });
-  ensurePrivateDirSync(stagingDir, "Optsidian local ONNX staging directory");
+  verifyFiles: "metadata" | "digest"
+): LocalOnnxArtifactState | undefined {
+  const current = inspectLocalOnnxModelArtifact(descriptor.key, env, { verifyFiles, descriptor });
+  return current.installed ? current : undefined;
+}
 
-  try {
-    for (const file of descriptor.files) {
-      const target = path.join(stagingDir, file.path);
-      ensurePrivateDirSync(path.dirname(target), "Optsidian local ONNX artifact directory");
-      await downloadFile(sourceUrl(descriptor, file), target, env, {
-        sendAuth: false,
-        maxBytes: file.sizeBytes
-      });
-      await verifyLocalOnnxFile(target, file);
-    }
-    writePrivateFileSync(
-      path.join(stagingDir, "manifest.json"),
-      `${JSON.stringify(createManifest(descriptor), null, 2)}\n`,
-      "Optsidian local ONNX manifest"
-    );
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    fs.renameSync(stagingDir, targetDir);
-  } catch (error) {
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
+async function stageDownloadedModel(
+  descriptor: LocalOnnxModelDescriptor,
+  env: NodeJS.ProcessEnv,
+  downloadFile: typeof downloadFileStreaming,
+  stagingDir: string
+): Promise<void> {
+  for (const file of descriptor.files) {
+    const target = path.join(stagingDir, file.path);
+    ensurePrivateDirSync(path.dirname(target), "Optsidian local ONNX artifact directory");
+    await downloadFile(sourceUrl(descriptor, file), target, env, {
+      sendAuth: false,
+      maxBytes: file.sizeBytes
+    });
+    await verifyLocalOnnxFile(target, file);
   }
+  writePrivateFileSync(
+    path.join(stagingDir, "manifest.json"),
+    `${JSON.stringify(createManifest(descriptor), null, 2)}\n`,
+    "Optsidian local ONNX manifest"
+  );
 }
 
 function inspectLocalOnnxFiles(
@@ -448,6 +443,19 @@ async function verifyLocalOnnxFile(filePath: string, file: LocalOnnxArtifactFile
   }
 }
 
+async function verifyStagedLocalOnnxModel(descriptor: LocalOnnxModelDescriptor, stagingDir: string): Promise<string> {
+  for (const file of descriptor.files) {
+    await verifyLocalOnnxFile(path.join(stagingDir, file.path), file);
+  }
+  return combinedFilesHash(descriptor.files);
+}
+
+function replaceArtifactDir(stagingDir: string, artifactDir: string): void {
+  ensurePrivateDirSync(path.dirname(artifactDir), "Optsidian local ONNX artifact directory");
+  fs.rmSync(artifactDir, { recursive: true, force: true });
+  fs.renameSync(stagingDir, artifactDir);
+}
+
 function createManifest(descriptor: LocalOnnxModelDescriptor): LocalOnnxArtifactManifest {
   return {
     packageId: "dense-onnx",
@@ -489,53 +497,6 @@ function ensureLocalOnnxDataDir(env: NodeJS.ProcessEnv): void {
   ensurePrivateDirSync(localOnnxDataDir(env), "Optsidian local ONNX cache directory");
 }
 
-function ensureLocalOnnxArtifactParentDir(env: NodeJS.ProcessEnv, parentDir: string): void {
-  ensureLocalOnnxDataDir(env);
-  const root = localOnnxDataDir(env);
-  let current = parentDir;
-  const stack: string[] = [];
-  while (current !== root && current.startsWith(`${root}${path.sep}`)) {
-    stack.push(current);
-    current = path.dirname(current);
-  }
-  for (const dir of stack.reverse()) ensurePrivateDirSync(dir, "Optsidian local ONNX artifact directory");
-}
-
-async function acquireInstallLock(lockDir: string, timeoutMs: number, pollMs: number): Promise<() => void> {
-  const startedAt = Date.now();
-  while (true) {
-    try {
-      fs.mkdirSync(lockDir, { recursive: false, mode: 0o700 });
-      ensurePrivateDirSync(lockDir, "Optsidian local ONNX install lock directory");
-      writePrivateFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
-        pid: process.pid,
-        startedAt: new Date().toISOString()
-      }, null, 2)}\n`, "Optsidian local ONNX install lock owner");
-      return () => fs.rmSync(lockDir, { recursive: true, force: true });
-    } catch (error) {
-      if (!isPathExistsError(error)) throw error;
-      if (removeStaleInstallLock(lockDir)) continue;
-      if (Date.now() - startedAt >= timeoutMs) {
-        throw new RuntimeError(`Timed out waiting for local ONNX model install lock: ${lockDir}`);
-      }
-      await sleep(pollMs);
-    }
-  }
-}
-
-function removeStaleInstallLock(lockDir: string): boolean {
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(lockDir);
-  } catch (error) {
-    if (isNoEntryError(error)) return true;
-    throw error;
-  }
-  if (Date.now() - stat.mtimeMs < LOCAL_ONNX_INSTALL_LOCK_STALE_MS) return false;
-  fs.rmSync(lockDir, { recursive: true, force: true });
-  return true;
-}
-
 function sha256FileSync(filePath: string): string {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
@@ -550,10 +511,6 @@ function sha256File(filePath: string): Promise<string> {
   });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -564,12 +521,4 @@ function errorCode(error: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isPathExistsError(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST";
-}
-
-function isNoEntryError(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }

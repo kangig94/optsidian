@@ -245,6 +245,16 @@ export function snapshotIdentityTupleForAnalyzerIdentity(
   };
 }
 
+export function lexicalIdentityHashFromSnapshotIdentityTuple(tuple: SnapshotIdentityTuple): string {
+  return sha256(canonicalValueBytes({
+    buildVersion: tuple.buildVersion,
+    fieldSetVersion: tuple.fieldSetVersion,
+    partitionBits: tuple.partitionBits,
+    analyzerIdentity: tuple.analyzerIdentity,
+    searchSettingsHash: tuple.searchSettingsHash
+  }));
+}
+
 function snapshotAnalyzerIdentityFor(
   analyzerIdentity: SearchAnalyzer["identity"],
   searchSettings: IndexAffectingSearchSettings

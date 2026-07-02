@@ -625,8 +625,7 @@ export function searchAnalyzerRuntimeStatus(
       modelPath: managerStatus.model.targetDir,
       missingFiles: managerStatus.model.missingFiles,
       analyzerState: managerStatus.state,
-      leaseCount: managerStatus.leaseCount,
-      ...(managerStatus.state === "degraded" ? { reason: managerStatus.reason } : {})
+      leaseCount: managerStatus.leaseCount
     }
   };
 }

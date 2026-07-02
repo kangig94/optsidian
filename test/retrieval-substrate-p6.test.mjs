@@ -15,6 +15,8 @@ import {
   localOnnxModelDescriptor,
   resolveLocalOnnxProviderSelection
 } from "../src/core/search/dense/index.ts";
+import { ExclusiveClaim } from "../src/core/lifecycle/exclusive-claim.ts";
+import { createProcessToken } from "../src/core/lifecycle/process-token.ts";
 import { tokenizeRoutedText } from "../src/core/search/analyzer.ts";
 
 test("AC13 P6 provider selection defaults to BGE-M3 and selects multilingual-e5-small", () => {
@@ -102,6 +104,35 @@ test("AC12 P6 dense path uses model-native tokenizer while lexical Hangul still 
   assert.equal(denseInputs.some((input) => input.includes("kiwimorph")), false);
 });
 
+test("local ONNX rejected session load self-invalidates and retries", async () => {
+  let attempts = 0;
+  const { ort } = mockOrt({
+    dim: 384,
+    onCreate() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("session create failed once");
+    }
+  });
+  const provider = new LocalOnnxProvider({
+    model: "multilingual-e5-small",
+    ort,
+    tokenizer: {
+      encode() {
+        return { ids: [1], attention_mask: [1] };
+      }
+    },
+    ensureArtifact: async () => {},
+    executionProvider: "cpu",
+    platform: "linux"
+  });
+
+  await assert.rejects(() => provider.embed("first"), /session create failed once/);
+  const vector = await provider.embed("second");
+  assert.equal(vector.length, 384);
+  assert.equal(attempts, 2);
+  await provider.close();
+});
+
 test("AC13 P6 README documents Linux GPU requirements and graceful CPU fallback", () => {
   const readme = fs.readFileSync(path.join(process.cwd(), "README.md"), "utf8");
   assert.match(readme, /Dense Search GPU Runtime/);
@@ -170,7 +201,7 @@ test("AC13 P6 local ONNX artifact install verifies digests replaces staging and 
   const modelDir = localOnnxModelDir(descriptor.key, env);
   assert.equal(fs.readFileSync(path.join(modelDir, "onnx/model.onnx"), "utf8"), "model-v1");
   assert.equal(inspectLocalOnnxModelArtifact(descriptor.key, env, { descriptor }).installed, true);
-  assert.equal(fs.readdirSync(path.dirname(modelDir)).some((entry) => entry.endsWith(".part")), false);
+  assert.equal(stagingClaimCount(path.join(root, "cache", "optsidian", "dense-onnx", "staging")), 0);
 
   const replacement = tinyDescriptor({
     "onnx/model.onnx": Buffer.from("model-v2"),
@@ -198,15 +229,19 @@ test("AC13 P6 local ONNX artifact install verifies digests replaces staging and 
   });
   assert.equal(failed.status, "error");
   assert.equal(fs.readFileSync(path.join(modelDir, "onnx/model.onnx"), "utf8"), "model-v2");
-  assert.equal(fs.readdirSync(path.dirname(modelDir)).some((entry) => entry.endsWith(".part")), false);
+  assert.equal(stagingClaimCount(path.join(root, "cache", "optsidian", "dense-onnx", "staging")), 0);
 });
 
-test("AC13 P6 local ONNX artifact install lock timeout is native-free", async () => {
+test("AC13 P6 local ONNX artifact install claim timeout is native-free", async () => {
   const root = tempRoot();
   const env = testEnv(root);
   const descriptor = tinyDescriptor();
-  const lockDir = path.join(root, "cache", "optsidian", "dense-onnx", `${descriptor.key}.install.lock`);
-  fs.mkdirSync(lockDir, { recursive: true });
+  const claimDir = path.join(root, "cache", "optsidian", "dense-onnx", `${descriptor.key}.install.claim`);
+  const holder = await ExclusiveClaim.acquire(claimDir, {
+    token: createProcessToken(),
+    claimId: "live-holder",
+    timeoutMs: 0
+  });
   const result = await ensureLocalOnnxModelArtifact(descriptor.key, env, {
     descriptor,
     forceInstall: true,
@@ -216,8 +251,9 @@ test("AC13 P6 local ONNX artifact install lock timeout is native-free", async ()
       throw new Error("download should not start while locked");
     }
   });
+  holder.release();
   assert.equal(result.status, "error");
-  assert.match(result.message, /Timed out waiting/);
+  assert.match(result.message, /Exclusive claim is held by live pid/);
 });
 
 test("AC13 P6 optional real local ONNX smoke", { skip: process.env.OPTSIDIAN_RUN_REAL_ONNX_TEST !== "1" }, async () => {
@@ -237,6 +273,17 @@ function testEnv(root) {
     XDG_CACHE_HOME: path.join(root, "cache"),
     XDG_CONFIG_HOME: path.join(root, "config")
   };
+}
+
+function stagingClaimCount(stagingRoot) {
+  if (!fs.existsSync(stagingRoot)) return 0;
+  let count = 0;
+  for (const namespace of fs.readdirSync(stagingRoot, { withFileTypes: true })) {
+    if (!namespace.isDirectory()) continue;
+    const namespaceDir = path.join(stagingRoot, namespace.name);
+    count += fs.readdirSync(namespaceDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
+  }
+  return count;
 }
 
 function tinyDescriptor(contents = {

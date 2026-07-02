@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { UsageError } from "../../errors.js";
 import { matchesPathFilter, matchesTagFilter, normalizeSearchParams } from "../../core/search/params.js";
 import { DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS, type SearchScoringLambdas } from "../../core/search/constants.js";
@@ -108,6 +109,7 @@ export class DaemonSearchStoreService {
       searchSettings?: Partial<IndexAffectingSearchSettings>;
       rankingTuning?: Partial<SearchRankingTuning>;
       settings?: OptsidianSettings;
+      env?: NodeJS.ProcessEnv;
       vectorPool?: Pick<VectorGenerationPool, "searchActiveBuiltIndex">;
     } = {}
   ) {
@@ -119,7 +121,11 @@ export class DaemonSearchStoreService {
     this.queryScheduler = new SearchQueryScheduler(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
-    this.rankingTuning = normalizeRankingTuning(options.rankingTuning, options.settings ?? readOptsidianSettings(process.cwd(), process.env), process.env);
+    this.rankingTuning = normalizeRankingTuning(
+      options.rankingTuning,
+      options.settings ?? readOptsidianSettings(process.cwd(), options.env ?? process.env),
+      options.env ?? process.env
+    );
     this.queryAnalysisCache = new QueryAnalysisCache(
       options.queryCacheSize ?? envNumber(process.env.OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE) ?? DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES
     );
@@ -423,7 +429,22 @@ export class DaemonSearchStoreService {
 
   stats() {
     return {
-      queryAnalysisCache: this.queryAnalysisCache.stats()
+      queryAnalysisCache: this.queryAnalysisCache.stats(),
+      rankingTuningHash: rankingTuningHash(this.rankingTuning)
+    };
+  }
+
+  resultIdentityForQuery(input: {
+    snapshotId: string;
+    query: string;
+    filters?: unknown;
+    limit: number;
+    rankingVersion: string;
+    analyzerIdentity: SearchAnalyzerIdentity;
+  }) {
+    return {
+      ...input,
+      rankingTuningHash: rankingTuningHash(this.rankingTuning)
     };
   }
 
@@ -983,6 +1004,14 @@ function normalizeRankingTuning(
       )
     }
   };
+}
+
+export function rankingTuningHash(tuning: SearchRankingTuning): string {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    denseLambda: tuning.lambdas.dense ?? SEARCH_SCORING_LAMBDAS.dense,
+    linkLambda: tuning.lambdas.link ?? SEARCH_SCORING_LAMBDAS.link,
+    rrfK: tuning.rrfK
+  })).digest("hex");
 }
 
 function envInteger(raw: string | undefined): number | undefined {

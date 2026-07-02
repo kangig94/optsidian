@@ -1,4 +1,5 @@
 import { threadId } from "node:worker_threads";
+import { Attempt, type AttemptOwner } from "../lifecycle/conditional-commit.js";
 import {
   inspectKiwiModelArtifact,
   inspectKiwiWasmArtifact,
@@ -27,12 +28,6 @@ export type KiwiManagerStatus =
       leaseCount: number;
       model: KiwiModelArtifactState;
       identity: KiwiAnalyzerIdentity;
-    }
-  | {
-      state: "degraded";
-      leaseCount: 0;
-      model: KiwiModelArtifactState;
-      reason: string;
     };
 
 type KiwiLease = {
@@ -56,12 +51,6 @@ type KiwiManagerOptions = {
   inspectWasmArtifact?: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
 };
 
-type DegradedState = {
-  envKey: string;
-  reason: string;
-  artifactStateKey: string;
-};
-
 const KIWI_IDLE_TTL_MS = 5 * 60 * 1000;
 
 export class KiwiAnalyzerTerminalLoadError extends Error {
@@ -80,12 +69,13 @@ export class KiwiAnalyzerManager {
   private readonly loadAnalyzer: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
   private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv, options?: KiwiModelArtifactInspectOptions) => KiwiModelArtifactState;
   private readonly inspectWasmArtifact: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
+  private readonly loadAttemptOwner: AttemptOwner<ActiveKiwiHandle> = { current: undefined };
   private activeHandle: ActiveKiwiHandle | null = null;
-  private loadPromise: Promise<ActiveKiwiHandle> | null = null;
-  private loadPromiseKey: string | null = null;
-  private loadPromiseInstallsIfMissing = false;
+  private loadAttempt: Attempt<ActiveKiwiHandle> | undefined;
+  private loadAttemptKey: string | null = null;
+  private loadAttemptInstallsIfMissing = false;
   private idleTimer: NodeJS.Timeout | undefined;
-  private degraded: DegradedState | null = null;
+  private closed = false;
 
   constructor(options: KiwiManagerOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? KIWI_IDLE_TTL_MS;
@@ -108,16 +98,8 @@ export class KiwiAnalyzerManager {
         identity: this.activeHandle.analyzer.identity
       };
     }
-    if (this.loadPromise && this.loadPromiseKey === key) {
+    if (this.loadAttempt && this.loadAttemptKey === key) {
       return { state: "loading", leaseCount: 0, model };
-    }
-    if (this.degraded && this.degraded.envKey === key) {
-      return {
-        state: "degraded",
-        leaseCount: 0,
-        model,
-        reason: this.degraded.reason
-      };
     }
     return { state: "unloaded", leaseCount: 0, model };
   }
@@ -145,7 +127,13 @@ export class KiwiAnalyzerManager {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     this.clearIdleTimer();
+    const attempt = this.loadAttempt;
+    if (attempt && this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
+    this.loadAttempt = undefined;
+    this.loadAttemptKey = null;
+    this.loadAttemptInstallsIfMissing = false;
     const handle = this.activeHandle;
     if (handle) await this.disposeHandle(handle);
   }
@@ -155,6 +143,9 @@ export class KiwiAnalyzerManager {
     declaredAnalyzers: readonly KiwiDeclaredAnalyzer[],
     options: { wait: boolean; installIfMissing: boolean }
   ): Promise<KiwiLease> {
+    if (this.closed) {
+      throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+    }
     const normalized = normalizeDeclaredAnalyzers(declaredAnalyzers);
     if (!normalized.includes("ko")) return noopLease(normalized);
     const key = envKey(env);
@@ -164,15 +155,7 @@ export class KiwiAnalyzerManager {
       return this.leaseHandle(existing, normalized);
     }
 
-    if (this.degraded && this.degraded.envKey === key) {
-      const model = this.inspectModelArtifact(env, { verifyFiles: "digest" });
-      if (!model.installed || artifactStateKey(model, this.inspectWasmArtifact(env)) !== this.degraded.artifactStateKey) {
-        this.degraded = null;
-      }
-    }
-
     if (!options.wait) return noopLease(withoutKiwi(normalized));
-    if (this.degraded && this.degraded.envKey === key) return noopLease(withoutKiwi(normalized));
 
     const handle = await this.ensureLoaded(env, options.installIfMissing);
     return this.leaseHandle(handle, normalized);
@@ -180,16 +163,19 @@ export class KiwiAnalyzerManager {
 
   private async ensureLoaded(env: NodeJS.ProcessEnv, installIfMissing: boolean): Promise<ActiveKiwiHandle> {
     const key = envKey(env);
+    if (this.closed) {
+      throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+    }
     if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return this.activeHandle;
     }
-    while (this.loadPromise) {
-      const pending = this.loadPromise;
-      if (this.loadPromiseKey === key && (this.loadPromiseInstallsIfMissing || !installIfMissing)) {
-        return pending;
+    while (this.loadAttempt) {
+      const pending = this.loadAttempt;
+      if (this.loadAttemptKey === key && (this.loadAttemptInstallsIfMissing || !installIfMissing)) {
+        return pending.wait();
       }
       try {
-        await pending;
+        await pending.wait();
       } catch {
         // The caller needs the requested env/load mode; retry after the in-flight load settles.
       }
@@ -199,40 +185,42 @@ export class KiwiAnalyzerManager {
     }
 
     this.clearIdleTimer();
-    this.loadPromiseKey = key;
-    this.loadPromiseInstallsIfMissing = installIfMissing;
-    this.loadPromise = this.loadFresh(env, key, installIfMissing);
-    try {
-      return await this.loadPromise;
-    } finally {
-      this.loadPromise = null;
-      this.loadPromiseKey = null;
-      this.loadPromiseInstallsIfMissing = false;
-    }
+    let attempt!: Attempt<ActiveKiwiHandle>;
+    attempt = Attempt.start(this.loadAttemptOwner, () => this.loadFresh(env, installIfMissing), {
+      install: async (handle) => {
+        if (this.closed) throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+        await this.replaceActiveHandle(handle);
+      },
+      close: (handle) => this.disposeHandle(handle)
+    });
+    this.loadAttempt = attempt;
+    this.loadAttemptKey = key;
+    this.loadAttemptInstallsIfMissing = installIfMissing;
+    attempt.result.finally(() => {
+      if (this.loadAttempt !== attempt) return;
+      this.loadAttempt = undefined;
+      this.loadAttemptKey = null;
+      this.loadAttemptInstallsIfMissing = false;
+      if (this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
+    }).catch(() => undefined);
+    return attempt.wait();
   }
 
-  private async loadFresh(env: NodeJS.ProcessEnv, key: string, installIfMissing: boolean): Promise<ActiveKiwiHandle> {
+  private async loadFresh(env: NodeJS.ProcessEnv, installIfMissing: boolean): Promise<ActiveKiwiHandle> {
     try {
       const analyzer = await this.loadAnalyzer({ env, installIfMissing });
       const handle: ActiveKiwiHandle = {
         analyzer,
-        envKey: key,
+        envKey: envKey(env),
         leaseCount: 0,
         closed: false,
         disposed: false
       };
-      await this.replaceActiveHandle(handle);
-      this.degraded = null;
       return handle;
     } catch (error) {
       const model = this.inspectModelArtifact(env);
       const wasm = this.inspectWasmArtifact(env);
       if (model.installed && wasm.installed) {
-        this.degraded = {
-          envKey: key,
-          reason: errorMessage(error),
-          artifactStateKey: artifactStateKey(model, wasm)
-        };
         throw new KiwiAnalyzerTerminalLoadError(`Kiwi analyzer load failed: ${errorMessage(error)}`, error);
       }
       throw error;
@@ -314,20 +302,6 @@ function withoutKiwi(values: readonly KiwiDeclaredAnalyzer[]): KiwiDeclaredAnaly
 
 function envKey(env: NodeJS.ProcessEnv): string {
   return kiwiDataDir(env);
-}
-
-function modelStateKey(state: KiwiModelArtifactState): string {
-  if (!state.installed || !state.manifest) return `missing:${state.missingFiles.join(",")}`;
-  return `${state.manifest.kiwiNlpVersion}:${state.manifest.modelVersion}:${state.manifest.archiveSha256}:${state.manifest.installedAt}`;
-}
-
-function wasmStateKey(state: KiwiWasmArtifactState): string {
-  if (!state.installed || !state.manifest) return `missing:${state.missingFiles.join(",")}`;
-  return `${state.manifest.kiwiNlpVersion}:${state.manifest.wasmSha256}:${state.manifest.installedAt}`;
-}
-
-function artifactStateKey(model: KiwiModelArtifactState, wasm: KiwiWasmArtifactState): string {
-  return `model:${modelStateKey(model)}|wasm:${wasmStateKey(wasm)}`;
 }
 
 function errorMessage(error: unknown): string {

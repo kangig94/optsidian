@@ -32,15 +32,17 @@ import type {
   VectorStoreKey
 } from "./vector-store/types.js";
 
-export const SEARCH_DAEMON_PROTOCOL_VERSION = 3;
+export const SEARCH_DAEMON_PROTOCOL_VERSION = 4;
 export const QUERY_DAEMON_METHODS = [
   "Status",
+  "WaitReady",
   "Search",
   "Retrieve"
 ] as const;
 
 export const CONTROL_DAEMON_METHODS = [
   "Status",
+  "WaitReady",
   "LoadVault",
   "Rebuild",
   "Refresh",
@@ -67,13 +69,15 @@ export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = SEARCH_DAEMON_DEFAULT_
 export type SearchDaemonCapability = (typeof SEARCH_DAEMON_CAPABILITIES)[number];
 export type QueryDaemonMethod = (typeof QUERY_DAEMON_METHODS)[number];
 export type ControlDaemonMethod = (typeof CONTROL_DAEMON_METHODS)[number];
-export type MutatingControlDaemonMethod = Exclude<ControlDaemonMethod, "Status">;
+export type MutatingControlDaemonMethod = Exclude<ControlDaemonMethod, "Status" | "WaitReady">;
 export type AnyDaemonMethod = QueryDaemonMethod | ControlDaemonMethod;
 
 export type SearchDaemonErrorCode =
   | "BAD_REQUEST"
   | "SEARCH_DAEMON_UNAVAILABLE"
-  | "SEARCH_DAEMON_AUTH_FAILED"
+  | "STALE_INCARNATION"
+  | "DAEMON_STARTING"
+  | "DAEMON_DRAINING"
   | "SEARCH_DAEMON_NOT_READY"
   | "DEADLINE_EXCEEDED"
   | "CANCELLED"
@@ -93,7 +97,7 @@ export type DaemonRequestBase<M extends string, P> = {
   deadline: number;
   cancellationId?: string;
   traceId?: string;
-  nonce?: string;
+  incarnation?: string;
   payload: P;
 };
 
@@ -309,21 +313,21 @@ export type PruneRequestPayload = {
   dryRun?: boolean;
 };
 
-export type StatusRequestPayload = {
-  nonce?: string;
-};
+export type StatusRequestPayload = Record<string, never>;
 
-export type ShutdownRequestPayload = {
-  nonce: string;
-};
+export type WaitReadyRequestPayload = Record<string, never>;
+
+export type ShutdownRequestPayload = Record<string, never>;
 
 export type QueryDaemonRequest =
   | DaemonRequestBase<"Status", StatusRequestPayload>
+  | DaemonRequestBase<"WaitReady", WaitReadyRequestPayload>
   | DaemonRequestBase<"Search", SearchRequestPayload>
   | DaemonRequestBase<"Retrieve", RetrieveRequestPayload>;
 
 export type ControlDaemonRequest =
   | DaemonRequestBase<"Status", StatusRequestPayload>
+  | DaemonRequestBase<"WaitReady", WaitReadyRequestPayload>
   | DaemonRequestBase<"LoadVault", VaultRequestPayload>
   | DaemonRequestBase<"Rebuild", VaultRequestPayload>
   | DaemonRequestBase<"Refresh", VaultRequestPayload>
@@ -337,19 +341,25 @@ export type DaemonRequestByCapability = {
   control: ControlDaemonRequest;
 };
 
-export type OwnerStatus = {
-  pid: number;
+export type TenancySlot = {
   uid: number;
   runtimeHash: string;
-  binaryVersion: string;
   protocolVersion: number;
-  nonce: string;
-  querySocketPath: string;
-  controlSocketPath: string;
+};
+
+export type TenancyRecord = {
+  slot: TenancySlot;
+  epoch: number;
+  incarnationId: string;
+  binaryVersion: string;
+  pid: number;
+  socketPath: string;
   startedAt: string;
 };
 
-export type SearchDaemonPhase = "starting" | "ready" | "shutting-down";
+export type OwnerStatus = TenancyRecord;
+
+export type SearchDaemonPhase = "starting" | "ready" | "draining";
 
 export type VaultState = "unloaded" | "loading" | "ready" | "updating";
 
@@ -375,16 +385,18 @@ export type SearchIndexProgress = SearchIndexProgressUpdate & {
   updatedAt: string;
 };
 
-export type PublicStatusResult = {
+export type StatusResult = {
   ok: true;
   ready: boolean;
   phase: SearchDaemonPhase;
   protocolVersion: number;
-};
-
-export type StatusResult = PublicStatusResult & {
-  nonce: string;
-  owner: OwnerStatus;
+  binaryVersion: string;
+  epoch: number;
+  incarnationId: string;
+  pid: number;
+  socketPath: string;
+  startedAt: string;
+  owner: TenancyRecord;
   metrics: {
     requests: number;
     failures: number;
@@ -434,13 +446,15 @@ export type ShutdownResult = {
 };
 
 export type QueryDaemonResultByMethod = {
-  Status: PublicStatusResult | StatusResult;
+  Status: StatusResult;
+  WaitReady: StatusResult;
   Search: SearchResult;
   Retrieve: RetrieveResult;
 };
 
 export type ControlDaemonResultByMethod = {
-  Status: PublicStatusResult | StatusResult;
+  Status: StatusResult;
+  WaitReady: StatusResult;
   LoadVault: SearchIndexWarmResult;
   Rebuild: SearchIndexMutationResult;
   Refresh: RefreshResult;
@@ -528,12 +542,12 @@ export function encodeFrame(message: unknown): Buffer {
 
 export function queryMethodDefaultDeadlineMs(method: QueryDaemonMethod): number {
   if (method === "Retrieve") return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
-  if (method === "Status") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
+  if (method === "Status" || method === "WaitReady") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
 }
 
 export function controlMethodDefaultDeadlineMs(method: ControlDaemonMethod): number {
-  if (method === "Status") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
+  if (method === "Status" || method === "WaitReady") return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
 }
 

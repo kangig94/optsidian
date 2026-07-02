@@ -6,46 +6,69 @@ import { vaultRealpath } from "../../core/path.js";
 export type SearchStoreCachePaths = {
   vaultRoot: string;
   vaultStateHash: string;
+  lexicalIdentityHash: string;
+  storeId: string;
   cacheRootDir: string;
   searchRootDir: string;
   storesDir: string;
+  vaultDir: string;
   rootDir: string;
   storeStatePath: string;
   segmentsDir: string;
   snapshotsDir: string;
   retrievalsDir: string;
   linkGraphsDir: string;
+  ledgersDir: string;
   activeDir: string;
   tmpDir: string;
   activePointerPath: string;
   retrievalActivePointerPath: string;
 };
 
-export function searchStoreCachePaths(vaultRoot: string, env: NodeJS.ProcessEnv = process.env): SearchStoreCachePaths {
+export function searchStoreCachePaths(
+  vaultRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+  identity: { lexicalIdentityHash?: string } = {}
+): SearchStoreCachePaths {
   const root = vaultRealpath(vaultRoot);
   const vaultStateHash = sha256(root).slice(0, 16);
+  const lexicalIdentityHash = safeStoreFileName(identity.lexicalIdentityHash ?? "default-lexical");
+  const storeId = `${vaultStateHash}:${lexicalIdentityHash}`;
   const cacheRootDir = optsidianCacheRoot(env);
   const searchRootDir = path.join(cacheRootDir, "search");
   const storesDir = path.join(searchRootDir, "stores");
-  const rootDir = path.join(storesDir, vaultStateHash);
+  const vaultDir = path.join(storesDir, vaultStateHash);
+  const rootDir = path.join(vaultDir, lexicalIdentityHash);
   const activeDir = path.join(rootDir, "active");
   return {
     vaultRoot: root,
     vaultStateHash,
+    lexicalIdentityHash,
+    storeId,
     cacheRootDir,
     searchRootDir,
     storesDir,
+    vaultDir,
     rootDir,
     storeStatePath: path.join(rootDir, "store.json"),
     segmentsDir: path.join(rootDir, "segments"),
     snapshotsDir: path.join(rootDir, "snapshots"),
     retrievalsDir: path.join(rootDir, "retrievals"),
     linkGraphsDir: path.join(rootDir, "link-graphs"),
+    ledgersDir: path.join(rootDir, "ledgers"),
     activeDir,
     tmpDir: path.join(rootDir, "tmp"),
-    activePointerPath: path.join(activeDir, vaultStateHash),
-    retrievalActivePointerPath: path.join(activeDir, `${vaultStateHash}.retrieval`)
+    activePointerPath: path.join(activeDir, lexicalIdentityHash),
+    retrievalActivePointerPath: path.join(activeDir, `${lexicalIdentityHash}.retrieval`)
   };
+}
+
+export function searchStoreLedgerRootDir(paths: SearchStoreCachePaths, embeddingSpaceId: string): string {
+  return path.join(paths.ledgersDir, safeStoreFileName(embeddingSpaceId));
+}
+
+export function searchStoreId(paths: SearchStoreCachePaths): string {
+  return paths.storeId;
 }
 
 export function safeStoreFileName(value: string): string {

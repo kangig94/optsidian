@@ -13,6 +13,7 @@ export type VaultDirtyMarkConsumer = (marks: readonly VaultDirtyMark[]) => void 
 
 export type RetrievalSaveWatcher = {
   close(): void;
+  flushNow?(): Promise<readonly VaultDirtyMark[]>;
   unref?(): void;
 };
 
@@ -84,7 +85,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.started = true;
     this.ensureContentHashBaseline();
     try {
-      this.watchDirectoryTree(this.vaultRoot);
+      this.reconcile(this.vaultRoot);
     } catch (error) {
       this.startFallbackScan(error);
     }
@@ -126,26 +127,11 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     if (eventType !== "change" && eventType !== "rename") return;
     const safe = this.resolveChangedPath(path.join(dir, filename.toString()));
     if (!safe) return;
-    if (this.watchRuntimeDirectoryIfNeeded(safe)) return;
-    this.queueResolvedMarkdownPath(safe);
-  }
-
-  private watchRuntimeDirectoryIfNeeded(safe: SafePath): boolean {
-    let stat: fs.Stats;
     try {
-      stat = fs.lstatSync(safe.abs);
-    } catch {
-      return false;
-    }
-    if (stat.isSymbolicLink()) return true;
-    if (!stat.isDirectory()) return false;
-    if (pathContainsSkippedDirectory(safe.rel, "dir")) return true;
-    try {
-      this.watchDirectoryTree(safe.abs);
+      this.reconcile(safe.abs);
     } catch (error) {
       this.startFallbackScan(error);
     }
-    return true;
   }
 
   private queueResolvedMarkdownPath(safe: SafePath): void {
@@ -211,15 +197,95 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     }
   }
 
-  private watchDirectoryTree(start: string): void {
-    for (const dir of enumerateWatchDirs(this.vaultRoot, start)) {
-      const safe = resolveVaultPath(this.vaultRoot, dir, { mustExist: true });
-      if (!pathContainsSkippedDirectory(safe.rel, "dir")) this.watchDir(safe.abs);
+  private reconcile(subtree: string): void {
+    if (this.closed) return;
+    const safe = this.resolveChangedPath(subtree);
+    if (!safe) return;
+    const stat = lstatIfExists(safe.abs);
+    this.dropMissingWatchers();
+
+    if (!stat) {
+      this.reconcileMissing(safe);
+      return;
+    }
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      if (pathContainsSkippedDirectory(safe.rel, "dir")) return;
+      this.reconcileExistingDirectory(safe.abs);
+      return;
+    }
+    this.reconcileExistingFile(safe);
+  }
+
+  private reconcileExistingDirectory(dir: string): void {
+    const watchDirs = new Set<string>();
+    for (const watchDir of enumerateWatchDirs(this.vaultRoot, dir)) {
+      const safe = resolveVaultPath(this.vaultRoot, watchDir, { mustExist: true });
+      if (pathContainsSkippedDirectory(safe.rel, "dir")) continue;
+      watchDirs.add(safe.abs);
+      this.reopenWatchDir(safe.abs);
+    }
+    for (const watchedDir of [...this.watched.keys()]) {
+      if (isPathWithinOrEqual(watchedDir, dir) && !watchDirs.has(watchedDir)) this.closeWatchedDir(watchedDir);
+    }
+
+    const next = new Map(this.knownContentHashes);
+    const hashes = this.scanMarkdownContentHashes(dir);
+    const safe = resolveVaultPath(this.vaultRoot, dir, { mustExist: true });
+    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : "";
+    for (const relPath of this.knownContentHashes.keys()) {
+      if (!pathIsInSubtree(relPath, safe.rel, prefix)) continue;
+      if (hashes.has(relPath)) continue;
+      next.delete(relPath);
+      this.queueResolvedMarkdownPath(resolveVaultPath(this.vaultRoot, relPath, { mustExist: false }));
+    }
+    for (const [relPath, contentHash] of hashes) {
+      if (this.knownContentHashes.get(relPath) === contentHash) continue;
+      next.set(relPath, contentHash);
+      this.queueResolvedMarkdownPath(resolveVaultPath(this.vaultRoot, relPath, { mustExist: false }));
+    }
+    this.knownContentHashes = next;
+  }
+
+  private reconcileExistingFile(safe: SafePath): void {
+    if (!isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, "file")) return;
+    const next = new Map(this.knownContentHashes);
+    try {
+      const read = readVaultFileHardened(this.vaultRoot, safe.rel);
+      if (!read.stat.isFile()) return;
+      const contentHash = sha256(read.bytes);
+      if (this.knownContentHashes.get(read.safe.rel) !== contentHash) {
+        next.set(read.safe.rel, contentHash);
+        this.queueResolvedMarkdownPath(read.safe);
+      }
+    } catch {
+      next.delete(safe.rel);
+      this.queueResolvedMarkdownPath(safe);
+    }
+    this.knownContentHashes = next;
+  }
+
+  private reconcileMissing(safe: SafePath): void {
+    this.closeWatchedSubtree(safe.abs);
+    if (isMarkdownPath(safe.rel) && !pathContainsSkippedDirectory(safe.rel, "file")) {
+      if (this.knownContentHashes.has(safe.rel)) {
+        this.knownContentHashes.delete(safe.rel);
+        this.queueResolvedMarkdownPath(safe);
+      }
+      return;
+    }
+
+    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : "";
+    for (const relPath of [...this.knownContentHashes.keys()]) {
+      if (!pathIsInSubtree(relPath, safe.rel, prefix)) continue;
+      this.knownContentHashes.delete(relPath);
+      this.queueResolvedMarkdownPath(resolveVaultPath(this.vaultRoot, relPath, { mustExist: false }));
     }
   }
 
-  private watchDir(dir: string): void {
-    if (this.closed || this.fallbackTimer || this.watched.has(dir)) return;
+  private reopenWatchDir(dir: string): void {
+    if (this.closed || this.fallbackTimer) return;
+    this.closeWatchedDir(dir);
     const watcher = this.watchDirectory(dir, (eventType, filename) => {
       this.handleWatchEvent(dir, eventType, filename);
     });
@@ -232,34 +298,16 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.closeWatchers();
     this.ensureContentHashBaseline();
     this.fallbackTimer = this.setIntervalFn(() => {
-      this.scanForContentDeltas();
+      this.reconcile(this.vaultRoot);
     }, this.fallbackPollMs);
     this.fallbackTimer.unref?.();
   }
 
-  private scanForContentDeltas(): void {
-    if (this.closed) return;
-    const next = this.scanMarkdownContentHashes();
-    for (const relPath of this.knownContentHashes.keys()) {
-      if (!next.has(relPath)) {
-        const safe = this.resolveChangedPath(relPath);
-        if (safe) this.queueResolvedMarkdownPath(safe);
-      }
-    }
-    for (const [relPath, contentHash] of next) {
-      if (this.knownContentHashes.get(relPath) !== contentHash) {
-        const safe = this.resolveChangedPath(relPath);
-        if (safe) this.queueResolvedMarkdownPath(safe);
-      }
-    }
-    this.knownContentHashes = next;
-  }
-
-  private scanMarkdownContentHashes(): Map<string, string> {
+  private scanMarkdownContentHashes(start: string = this.vaultRoot): Map<string, string> {
     const hashes = new Map<string, string>();
     let files: string[];
     try {
-      files = walkFiles(this.vaultRoot, this.vaultRoot, { includeHidden: false, all: false });
+      files = walkFiles(this.vaultRoot, start, { includeHidden: false, all: false });
     } catch {
       return hashes;
     }
@@ -283,6 +331,26 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   private closeWatchers(): void {
     for (const watcher of this.watched.values()) watcher.close();
     this.watched.clear();
+  }
+
+  private closeWatchedSubtree(dir: string): void {
+    for (const watchedDir of [...this.watched.keys()]) {
+      if (isPathWithinOrEqual(watchedDir, dir)) this.closeWatchedDir(watchedDir);
+    }
+  }
+
+  private closeWatchedDir(dir: string): void {
+    const watcher = this.watched.get(dir);
+    if (!watcher) return;
+    watcher.close();
+    this.watched.delete(dir);
+  }
+
+  private dropMissingWatchers(): void {
+    for (const dir of [...this.watched.keys()]) {
+      const stat = lstatIfExists(dir);
+      if (!stat?.isDirectory()) this.closeWatchedDir(dir);
+    }
   }
 }
 
@@ -315,6 +383,27 @@ function pathContainsSkippedDirectory(relPath: string, kind: "file" | "dir"): bo
   return dirs.some((part) => shouldSkipDir(part, false));
 }
 
+function pathIsInSubtree(relPath: string, subtreeRel: string, subtreePrefix: string): boolean {
+  const normalized = normalizeVaultRelativePath(relPath);
+  const subtree = normalizeVaultRelativePath(subtreeRel);
+  if (!subtree) return true;
+  return normalized === subtree || normalized.startsWith(subtreePrefix);
+}
+
+function isPathWithinOrEqual(candidate: string, parent: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function lstatIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 function isMarkdownPath(relPath: string): boolean {
   return path.posix.extname(normalizeVaultRelativePath(relPath)).toLowerCase() === ".md";
 }
@@ -331,4 +420,8 @@ function normalizeVaultRelativePath(value: string): string {
 
 function sha256(bytes: Uint8Array): string {
   return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }

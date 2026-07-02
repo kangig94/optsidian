@@ -6,6 +6,7 @@ import {
   createDaemonSnapshotStore,
   createWorkerEmbeddingSetBuilder,
   DaemonSearchStoreService,
+  VaultPublisherRegistry,
   type DaemonSnapshotStore,
   type SnapshotDirtyMark
 } from "./search-store/index.js";
@@ -20,6 +21,7 @@ import { VaultRegistry } from "./vault-registry.js";
 import {
   effectiveSearchRuntimeProfile,
   envForSearchRuntimeProfile,
+  lexicalIdentityHashForSearchRuntimeProfile,
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash,
   settingsForSearchRuntimeProfile,
@@ -31,6 +33,7 @@ import {
   type VaultChangeProducerOptions,
   type VaultDirtyMark
 } from "./vector-store/watcher.js";
+import type { CurrentWriterToken, TenancyFenceProvider } from "../core/lifecycle/conditional-commit.js";
 
 export type ProfileRuntimeStatus = {
   profileHash: string;
@@ -60,6 +63,7 @@ type ProfileRuntimeAcquireOptions = {
 
 type SavePublicationState = {
   pendingMarks: Map<string, SnapshotDirtyMark>;
+  pendingJournalSeqs: Set<number>;
   foldChain: Promise<void>;
   running?: Promise<void>;
 };
@@ -71,6 +75,7 @@ export type ProfileManagerOptions = {
   saveWatcherDebounceMs?: number;
   saveWatcherFallbackPollMs?: number;
   saveMutationDeadlineMs?: number;
+  tenancyFence?: TenancyFenceProvider & { writerToken?: CurrentWriterToken };
 };
 
 const MAX_CANCELLED_IDS = 4096;
@@ -83,7 +88,10 @@ export class ProfileRuntime {
   readonly searchStore: DaemonSearchStoreService;
   readonly vaults = new VaultRegistry();
   private readonly embedScheduler: Pick<EmbedScheduler, "cancel">;
-  private readonly snapshotStore: Pick<DaemonSnapshotStore, "publishSaveSnapshot" | "foldSaveDirtyMarks">;
+  private readonly snapshotStore: Pick<
+    DaemonSnapshotStore,
+    "publishSaveSnapshot" | "foldSaveDirtyMarks" | "journalSaveDirtyMarks" | "journalPendingDebounce" | "recordSaveFailure" | "drainPublishers" | "close"
+  >;
   private readonly startSaveWatcher: RuntimeSaveWatcherFactory;
   private readonly saveWatcherDebounceMs: number | undefined;
   private readonly saveWatcherFallbackPollMs: number | undefined;
@@ -96,7 +104,10 @@ export class ProfileRuntime {
     profile: SearchRuntimeProfile,
     pools: DaemonPools,
     vectorPool: VectorGenerationManager,
-    snapshotStore: Pick<DaemonSnapshotStore, "publishSaveSnapshot" | "foldSaveDirtyMarks">,
+    snapshotStore: Pick<
+      DaemonSnapshotStore,
+      "publishSaveSnapshot" | "foldSaveDirtyMarks" | "journalSaveDirtyMarks" | "journalPendingDebounce" | "recordSaveFailure" | "drainPublishers" | "close"
+    >,
     searchStore: DaemonSearchStoreService,
     embedScheduler: Pick<EmbedScheduler, "cancel">,
     options: ProfileManagerOptions
@@ -118,6 +129,7 @@ export class ProfileRuntime {
     profile: SearchRuntimeProfile,
     baseEnv: NodeJS.ProcessEnv,
     embedScheduler: EmbedScheduler,
+    publisherRegistry: VaultPublisherRegistry,
     options: ProfileManagerOptions = {}
   ): Promise<ProfileRuntime> {
     const normalized = normalizeSearchRuntimeProfile(profile);
@@ -145,8 +157,11 @@ export class ProfileRuntime {
       byteCap: normalized.memory.snapshotByteCap,
       retentionCount: normalized.cache.snapshotRetention,
       profileHash,
+      lexicalIdentityHash: lexicalIdentityHashForSearchRuntimeProfile(normalized),
       searchSettings: normalized.index,
       vectorPool,
+      publisherRegistry,
+      tenancyFence: options.tenancyFence,
       embeddingSetBuilder: createWorkerEmbeddingSetBuilder({
         provider: embeddingProvider,
         providerPayload,
@@ -163,6 +178,7 @@ export class ProfileRuntime {
       queryCacheSize: normalized.cache.queryAnalysisEntries,
       searchSettings: normalized.index,
       settings,
+      env,
       vectorPool
     });
     return new ProfileRuntime(normalized, pools, vectorPool, snapshotStore, searchStore, embedScheduler, options);
@@ -198,8 +214,13 @@ export class ProfileRuntime {
   }
 
   async close(): Promise<void> {
-    for (const watcher of this.saveWatchers.values()) watcher.close();
+    for (const watcher of this.saveWatchers.values()) {
+      await watcher.flushNow?.();
+      watcher.close();
+    }
     this.saveWatchers.clear();
+    await this.snapshotStore.drainPublishers();
+    await this.snapshotStore.close();
     await this.pools.close();
   }
 
@@ -221,8 +242,10 @@ export class ProfileRuntime {
   private enqueueSaveSnapshot(vaultRoot: string, marks: readonly VaultDirtyMark[]): void {
     if (marks.length === 0) return;
     const saveMarks = marks.map(snapshotDirtyMarkFromVaultMark);
+    const journalSeqs = this.snapshotStore.journalSaveDirtyMarks(vaultRoot, saveMarks);
     const state = this.savePublicationState(vaultRoot);
     mergeDirtyMarks(state.pendingMarks, saveMarks);
+    for (const journalSeq of journalSeqs) state.pendingJournalSeqs.add(journalSeq);
     if (state.running) this.enqueueActiveSaveFold(vaultRoot, saveMarks, state);
     else this.startSavePublicationDrain(vaultRoot, state);
   }
@@ -232,6 +255,7 @@ export class ProfileRuntime {
     if (!state) {
       state = {
         pendingMarks: new Map(),
+        pendingJournalSeqs: new Set(),
         foldChain: Promise.resolve()
       };
       this.savePublications.set(vaultRoot, state);
@@ -253,15 +277,22 @@ export class ProfileRuntime {
 
   private async drainSavePublications(vaultRoot: string, state: SavePublicationState): Promise<void> {
     while (state.pendingMarks.size > 0) {
+      const journalSeqs = [...state.pendingJournalSeqs];
       drainDirtyMarks(state.pendingMarks);
+      state.pendingJournalSeqs.clear();
       await state.foldChain;
       const saveJobId = this.nextSaveJobId++;
       const cancellationId = `save:${this.profileHash}:${saveJobId}`;
       const deadline = Date.now() + this.saveMutationDeadlineMs;
-      await this.snapshotStore.publishSaveSnapshot(vaultRoot, {
-        deadline,
-        cancellationId
-      });
+      try {
+        await this.snapshotStore.publishSaveSnapshot(vaultRoot, {
+          deadline,
+          cancellationId
+        });
+      } catch (error) {
+        await this.snapshotStore.recordSaveFailure(vaultRoot, journalSeqs, error);
+        throw error;
+      }
     }
   }
 
@@ -306,6 +337,7 @@ export class ProfileManager {
   private readonly defaultProfile: SearchRuntimeProfile;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly embedScheduler: EmbedScheduler;
+  private readonly publisherRegistry = new VaultPublisherRegistry();
   private readonly ownsEmbedScheduler: boolean;
   private readonly options: ProfileManagerOptions;
   private closed = false;
@@ -358,7 +390,7 @@ export class ProfileManager {
     if (current) return current;
     const pending = this.pending.get(profileHash);
     if (pending) return pending;
-    const created = ProfileRuntime.create(profile, this.baseEnv, this.embedScheduler, this.options)
+    const created = ProfileRuntime.create(profile, this.baseEnv, this.embedScheduler, this.publisherRegistry, this.options)
       .then(async (runtime) => {
         if (this.closed) {
           await runtime.close();
@@ -406,6 +438,7 @@ export class ProfileManager {
     this.closed = true;
     await Promise.allSettled([...this.pending.values()]);
     await Promise.all([...this.runtimes.entries()].map(([profileHash, entry]) => this.closeEntry(profileHash, entry)));
+    await this.publisherRegistry.close();
     if (this.ownsEmbedScheduler) await this.embedScheduler.close();
   }
 

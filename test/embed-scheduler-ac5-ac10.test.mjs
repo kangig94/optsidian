@@ -11,11 +11,13 @@ import { createSearchDaemonIdleIsolationHarnessForTests } from "../src/daemon/se
 import { searchStoreCachePaths } from "../src/daemon/search-store/cache-paths.ts";
 import {
   effectiveSearchRuntimeProfile,
+  lexicalIdentityHashForSearchRuntimeProfile,
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash
 } from "../src/daemon/runtime-profile.ts";
 import { vectorStoreCachePaths } from "../src/daemon/vector-store/index.ts";
 import { docIdForVaultPath } from "../src/daemon/vector-store/watcher.ts";
+import { activeSnapshotFromEdition } from "./helpers/edition-ledger.mjs";
 
 function tempRoot(prefix = "optsidian-embed-scheduler-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -41,6 +43,12 @@ function dirtyMarkForPath(vault, rel) {
     path: rel,
     contentHash: sha256(fs.readFileSync(path.join(vault, rel)))
   };
+}
+
+function searchPathsForRuntime(vault, env, profile = effectiveSearchRuntimeProfile(process.cwd(), env)) {
+  return searchStoreCachePaths(vault, env, {
+    lexicalIdentityHash: lexicalIdentityHashForSearchRuntimeProfile(profile)
+  });
 }
 
 function context(id, ms = 5000) {
@@ -326,8 +334,8 @@ test("AC5 watcher-driven save lets query encode run after one save slice", async
         preload: false,
         warmupQueryAnalyzer: false
       });
-      const paths = searchStoreCachePaths(vault, env);
-      const initialSnapshotId = readJson(paths.activePointerPath).snapshotId;
+      const paths = searchPathsForRuntime(vault, env, lease.runtime.profile);
+      const initialSnapshotId = activeSnapshotFromEdition(paths).snapshotId;
       const initialCallCount = embedding.calls.length;
       const initialCompletedSlices = embedding.completedDocumentSlices;
       embedding.setGateDocuments(true);
@@ -360,7 +368,7 @@ test("AC5 watcher-driven save lets query encode run after one save slice", async
         }
         embedding.releaseAllDocuments();
       }
-      await waitFor(() => readJson(paths.activePointerPath).snapshotId !== initialSnapshotId, 5000);
+      await waitFor(() => activeSnapshotFromEdition(paths).snapshotId !== initialSnapshotId, 5000);
     } finally {
       lease.release();
     }
@@ -445,9 +453,9 @@ test("AC5 two same-model profiles share one scheduler/model owner and one vector
     await publishGeneration(vectorManager, pathsB, spec, "gen-profile-b", [makeChunk("doc-b", [0, 1, 0], spec)]);
 
     const stats = vectorManager.statsForTests();
-    assert.equal(Object.keys(stats.active).length, 2);
-    assert.equal(stats.active[`${hashA}:${pathsA.key.vaultStateHash}:embedding-shared`], "gen-profile-a");
-    assert.equal(stats.active[`${hashB}:${pathsB.key.vaultStateHash}:embedding-shared`], "gen-profile-b");
+    assert.equal(Object.keys(stats.active).length, 1);
+    assert.equal(stats.active[`${pathsA.key.vaultStateHash}:embedding-shared`], "gen-profile-b");
+    assert.deepEqual(pathsA.key, pathsB.key);
     assert.equal(vectorFactory.calls.create.filter((call) => call.role === "query").length, 2);
   } finally {
     await manager.close();
@@ -525,17 +533,15 @@ test("daemon shutdown relinquishes its socket path before the slow teardown (idl
     env,
     embedScheduler: scheduler
   });
-  // A daemon owns actual socket files at these paths; removeOrphanSocket unlinks whatever is present.
-  fs.writeFileSync(harness.querySocketPath, "");
-  fs.writeFileSync(harness.controlSocketPath, "");
+  // A daemon owns an actual socket file at this path; drain unlinks whatever is present exactly once.
+  fs.writeFileSync(harness.socketPath, "");
 
   const shutdown = harness.close();
   await closeEntered.promise; // shutdown has reached the slow embedScheduler.close()
 
   // Before the slow close resolves, the socket files must already be gone and the owner released, so a
   // successor booting after removeOwner binds cleanly and its live socket is never deleted by us.
-  assert.equal(fs.existsSync(harness.querySocketPath), false, "query socket unlinked before slow close");
-  assert.equal(fs.existsSync(harness.controlSocketPath), false, "control socket unlinked before slow close");
+  assert.equal(fs.existsSync(harness.socketPath), false, "socket unlinked before slow close");
   assert.equal(harness.ownerRemoved(), true, "owner released before slow close");
 
   releaseClose.resolve();

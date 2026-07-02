@@ -79,7 +79,7 @@ class CoralNeedleProcessInstance implements CoralNeedleInstance {
     this.key = input.key;
     this.generationId = input.generationId;
     this.dbPath = input.dbPath;
-    this.instanceId = `${input.role}:${input.key.profileHash}:${input.key.vaultStateHash}:${input.key.embeddingSetId}:${input.generationId}:${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    this.instanceId = `${input.role}:${input.key.vaultStateHash}:${input.key.embeddingSetId}:${input.generationId}:${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
     this.child = fork(options.scriptPath ?? defaultProcessScript(), [], {
       env: options.env ?? process.env,
       execArgv: processExecArgv(),

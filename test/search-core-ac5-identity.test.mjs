@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDeterministicEmbeddingSetBuilder } from "./helpers/deterministic-embedding.mjs";
+import { activeSnapshotFromEdition } from "./helpers/edition-ledger.mjs";
 
 const repoRoot = process.cwd();
 const PRE_CHANGE_SCHEMA_DIGEST = "298ed77e0d89ac164671c8104225d1f292e955d75ed27423de49d169e185afac";
@@ -129,21 +130,16 @@ test("AC5 schema digest identity changes from the pre-change baseline and stale 
     manifest: staleManifest,
     canonicalManifestSha256: staleCanonicalManifestSha256
   };
-  persistJson(path.join(paths.snapshotsDir, staleSnapshotId), staleEnvelope);
-  persistJson(paths.activePointerPath, {
-    schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
-    snapshotId: staleSnapshotId,
-    canonicalManifestSha256: staleCanonicalManifestSha256
-  });
+  persistJson(currentEnvelopePath, staleEnvelope);
 
-  assert.equal(store.readSnapshotEnvelope(paths, staleSnapshotId)?.snapshotId, staleSnapshotId);
-  assert.equal(store.snapshotIdentityMatches(paths, staleSnapshotId), false);
+  assert.equal(store.readSnapshotEnvelope(paths, built.snapshotId), undefined);
+  assert.equal(store.snapshotIdentityMatches(paths, built.snapshotId), false);
 
   const repaired = await store.loadVault(vault);
   assert.equal(repaired.vaults[0].status, "ready");
   assert.equal(repaired.snapshotId, built.snapshotId);
   assert.equal(buildCount, 2);
-  const repairedActive = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const repairedActive = activeSnapshotFromEdition(paths);
   assert.equal(repairedActive.snapshotId, built.snapshotId);
 });
 
@@ -169,7 +165,7 @@ test("AC5 snapshot envelope validator rejects old diagnostics.documents shape at
   assert.equal(loaded.vaults[0].status, "ready");
 
   const paths = searchStoreCachePaths(vault, env);
-  const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const active = activeSnapshotFromEdition(paths);
   const envelopePath = path.join(paths.snapshotsDir, active.snapshotId);
   const envelope = JSON.parse(fs.readFileSync(envelopePath, "utf8"));
   assert.equal(envelope.schemaHash, SNAPSHOT_PERSISTENCE_SCHEMA_HASH);

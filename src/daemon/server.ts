@@ -1,13 +1,11 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { ensurePrivateDirSync } from "../core/private-path.js";
+import { createProcessToken, type ProcessToken } from "../core/lifecycle/process-token.js";
 import {
-  CONTROL_DAEMON_CAPABILITY,
-  QUERY_DAEMON_CAPABILITY,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type ControlDaemonRequest,
   type MutatingControlDaemonMethod,
-  type OwnerStatus,
-  type PublicStatusResult,
   type QueryDaemonRequest,
   type SearchIndexProgressUpdate,
   type SearchDaemonPhase,
@@ -19,13 +17,15 @@ import { DaemonMetrics } from "./metrics.js";
 import {
   computeBinaryVersion,
   computeRuntimeHash,
+  createBindBackedTenancyFenceProvider,
   createOwnerRecord,
   createOwnerRegistry,
   currentUid,
   defaultSearchDaemonBinaryPath,
   defaultSearchDaemonRuntimeDir,
-  randomNonce,
-  socketPathsForOwner,
+  nextOwnerEpoch,
+  randomIncarnationId,
+  socketPathForOwner,
   type DesiredOwnerIdentity,
   type OwnerRecord,
   type OwnerRegistry
@@ -85,9 +85,8 @@ export async function runSearchDaemon(options: RunSearchDaemonOptions = {}): Pro
     const owner = resolveOwnerFromEnv(env);
     process.stdout.write(`${JSON.stringify({
       protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-      querySocketPath: owner.querySocketPath,
-      controlSocketPath: owner.controlSocketPath,
-      runtimeHash: owner.runtimeHash,
+      socketPath: owner.socketPath,
+      runtimeHash: owner.slot.runtimeHash,
       binaryVersion: owner.binaryVersion
     })}\n`);
     return;
@@ -111,20 +110,19 @@ class SearchDaemon {
   private resolveShutdown!: () => void;
   private readonly registry: OwnerRegistry;
   private readonly owner: OwnerRecord;
-  private readonly queryRpcServer: RpcServer;
-  private readonly controlRpcServer: RpcServer;
+  private readonly rpcServer: RpcServer;
   private readonly queryServer: CapabilityDispatchServer;
   private readonly controlServer: CapabilityDispatchServer;
   private readonly idleMs: number;
   private readonly env: NodeJS.ProcessEnv;
   private readonly activeCancellationIds = new Map<string, string>();
+  private readonly readyWaiters = new Set<() => void>();
   private idleTimer: NodeJS.Timeout | undefined;
 
   constructor(
     registry: OwnerRegistry,
     owner: OwnerRecord,
-    queryRpcServer: RpcServer,
-    controlRpcServer: RpcServer,
+    rpcServer: RpcServer,
     embedScheduler: EmbedScheduler,
     profiles: ProfileManager,
     idleMs: number,
@@ -132,8 +130,7 @@ class SearchDaemon {
   ) {
     this.registry = registry;
     this.owner = owner;
-    this.queryRpcServer = queryRpcServer;
-    this.controlRpcServer = controlRpcServer;
+    this.rpcServer = rpcServer;
     this.embedScheduler = embedScheduler;
     this.profiles = profiles;
     this.idleMs = idleMs;
@@ -146,90 +143,92 @@ class SearchDaemon {
   }
 
   static async start(options: StartOptions): Promise<SearchDaemon> {
-    const owner = resolveOwnerFromEnv(options.env);
+    const ownerSeed = resolveOwnerFromEnv(options.env);
+    const desired = desiredFromOwner(ownerSeed);
     const registry = createOwnerRegistry({
       env: options.env,
-      desired: owner
+      desired
     });
     ensurePrivateDirSync(registry.runtimeDir, "Optsidian search daemon runtime directory");
-    removeOrphanSocket(owner.querySocketPath);
-    removeOrphanSocket(owner.controlSocketPath);
-    let queryRpcServer: RpcServer | undefined;
-    let controlRpcServer: RpcServer | undefined;
+    const processToken = createProcessToken();
+    const claimId = crypto.randomUUID();
+    let rpcServer: RpcServer | undefined;
     let embedScheduler: EmbedScheduler | undefined;
+    let profiles: ProfileManager | undefined;
+    let owner: OwnerRecord | undefined;
+    let daemon: SearchDaemon | undefined;
+    let bootFailed = false;
+    const bootWaiters = new Set<() => void>();
+    const wakeBootWaiters = () => {
+      for (const waiter of bootWaiters) waiter();
+      bootWaiters.clear();
+    };
     try {
+      rpcServer = await createRpcServer({
+        socketPath: ownerSeed.socketPath,
+        handleRequest: async (request) => {
+          if (daemon) return daemon.handleRpcRequest(request);
+          return handleBootRequest(request, owner ?? ownerSeed, bootWaiters, () => daemon, () => bootFailed);
+        },
+        onConnectionClosed: (requestIds) => {
+          if (!daemon) return;
+          for (const requestId of requestIds) {
+            daemon.cancelRequest(requestId);
+          }
+        }
+      });
+      owner = createOwnerRecord(
+        desired,
+        ownerSeed.socketPath,
+        nextOwnerEpoch(registry),
+        randomIncarnationId(),
+        process.pid,
+        ownerSeed.startedAt
+      );
       registry.writeOwner(owner);
       const settings = readOptsidianSettings(process.cwd(), options.env);
       embedScheduler = createEmbedScheduler({ env: options.env, settings });
-      const profiles = new ProfileManager(options.env, embedScheduler);
-
-      let daemon: SearchDaemon | undefined;
-      queryRpcServer = await createRpcServer({
-        socketPath: owner.querySocketPath,
-        capability: QUERY_DAEMON_CAPABILITY,
-        handleRequest: (request) => {
-          if (!daemon) {
-            throw Object.assign(new Error("search daemon is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
-          }
-          return daemon.handleQueryRequest(request);
-        },
-        onConnectionClosed: (requestIds) => {
-          if (!daemon) return;
-          for (const requestId of requestIds) {
-            daemon.cancelRequest(requestId);
-          }
-        }
+      const tenancyFence = createBindBackedTenancyFenceProvider(registry, owner, claimId, processToken);
+      profiles = new ProfileManager(options.env, embedScheduler, {
+        tenancyFence
       });
-      controlRpcServer = await createRpcServer({
-        socketPath: owner.controlSocketPath,
-        capability: CONTROL_DAEMON_CAPABILITY,
-        handleRequest: (request) => {
-          if (!daemon) {
-            throw Object.assign(new Error("search daemon is not ready"), { code: "SEARCH_DAEMON_NOT_READY" });
-          }
-          return daemon.handleControlRequest(request);
-        },
-        onConnectionClosed: (requestIds) => {
-          if (!daemon) return;
-          for (const requestId of requestIds) {
-            daemon.cancelRequest(requestId);
-          }
-        }
-      });
-      daemon = new SearchDaemon(registry, owner, queryRpcServer, controlRpcServer, embedScheduler, profiles, daemonIdleMs(options.env, settings), options.env);
+      daemon = new SearchDaemon(registry, owner, rpcServer, embedScheduler, profiles, daemonIdleMs(options.env, settings), options.env);
       daemon.initialize();
+      wakeBootWaiters();
       return daemon;
     } catch (error) {
+      bootFailed = true;
       try {
-        await queryRpcServer?.close();
+        await rpcServer?.relinquish();
       } catch (cleanupError) {
-        logSearchDaemonProcessError("query socket cleanup failed", cleanupError);
+        logSearchDaemonProcessError("socket relinquish cleanup failed", cleanupError);
       }
       try {
-        await controlRpcServer?.close();
-      } catch (cleanupError) {
-        logSearchDaemonProcessError("control socket cleanup failed", cleanupError);
-      }
-      try {
-        removeOrphanSocket(owner.querySocketPath);
-        removeOrphanSocket(owner.controlSocketPath);
+        removeSocketPath(ownerSeed.socketPath);
       } catch (cleanupError) {
         logSearchDaemonProcessError("socket unlink cleanup failed", cleanupError);
       }
-      // Release the owner slot BEFORE the slow embed-scheduler teardown, mirroring shutdown()'s
-      // ordering (commit 2fe1f70). Otherwise the registry keeps advertising a dead-end owner (live
-      // pid, sockets already gone) for the whole duration of embedScheduler.close(), and a client
-      // arriving in that window cannot promptly spawn a fresh daemon.
       try {
-        registry.removeOwner(owner);
+        if (owner) registry.removeOwner(owner);
       } catch (cleanupError) {
         logSearchDaemonProcessError("owner cleanup failed", cleanupError);
+      }
+      try {
+        await rpcServer?.drain();
+      } catch (cleanupError) {
+        logSearchDaemonProcessError("request drain cleanup failed", cleanupError);
+      }
+      try {
+        await profiles?.close();
+      } catch (cleanupError) {
+        logSearchDaemonProcessError("profile cleanup failed", cleanupError);
       }
       try {
         await embedScheduler?.close();
       } catch (cleanupError) {
         logSearchDaemonProcessError("embed scheduler cleanup failed", cleanupError);
       }
+      wakeBootWaiters();
       throw error;
     }
   }
@@ -240,6 +239,7 @@ class SearchDaemon {
 
   initialize(): void {
     this.phase = "ready";
+    this.wakeReadyWaiters();
     this.armIdleTimer();
     const recovery = setTimeout(() => {
       void recoverRetrievalStartupState({ env: this.env }).catch((error: unknown) => {
@@ -249,12 +249,8 @@ class SearchDaemon {
     recovery.unref();
   }
 
-  private async handleQueryRequest(request: RpcRequestLike): Promise<unknown> {
-    return this.handleRequest(request, this.queryServer);
-  }
-
-  private async handleControlRequest(request: RpcRequestLike): Promise<unknown> {
-    return this.handleRequest(request, this.controlServer);
+  private async handleRpcRequest(request: RpcRequestLike): Promise<unknown> {
+    return this.handleRequest(request, this.dispatchServer(request));
   }
 
   private async handleRequest(request: RpcRequestLike, capabilityServer: CapabilityDispatchServer): Promise<unknown> {
@@ -284,6 +280,11 @@ class SearchDaemon {
     }
   }
 
+  private dispatchServer(request: RpcRequestLike): CapabilityDispatchServer {
+    if (this.queryServer.methods.includes(request.method)) return this.queryServer;
+    return this.controlServer;
+  }
+
   private cancelRequest(requestId: string): void {
     const cancellationIds = new Set([requestId]);
     const activeCancellationId = this.activeCancellationIds.get(requestId);
@@ -310,8 +311,11 @@ class SearchDaemon {
     if (request.payload === null || typeof request.payload !== "object" || Array.isArray(request.payload)) {
       throw Object.assign(new Error("request payload must be an object"), { code: "BAD_REQUEST" });
     }
-    if (request.method !== "Status" && request.nonce !== this.owner.nonce) {
-      throw Object.assign(new Error("search daemon nonce authentication failed"), { code: "SEARCH_DAEMON_AUTH_FAILED" });
+    if (this.phase === "draining" && request.method !== "Status") {
+      throw Object.assign(new Error("search daemon is draining"), { code: "DAEMON_DRAINING" });
+    }
+    if (!incarnationOptionalMethod(request.method) && request.incarnation !== this.owner.incarnationId) {
+      throw Object.assign(new Error("search daemon incarnation is stale"), { code: "STALE_INCARNATION" });
     }
   }
 
@@ -319,6 +323,8 @@ class SearchDaemon {
     switch (request.method) {
       case "Status":
         return this.status(request);
+      case "WaitReady":
+        return this.waitReady(request);
       case "Search": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
           const result = await runtime.searchStore.search(request.payload, this.requestContext(request));
@@ -346,6 +352,8 @@ class SearchDaemon {
     switch (request.method) {
       case "Status":
         return this.status(request);
+      case "WaitReady":
+        return this.waitReady(request);
       case "LoadVault": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
           const progress = this.progressReporter(runtime, request.payload.vault, "loading");
@@ -419,13 +427,8 @@ class SearchDaemon {
       case "Prune":
         return this.profiles.pruneSearchCaches(request.payload);
       case "Shutdown":
-        if (request.payload.nonce !== this.owner.nonce) {
-          throw Object.assign(new Error("search daemon shutdown nonce authentication failed"), {
-            code: "SEARCH_DAEMON_AUTH_FAILED"
-          });
-        }
         setTimeout(() => {
-          void this.shutdown().catch(() => {});
+          void this.drain("draining").catch(() => {});
         }, 0).unref();
         return { ok: true, shuttingDown: true };
     }
@@ -451,21 +454,11 @@ class SearchDaemon {
     }
   }
 
-  private async status(request: Extract<QueryDaemonRequest | ControlDaemonRequest, { method: "Status" }>): Promise<PublicStatusResult | StatusResult> {
-    const publicStatus: PublicStatusResult = {
-      ok: true,
-      ready: this.phase === "ready",
-      phase: this.phase,
-      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
-    };
-    if (!this.statusAuthenticated(request)) return publicStatus;
-
+  private async status(request: Extract<QueryDaemonRequest | ControlDaemonRequest, { method: "Status" | "WaitReady" }>): Promise<StatusResult> {
     const context = this.requestContext(request);
     const profiles = await this.profiles.status(context);
     return {
-      ...publicStatus,
-      nonce: this.owner.nonce,
-      owner: this.owner satisfies OwnerStatus,
+      ...statusBase(this.owner, this.phase),
       metrics: this.metrics.snapshot(),
       pools: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.pools])),
       searchStore: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.searchStore])),
@@ -474,37 +467,60 @@ class SearchDaemon {
     };
   }
 
-  private statusAuthenticated(request: Extract<QueryDaemonRequest | ControlDaemonRequest, { method: "Status" }>): boolean {
-    return request.nonce === this.owner.nonce || request.payload.nonce === this.owner.nonce;
+  private async waitReady(request: Extract<QueryDaemonRequest | ControlDaemonRequest, { method: "WaitReady" }>): Promise<StatusResult> {
+    if (this.phase === "ready") return this.status(request);
+    if (this.phase === "draining") {
+      throw Object.assign(new Error("search daemon is draining"), { code: "DAEMON_DRAINING" });
+    }
+    await this.waitForReadyPhase(request.deadline);
+    return this.status(request);
+  }
+
+  private waitForReadyPhase(deadline: number): Promise<void> {
+    if (this.phase === "ready") return Promise.resolve();
+    if (this.phase === "draining") {
+      return Promise.reject(Object.assign(new Error("search daemon is draining"), { code: "DAEMON_DRAINING" }));
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return Promise.reject(Object.assign(new Error("wait-ready deadline expired"), { code: "DEADLINE_EXCEEDED" }));
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.readyWaiters.delete(finish);
+        if (this.phase === "ready") resolve();
+        else reject(Object.assign(new Error("search daemon is draining"), { code: "DAEMON_DRAINING" }));
+      };
+      const timer = setTimeout(finish, remainingMs);
+      timer.unref();
+      this.readyWaiters.add(finish);
+    });
   }
 
   async closeForTests(): Promise<void> {
-    await this.shutdown();
+    await this.drain("draining");
   }
 
-  private async shutdown(): Promise<void> {
-    if (this.phase === "shutting-down") return;
-    this.phase = "shutting-down";
+  private async drain(phase: Extract<SearchDaemonPhase, "draining">): Promise<void> {
+    if (this.phase === "draining") return;
+    this.phase = phase;
     this.clearIdleTimer();
-    // Fully relinquish the socket path — stop listening AND unlink the socket files — BEFORE
-    // releasing the owner registry slot. A successor daemon only boots once `removeOwner` leaves
-    // the registry empty; by then this daemon has stopped touching the socket path, so the slow
-    // teardown below (profiles / embed scheduler close) can never unlink a socket that the
-    // successor has since bound at the same path. Doing the unlink after a slow embed-scheduler
-    // close (its previous position) let an auto-booted successor's live socket get deleted here,
-    // which surfaced as a client `connect ENOENT` that never recovered before the ready deadline.
+    this.wakeReadyWaiters();
     try {
-      await this.queryRpcServer.close();
+      await this.rpcServer.relinquish();
     } catch {}
     try {
-      await this.controlRpcServer.close();
-    } catch {}
-    try {
-      removeOrphanSocket(this.owner.querySocketPath);
-      removeOrphanSocket(this.owner.controlSocketPath);
+      removeSocketPath(this.owner.socketPath);
     } catch {}
     try {
       this.registry.removeOwner(this.owner);
+    } catch {}
+    try {
+      await this.rpcServer.drain();
     } catch {}
     try {
       await this.profiles.close();
@@ -515,12 +531,17 @@ class SearchDaemon {
     this.resolveShutdown();
   }
 
+  private wakeReadyWaiters(): void {
+    for (const waiter of this.readyWaiters) waiter();
+    this.readyWaiters.clear();
+  }
+
   private armIdleTimer(): void {
     this.clearIdleTimer();
     if (this.phase !== "ready") return;
     if (this.metrics.snapshot().activeRequests > 0) return;
     this.idleTimer = setTimeout(() => {
-      void this.shutdown().catch((error: unknown) => {
+      void this.drain("draining").catch((error: unknown) => {
         logSearchDaemonProcessError("idle shutdown failed", error);
       });
     }, this.idleMs);
@@ -568,41 +589,42 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   waitForShutdown(): Promise<void>;
   close(): Promise<void>;
   ownerRemoved(): boolean;
-  querySocketPath: string;
-  controlSocketPath: string;
+  socketPath: string;
 } {
   const env = options.env ?? process.env;
   const owner: OwnerRecord = {
-    uid: currentUid(),
-    runtimeHash: "test-runtime",
+    slot: {
+      uid: currentUid(),
+      runtimeHash: "test-runtime",
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
+    },
+    epoch: 1,
+    incarnationId: randomIncarnationId(),
     binaryVersion: "test-binary",
-    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-    nonce: "test-nonce",
     pid: process.pid,
-    querySocketPath: `/tmp/optsidian-search-daemon-test-query-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
-    controlSocketPath: `/tmp/optsidian-search-daemon-test-control-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
+    socketPath: `/tmp/optsidian-search-daemon-test-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
     startedAt: new Date().toISOString()
   };
   let removed = false;
   const registry: OwnerRegistry = {
     runtimeDir: "/tmp",
     ownerPath: "/tmp/optsidian-search-daemon-test.owner",
-    lockPath: "/tmp/optsidian-search-daemon-test.lock",
     readOwner: () => owner,
     writeOwner: () => undefined,
     removeOwner: () => {
       removed = true;
-    },
-    withControlLock: async (_deadlineMs, fn) => fn()
+    }
   };
-  const queryRpcServer: RpcServer = { close: async () => undefined };
-  const controlRpcServer: RpcServer = { close: async () => undefined };
+  const rpcServer: RpcServer = {
+    relinquish: async () => undefined,
+    drain: async () => undefined,
+    close: async () => undefined
+  };
   const profiles = new ProfileManager(env, options.embedScheduler);
   const daemon = new SearchDaemon(
     registry,
     owner,
-    queryRpcServer,
-    controlRpcServer,
+    rpcServer,
     options.embedScheduler,
     profiles,
     options.idleMs,
@@ -613,8 +635,7 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     waitForShutdown: () => daemon.waitForShutdown(),
     close: () => daemon.closeForTests(),
     ownerRemoved: () => removed,
-    querySocketPath: owner.querySocketPath,
-    controlSocketPath: owner.controlSocketPath
+    socketPath: owner.socketPath
   };
 }
 
@@ -627,28 +648,33 @@ function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {
     binaryVersion: env.OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION?.trim() || computeBinaryVersion(binaryPath),
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
   };
-  const sockets = {
-    querySocketPath: env.OPTSIDIAN_SEARCH_DAEMON_QUERY_SOCKET?.trim() ||
-      env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim() ||
-      socketPathsForOwner(runtimeDir, desired).querySocketPath,
-    controlSocketPath: env.OPTSIDIAN_SEARCH_DAEMON_CONTROL_SOCKET?.trim() ||
-      socketPathsForOwner(runtimeDir, desired).controlSocketPath
-  };
+  const socketPath = env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim() ||
+    socketPathForOwner(runtimeDir, desired);
   return createOwnerRecord(
     desired,
-    sockets,
-    env.OPTSIDIAN_SEARCH_DAEMON_NONCE?.trim() || randomNonce(),
+    socketPath,
+    0,
+    env.OPTSIDIAN_SEARCH_DAEMON_INCARNATION?.trim() || "pending",
     process.pid,
     new Date().toISOString()
   );
 }
 
-function removeOrphanSocket(socketPath: string): void {
+function removeSocketPath(socketPath: string): void {
   try {
     fs.rmSync(socketPath, { force: true });
   } catch {
     throw new Error(`Cannot remove stale search daemon socket at ${socketPath}`);
   }
+}
+
+function desiredFromOwner(owner: OwnerRecord): DesiredOwnerIdentity {
+  return {
+    uid: owner.slot.uid,
+    runtimeHash: owner.slot.runtimeHash,
+    binaryVersion: owner.binaryVersion,
+    protocolVersion: owner.slot.protocolVersion
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -693,6 +719,7 @@ function settingNumber(raw: string | undefined, fallback: number | undefined): n
 function queryRegistry(): Record<QueryDaemonRequest["method"], RegistryHandler<QueryRuntime>> {
   return {
     Status: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
+    WaitReady: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     Search: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     Retrieve: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest)
   };
@@ -701,6 +728,7 @@ function queryRegistry(): Record<QueryDaemonRequest["method"], RegistryHandler<Q
 function controlRegistry(): Record<ControlDaemonRequest["method"], RegistryHandler<ControlRuntime>> {
   return {
     Status: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
+    WaitReady: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     LoadVault: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     Rebuild: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     Refresh: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
@@ -729,6 +757,96 @@ function createCapabilityDispatchServer<R>(
 
 function capabilityLabel(server: CapabilityDispatchServer): string {
   return server.methods.includes("Retrieve") ? "query daemon" : "control daemon";
+}
+
+async function handleBootRequest(
+  request: RpcRequestLike,
+  owner: OwnerRecord,
+  bootWaiters: Set<() => void>,
+  getDaemon: () => SearchDaemon | undefined,
+  bootFailed: () => boolean
+): Promise<StatusResult> {
+  validateBootRequest(request);
+  if (request.method === "Status") return emptyStatus(owner, "starting");
+  if (request.method !== "WaitReady") {
+    throw Object.assign(new Error("search daemon is starting"), { code: "DAEMON_STARTING" });
+  }
+  await waitForBootReady(request.deadline, bootWaiters);
+  if (bootFailed()) {
+    throw Object.assign(new Error("search daemon failed before becoming ready"), { code: "SEARCH_DAEMON_UNAVAILABLE" });
+  }
+  return emptyStatus(owner, getDaemon() ? "ready" : "starting");
+}
+
+function validateBootRequest(request: RpcRequestLike): void {
+  if (request.protocolVersion !== SEARCH_DAEMON_PROTOCOL_VERSION) {
+    throw Object.assign(new Error("search daemon protocol version mismatch"), { code: "BAD_REQUEST" });
+  }
+  if (!Number.isFinite(request.deadline)) {
+    throw Object.assign(new Error("request deadline must be a finite number"), { code: "BAD_REQUEST" });
+  }
+  if (Date.now() >= request.deadline) {
+    throw Object.assign(new Error("request deadline expired before admission"), { code: "DEADLINE_EXCEEDED" });
+  }
+  if (request.payload === null || typeof request.payload !== "object" || Array.isArray(request.payload)) {
+    throw Object.assign(new Error("request payload must be an object"), { code: "BAD_REQUEST" });
+  }
+}
+
+function waitForBootReady(deadline: number, bootWaiters: Set<() => void>): Promise<void> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    return Promise.reject(Object.assign(new Error("wait-ready deadline expired"), { code: "DEADLINE_EXCEEDED" }));
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      bootWaiters.delete(finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, remainingMs);
+    timer.unref();
+    bootWaiters.add(finish);
+  });
+}
+
+function statusBase(owner: OwnerRecord, phase: SearchDaemonPhase) {
+  return {
+    ok: true as const,
+    ready: phase === "ready",
+    phase,
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+    binaryVersion: owner.binaryVersion,
+    epoch: owner.epoch,
+    incarnationId: owner.incarnationId,
+    pid: owner.pid,
+    socketPath: owner.socketPath,
+    startedAt: owner.startedAt,
+    owner
+  };
+}
+
+function emptyStatus(owner: OwnerRecord, phase: SearchDaemonPhase): StatusResult {
+  return {
+    ...statusBase(owner, phase),
+    metrics: {
+      requests: 0,
+      failures: 0,
+      activeRequests: 0,
+      startedAt: owner.startedAt
+    },
+    pools: {},
+    searchStore: {},
+    profiles: {},
+    vaults: []
+  };
+}
+
+function incarnationOptionalMethod(method: string): boolean {
+  return method === "Status" || method === "WaitReady";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

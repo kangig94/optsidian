@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import net from "node:net";
 import {
   FrameDecoder,
@@ -27,6 +28,8 @@ export type RpcConnection<Request extends RpcRequestLike = RpcRequestLike> = {
 };
 
 export type RpcServer = {
+  relinquish(): Promise<void>;
+  drain(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -47,6 +50,8 @@ type PendingRequest = {
 };
 
 const RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000;
+
+export type SocketProbeResult = "listening" | "refused" | "missing" | "unavailable";
 
 export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike>(socketPath: string): Promise<RpcConnection<Request>> {
   const socket = await openSocket(socketPath);
@@ -115,6 +120,7 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
 ): Promise<RpcServer> {
   const sockets = new Set<net.Socket>();
   const activeRequestsBySocket = new Map<net.Socket, Set<string>>();
+  const activeRequestPromises = new Set<Promise<void>>();
   const socketIdleTimeoutMs = options.socketIdleTimeoutMs ?? RPC_SOCKET_IDLE_TIMEOUT_MS;
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -151,7 +157,7 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
         }
         const request = message as Request;
         activeRequestsBySocket.get(socket)?.add(request.requestId);
-        void Promise.resolve()
+        const activeRequest = Promise.resolve()
           .then(() => options.handleRequest(request))
           .then((result) => {
             if (socket.destroyed) return;
@@ -172,7 +178,9 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
           })
           .finally(() => {
             activeRequestsBySocket.get(socket)?.delete(request.requestId);
+            activeRequestPromises.delete(activeRequest);
           });
+        activeRequestPromises.add(activeRequest);
       }
     });
 
@@ -184,25 +192,83 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
+  await listenWithStaleSocketProbe(server, options.socketPath);
+
+  let relinquished = false;
+
+  async function relinquish(): Promise<void> {
+    if (relinquished) return;
+    relinquished = true;
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error && errorCode(error) !== "ERR_SERVER_NOT_RUNNING") reject(error);
+        else resolve();
+      });
+    });
+  }
+
+  async function drain(): Promise<void> {
+    while (activeRequestPromises.size > 0) {
+      await Promise.allSettled([...activeRequestPromises]);
+    }
+  }
+
+  return {
+    relinquish,
+    drain,
+    async close() {
+      await relinquish();
+      await drain();
+    }
+  };
+}
+
+export async function probeSocketPath(socketPath: string): Promise<SocketProbeResult> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    socket.once("connect", () => {
+      socket.end(() => resolve("listening"));
+    });
+    socket.once("error", (error) => {
+      const code = errorCode(error);
+      if (code === "ECONNREFUSED") resolve("refused");
+      else if (code === "ENOENT") resolve("missing");
+      else resolve("unavailable");
+    });
+  });
+}
+
+async function listenWithStaleSocketProbe(server: net.Server, socketPath: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await listen(server, socketPath);
+      return;
+    } catch (error) {
+      if (errorCode(error) !== "EADDRINUSE" || attempt > 0) throw error;
+      const probe = await probeSocketPath(socketPath);
+      if (probe !== "refused") throw error;
+      await fsRmSocket(socketPath);
+    }
+  }
+}
+
+function listen(server: net.Server, socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(options.socketPath, () => {
+    server.listen(socketPath, () => {
       server.off("error", reject);
       resolve();
     });
   });
+}
 
-  return {
-    close() {
-      return new Promise((resolve, reject) => {
-        for (const socket of sockets) socket.destroy();
-        server.close((error) => {
-          if (error) reject(error);
-          else resolve();
-        });
-      });
-    }
-  };
+async function fsRmSocket(socketPath: string): Promise<void> {
+  try {
+    await fs.rm(socketPath, { force: true });
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
 }
 
 function writeResponse(socket: net.Socket, response: RpcResponseLike, onComplete?: () => void): void {
@@ -240,11 +306,12 @@ function openSocket(socketPath: string): Promise<net.Socket> {
 }
 
 function errorToRpcError(error: unknown) {
-  if (error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string") {
+  const code = errorCode(error);
+  if (code) {
     return rpcError(
-      (error as { code: string }).code as never,
+      code as never,
       error instanceof Error ? error.message : String(error),
-      "details" in error ? (error as { details?: unknown }).details : undefined
+      error && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined
     );
   }
   return rpcError("INTERNAL", error instanceof Error ? error.message : String(error));
@@ -255,6 +322,12 @@ function rpcResponseError(code: string, message: string, details?: unknown): Err
   error.code = code;
   if (details !== undefined) error.details = details;
   return error;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : undefined;
 }
 
 function bufferChunk(chunk: string | Buffer): Buffer {
