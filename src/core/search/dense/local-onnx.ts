@@ -147,15 +147,20 @@ export class LocalOnnxProvider implements EmbeddingProvider {
 
   private async tokenizer(): Promise<LocalOnnxTokenizer> {
     if (this.injectedTokenizer) return this.injectedTokenizer;
-    this.tokenizerPromise ??= (async () => {
+    if (this.tokenizerPromise) return this.tokenizerPromise;
+    const promise = (async () => {
       await this.ensureArtifact();
       return this.loadTokenizerImpl(this.descriptor, this.env);
     })();
-    return this.tokenizerPromise;
+    this.tokenizerPromise = invalidateCacheOnReject(promise, () => {
+      if (this.tokenizerPromise === promise) this.tokenizerPromise = undefined;
+    });
+    return promise;
   }
 
   private async session(): Promise<LocalOnnxSessionSelection> {
-    this.sessionPromise ??= (async () => {
+    if (this.sessionPromise) return this.sessionPromise;
+    const promise = (async () => {
       await this.ensureArtifact();
       const ort = await this.ort();
       this.activeOrt = ort;
@@ -169,7 +174,10 @@ export class LocalOnnxProvider implements EmbeddingProvider {
       this.selectedExecutionProvider = selection.executionProvider;
       return selection;
     })();
-    return this.sessionPromise;
+    this.sessionPromise = invalidateCacheOnReject(promise, () => {
+      if (this.sessionPromise === promise) this.sessionPromise = undefined;
+    });
+    return promise;
   }
 
   private async ort(): Promise<LocalOnnxRuntime> {
@@ -177,7 +185,12 @@ export class LocalOnnxProvider implements EmbeddingProvider {
       this.activeOrt = this.injectedOrt;
       return this.injectedOrt;
     }
-    this.ortPromise ??= importOnnxRuntime();
+    if (!this.ortPromise) {
+      const promise = importOnnxRuntime();
+      this.ortPromise = invalidateCacheOnReject(promise, () => {
+        if (this.ortPromise === promise) this.ortPromise = undefined;
+      });
+    }
     this.activeOrt = await this.ortPromise;
     return this.activeOrt;
   }
@@ -381,6 +394,15 @@ async function defaultLoadTokenizer(descriptor: LocalOnnxModelDescriptor, env: N
   const tokenizerJson = JSON.parse(fs.readFileSync(localOnnxTokenizerJsonPath(descriptor.key, env), "utf8")) as object;
   const tokenizerConfig = JSON.parse(fs.readFileSync(localOnnxTokenizerConfigPath(descriptor.key, env), "utf8")) as object;
   return new Tokenizer(tokenizerJson, tokenizerConfig);
+}
+
+// Caching happens at the call site (`this.xPromise = ...`); this only wires self-invalidation so a
+// transient failure (artifact mid-reinstall, one bad ONNX session create) does not poison every
+// future encode for the life of the provider. `onReject` clears the cached slot; the original
+// promise is returned unchanged so the caller still observes the rejection.
+function invalidateCacheOnReject<T>(promise: Promise<T>, onReject: () => void): Promise<T> {
+  promise.catch(() => onReject());
+  return promise;
 }
 
 async function importOnnxRuntime(): Promise<LocalOnnxRuntime> {

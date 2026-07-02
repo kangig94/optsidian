@@ -654,8 +654,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
     context: SnapshotRequestContext = {}
   ): Promise<LexicalReadContextResult> {
     const paths = this.paths(vaultRoot);
+    let pinned: { loaded: LoadedSnapshot; pinToken: string } | undefined;
     try {
-      const pinned = await this.withLifecycleStore(paths, async () => {
+      pinned = await this.withLifecycleStore(paths, async () => {
         const snapshotId = await this.ensureActiveSnapshot(paths.vaultRoot, context);
         const loaded = await this.ensureLoaded(paths, snapshotId, { touchCache: false });
         loaded.refCount += 1;
@@ -685,6 +686,12 @@ export class DaemonSnapshotStore implements SnapshotStore {
         }
       };
     } catch {
+      // The pin is committed inside withLifecycleStore, but post-pin work (content-hash map, corpus
+      // id fallback) runs after it. If that throws, release the pin here — otherwise its refCount
+      // stays > 0 forever and the snapshot becomes permanently exempt from GC.
+      if (pinned) {
+        this.release({ snapshotId: pinned.loaded.snapshotId, view: pinned.loaded.view, pinToken: pinned.pinToken });
+      }
       return { status: "index-not-ready", reason: "lexical-snapshot-unavailable" };
     }
   }
@@ -1242,7 +1249,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
           else fs.rmSync(target, { force: true });
         }
         if (!published) {
-          const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.segment.tmp`);
+          const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.${randomTmpSuffix()}.segment.tmp`);
           writePrivateFileSync(tmp, segment.bytes, "Optsidian search segment");
           fsyncFileSync(tmp);
           fsyncDirSync(paths.tmpDir);
@@ -1260,7 +1267,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       }
 
       const manifestPath = path.join(paths.snapshotsDir, built.snapshotId);
-      const manifestTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.manifest.tmp`);
+      const manifestTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.${randomTmpSuffix()}.manifest.tmp`);
       writePrivateFileSync(manifestTmp, `${JSON.stringify(envelope)}\n`, "Optsidian search snapshot manifest");
       fsyncFileSync(manifestTmp);
       await this.renameManifest(manifestTmp, manifestPath);
@@ -1271,7 +1278,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         snapshotId: built.snapshotId,
         canonicalManifestSha256: built.canonicalManifestSha256
       };
-      const activeTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.active.tmp`);
+      const activeTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.${randomTmpSuffix()}.active.tmp`);
       writePrivateFileSync(activeTmp, `${JSON.stringify(activePointer)}\n`, "Optsidian search active pointer");
       fsyncFileSync(activeTmp);
       await this.renameActive(activeTmp, paths.activePointerPath);
@@ -1475,7 +1482,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         retrievalSnapshotId: publication.envelope.retrievalSnapshotId,
         vectorGenerationId: publication.active.vectorGenerationId
       });
-      const activeTmp = path.join(paths.tmpDir, `${publication.active.retrievalSnapshotId}.${process.pid}.retrieval-active.tmp`);
+      const activeTmp = path.join(paths.tmpDir, `${publication.active.retrievalSnapshotId}.${process.pid}.${randomTmpSuffix()}.retrieval-active.tmp`);
       writePrivateFileSync(activeTmp, `${JSON.stringify(publication.active)}\n`, "Optsidian retrieval active pointer");
       fsyncFileSync(activeTmp);
       await this.renameRetrieval(activeTmp, paths.retrievalActivePointerPath);
@@ -1700,20 +1707,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private async markSweepSearchGc(paths: SearchStoreCachePaths): Promise<void> {
     for (const file of await safeReadDirAsync(paths.retrievalsDir)) {
       if (await this.retrievalSnapshotIsProtected(paths, file)) continue;
-      await fs.promises.rm(path.join(paths.retrievalsDir, file), { force: true });
+      await rmBestEffort(path.join(paths.retrievalsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.snapshotsDir)) {
       if (await this.snapshotIsProtectedForGc(paths, file)) continue;
-      await fs.promises.rm(path.join(paths.snapshotsDir, file), { force: true });
+      await rmBestEffort(path.join(paths.snapshotsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.segmentsDir)) {
       if (await this.segmentIsProtectedForGc(paths, file)) continue;
-      await fs.promises.rm(path.join(paths.segmentsDir, file), { force: true });
+      await rmBestEffort(path.join(paths.segmentsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.linkGraphsDir)) {
       if (!isValidSnapshotId(file)) continue;
       if (await this.linkGraphIsProtectedForGc(paths, file as LinkGraphId)) continue;
-      await fs.promises.rm(path.join(paths.linkGraphsDir, file), { force: true });
+      await rmBestEffort(path.join(paths.linkGraphsDir, file), { force: true });
     }
   }
 
@@ -1760,7 +1767,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
           generationId: generationDir
         });
         if (await this.vectorGenerationIsProtected(paths, key)) continue;
-        await fs.promises.rm(generationPath, { recursive: true, force: true });
+        await rmBestEffort(generationPath, { recursive: true, force: true });
       }
       let hasGenerations = false;
       for (const entry of await safeReadDirAsync(vectorPaths.generationsDir)) {
@@ -1770,8 +1777,12 @@ export class DaemonSnapshotStore implements SnapshotStore {
         }
       }
       if (!hasGenerations && !await this.vectorStoreHasProtectedGeneration(paths, embeddingSetDir)) {
-        await fs.promises.rm(vectorPaths.rootDir, { recursive: true, force: true });
-        removedStoreIds.push(vectorStoreId(vectorPaths));
+        // Only record the store as removed if the directory actually went away; otherwise the
+        // catalog would drop a store whose files still exist on disk.
+        try {
+          await fs.promises.rm(vectorPaths.rootDir, { recursive: true, force: true });
+          removedStoreIds.push(vectorStoreId(vectorPaths));
+        } catch {}
       }
     }
     if (removedStoreIds.length > 0) {
@@ -2162,6 +2173,14 @@ export function createWorkerEmbeddingSetBuilder(input: {
   };
 }
 
+// Per-write random suffix so two concurrent builds in the same process (e.g. a manual Rebuild
+// racing a save-lane publish) never target an identical tmp path — otherwise the first rename moves
+// the shared tmp away and the second fails with a spurious ENOENT. Leftover tmps are still swept by
+// mtime in sweepStaleTmpDir.
+function randomTmpSuffix(): string {
+  return crypto.randomBytes(8).toString("hex");
+}
+
 function embeddingBuildLane(lane: EmbedSchedulerLane | undefined): RetrievalEmbeddingBuildLane {
   if (lane === "save" || lane === "refresh" || lane === "rebuild") return lane;
   return "rebuild";
@@ -2542,7 +2561,7 @@ async function storeRetrievalSnapshotEnvelope(
   ensurePrivateDirSync(paths.retrievalsDir, "Optsidian retrieval snapshot directory");
   ensurePrivateDirSync(paths.tmpDir, "Optsidian search tmp directory");
   const target = path.join(paths.retrievalsDir, envelope.retrievalSnapshotId);
-  const tmp = path.join(paths.tmpDir, `${envelope.retrievalSnapshotId}.${process.pid}.retrieval.tmp`);
+  const tmp = path.join(paths.tmpDir, `${envelope.retrievalSnapshotId}.${process.pid}.${randomTmpSuffix()}.retrieval.tmp`);
   writePrivateFileSync(tmp, `${JSON.stringify(envelope)}\n`, "Optsidian retrieval snapshot envelope");
   fsyncFileSync(tmp);
   await durableRename(tmp, target);
@@ -2783,11 +2802,30 @@ async function isStaleTmpPathAsync(filePath: string, nowMs: number): Promise<boo
   }
 }
 
+async function rmBestEffort(target: string, options: { recursive?: boolean; force?: boolean }): Promise<void> {
+  // Best-effort GC deletion: a single undeletable entry (e.g. a file held open on Windows) must not
+  // abort the whole mark-sweep pass and stall the vault's GC. Undeleted entries retry next pass.
+  try {
+    await fs.promises.rm(target, options);
+  } catch {}
+}
+
 async function retainedSnapshotFilesAsync(dirPath: string, count: number): Promise<string[]> {
-  return (await safeReadDirAsync(dirPath))
-    .filter(isValidSnapshotId)
-    .sort((left, right) => compareCodePoint(right, left))
+  // "Newest N" must mean most-recently-built, not lexically-highest hash. Snapshot ids are SHA-256
+  // digests with no temporal component, so sorting them by code point would retain arbitrary files
+  // and could GC a snapshot that was just published (breaking explicit-snapshotId pin replay).
+  const files = (await safeReadDirAsync(dirPath)).filter(isValidSnapshotId);
+  const withMtime = await Promise.all(files.map(async (name) => {
+    let mtimeMs = 0;
+    try {
+      mtimeMs = (await fs.promises.stat(path.join(dirPath, name))).mtimeMs;
+    } catch {}
+    return { name, mtimeMs };
+  }));
+  return withMtime
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || compareCodePoint(right.name, left.name))
     .slice(0, count)
+    .map((entry) => entry.name);
 }
 
 function currentContentHashes(vaultRoot: string): Map<string, string> {

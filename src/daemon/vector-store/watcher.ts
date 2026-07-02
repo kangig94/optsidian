@@ -64,7 +64,14 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.onDirtyMarks = options.onDirtyMarks;
     this.debounceMs = options.debounceMs ?? 250;
     this.fallbackPollMs = options.fallbackPollMs ?? 5000;
-    this.watchDirectory = options.watchDirectory ?? ((dir, listener) => fs.watch(dir, listener));
+    this.watchDirectory = options.watchDirectory ?? ((dir, listener) => {
+      const watcher = fs.watch(dir, listener);
+      // An unhandled 'error' event on an fs.watch handle would throw as an uncaughtException and
+      // exit the daemon. Route it to the periodic-scan fallback instead, matching how synchronous
+      // watch-registration failures are already handled.
+      watcher.on("error", (error) => this.startFallbackScan(error));
+      return watcher;
+    });
     this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.clearTimer = options.clearTimer ?? clearTimeout;
     this.setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));

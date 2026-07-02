@@ -49,6 +49,7 @@ type QueryEncodeFlight = {
   schedulerCancellationId: string;
   promise: Promise<ModelEncodeWorkerResult>;
   waiters: Set<QueryEncodeWaiter>;
+  settled?: { ok: true; result: ModelEncodeWorkerResult } | { ok: false; error: Error };
 };
 
 const LANE_ORDER: readonly EmbedSchedulerLane[] = ["query", "save", "refresh", "rebuild"];
@@ -123,9 +124,11 @@ export class EmbedScheduler {
       };
       this.querySingleFlights.set(key, flight);
       scheduled.then((result) => {
+        flight.settled = { ok: true, result };
         for (const waiter of flight.waiters) waiter.resolve(result);
       }, (error: unknown) => {
         const failure = error instanceof Error ? error : new Error(String(error));
+        flight.settled = { ok: false, error: failure };
         for (const waiter of flight.waiters) waiter.reject(failure);
       }).finally(() => {
         if (this.querySingleFlights.get(key) === flight) this.querySingleFlights.delete(key);
@@ -135,7 +138,10 @@ export class EmbedScheduler {
     }
     return this.run(lane, () => this.embedding.encode({
       ...payload,
-      suppressCpuPromotion: payload.suppressCpuPromotion === true || this.rebuildLaneIsActive()
+      // Only the foreground query lane may trigger an inline CPU→GPU promotion; a background
+      // document-embed batch (save/refresh/rebuild) must never block a queued query behind a GPU
+      // model load, which would violate the documented query > save > refresh > rebuild priority.
+      suppressCpuPromotion: payload.suppressCpuPromotion === true || lane !== "query" || this.rebuildLaneIsActive()
     }, options), options);
   }
 
@@ -258,6 +264,14 @@ export class EmbedScheduler {
   private attachQueryEncodeWaiter(flight: QueryEncodeFlight, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
     if (this.cancelled.has(options.cancellationId)) {
       return Promise.reject(Object.assign(new Error("embed scheduler request was cancelled before admission"), { code: "CANCELLED" }));
+    }
+    // A waiter can attach after the flight already settled (its resolve/reject ran, but the
+    // `.finally` that clears `waiters` has not yet). Serve the stored outcome directly instead of
+    // enqueuing into a Set that is about to be cleared — otherwise this waiter would hang forever.
+    if (flight.settled) {
+      return flight.settled.ok
+        ? Promise.resolve(flight.settled.result)
+        : Promise.reject(flight.settled.error);
     }
     return new Promise((resolve, reject) => {
       const waiter: QueryEncodeWaiter = {

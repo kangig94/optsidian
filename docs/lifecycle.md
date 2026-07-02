@@ -88,17 +88,23 @@ profile is the norm; a distinct `profile` in the request payload spins up a seco
 ### Explicit shutdown
 
 The `Shutdown` control method (`server.ts:384-393`) requires the nonce, replies `{ok, shuttingDown}`,
-then asynchronously runs `shutdown()` on an `unref`'d timer. `shutdown()` (`server.ts:443-464`) sets
-`phase = "shutting-down"`, removes the owner record, closes both RPC servers, closes all profile
-runtimes (`profiles.close()`), unlinks both sockets, and resolves the `waitForShutdown` promise that
-keeps `runSearchDaemon` alive (`server.ts:94-96`).
+then asynchronously runs `shutdown()` on an `unref`'d timer. `shutdown()` sets
+`phase = "shutting-down"`, closes both RPC servers, unlinks both sockets, and **removes the owner
+record — all before** the slow teardown of the profile runtimes (`profiles.close()`) and the embed
+scheduler (`embedScheduler.close()`); it then resolves the `waitForShutdown` promise that keeps
+`runSearchDaemon` alive (`server.ts:94-96`). The socket path and owner slot must be fully relinquished
+*before* the slow teardown (commit 2fe1f70): otherwise a client arriving mid-shutdown can auto-boot a
+successor daemon that binds the same socket path, and this daemon's later teardown would delete the
+successor's live socket.
 
 ### Startup partial-failure cleanup & crash recovery
 
 - **Partial-start cleanup**: if construction fails after a socket is opened, `SearchDaemon.start`'s
-  `catch` closes whichever RPC servers opened, unlinks both socket paths, and removes the owner record
-  (`server.ts:192-215`). Orphan sockets are also unlinked *before* binding (`removeOrphanSocket`,
-  `server.ts:147-148, 528-534`).
+  `catch` closes whichever RPC servers opened, unlinks both socket paths, removes the owner record,
+  and *then* closes the embed scheduler — the same relinquish-before-slow-teardown ordering as
+  `shutdown()`, so a failed start never leaves a dead-end owner record advertised while the slow
+  `embedScheduler.close()` runs. Orphan sockets are also unlinked *before* binding
+  (`removeOrphanSocket`).
 - **Process error handlers**: uncaught exceptions / unhandled rejections log to stderr and
   `process.exit(1)` for both the daemon (`server.ts:540-558`) and its workers
   (`worker-entry.ts:377-395`).

@@ -76,19 +76,24 @@ export class ModelSessionLifecycle {
       deadline: options.deadline,
       signal: options.signal
     });
-    const output = await abortable(
-      session.encode(texts, {
-        signal: options.signal,
-        inputKind: options.origin === "query-text" ? "query" : "document"
-      }),
-      options.signal,
-      () => undefined
-    );
-    this.armIdleUnload();
-    if (!options.suppressCpuPromotion) {
-      await this.promoteCpuSessionIfGpuAvailable(options.signal);
+    try {
+      const output = await abortable(
+        session.encode(texts, {
+          signal: options.signal,
+          inputKind: options.origin === "query-text" ? "query" : "document"
+        }),
+        options.signal,
+        () => undefined
+      );
+      if (!options.suppressCpuPromotion) {
+        await this.promoteCpuSessionIfGpuAvailable(options.signal);
+      }
+      return output;
+    } finally {
+      // Re-arm idle unload even when the encode (or promotion) throws — `ensureSession` cleared the
+      // timer on entry, so a failed encode would otherwise leave the loaded session resident forever.
+      this.armIdleUnload();
     }
-    return output;
   }
 
   async unload(): Promise<void> {
@@ -199,6 +204,9 @@ export class ModelSessionLifecycle {
   }
 
   private async pickDevice(): Promise<ModelDevice> {
+    // Required VRAM of 0 means "unconfigured" (the out-of-box default) — treat it as CPU rather
+    // than letting `0 >= 0 * 1.5` select GPU, so the documented "default is CPU" holds.
+    if (this.requiredVramBytes <= 0) return "cpu";
     const vram = await this.probeVram();
     return vram.freeBytes >= this.requiredVramBytes * 1.5 ? "gpu" : "cpu";
   }

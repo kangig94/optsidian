@@ -216,15 +216,19 @@ class SearchDaemon {
       } catch (cleanupError) {
         logSearchDaemonProcessError("socket unlink cleanup failed", cleanupError);
       }
-      try {
-        await embedScheduler?.close();
-      } catch (cleanupError) {
-        logSearchDaemonProcessError("embed scheduler cleanup failed", cleanupError);
-      }
+      // Release the owner slot BEFORE the slow embed-scheduler teardown, mirroring shutdown()'s
+      // ordering (commit 2fe1f70). Otherwise the registry keeps advertising a dead-end owner (live
+      // pid, sockets already gone) for the whole duration of embedScheduler.close(), and a client
+      // arriving in that window cannot promptly spawn a fresh daemon.
       try {
         registry.removeOwner(owner);
       } catch (cleanupError) {
         logSearchDaemonProcessError("owner cleanup failed", cleanupError);
+      }
+      try {
+        await embedScheduler?.close();
+      } catch (cleanupError) {
+        logSearchDaemonProcessError("embed scheduler cleanup failed", cleanupError);
       }
       throw error;
     }

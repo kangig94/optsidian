@@ -382,7 +382,9 @@ export class VectorGenerationPool {
     }
     this.generations.set(generationMapKey(key, next.generationId), next);
     this.activeByKey.set(keyString, next);
-    if (old && old !== next) void this.retire(old);
+    // Retiring a superseded generation is best-effort: its subprocess may already be dead, and a
+    // rejected close must never escape as an unhandled rejection (which would exit the daemon).
+    if (old && old !== next) void this.retire(old).catch(() => undefined);
   }
 
   private async lazyOpenActiveGeneration(
@@ -497,9 +499,14 @@ export class VectorGenerationPool {
       }
       if (handle.closeStarted) return;
       handle.closeStarted = true;
-      await handle.instance.close();
       const mapKey = generationMapKey(handle.key, handle.generationId);
-      if (this.generations.get(mapKey) === handle) this.generations.delete(mapKey);
+      try {
+        await handle.instance.close();
+      } finally {
+        // Drop the handle even if close() rejects, so a failed teardown cannot leave a dead
+        // generation stranded in the pool forever (and re-rejected on every later close()).
+        if (this.generations.get(mapKey) === handle) this.generations.delete(mapKey);
+      }
     })();
     return handle.closePromise;
   }
