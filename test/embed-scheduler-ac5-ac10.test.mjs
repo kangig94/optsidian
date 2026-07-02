@@ -485,6 +485,52 @@ test("AC10 background embeds do not keep the daemon idle timer alive", async () 
   }
 });
 
+test("daemon shutdown relinquishes its socket path before the slow teardown (idle-reboot race)", async () => {
+  // Regression: idle shutdown used to unlink the socket files AFTER a slow embedScheduler.close().
+  // A client call arriving during that window auto-boots a successor daemon that binds the same
+  // socket path; the shutting-down daemon then unlinked the successor's live socket, surfacing as a
+  // client `connect ENOENT` that never recovered before the ~30s ready deadline. The fix relinquishes
+  // the socket path (close + unlink) and releases the owner slot BEFORE the slow teardown, and never
+  // touches the path afterward.
+  const root = tempRoot();
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(root, "cache"),
+    XDG_CONFIG_HOME: path.join(root, "config")
+  };
+  const embedding = createEmbeddingPool({ gateDocuments: false });
+  const scheduler = new EmbedScheduler({ embedding, ownsEmbedding: false });
+  const closeEntered = deferred();
+  const releaseClose = deferred();
+  const realClose = scheduler.close.bind(scheduler);
+  scheduler.close = async () => {
+    closeEntered.resolve();
+    await releaseClose.promise;
+    return realClose();
+  };
+
+  const harness = createSearchDaemonIdleIsolationHarnessForTests({
+    idleMs: 3_600_000, // do not auto-fire; trigger shutdown manually
+    env,
+    embedScheduler: scheduler
+  });
+  // A daemon owns actual socket files at these paths; removeOrphanSocket unlinks whatever is present.
+  fs.writeFileSync(harness.querySocketPath, "");
+  fs.writeFileSync(harness.controlSocketPath, "");
+
+  const shutdown = harness.close();
+  await closeEntered.promise; // shutdown has reached the slow embedScheduler.close()
+
+  // Before the slow close resolves, the socket files must already be gone and the owner released, so a
+  // successor booting after removeOwner binds cleanly and its live socket is never deleted by us.
+  assert.equal(fs.existsSync(harness.querySocketPath), false, "query socket unlinked before slow close");
+  assert.equal(fs.existsSync(harness.controlSocketPath), false, "control socket unlinked before slow close");
+  assert.equal(harness.ownerRemoved(), true, "owner released before slow close");
+
+  releaseClose.resolve();
+  await shutdown;
+});
+
 function makeSpec() {
   return {
     specId: "deterministic-spec",

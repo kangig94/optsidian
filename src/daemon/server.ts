@@ -482,9 +482,13 @@ class SearchDaemon {
     if (this.phase === "shutting-down") return;
     this.phase = "shutting-down";
     this.clearIdleTimer();
-    try {
-      this.registry.removeOwner(this.owner);
-    } catch {}
+    // Fully relinquish the socket path — stop listening AND unlink the socket files — BEFORE
+    // releasing the owner registry slot. A successor daemon only boots once `removeOwner` leaves
+    // the registry empty; by then this daemon has stopped touching the socket path, so the slow
+    // teardown below (profiles / embed scheduler close) can never unlink a socket that the
+    // successor has since bound at the same path. Doing the unlink after a slow embed-scheduler
+    // close (its previous position) let an auto-booted successor's live socket get deleted here,
+    // which surfaced as a client `connect ENOENT` that never recovered before the ready deadline.
     try {
       await this.queryRpcServer.close();
     } catch {}
@@ -492,14 +496,17 @@ class SearchDaemon {
       await this.controlRpcServer.close();
     } catch {}
     try {
+      removeOrphanSocket(this.owner.querySocketPath);
+      removeOrphanSocket(this.owner.controlSocketPath);
+    } catch {}
+    try {
+      this.registry.removeOwner(this.owner);
+    } catch {}
+    try {
       await this.profiles.close();
     } catch {}
     try {
       await this.embedScheduler.close();
-    } catch {}
-    try {
-      removeOrphanSocket(this.owner.querySocketPath);
-      removeOrphanSocket(this.owner.controlSocketPath);
     } catch {}
     this.resolveShutdown();
   }
@@ -557,6 +564,8 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   waitForShutdown(): Promise<void>;
   close(): Promise<void>;
   ownerRemoved(): boolean;
+  querySocketPath: string;
+  controlSocketPath: string;
 } {
   const env = options.env ?? process.env;
   const owner: OwnerRecord = {
@@ -599,7 +608,9 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   return {
     waitForShutdown: () => daemon.waitForShutdown(),
     close: () => daemon.closeForTests(),
-    ownerRemoved: () => removed
+    ownerRemoved: () => removed,
+    querySocketPath: owner.querySocketPath,
+    controlSocketPath: owner.controlSocketPath
   };
 }
 
