@@ -672,6 +672,75 @@ test("AC11 P4 freshness persists dirty/building/fresh states across startup reco
   await pool.close();
 });
 
+test("P4 pickDevice defaults to CPU when required VRAM is unconfigured (0) and never probes", async () => {
+  let probed = false;
+  const lifecycle = new ModelSessionLifecycle({
+    requiredVramBytes: 0,
+    probeVram: () => {
+      probed = true;
+      return { freeBytes: 1_000_000_000 };
+    },
+    loadSession: async (device) => fakeSession(device),
+    idleMs: 1000
+  });
+  await lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "query-text" });
+  assert.equal(lifecycle.stats().device, "cpu");
+  assert.equal(probed, false, "probeVram must not be consulted when required VRAM is unconfigured");
+  await lifecycle.unload();
+});
+
+test("P4 a failed encode still re-arms idle unload so the session is not pinned resident forever", async () => {
+  const sessions = [];
+  const lifecycle = new ModelSessionLifecycle({
+    requiredVramBytes: 100,
+    probeVram: () => ({ freeBytes: 0 }),
+    loadSession: async (device) => {
+      const session = fakeSession(device);
+      session.encode = async () => {
+        throw new Error("encode boom");
+      };
+      sessions.push(session);
+      return session;
+    },
+    idleMs: 10
+  });
+  await assert.rejects(
+    lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "query-text" }),
+    /encode boom/
+  );
+  assert.equal(lifecycle.stats().loaded, true, "session stays loaded immediately after a failed encode");
+  await delay(30);
+  assert.equal(lifecycle.stats().loaded, false, "idle unload must fire even though the encode failed");
+  assert.equal(sessions[0].closed, true);
+});
+
+test("P4 a retired generation whose close() rejects is still dropped from the pool", async () => {
+  const vault = tempRoot();
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
+  const closeAttempts = [];
+  const fake = createFakeCoralFactory({
+    onCreate: (instance) => {
+      if (instance.role === "query" && instance.generationId === "gen-a") {
+        instance.close = async () => {
+          instance.closed = true;
+          closeAttempts.push(instance.generationId);
+          throw new Error("close boom");
+        };
+      }
+    }
+  });
+  const pool = new VectorGenerationPool({ factory: fake.factory });
+  await publishGeneration(pool, paths, spec, "gen-a", [makeChunk("a", [1, 0, 0], spec)]);
+  await publishGeneration(pool, paths, spec, "gen-b", [makeChunk("b", [0, 1, 0], spec)]);
+
+  const keyPrefix = `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}`;
+  await waitFor(() => pool.statsForTests().refCounts[`${keyPrefix}:gen-a`] === undefined);
+  assert.ok(closeAttempts.includes("gen-a"), "gen-a query close was attempted and rejected");
+  assert.notEqual(pool.statsForTests().refCounts[`${keyPrefix}:gen-b`], undefined, "gen-b remains tracked");
+  await pool.close();
+});
+
 function fakeSession(device) {
   return {
     device,

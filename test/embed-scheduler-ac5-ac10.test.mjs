@@ -271,6 +271,17 @@ test("AC5 origin=text query encode completes after at most one rebuild slice", a
   await scheduler.close();
 });
 
+test("save and refresh lane document encodes suppress CPU promotion even without an active rebuild", async () => {
+  const embedding = createEmbeddingPool({ gateDocuments: false });
+  const scheduler = new EmbedScheduler({ embedding, ownsEmbedding: false });
+  const provider = providerPayload();
+  await scheduler.encode({ texts: ["saved"], inputKind: "document", provider }, context("save-1"), "save");
+  await scheduler.encode({ texts: ["refreshed"], inputKind: "document", provider }, context("refresh-1"), "refresh");
+  assert.equal(embedding.calls[0].suppressCpuPromotion, true, "save-lane encode must suppress promotion");
+  assert.equal(embedding.calls[1].suppressCpuPromotion, true, "refresh-lane encode must suppress promotion");
+  await scheduler.close();
+});
+
 test("AC5 watcher-driven save lets query encode run after one save slice", async () => {
   const root = tempRoot();
   const vault = path.join(root, "vault");
