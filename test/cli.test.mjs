@@ -1568,7 +1568,7 @@ test("index mutation rendering stays stable", async () => {
     ready: true,
     phase: "ready",
     nonce: "nonce",
-    protocolVersion: 2,
+    protocolVersion: 3,
     owner: {},
     metrics: { requests: 3, failures: 0, activeRequests: 0, startedAt: "2026-01-01T00:00:00.000Z" },
     pools: {},

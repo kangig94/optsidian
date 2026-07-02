@@ -1,4 +1,5 @@
 import type { EmbeddingSetId } from "../../core/search/contracts.js";
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from "../../core/search/dense/index.js";
 
 export type VectorStoreKey = {
   profileHash: string;
@@ -80,6 +81,9 @@ export type VectorGenerationMetadata = {
   builtEngine: "auto" | string;
   createdAt: string;
   embeddingSetId: EmbeddingSetId;
+  embeddingSpaceId?: EmbeddingSpaceId;
+  embeddingRecipeFreshnessId?: EmbeddingRecipeFreshnessId;
+  manifestHash?: string;
 };
 
 export type VectorSearchReadyResult = {

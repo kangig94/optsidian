@@ -16,6 +16,7 @@ import type { RetrieveResult, SearchIndexMutationResult, SearchMatch, SearchResu
 import { resolveVaultPath } from "../../core/path.js";
 import type { ExplainRequestPayload, ExplainResult, ModelProviderPayload, RetrieveRequestPayload, SearchIndexProgressUpdate, SearchRequestPayload } from "../protocol.js";
 import { remainingDeadlineMs } from "../protocol.js";
+import type { EmbedSchedulerLane } from "../embed-scheduler.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "../query-analysis-cache-defaults.js";
 import { QueryAnalysisCache } from "../query-analysis-cache.js";
 import {
@@ -24,7 +25,15 @@ import {
   type SearchExecutionSnapshotHandle
 } from "../search-execution.js";
 import type { AnalyzerWorkerPool, EmbeddingWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
-import { DaemonSnapshotStore, type PinnedRetrievalSnapshot, type SnapshotMutationResult, type SnapshotRequestContext } from "./snapshot-store.js";
+import {
+  DaemonSnapshotStore,
+  type DenseSignal,
+  type DenseGenerationPin,
+  type PinnedRetrievalReadContext,
+  type PinnedRetrievalSnapshot,
+  type SnapshotMutationResult,
+  type SnapshotRequestContext
+} from "./snapshot-store.js";
 import { SearchQueryScheduler } from "./query-scheduler.js";
 import { applySearchWarnings } from "./result-shaping.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../../core/settings.js";
@@ -46,6 +55,32 @@ export type DaemonRequestContext = {
   progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
+type ResolvedRetrieveOriginText = {
+  queryText: string;
+  sourceDocumentId?: string;
+  sourcePath?: string;
+  rightSourceDocumentId?: string;
+  rightSourcePath?: string;
+  excludeDocumentIds?: readonly string[];
+  warnings: string[];
+};
+
+type ResolvedRetrieveOrigin = ResolvedRetrieveOriginText & {
+  queryVector?: readonly number[];
+};
+
+type ResolveRetrieveOriginVectorResult =
+  | { status: "ready"; resolved: ResolvedRetrieveOrigin }
+  | { status: "index-not-ready"; reason: string; warnings: string[] };
+
+type ScheduledEmbeddingEncoder = {
+  encode(
+    payload: Parameters<EmbeddingWorkerPool["encode"]>[0],
+    options: Parameters<EmbeddingWorkerPool["encode"]>[1],
+    lane?: EmbedSchedulerLane
+  ): ReturnType<EmbeddingWorkerPool["encode"]>;
+};
+
 export type SearchRankingTuning = {
   rrfK: number;
   lambdas: Partial<SearchScoringLambdas>;
@@ -55,7 +90,7 @@ export class DaemonSearchStoreService {
   private readonly queryAnalysisCache: QueryAnalysisCache;
   private readonly store: DaemonSnapshotStore;
   private readonly latencyAnalyzer: AnalyzerWorkerPool;
-  private readonly embedding: EmbeddingWorkerPool;
+  private readonly embedding: ScheduledEmbeddingEncoder;
   private readonly searchExecution: SearchExecutionWorkerPool;
   private readonly vectorPool: Pick<VectorGenerationPool, "searchActiveBuiltIndex"> | undefined;
   private readonly queryScheduler: SearchQueryScheduler;
@@ -66,7 +101,7 @@ export class DaemonSearchStoreService {
   constructor(
     store: DaemonSnapshotStore,
     latencyAnalyzer: AnalyzerWorkerPool,
-    embedding: EmbeddingWorkerPool,
+    embedding: ScheduledEmbeddingEncoder,
     searchExecution: SearchExecutionWorkerPool,
     options: {
       queryCacheSize?: number;
@@ -93,7 +128,7 @@ export class DaemonSearchStoreService {
   private async encodeRetrieveQueryVector(
     queryText: string,
     payload: RetrieveRequestPayload,
-    pin: PinnedRetrievalSnapshot,
+    densePin: DenseGenerationPin,
     context: DaemonRequestContext,
     warnings: string[]
   ): Promise<readonly number[] | undefined> {
@@ -105,13 +140,13 @@ export class DaemonSearchStoreService {
       const encoded = await this.embedding.encode({
         texts: [queryText],
         inputKind: "query",
-        provider: modelProviderPayloadForEmbeddingSet(pin.embeddingSet)
+        provider: modelProviderPayloadForEmbeddingSet(densePin.embeddingSet)
       }, {
         deadline: context.deadline,
         cancellationId: context.cancellationId,
         requestId: context.requestId,
         vault: payload.vault
-      });
+      }, "query");
       return encoded.vectors[0];
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
@@ -143,13 +178,17 @@ export class DaemonSearchStoreService {
   }
 
   async rebuild(vault: string, context: DaemonRequestContext): Promise<SnapshotMutationResult> {
-    const result = await this.store.rebuild(vault, snapshotContext(context));
+    const result = await this.store.rebuild(vault, snapshotContext(context, "rebuild"));
     if (result.snapshotId) await this.preloadSnapshot(vault, result.snapshotId, context);
     return result;
   }
 
+  publishSaveSnapshot(vault: string, context: DaemonRequestContext): Promise<string> {
+    return this.store.publishSaveSnapshot(vault, snapshotContext(context, "save"));
+  }
+
   async refresh(vault: string, context: DaemonRequestContext) {
-    const result = await this.store.refresh(vault, snapshotContext(context));
+    const result = await this.store.refresh(vault, snapshotContext(context, "refresh"));
     if (result.snapshotId) await this.preloadSnapshot(vault, result.snapshotId, context);
     return result;
   }
@@ -182,65 +221,85 @@ export class DaemonSearchStoreService {
     return searchResult;
   }
 
+  private retrieveIndexNotReadyResult(
+    payload: RetrieveRequestPayload,
+    reason: string,
+    dense: DenseSignal,
+    warnings: readonly string[] = []
+  ): RetrieveResult {
+    return {
+      ok: true,
+      command: "retrieve",
+      schemaVersion: 1,
+      available: false,
+      status: "index-not-ready",
+      origin: payload.origin,
+      reason,
+      dense,
+      matches: [],
+      results: [],
+      ...(warnings.length > 0 ? { warnings: [...warnings] } : {})
+    };
+  }
+
   async retrieve(payload: RetrieveRequestPayload, context: DaemonRequestContext): Promise<RetrieveResult> {
-    const pinResult = await this.store.ensureActiveRetrievalSnapshot(payload.vault, snapshotContext(context));
-    if (pinResult.status !== "ready") {
-      return {
-        ok: true,
-        command: "retrieve",
-        schemaVersion: 1,
-        available: false,
-        status: "index-not-ready",
-        origin: payload.origin,
-        reason: pinResult.reason,
-        matches: [],
-        results: []
-      };
+    const readContextResult = await this.store.pinLexicalReadContext(payload.vault, snapshotContext(context));
+    if (readContextResult.status !== "ready") {
+      return this.retrieveIndexNotReadyResult(payload, readContextResult.reason, coldRetrieveDenseSignal());
     }
-    const pin = pinResult.pin;
+    const readContext = readContextResult.readContext;
     try {
-      assertRetrieveProviderModel(payload, pin);
-      const resolved = await this.resolveRetrieveOrigin(payload, pin, context);
-      const searchPayload = retrieveSearchPayload(payload, resolved.queryText);
-      const search = normalizeSearchParams(searchPayload);
-      if (search.retrieval === "vector" && !resolved.queryVector) {
-        return {
-          ok: true,
-          command: "retrieve",
-          schemaVersion: 1,
-          available: false,
-          status: "index-not-ready",
-          origin: payload.origin,
-          reason: "vector-active-spec-missing",
-          matches: [],
-          results: [],
-          ...(resolved.warnings.length > 0 ? { warnings: resolved.warnings } : {})
-        };
+      const resolvedText = this.resolveRetrieveOriginText(payload, readContext);
+      const missingGlobalSource = payload.origin === "global" && !resolvedText.sourcePath;
+      const searchPayload = missingGlobalSource ? undefined : retrieveSearchPayload(payload, resolvedText.queryText);
+      const search = searchPayload ? normalizeSearchParams(searchPayload) : undefined;
+      const desiredEmbeddingSpace = this.store.currentEmbeddingSpaceId();
+      const denseAttachment = await this.store.tryAttachDenseGeneration(readContext, desiredEmbeddingSpace);
+      if (denseAttachment.status === "attached") assertRetrieveProviderModel(payload, denseAttachment.densePin.embeddingSet.model);
+      const modeConsumesDense = missingGlobalSource || search?.retrieval !== "lexical";
+      const denseComparable = denseAttachment.status === "attached" &&
+        readContext.denseUsability.spaceMatch &&
+        modeConsumesDense;
+      const originVector = await this.resolveRetrieveOriginVector(
+        payload,
+        readContext,
+        resolvedText,
+        context,
+        denseComparable
+      );
+      if (originVector.status === "index-not-ready") {
+        return this.retrieveIndexNotReadyResult(payload, originVector.reason, readContext.denseSignal, originVector.warnings);
       }
-      const denseSearch = await this.searchActiveDenseGeneration(searchPayload, pin, resolved.queryVector);
-      if (denseSearch.status !== "ready") {
-        return {
-          ok: true,
-          command: "retrieve",
-          schemaVersion: 1,
-          available: false,
-          status: "index-not-ready",
-          origin: payload.origin,
-          reason: denseSearch.reason,
-          matches: [],
-          results: []
-        };
+      if (!searchPayload || !search) {
+        return this.retrieveIndexNotReadyResult(payload, "source-vector-missing", readContext.denseSignal, originVector.resolved.warnings);
       }
-      if (search.retrieval === "vector") {
-        return this.vectorOnlyRetrieveResult(payload, searchPayload, pin, denseSearch.results ?? [], {
+      const resolved = originVector.resolved;
+      let denseSearchResults: readonly DenseVectorSearchHit[] | undefined;
+      if (denseComparable && resolved.queryVector && readContext.densePin) {
+        const denseSearch = await this.searchAttachedDenseGeneration(searchPayload, readContext.densePin, resolved.queryVector);
+        if (denseSearch.status === "ready") {
+          denseSearchResults = denseSearch.results;
+        } else {
+          resolved.warnings.push(`dense retrieval skipped: ${denseSearch.reason}`);
+        }
+      }
+      const densePin = readContext.densePin;
+      const denseContributed = Boolean(denseComparable && resolved.queryVector && denseSearchResults && densePin) &&
+        (densePin
+          ? this.hasUsableDenseSearchResult(payload, searchPayload, readContext, densePin, denseSearchResults ?? [], resolved.excludeDocumentIds)
+          : false);
+      if (search.retrieval === "vector" && denseContributed && densePin) {
+        return this.vectorOnlyRetrieveResult(payload, searchPayload, readContext, densePin, denseSearchResults ?? [], {
           excludeDocumentIds: resolved.excludeDocumentIds,
           warnings: resolved.warnings
         });
       }
       const explain = payload.explain === true;
-      const result = await this.executeSearchWithPin({ ...searchPayload, debug: true }, context, explain, pin, {
-        queryVector: resolved.queryVector,
-        denseSearchResults: denseSearch.results,
+      const result = await this.executeSearchWithPin({ ...searchPayload, debug: true }, context, explain, readContext.lexicalPin, {
+        queryVector: denseContributed ? resolved.queryVector : undefined,
+        denseEmbeddingSet: denseContributed ? densePin?.embeddingSet : undefined,
+        denseSearchResults: denseContributed ? denseSearchResults : undefined,
+        denseLiveContentHashes: denseContributed ? readContext.liveContentHashes : undefined,
         sourceDocumentId: resolved.sourceDocumentId,
         sourcePath: resolved.sourcePath,
         excludeDocumentIds: resolved.excludeDocumentIds,
@@ -255,8 +314,9 @@ export class DaemonSearchStoreService {
         available: true,
         status: "ready",
         origin: payload.origin,
-        snapshotId: pin.snapshotId,
-        retrievalSnapshotId: pin.retrievalSnapshotId,
+        snapshotId: readContext.lexicalPin.snapshotId,
+        ...(readContext.densePin ? { retrievalSnapshotId: readContext.densePin.retrieval.retrievalSnapshotId } : {}),
+        dense: readContext.denseSignal,
         matches,
         results: scoredMatches.map((match) => ({
           path: match.path,
@@ -273,7 +333,7 @@ export class DaemonSearchStoreService {
           : {})
       };
     } finally {
-      this.store.release(pin);
+      this.store.releaseReadContext(readContext);
     }
   }
 
@@ -309,7 +369,9 @@ export class DaemonSearchStoreService {
     pin: Parameters<DaemonSnapshotStore["snapshotHandleForPin"]>[0] | PinnedRetrievalSnapshot,
     retrieval: {
       queryVector?: readonly number[];
+      denseEmbeddingSet?: DenseGenerationPin["embeddingSet"];
       denseSearchResults?: readonly DenseVectorSearchHit[];
+      denseLiveContentHashes?: ReadonlyMap<string, string>;
       sourceDocumentId?: string;
       sourcePath?: string;
       excludeDocumentIds?: readonly string[];
@@ -343,9 +405,10 @@ export class DaemonSearchStoreService {
       analyzerIdentity: analysisResult.analyzerIdentity,
       snapshot,
       documents,
-      denseEmbeddingSet: "embeddingSet" in pin ? pin.embeddingSet : undefined,
+      denseEmbeddingSet: retrieval.denseEmbeddingSet ?? ("embeddingSet" in pin ? pin.embeddingSet : undefined),
       queryVector: retrieval.queryVector,
       denseSearchResults: retrieval.denseSearchResults,
+      denseLiveContentHashes: retrieval.denseLiveContentHashes,
       sourceDocumentId: retrieval.sourceDocumentId,
       sourcePath: retrieval.sourcePath,
       excludeDocumentIds: retrieval.excludeDocumentIds,
@@ -369,48 +432,36 @@ export class DaemonSearchStoreService {
     return store.documentsForPin?.(pin);
   }
 
-  private async searchActiveDenseGeneration(
+  private async searchAttachedDenseGeneration(
     payload: SearchRequestPayload,
-    pin: PinnedRetrievalSnapshot,
+    densePin: DenseGenerationPin,
     queryVector: readonly number[] | undefined
   ): Promise<
     | { status: "ready"; results?: readonly DenseVectorSearchHit[] }
-    | { status: "index-not-ready"; reason: string }
+    | { status: "unreadable"; reason: string }
   > {
     if (!queryVector) return { status: "ready" };
-    if (!this.vectorPool) return { status: "index-not-ready", reason: "vector-active-spec-missing" };
     const search = normalizeSearchParams(payload);
-    const result = await this.vectorPool.searchActiveBuiltIndex({
-      key: pin.vectorKey,
-      queryVector,
-      candidateK: Math.max(search.limit, search.limit * 4),
-      expectedGenerationId: pin.vector.generationId
-    });
-    if (result.status !== "ready") {
+    try {
+      const results = await densePin.vectorLease.searchVector(queryVector, Math.max(search.limit, search.limit * 4));
       return {
-        status: "index-not-ready",
-        reason: result.reason === "active-generation-mismatched"
-          ? "vector-active-spec-mismatched"
-          : "vector-active-spec-missing"
+        status: "ready",
+        results: results.map((entry) => ({
+          chunkId: entry.chunkId,
+          entryId: entry.entryId,
+          similarity: entry.similarity
+        }))
       };
+    } catch {
+      return { status: "unreadable", reason: "vector-search-failed" };
     }
-    if (result.generationId !== pin.vector.generationId) {
-      return { status: "index-not-ready", reason: "vector-active-spec-mismatched" };
-    }
-    return {
-      status: "ready",
-      results: result.results.map((entry) => ({
-        chunkId: entry.chunkId,
-        entryId: entry.entryId,
-        similarity: entry.similarity
-      }))
-    };
   }
 
   private vectorOnlyRetrieveResult(
     payload: RetrieveRequestPayload,
     searchPayload: SearchRequestPayload,
-    pin: PinnedRetrievalSnapshot,
+    readContext: PinnedRetrievalReadContext,
+    densePin: DenseGenerationPin,
     denseResults: readonly DenseVectorSearchHit[],
     resolved: {
       excludeDocumentIds?: readonly string[];
@@ -419,12 +470,14 @@ export class DaemonSearchStoreService {
   ): RetrieveResult {
     const search = normalizeSearchParams(searchPayload);
     const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
-    const documents = this.documentsForPin(pin);
+    const documents = readContext.liveDocuments;
     const excluded = new Set(resolved.excludeDocumentIds ?? []);
     const matchesWithScore: Array<{ match: SearchMatch; score: number }> = [];
     for (const [index, result] of denseResults.entries()) {
       const document = documents?.get(result.entryId);
       if (!document || excluded.has(document.documentId)) continue;
+      const denseRecord = densePin.recordsByDocumentId.get(document.documentId);
+      if (!denseRecord || denseRecord.contentHash !== document.contentHash) continue;
       const relPath = document.path;
       if (pathFilter && !matchesPathFilter(relPath, pathFilter)) continue;
       const tags = document.tags;
@@ -446,7 +499,7 @@ export class DaemonSearchStoreService {
                   retrievalScore: score,
                   denseAgreement: score,
                   baseRank: index + 1,
-                  snapshotId: pin.snapshotId
+                  snapshotId: readContext.lexicalPin.snapshotId
                 }
               }
             : {})
@@ -462,8 +515,9 @@ export class DaemonSearchStoreService {
       available: true,
       status: "ready",
       origin: payload.origin,
-      snapshotId: pin.snapshotId,
-      retrievalSnapshotId: pin.retrievalSnapshotId,
+      snapshotId: readContext.lexicalPin.snapshotId,
+      retrievalSnapshotId: densePin.retrieval.retrievalSnapshotId,
+      dense: readContext.denseSignal,
       matches,
       results: matchesWithScore.map(({ match, score }) => ({
         path: match.path,
@@ -475,6 +529,38 @@ export class DaemonSearchStoreService {
       })),
       ...((resolved.warnings?.length ?? 0) > 0 ? { warnings: [...(resolved.warnings ?? [])] } : {})
     };
+  }
+
+  private hasUsableDenseSearchResult(
+    payload: RetrieveRequestPayload,
+    searchPayload: SearchRequestPayload,
+    readContext: PinnedRetrievalReadContext,
+    densePin: DenseGenerationPin,
+    denseResults: readonly DenseVectorSearchHit[],
+    excludeDocumentIds?: readonly string[]
+  ): boolean {
+    const search = normalizeSearchParams(searchPayload);
+    const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
+    const excluded = new Set(excludeDocumentIds ?? []);
+    return denseResults.some((result) =>
+      this.denseSearchResultUsableForRetrieval(result, search, pathFilter, readContext, densePin, excluded)
+    );
+  }
+
+  private denseSearchResultUsableForRetrieval(
+    result: DenseVectorSearchHit,
+    search: NormalizedSearchParams,
+    pathFilter: PathFilter | undefined,
+    readContext: PinnedRetrievalReadContext,
+    densePin: DenseGenerationPin,
+    excluded: ReadonlySet<string>
+  ): boolean {
+    const document = readContext.liveDocuments.get(result.entryId);
+    if (!document || excluded.has(document.documentId)) return false;
+    const denseRecord = densePin.recordsByDocumentId.get(document.documentId);
+    if (!denseRecord || denseRecord.contentHash !== document.contentHash) return false;
+    if (pathFilter && !matchesPathFilter(document.path, pathFilter)) return false;
+    return matchesTagFilter(document.tags, search.tags);
   }
 
   private async preloadSnapshot(
@@ -578,33 +664,23 @@ export class DaemonSearchStoreService {
     return result;
   }
 
-  private async resolveRetrieveOrigin(
+  private resolveRetrieveOriginText(
     payload: RetrieveRequestPayload,
-    pin: PinnedRetrievalSnapshot,
-    context: DaemonRequestContext
-  ): Promise<{
-    queryText: string;
-    queryVector?: readonly number[];
-    sourceDocumentId?: string;
-    sourcePath?: string;
-    excludeDocumentIds?: readonly string[];
-    warnings: string[];
-  }> {
-    const records = pin.embeddingSet.records;
+    readContext: PinnedRetrievalReadContext
+  ): ResolvedRetrieveOriginText {
     const warnings: string[] = [];
     if (payload.origin === "text") {
       const queryText = (payload.text ?? payload.query ?? "").trim();
       if (!queryText) throw Object.assign(new Error("origin=text requires text or query"), { code: "BAD_REQUEST" });
-      return { queryText, queryVector: await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings), warnings };
+      return { queryText, warnings };
     }
     if (payload.origin === "note") {
       const sourcePath = payload.sourcePath ?? payload.path ?? payload.left?.path;
       if (!sourcePath) throw Object.assign(new Error("origin=note requires sourcePath or path"), { code: "BAD_REQUEST" });
-      const source = recordByPath(records, sourcePath);
-      if (!source) throw Object.assign(new Error(`source note is not embedded: ${sourcePath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+      const source = liveDocumentByPath(readContext.liveDocuments, sourcePath);
+      if (!source) throw Object.assign(new Error(`source note is not indexed: ${sourcePath}`), { code: "SEARCH_DAEMON_NOT_READY" });
       return {
-        queryText: source.text,
-        queryVector: storedVectorForRecord(source, sourcePath),
+        queryText: denseTextForLiveDocument(source),
         sourceDocumentId: source.documentId,
         sourcePath: source.path,
         excludeDocumentIds: [source.documentId],
@@ -613,37 +689,40 @@ export class DaemonSearchStoreService {
     }
     if (payload.origin === "pair") {
       const leftPath = payload.left?.path ?? payload.sourcePath ?? payload.path;
-      const leftText = payload.left?.text ?? payload.text ?? payload.query;
       const rightPath = payload.right?.path;
-      const rightText = payload.right?.text;
-      if (rightPath) {
-        if (!leftPath && !leftText) {
-          throw Object.assign(new Error("origin=pair requires left.path or left.text when right.path is provided"), { code: "BAD_REQUEST" });
-        }
-        const left = leftPath ? recordByPath(records, leftPath) : undefined;
-        if (leftPath && !left) throw Object.assign(new Error(`left note is not embedded: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
-        const queryText = left?.text ?? leftText?.trim() ?? "";
-        if (!queryText) throw Object.assign(new Error("origin=pair requires non-empty left.text when left.path is absent"), { code: "BAD_REQUEST" });
-        return {
-          queryText,
-          queryVector: left
-            ? storedVectorForRecord(left, left.path ?? leftPath ?? "left note")
-            : await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings),
-          sourceDocumentId: left?.documentId,
-          sourcePath: left?.path,
-          warnings
-        };
+      if (
+        payload.left?.text !== undefined ||
+        payload.right?.text !== undefined ||
+        payload.text !== undefined ||
+        payload.query !== undefined
+      ) {
+        throw Object.assign(new Error("origin=pair accepts note-path sides only; use origin=text for raw text"), { code: "BAD_REQUEST" });
       }
-      if (!leftPath || rightText === undefined) {
-        throw Object.assign(new Error("origin=pair requires one side to be a note path and the other side to be a note path or text"), { code: "BAD_REQUEST" });
+      if (!leftPath || !rightPath) {
+        throw Object.assign(new Error("origin=pair requires left.path and right.path"), { code: "BAD_REQUEST" });
       }
-      const left = recordByPath(records, leftPath);
-      if (!left) throw Object.assign(new Error(`left note is not embedded: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
-      const queryText = rightText.trim();
-      if (!queryText) throw Object.assign(new Error("origin=pair requires non-empty right.text when right.path is absent"), { code: "BAD_REQUEST" });
+      const left = liveDocumentByPath(readContext.liveDocuments, leftPath);
+      if (!left) throw Object.assign(new Error(`left note is not indexed: ${leftPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+      const right = liveDocumentByPath(readContext.liveDocuments, rightPath);
+      if (!right) throw Object.assign(new Error(`right note is not indexed: ${rightPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
       return {
-        queryText,
-        queryVector: await this.encodeRetrieveQueryVector(queryText, payload, pin, context, warnings),
+        queryText: denseTextForLiveDocument(left),
+        sourceDocumentId: left.documentId,
+        sourcePath: left.path,
+        rightSourceDocumentId: right.documentId,
+        rightSourcePath: right.path,
+        warnings
+      };
+    }
+    if (payload.origin === "global") {
+      const sourcePath = payload.sourcePath ?? payload.path ?? payload.left?.path;
+      if (!sourcePath) return { queryText: "", warnings };
+      const source = liveDocumentByPath(readContext.liveDocuments, sourcePath);
+      if (!source) throw Object.assign(new Error(`global source note is not indexed: ${sourcePath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+      return {
+        queryText: denseTextForLiveDocument(source),
+        sourceDocumentId: source.documentId,
+        sourcePath: source.path,
         warnings
       };
     }
@@ -651,6 +730,74 @@ export class DaemonSearchStoreService {
       queryText: payload.query?.trim() || "",
       warnings
     };
+  }
+
+  private async resolveRetrieveOriginVector(
+    payload: RetrieveRequestPayload,
+    readContext: PinnedRetrievalReadContext,
+    resolved: ResolvedRetrieveOriginText,
+    context: DaemonRequestContext,
+    denseComparable: boolean
+  ): Promise<ResolveRetrieveOriginVectorResult> {
+    const densePin = readContext.densePin;
+    if (payload.origin === "text") {
+      if (!denseComparable || !densePin) return { status: "ready", resolved };
+      return {
+        status: "ready",
+        resolved: {
+          ...resolved,
+          queryVector: await this.encodeRetrieveQueryVector(resolved.queryText, payload, densePin, context, resolved.warnings)
+        }
+      };
+    }
+    if (!denseComparable || !densePin) {
+      return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+    }
+    if (payload.origin === "note") {
+      const sourcePath = payload.sourcePath ?? payload.path ?? payload.left?.path;
+      const record = sourcePath ? recordByPath(densePin.embeddingSet.records, sourcePath) : undefined;
+      const queryVector = usableStoredVector(record, readContext.liveContentHashes, sourcePath);
+      if (!queryVector) return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+      return {
+        status: "ready",
+        resolved: {
+          ...resolved,
+          queryVector
+        }
+      };
+    }
+    if (payload.origin === "pair") {
+      const leftPath = payload.left?.path ?? payload.sourcePath ?? payload.path;
+      const rightPath = payload.right?.path ?? resolved.rightSourcePath;
+      if (!rightPath || !leftPath) return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+      const leftRecord = recordByPath(densePin.embeddingSet.records, leftPath);
+      const rightRecord = recordByPath(densePin.embeddingSet.records, rightPath);
+      const queryVector = usableStoredVector(leftRecord, readContext.liveContentHashes, leftPath);
+      const rightVector = usableStoredVector(rightRecord, readContext.liveContentHashes, rightPath);
+      if (!queryVector || !rightVector) return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+      return {
+        status: "ready",
+        resolved: {
+          ...resolved,
+          queryVector
+        }
+      };
+    }
+    if (payload.origin === "global") {
+      const sourcePath = resolved.sourcePath ?? payload.sourcePath ?? payload.path ?? payload.left?.path;
+      if (!sourcePath) return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+      const record = recordByPath(densePin.embeddingSet.records, sourcePath);
+      const queryVector = usableStoredVector(record, readContext.liveContentHashes, sourcePath);
+      if (!queryVector) return { status: "index-not-ready", reason: "source-vector-missing", warnings: resolved.warnings };
+      return {
+        status: "ready",
+        resolved: {
+          ...resolved,
+          queryVector
+        }
+      };
+    }
+    return { status: "ready", resolved };
   }
 
   private requireAnalyzerIdentity(): SearchAnalyzerIdentity {
@@ -679,15 +826,15 @@ function retrieveSearchPayload(payload: RetrieveRequestPayload, queryText: strin
   };
 }
 
-function assertRetrieveProviderModel(payload: RetrieveRequestPayload, pin: PinnedRetrievalSnapshot): void {
+function assertRetrieveProviderModel(payload: RetrieveRequestPayload, activeModel: string): void {
   const requested = payload.providerModel?.trim();
-  if (!requested || requested === "default" || requested === pin.embeddingSet.model) return;
+  if (!requested || requested === "default" || requested === activeModel) return;
   throw new UsageError(
-    `Retrieve provider model ${requested} does not match the active embedding model ${pin.embeddingSet.model}; rebuild with that model before querying`
+    `Retrieve provider model ${requested} does not match the active embedding model ${activeModel}; rebuild with that model before querying`
   );
 }
 
-function modelProviderPayloadForEmbeddingSet(embeddingSet: PinnedRetrievalSnapshot["embeddingSet"]): ModelProviderPayload {
+function modelProviderPayloadForEmbeddingSet(embeddingSet: DenseGenerationPin["embeddingSet"]): ModelProviderPayload {
   if (embeddingSet.recipe.provider.id === "local-onnx") {
     return {
       kind: "local-onnx",
@@ -717,14 +864,50 @@ function titleFromPath(relPath: string): string {
   return relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
 }
 
-function recordByPath(records: readonly { path?: string; documentId: string; text: string; vector?: readonly number[] }[], relPath: string) {
+function recordByPath(
+  records: readonly { path?: string; documentId: string; text: string; contentHash: string; vector?: readonly number[] }[],
+  relPath: string
+) {
   const normalized = normalizeRelPath(relPath);
   return records.find((record) => record.path && normalizeRelPath(record.path) === normalized);
 }
 
-function storedVectorForRecord(record: { vector?: readonly number[] }, relPath: string): readonly number[] {
-  if (Array.isArray(record.vector)) return record.vector;
-  throw Object.assign(new Error(`stored vector is missing for note: ${relPath}`), { code: "SEARCH_DAEMON_NOT_READY" });
+function liveDocumentByPath<T extends { path: string }>(documents: ReadonlyMap<string, T>, relPath: string): T | undefined {
+  const normalized = normalizeRelPath(relPath);
+  for (const document of documents.values()) {
+    if (normalizeRelPath(document.path) === normalized) return document;
+  }
+  return undefined;
+}
+
+function denseTextForLiveDocument(document: {
+  title: string;
+  path: string;
+  tags: readonly string[];
+  snippetCorpus: { lines: readonly { text: string }[] };
+}): string {
+  const snippets = document.snippetCorpus.lines.map((line) => line.text).join("\n");
+  const tags = document.tags.length > 0 ? `\n${document.tags.join(" ")}` : "";
+  return `${document.title}\n${document.path}\n${snippets}${tags}`.trim();
+}
+
+function usableStoredVector(
+  record: { documentId: string; contentHash: string; vector?: readonly number[] } | undefined,
+  liveContentHashes: ReadonlyMap<string, string>,
+  relPath: string | undefined
+): readonly number[] | undefined {
+  if (!record || !relPath) return undefined;
+  const liveHash = liveContentHashes.get(record.documentId);
+  if (liveHash !== record.contentHash) return undefined;
+  return Array.isArray(record.vector) ? record.vector : undefined;
+}
+
+function coldRetrieveDenseSignal(pendingCount = 0): DenseSignal {
+  return {
+    state: "cold",
+    pendingCount,
+    generationAgeMs: null
+  };
 }
 
 function normalizeRelPath(value: string): string {
@@ -742,11 +925,12 @@ function assertQueryAnalysisTermCount(analysis: SearchTextAnalysis): void {
   }
 }
 
-function snapshotContext(context: DaemonRequestContext): SnapshotRequestContext {
+function snapshotContext(context: DaemonRequestContext, embeddingLane?: EmbedSchedulerLane): SnapshotRequestContext {
   return {
     deadline: context.deadline,
     cancellationId: context.cancellationId,
-    progress: context.progress
+    progress: context.progress,
+    ...(embeddingLane ? { embeddingLane } : {})
   };
 }
 

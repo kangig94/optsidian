@@ -233,6 +233,23 @@ test("mcp command_map and write handlers preserve routing, preference guidance, 
   }
 });
 
+test("mcp command_map annotation is open-world and read-only", async () => {
+  const registrations = [];
+  const { registerOptsidianTools } = await import(path.resolve("src/mcp/tools.ts"));
+  registerOptsidianTools({
+    registerTool(name, config, handler) {
+      registrations.push({ name, config, handler });
+    }
+  }, () => tempVault());
+
+  const commandMap = registrations.find((registration) => registration.name === "command_map");
+  assert.ok(commandMap);
+  assert.equal(commandMap.config.annotations.readOnlyHint, true);
+  assert.equal(commandMap.config.annotations.destructiveHint, false);
+  assert.equal(commandMap.config.annotations.idempotentHint, true);
+  assert.equal(commandMap.config.annotations.openWorldHint, true);
+});
+
 test("mcp edit uses flat fields and validates selector count", async () => {
   const vault = tempVault();
   const { createToolHandlers } = await import(path.resolve("src/mcp/tools.ts"));

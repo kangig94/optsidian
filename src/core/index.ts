@@ -27,6 +27,8 @@ export type {
   PatchParams,
   ReadParams,
   ReadResult,
+  RetrieveDenseSignal,
+  RetrieveDenseSignalState,
   SearchIndexMutationResult,
   SearchIndexPrunedStore,
   SearchIndexPruneResult,

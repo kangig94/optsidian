@@ -32,7 +32,7 @@ import type {
   VectorStoreKey
 } from "./vector-store/types.js";
 
-export const SEARCH_DAEMON_PROTOCOL_VERSION = 2;
+export const SEARCH_DAEMON_PROTOCOL_VERSION = 3;
 export const QUERY_DAEMON_METHODS = [
   "Status",
   "Search",
@@ -169,6 +169,7 @@ export type ModelEncodeWorkerPayload = {
   texts: readonly string[];
   provider: ModelProviderPayload;
   inputKind?: EmbeddingInputKind;
+  suppressCpuPromotion?: boolean;
 };
 
 export type ModelEncodeWorkerResult = {

@@ -84,6 +84,7 @@ export type SearchExecutionJob = {
   denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
   queryVector?: readonly number[];
   denseSearchResults?: readonly DenseVectorSearchHit[];
+  denseLiveContentHashes?: ReadonlyMap<string, string>;
   sourceDocumentId?: string;
   sourcePath?: string;
   excludeDocumentIds?: readonly string[];
@@ -102,6 +103,7 @@ export type SearchShardExecutionJob = {
   denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
   queryVector?: readonly number[];
   denseSearchResults?: readonly DenseVectorSearchHit[];
+  denseLiveContentHashes?: ReadonlyMap<string, string>;
   sourceDocumentId?: string;
   sourcePath?: string;
   excludeDocumentIds?: readonly string[];
@@ -140,6 +142,7 @@ type RetrievalExecutionContext = {
   denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
   queryVector?: readonly number[];
   denseSearchResults?: readonly DenseVectorSearchHit[];
+  denseLiveContentHashes?: ReadonlyMap<string, string>;
   sourceDocumentId?: string;
   sourcePath?: string;
   excludeDocumentIds?: readonly string[];
@@ -189,6 +192,7 @@ export function executeSearchJob(job: SearchExecutionJob): SearchExecutionResult
     denseEmbeddingSet: job.denseEmbeddingSet,
     queryVector: job.queryVector,
     denseSearchResults: job.denseSearchResults,
+    denseLiveContentHashes: job.denseLiveContentHashes,
     sourceDocumentId: job.sourceDocumentId,
     sourcePath: job.sourcePath,
     excludeDocumentIds: job.excludeDocumentIds,
@@ -350,6 +354,7 @@ function querySearchShard(job: SearchShardExecutionJob, snapshot: SearchSnapshot
       denseEmbeddingSet: job.denseEmbeddingSet,
       queryVector: job.queryVector,
       denseSearchResults: job.denseSearchResults,
+      denseLiveContentHashes: job.denseLiveContentHashes,
       sourceDocumentId: job.sourceDocumentId,
       sourcePath: job.sourcePath,
       excludeDocumentIds: job.excludeDocumentIds,
@@ -442,6 +447,8 @@ function denseCandidateSet(
   for (const result of retrieval.denseSearchResults) {
     const record = records.get(result.entryId);
     if (!record) continue;
+    const liveHash = retrieval.denseLiveContentHashes?.get(record.documentId);
+    if (retrieval.denseLiveContentHashes && liveHash !== record.contentHash) continue;
     const ref = refs.get(record.documentId);
     if (!ref) continue;
     const denseAgreement = denseAgreementFromCosine(result.similarity);

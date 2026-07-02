@@ -1,6 +1,8 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-path.js";
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from "../../core/search/dense/index.js";
 import { durableRename, fsyncDirSync, fsyncFileSync, type DurableRename } from "../search-store/publication.js";
 import {
   vectorGenerationDbPath,
@@ -36,14 +38,36 @@ export type BuildVectorGenerationInput = {
   spec: CoralEmbeddingSpec;
   chunks: readonly CoralChunkRecord[];
   engineName?: "auto" | string;
-  generationId?: string;
+  generationId: string;
+  embeddingSpaceId?: EmbeddingSpaceId;
+  embeddingRecipeFreshnessId?: EmbeddingRecipeFreshnessId;
   progress?: (progress: SearchIndexProgressUpdate) => void;
+  canReplaceExistingGeneration?: () => boolean | Promise<boolean>;
 };
 
 export type BuiltVectorGeneration = {
   metadata: VectorGenerationMetadata;
   dbPath: string;
+  reused?: boolean;
 };
+
+export type ReadableVectorGenerationLease = {
+  readonly key: VectorStoreKey;
+  readonly generationId: string;
+  readonly dbPath: string;
+  readonly spec: CoralEmbeddingSpec;
+  searchVector(queryVector: readonly number[] | Float32Array, candidateK: number): Promise<CoralSearchResult[]>;
+  release(): void;
+};
+
+type PinReadableGenerationNotReadyReason =
+  | "no-active-built-spec"
+  | "active-generation-mismatched"
+  | "active-generation-unreadable";
+
+export type PinReadableGenerationResult =
+  | { status: "ready"; lease: ReadableVectorGenerationLease }
+  | { status: "index-not-ready"; reason: PinReadableGenerationNotReadyReason };
 
 type GenerationHandle = {
   key: VectorStoreKey;
@@ -71,6 +95,7 @@ export class VectorGenerationPool {
   private readonly now: () => number;
   private readonly activeByKey = new Map<string, GenerationHandle>();
   private readonly generations = new Map<string, GenerationHandle>();
+  private readonly lazyOpenByGeneration = new Map<string, Promise<GenerationHandle>>();
   private closed = false;
 
   constructor(options: VectorGenerationPoolOptions = {}) {
@@ -82,9 +107,27 @@ export class VectorGenerationPool {
 
   async buildStagingGeneration(input: BuildVectorGenerationInput): Promise<BuiltVectorGeneration> {
     this.assertOpen();
-    const generationId = input.generationId ?? createGenerationId(this.now());
-    const stagingDir = vectorStagingDir(input.paths, generationId);
-    const stagingDbPath = vectorStagingDbPath(input.paths, generationId);
+    const generationId = input.generationId;
+    const manifestHash = vectorGenerationManifestHash(input);
+    const finalDir = vectorGenerationDir(input.paths, generationId);
+    const finalDbPath = vectorGenerationDbPath(input.paths, generationId);
+    const existing = await this.inspectExistingGeneration(input, manifestHash);
+    if (existing.status === "reusable") {
+      input.progress?.({
+        phase: "vector-indexing",
+        total: input.chunks.length + 2,
+        completed: input.chunks.length + 2,
+        current: generationId,
+        message: "reused"
+      });
+      return { metadata: existing.metadata, dbPath: existing.metadata.dbPath, reused: true };
+    }
+    if (existing.status === "blocked") {
+      throw new Error(`vector generation ${generationId} already exists and is not safely replaceable: ${existing.reason}`);
+    }
+    const stagingToken = `${generationId}.${process.pid}.${this.now()}.${Math.random().toString(16).slice(2)}`;
+    const stagingDir = vectorStagingDir(input.paths, stagingToken);
+    const stagingDbPath = vectorStagingDbPath(input.paths, stagingToken);
     const progressTotal = input.chunks.length + 2;
     input.progress?.({
       phase: "vector-indexing",
@@ -118,22 +161,22 @@ export class VectorGenerationPool {
         current: generationId,
         message: "built"
       });
-      const finalDir = vectorGenerationDir(input.paths, generationId);
-      if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true, force: true });
       ensurePrivateDirSync(input.paths.generationsDir, "Optsidian vector generations directory");
-      await durableRename(stagingDir, finalDir);
-      fsyncDirSync(input.paths.generationsDir);
       const metadata: VectorGenerationMetadata = {
         schemaVersion: 1,
         key: input.paths.key,
         generationId,
-        dbPath: vectorGenerationDbPath(input.paths, generationId),
+        dbPath: finalDbPath,
         spec: input.spec,
         chunkCount: input.chunks.length,
         builtEngine: input.engineName ?? "auto",
         createdAt: new Date(this.now()).toISOString(),
-        embeddingSetId: input.paths.key.embeddingSetId
+        embeddingSetId: input.paths.key.embeddingSetId,
+        ...(input.embeddingSpaceId ? { embeddingSpaceId: input.embeddingSpaceId } : {}),
+        ...(input.embeddingRecipeFreshnessId ? { embeddingRecipeFreshnessId: input.embeddingRecipeFreshnessId } : {}),
+        manifestHash
       };
+      await this.publishBuiltGenerationDirectory(input, stagingDir, finalDir, existing.status === "replaceable");
       await storeVectorGenerationMetadata(input.paths, metadata);
       input.progress?.({
         phase: "vector-indexing",
@@ -153,6 +196,17 @@ export class VectorGenerationPool {
     this.assertOpen();
     if (metadata.embeddingSetId !== paths.key.embeddingSetId) {
       throw new Error(`vector generation embeddingSetId mismatch: ${metadata.embeddingSetId}`);
+    }
+    const active = this.activeByKey.get(vectorStoreKeyString(paths.key));
+    if (active && !active.draining && !active.closeStarted && generationHandleMatchesMetadata(active, metadata)) {
+      await writeActiveVectorPointer(paths, metadata, this.renameActive);
+      this.recordPromotedGeneration(paths, metadata);
+      return;
+    }
+    const pointer = readActiveVectorPointer(paths);
+    if (!active && activeVectorPointerMatchesMetadata(pointer, metadata)) {
+      this.recordPromotedGeneration(paths, metadata);
+      return;
     }
     const instance = await this.factory.create({
       role: "query",
@@ -178,12 +232,15 @@ export class VectorGenerationPool {
         drainResolvers: []
       };
       await writeActiveVectorPointer(paths, metadata, this.renameActive);
+      const current = this.activeByKey.get(vectorStoreKeyString(paths.key));
+      if (current && !current.draining && !current.closeStarted && generationHandleMatchesMetadata(current, metadata)) {
+        promoted = true;
+        await Promise.resolve(instance.close()).catch(() => undefined);
+        this.recordPromotedGeneration(paths, metadata);
+        return;
+      }
       this.flipActive(paths.key, next);
-      this.catalog.recordBuilt(paths, {
-        generationId: metadata.generationId,
-        chunkCount: metadata.chunkCount,
-        nowMs: this.now()
-      });
+      this.recordPromotedGeneration(paths, metadata);
       promoted = true;
     } finally {
       if (!promoted) await Promise.resolve(instance.close()).catch(() => undefined);
@@ -213,17 +270,61 @@ export class VectorGenerationPool {
     }
   }
 
+  async pinReadableGeneration(input: {
+    paths: VectorStoreCachePaths;
+    key?: VectorStoreKey;
+    expectedGenerationId: string;
+    expectedSpec: CoralEmbeddingSpec;
+  }): Promise<PinReadableGenerationResult> {
+    this.assertOpen();
+    const key = input.key ?? input.paths.key;
+    if (!vectorStoreKeysEqual(key, input.paths.key)) {
+      return { status: "index-not-ready", reason: "active-generation-mismatched" };
+    }
+    const activePin = this.acquireActive(key);
+    if (activePin) {
+      if (
+        activePin.handle.generationId !== input.expectedGenerationId ||
+        !embeddingSpecEqual(activePin.handle.spec, input.expectedSpec)
+      ) {
+        this.release(activePin);
+        return { status: "index-not-ready", reason: "active-generation-mismatched" };
+      }
+      return { status: "ready", lease: this.leaseFromPin(activePin) };
+    }
+
+    try {
+      const handle = await this.lazyOpenActiveGeneration(input.paths, key, input.expectedGenerationId, input.expectedSpec);
+      const pin = this.acquireHandle(handle);
+      return { status: "ready", lease: this.leaseFromPin(pin) };
+    } catch (error) {
+      const reason = error && typeof error === "object" && "reason" in error
+        ? (error as { reason?: unknown }).reason
+        : undefined;
+      if (
+        reason === "no-active-built-spec" ||
+        reason === "active-generation-mismatched" ||
+        reason === "active-generation-unreadable"
+      ) {
+        return { status: "index-not-ready", reason };
+      }
+      return { status: "index-not-ready", reason: "active-generation-unreadable" };
+    }
+  }
+
   statsForTests(): {
     active: Record<string, string>;
     refCounts: Record<string, number>;
     draining: string[];
+    lazyOpens: string[];
   } {
     const refCounts: Record<string, number> = {};
     for (const [key, generation] of this.generations) refCounts[key] = generation.refCount;
     return {
       active: Object.fromEntries([...this.activeByKey.entries()].map(([key, generation]) => [key, generation.generationId])),
       refCounts,
-      draining: [...this.generations.values()].filter((generation) => generation.draining).map((generation) => generation.generationId)
+      draining: [...this.generations.values()].filter((generation) => generation.draining).map((generation) => generation.generationId),
+      lazyOpens: [...this.lazyOpenByGeneration.keys()]
     };
   }
 
@@ -238,10 +339,30 @@ export class VectorGenerationPool {
   private acquireActive(key: VectorStoreKey): VectorPin | undefined {
     const handle = this.activeByKey.get(vectorStoreKeyString(key));
     if (!handle || handle.draining || handle.closeStarted) return undefined;
+    return this.acquireHandle(handle);
+  }
+
+  private acquireHandle(handle: GenerationHandle): VectorPin {
     handle.refCount += 1;
     const token = `${handle.generationId}:${handle.refCount}:${this.now()}:${Math.random().toString(16).slice(2)}`;
     handle.pinTokens.add(token);
     return { handle, token };
+  }
+
+  private leaseFromPin(pin: VectorPin): ReadableVectorGenerationLease {
+    let released = false;
+    return {
+      key: pin.handle.key,
+      generationId: pin.handle.generationId,
+      dbPath: pin.handle.dbPath,
+      spec: pin.handle.spec,
+      searchVector: (queryVector, candidateK) => Promise.resolve(pin.handle.instance.searchVector(queryVector, candidateK)),
+      release: () => {
+        if (released) return;
+        released = true;
+        this.release(pin);
+      }
+    };
   }
 
   private release(pin: VectorPin): void {
@@ -256,9 +377,108 @@ export class VectorGenerationPool {
   private flipActive(key: VectorStoreKey, next: GenerationHandle): void {
     const keyString = vectorStoreKeyString(key);
     const old = this.activeByKey.get(keyString);
+    if (old && old !== next && old.generationId === next.generationId) {
+      throw new Error(`refusing to replace active vector handle with same generation id: ${next.generationId}`);
+    }
     this.generations.set(generationMapKey(key, next.generationId), next);
     this.activeByKey.set(keyString, next);
     if (old && old !== next) void this.retire(old);
+  }
+
+  private async lazyOpenActiveGeneration(
+    paths: VectorStoreCachePaths,
+    key: VectorStoreKey,
+    expectedGenerationId: string,
+    expectedSpec: CoralEmbeddingSpec
+  ): Promise<GenerationHandle> {
+    const mapKey = generationMapKey(key, expectedGenerationId);
+    const existing = this.lazyOpenByGeneration.get(mapKey);
+    if (existing) return existing;
+    const open = this.openActiveGeneration(paths, key, expectedGenerationId, expectedSpec);
+    this.lazyOpenByGeneration.set(mapKey, open);
+    try {
+      return await open;
+    } finally {
+      if (this.lazyOpenByGeneration.get(mapKey) === open) this.lazyOpenByGeneration.delete(mapKey);
+    }
+  }
+
+  private async openActiveGeneration(
+    paths: VectorStoreCachePaths,
+    key: VectorStoreKey,
+    expectedGenerationId: string,
+    expectedSpec: CoralEmbeddingSpec
+  ): Promise<GenerationHandle> {
+    const ready = this.activeByKey.get(vectorStoreKeyString(key));
+    if (ready && !ready.draining && !ready.closeStarted) {
+      if (ready.generationId !== expectedGenerationId || !embeddingSpecEqual(ready.spec, expectedSpec)) {
+        throw notReady("active-generation-mismatched");
+      }
+      return ready;
+    }
+
+    const active = readActiveVectorPointer(paths);
+    if (!active) throw notReady("no-active-built-spec");
+    if (
+      active.generationId !== expectedGenerationId ||
+      active.embeddingSetId !== key.embeddingSetId ||
+      active.specId !== expectedSpec.specId
+    ) {
+      throw notReady("active-generation-mismatched");
+    }
+    const metadata = loadVectorGenerationMetadata(paths, active.generationId);
+    if (!metadata) throw notReady("active-generation-unreadable");
+    if (
+      metadata.generationId !== expectedGenerationId ||
+      metadata.embeddingSetId !== key.embeddingSetId ||
+      metadata.dbPath !== active.dbPath ||
+      metadata.spec.specId !== active.specId ||
+      !embeddingSpecEqual(metadata.spec, expectedSpec) ||
+      !vectorStoreKeysEqual(metadata.key, key)
+    ) {
+      throw notReady("active-generation-mismatched");
+    }
+    if (!fs.existsSync(metadata.dbPath)) throw notReady("active-generation-unreadable");
+
+    const instance = await this.factory.create({
+      role: "query",
+      key,
+      generationId: metadata.generationId,
+      dbPath: metadata.dbPath
+    });
+    let installed = false;
+    try {
+      await instance.initStore(metadata.dbPath);
+      await instance.setActiveSpec(metadata.spec);
+      await instance.buildIndex(metadata.builtEngine);
+      const next: GenerationHandle = {
+        key,
+        generationId: metadata.generationId,
+        dbPath: metadata.dbPath,
+        spec: metadata.spec,
+        instance,
+        refCount: 0,
+        pinTokens: new Set(),
+        draining: false,
+        closeStarted: false,
+        drainResolvers: []
+      };
+      const current = this.activeByKey.get(vectorStoreKeyString(key));
+      if (current && !current.draining && !current.closeStarted) {
+        if (current.generationId !== expectedGenerationId || !embeddingSpecEqual(current.spec, expectedSpec)) {
+          throw notReady("active-generation-mismatched");
+        }
+        installed = true;
+        await Promise.resolve(instance.close()).catch(() => undefined);
+        return current;
+      }
+      this.generations.set(generationMapKey(key, next.generationId), next);
+      this.activeByKey.set(vectorStoreKeyString(key), next);
+      installed = true;
+      return next;
+    } finally {
+      if (!installed) await Promise.resolve(instance.close()).catch(() => undefined);
+    }
   }
 
   private async retire(handle: GenerationHandle): Promise<void> {
@@ -278,9 +498,110 @@ export class VectorGenerationPool {
       if (handle.closeStarted) return;
       handle.closeStarted = true;
       await handle.instance.close();
-      this.generations.delete(generationMapKey(handle.key, handle.generationId));
+      const mapKey = generationMapKey(handle.key, handle.generationId);
+      if (this.generations.get(mapKey) === handle) this.generations.delete(mapKey);
     })();
     return handle.closePromise;
+  }
+
+  private async inspectExistingGeneration(
+    input: BuildVectorGenerationInput,
+    manifestHash: string
+  ): Promise<
+    | { status: "absent" }
+    | { status: "reusable"; metadata: VectorGenerationMetadata }
+    | { status: "replaceable" }
+    | { status: "blocked"; reason: string }
+  > {
+    const finalDir = vectorGenerationDir(input.paths, input.generationId);
+    if (!fs.existsSync(finalDir)) return { status: "absent" };
+    const metadata = loadVectorGenerationMetadata(input.paths, input.generationId);
+    if (
+      metadata &&
+      fs.existsSync(metadata.dbPath) &&
+      vectorGenerationMetadataMatchesInput(metadata, input, manifestHash, { allowMissingManifestHash: true })
+    ) {
+      if (metadata.manifestHash === manifestHash) return { status: "reusable", metadata };
+      const upgraded = { ...metadata, manifestHash };
+      await storeVectorGenerationMetadata(input.paths, upgraded);
+      return { status: "reusable", metadata: upgraded };
+    }
+    if (this.generationIsInUse(input.paths, input.generationId)) {
+      return { status: "blocked", reason: "generation-in-use" };
+    }
+    const active = readActiveVectorPointer(input.paths);
+    if (active?.generationId === input.generationId) {
+      return { status: "blocked", reason: "active-pointer-references-generation" };
+    }
+    if (!input.canReplaceExistingGeneration) {
+      return { status: "blocked", reason: "gc-roots-not-available" };
+    }
+    const canReplace = await input.canReplaceExistingGeneration();
+    return canReplace ? { status: "replaceable" } : { status: "blocked", reason: "generation-protected" };
+  }
+
+  private generationIsInUse(paths: VectorStoreCachePaths, generationId: string): boolean {
+    const mapKey = generationMapKey(paths.key, generationId);
+    if (this.lazyOpenByGeneration.has(mapKey)) return true;
+    const active = this.activeByKey.get(vectorStoreKeyString(paths.key));
+    if (active?.generationId === generationId) return true;
+    const handle = this.generations.get(mapKey);
+    return Boolean(handle && (!handle.closeStarted || handle.refCount > 0 || handle.pinTokens.size > 0));
+  }
+
+  private async publishBuiltGenerationDirectory(
+    input: BuildVectorGenerationInput,
+    stagingDir: string,
+    finalDir: string,
+    replaceExisting: boolean
+  ): Promise<void> {
+    if (!fs.existsSync(finalDir)) {
+      await durableRename(stagingDir, finalDir);
+      fsyncDirSync(input.paths.generationsDir);
+      return;
+    }
+    if (!replaceExisting) {
+      throw new Error(`vector generation ${input.generationId} appeared before publish`);
+    }
+    if (this.generationIsInUse(input.paths, input.generationId)) {
+      throw new Error(`vector generation ${input.generationId} became active before replacement`);
+    }
+    const active = readActiveVectorPointer(input.paths);
+    if (active?.generationId === input.generationId) {
+      throw new Error(`vector generation ${input.generationId} became active before replacement`);
+    }
+    const canStillReplace = input.canReplaceExistingGeneration
+      ? await input.canReplaceExistingGeneration()
+      : false;
+    if (!canStillReplace) {
+      throw new Error(`vector generation ${input.generationId} became protected before replacement`);
+    }
+    ensurePrivateDirSync(input.paths.tmpDir, "Optsidian vector tmp directory");
+    const retiredDir = path.join(
+      input.paths.tmpDir,
+      `${input.generationId}.${process.pid}.${this.now()}.${Math.random().toString(16).slice(2)}.retired`
+    );
+    await durableRename(finalDir, retiredDir);
+    fsyncDirSync(input.paths.generationsDir);
+    try {
+      await durableRename(stagingDir, finalDir);
+      fsyncDirSync(input.paths.generationsDir);
+    } catch (error) {
+      if (!fs.existsSync(finalDir) && fs.existsSync(retiredDir)) {
+        await durableRename(retiredDir, finalDir);
+        fsyncDirSync(input.paths.generationsDir);
+      }
+      throw error;
+    }
+    await fs.promises.rm(retiredDir, { recursive: true, force: true });
+  }
+
+  private recordPromotedGeneration(paths: VectorStoreCachePaths, metadata: VectorGenerationMetadata): void {
+    this.catalog.recordBuilt(paths, {
+      generationId: metadata.generationId,
+      chunkCount: metadata.chunkCount,
+      nowMs: this.now()
+    });
   }
 
   private assertOpen(): void {
@@ -366,8 +687,99 @@ function generationMapKey(key: VectorStoreKey, generationId: string): string {
   return `${vectorStoreKeyString(key)}:${generationId}`;
 }
 
-function createGenerationId(nowMs: number): string {
-  return `gen-${nowMs.toString(36)}-${process.pid.toString(36)}-${Math.random().toString(16).slice(2)}`;
+function vectorStoreKeysEqual(left: VectorStoreKey, right: VectorStoreKey): boolean {
+  return left.profileHash === right.profileHash &&
+    left.vaultStateHash === right.vaultStateHash &&
+    left.embeddingSetId === right.embeddingSetId;
+}
+
+function embeddingSpecEqual(left: CoralEmbeddingSpec, right: CoralEmbeddingSpec): boolean {
+  return left.specId === right.specId &&
+    left.provider === right.provider &&
+    left.model === right.model &&
+    left.dims === right.dims &&
+    left.normalization === right.normalization &&
+    left.createdAt === right.createdAt;
+}
+
+export function vectorGenerationManifestHash(input: {
+  spec: CoralEmbeddingSpec;
+  chunks: readonly CoralChunkRecord[];
+  engineName?: "auto" | string;
+  embeddingSpaceId?: EmbeddingSpaceId;
+  embeddingRecipeFreshnessId?: EmbeddingRecipeFreshnessId;
+}): string {
+  const chunks = input.chunks
+    .map((chunk) => ({
+      id: chunk.id,
+      entryId: chunk.entryId,
+      entryKind: chunk.entryKind,
+      chunkIndex: chunk.chunkIndex,
+      text: chunk.text,
+      contentHash: chunk.contentHash,
+      specId: chunk.specId,
+      vector: Array.from(chunk.vector)
+    }))
+    .sort((left, right) =>
+      left.entryId.localeCompare(right.entryId) ||
+      left.chunkIndex - right.chunkIndex ||
+      left.id.localeCompare(right.id)
+    );
+  return crypto.createHash("sha256").update(JSON.stringify({
+    schemaVersion: 1,
+    spec: {
+      specId: input.spec.specId,
+      provider: input.spec.provider,
+      model: input.spec.model,
+      dims: input.spec.dims,
+      normalization: input.spec.normalization,
+      createdAt: input.spec.createdAt
+    },
+    builtEngine: input.engineName ?? "auto",
+    embeddingSpaceId: input.embeddingSpaceId ?? null,
+    embeddingRecipeFreshnessId: input.embeddingRecipeFreshnessId ?? null,
+    chunks
+  })).digest("hex");
+}
+
+function vectorGenerationMetadataMatchesInput(
+  metadata: VectorGenerationMetadata,
+  input: BuildVectorGenerationInput,
+  manifestHash: string,
+  options: { allowMissingManifestHash?: boolean } = {}
+): boolean {
+  return vectorStoreKeysEqual(metadata.key, input.paths.key) &&
+    metadata.generationId === input.generationId &&
+    metadata.embeddingSetId === input.paths.key.embeddingSetId &&
+    metadata.dbPath === vectorGenerationDbPath(input.paths, input.generationId) &&
+    embeddingSpecEqual(metadata.spec, input.spec) &&
+    metadata.chunkCount === input.chunks.length &&
+    metadata.builtEngine === (input.engineName ?? "auto") &&
+    (metadata.embeddingSpaceId ?? undefined) === (input.embeddingSpaceId ?? undefined) &&
+    (metadata.embeddingRecipeFreshnessId ?? undefined) === (input.embeddingRecipeFreshnessId ?? undefined) &&
+    (metadata.manifestHash === manifestHash || (options.allowMissingManifestHash === true && metadata.manifestHash === undefined));
+}
+
+function generationHandleMatchesMetadata(handle: GenerationHandle, metadata: VectorGenerationMetadata): boolean {
+  return handle.generationId === metadata.generationId &&
+    handle.dbPath === metadata.dbPath &&
+    vectorStoreKeysEqual(handle.key, metadata.key) &&
+    embeddingSpecEqual(handle.spec, metadata.spec);
+}
+
+function activeVectorPointerMatchesMetadata(
+  pointer: { generationId: string; embeddingSetId: string; specId: string; dbPath: string } | undefined,
+  metadata: VectorGenerationMetadata
+): boolean {
+  if (!pointer) return false;
+  return pointer.generationId === metadata.generationId &&
+    pointer.embeddingSetId === metadata.embeddingSetId &&
+    pointer.specId === metadata.spec.specId &&
+    pointer.dbPath === metadata.dbPath;
+}
+
+function notReady(reason: PinReadableGenerationNotReadyReason): Error {
+  return Object.assign(new Error(`vector generation is not readable: ${reason}`), { reason });
 }
 
 function isVectorGenerationMetadata(value: unknown): value is VectorGenerationMetadata {
@@ -380,7 +792,10 @@ function isVectorGenerationMetadata(value: unknown): value is VectorGenerationMe
     typeof value.chunkCount === "number" &&
     typeof value.builtEngine === "string" &&
     typeof value.createdAt === "string" &&
-    typeof value.embeddingSetId === "string";
+    typeof value.embeddingSetId === "string" &&
+    (!("embeddingSpaceId" in value) || typeof value.embeddingSpaceId === "string") &&
+    (!("embeddingRecipeFreshnessId" in value) || typeof value.embeddingRecipeFreshnessId === "string") &&
+    (!("manifestHash" in value) || typeof value.manifestHash === "string");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

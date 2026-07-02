@@ -425,10 +425,11 @@ function searchResultFromRetrieve(result: RetrieveResult): SearchResult & { snap
     origin: result.origin,
     matches: result.matches,
     results: result.results,
+    dense: result.dense,
     ...(result.status === "ready"
       ? {
           snapshotId: result.snapshotId,
-          retrievalSnapshotId: result.retrievalSnapshotId,
+          ...(result.retrievalSnapshotId ? { retrievalSnapshotId: result.retrievalSnapshotId } : {}),
           ...(result.debug ? { debug: result.debug } : {})
         }
       : {}),

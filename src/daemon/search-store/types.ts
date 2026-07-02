@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import type { SearchTokenChannelTerms, UnresolvedNoteLink } from "../../core/search/analysis/index.js";
 import type { CorpusSnapshotId, EmbeddingSetId, LinkGraphEdge, LinkGraphId, RetrieverPlanIdentity, RetrievalSnapshotId } from "../../core/search/contracts.js";
-import type { EmbeddingRecipeIdentity, EmbeddingSetRecord } from "../../core/search/dense/index.js";
+import type {
+  EmbeddingRecipeFreshnessId,
+  EmbeddingRecipeIdentity,
+  EmbeddingSetRecord,
+  EmbeddingSpaceId
+} from "../../core/search/dense/index.js";
 import type { VectorStoreKey } from "../vector-store/types.js";
 import {
   canonicalValueBytes,
@@ -46,6 +51,8 @@ export const SNAPSHOT_PERSISTENCE_SCHEMA = {
     "corpusSnapshotId",
     "linkGraphId",
     "embeddingSetId",
+    "embeddingSpaceId",
+    "embeddingRecipeFreshnessId",
     "retrieverPlanIdentity",
     "rankingFeatureVersion",
     "canonicalManifestSha256",
@@ -126,6 +133,8 @@ export type RetrievalSnapshotEnvelope = {
   corpusSnapshotId: CorpusSnapshotId;
   linkGraphId: LinkGraphId;
   embeddingSetId: EmbeddingSetId;
+  embeddingSpaceId: EmbeddingSpaceId;
+  embeddingRecipeFreshnessId: EmbeddingRecipeFreshnessId;
   retrieverPlanIdentity: RetrieverPlanIdentity;
   rankingFeatureVersion: string;
   canonicalManifestSha256: string;

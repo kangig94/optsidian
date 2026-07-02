@@ -280,6 +280,7 @@ export function similarityResultFromRetrieve(
     status: retrieve.status,
     origin: retrieve.origin,
     request,
+    dense: retrieve.dense,
     matches: retrieve.matches,
     results: retrieve.results.map((result) => ({
       path: result.path,
@@ -291,7 +292,7 @@ export function similarityResultFromRetrieve(
     })),
     ...(retrieve.status === "ready" ? {
       snapshotId: retrieve.snapshotId,
-      retrievalSnapshotId: retrieve.retrievalSnapshotId
+      ...(retrieve.retrievalSnapshotId ? { retrievalSnapshotId: retrieve.retrievalSnapshotId } : {})
     } : { reason: retrieve.reason }),
     ...(retrieve.warnings ? { warnings: retrieve.warnings } : {})
   };

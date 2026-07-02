@@ -4,8 +4,9 @@ This document traces the **complete runtime lifecycle** of the search / retrieva
 daemon is born and dies, how the embedding model session loads and unloads, what a request does
 end-to-end per retrieval mode, and how caches and indexes are built, published, pinned, and garbage
 collected. It complements [`ARCHITECTURE.md`](ARCHITECTURE.md) (layer graph, dependency rules) and
-[`search.md`](search.md) (benchmark + snapshot principles). Every claim cites `file:line` against the
-current source.
+[`search.md`](search.md) (benchmark + snapshot principles). References prefer stable symbols and file
+names; exact line numbers are included only where they are useful orientation, not as a mechanically
+maintained citation set.
 
 Iron law (unchanged): results are a pure function of `(snapshot id, query, filters, limit, ranking
 version, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
@@ -52,7 +53,7 @@ protocolVersion)` (`owner-registry.ts:26-31`, `desiredOwnerIdentity` `:123-130`)
 
 Every request except `Status` must carry the owner nonce or it is rejected with
 `SEARCH_DAEMON_AUTH_FAILED` (`server.ts:287-289`). The protocol version must match
-(`SEARCH_DAEMON_PROTOCOL_VERSION = 2`, `protocol.ts:35`; validated `server.ts:272-274`).
+(`SEARCH_DAEMON_PROTOCOL_VERSION = 3`, `protocol.ts:35`; validated `server.ts:272-274`).
 
 The **ready handshake**: on start the daemon opens both sockets, then sets `phase = "ready"`
 (`initialize`, `server.ts:222-224`). Until `daemon` is constructed, both socket handlers throw
@@ -63,10 +64,10 @@ The **ready handshake**: on start the daemon opens both sockets, then sets `phas
 
 The daemon arms a no-request idle shutdown timer. `daemonIdleMs` defaults to `6 * 60 * 60 * 1000`
 and still honors `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` / `settings.search.daemonIdleMs`
-(`server.ts:585-587`). Startup arms the timer after `phase = "ready"` (`server.ts:226-235`);
-`handleRequest` clears it at request admission and re-arms it in `finally` after the request completes
-(`server.ts:245-269`). When the timer fires, it runs the same shutdown path as explicit `Shutdown`
-(`server.ts:477-487`). A later CLI or MCP call auto-boots the daemon through `ensureReady()`.
+(`daemonIdleMs`, `server.ts`). Startup arms the timer after `phase = "ready"` (`SearchDaemon.initialize`);
+`SearchDaemon.handleRequest` clears it at request admission and re-arms it in `finally` after the
+request completes. When the timer fires, it runs the same shutdown path as explicit `Shutdown`
+(`SearchDaemon.shutdown`). A later CLI or MCP call auto-boots the daemon through `ensureReady()`.
 
 > **DO** treat the daemon as warm between requests within the idle window.
 > **DON'T** confuse daemon idle shutdown with model idle unload; embedding model sessions keep their
@@ -77,14 +78,12 @@ and still honors `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` / `settings.search.daemonIdle
 The daemon multiplexes **profile runtimes** keyed by a hash of the `SearchRuntimeProfile` (analyzer
 mode, ngram, embedding provider/model, ranking, worker counts, caps —
 `runtime-profile.ts:13-56`, `searchRuntimeProfileHash` `:179-181`). `ProfileManager`
-(`profile-manager.ts:156`) lazily creates one `ProfileRuntime` per distinct profile
-(`ProfileRuntime.create`, `profile-manager.ts:71-118`) — each with its own worker pools, vector
-generation pool, and search store. Profile runtimes are still retained until daemon shutdown:
-`release` decrements the active-request count and calls a profile-level `armIdleTimer` that only
-clears the timer (`profile-manager.ts:288-302`). `closeEntryIfIdle` (`:304-307`) exists but has no
-scheduled caller. Profile runtimes are therefore torn down only by `ProfileManager.close()` on daemon shutdown
-(`:253-257`). A single default profile is the norm; a distinct `profile` in the request payload spins
-up a second resident runtime.
+(`profile-manager.ts:226-243`) lazily creates one `ProfileRuntime` per distinct profile
+(`ProfileRuntime.create`, `profile-manager.ts:101-153`) — each with profile-scoped analyzer/search
+resources and a search store, plus leases on the process-scoped `EmbedScheduler` and
+`VectorGenerationManager`. Profile runtimes remain resident while the daemon is alive and are torn down
+by `ProfileManager.close()` during daemon shutdown (`profile-manager.ts:329-334`). A single default
+profile is the norm; a distinct `profile` in the request payload spins up a second resident runtime.
 
 ### Explicit shutdown
 
@@ -113,42 +112,53 @@ keeps `runSearchDaemon` alive (`server.ts:94-96`).
 
 | Name | Value | Source |
 |------|-------|--------|
-| `SEARCH_DAEMON_PROTOCOL_VERSION` | `2` | `protocol.ts:35` |
+| `SEARCH_DAEMON_PROTOCOL_VERSION` | `3` | `protocol.ts:35` |
 | Ready poll timeout | `15000` ms | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts:58` |
 | Owner control lock stale | `20_000` ms | `LOCK_STALE_MS`, `owner-registry.ts:61` |
-| Daemon idle timeout | `6 hours` by default; armed after startup and each request | `server.ts:477-487, 585-587` |
+| Daemon idle timeout | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.shutdown` |
 | Nonce | random 24 bytes | `randomNonce`, `owner-registry.ts:105-107` |
 | Runtime dir override | `OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR` | `owner-registry.ts:85-91` |
-| Idle-ms override | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` | `server.ts:585` |
+| Idle-ms override | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` | `daemonIdleMs` |
 
 ---
 
 ## 2. Embedding model session lifecycle (load / unload)
 
 The model session is **separate from the daemon**: the daemon is resident, but the model loads on
-demand and unloads on idle. It lives inside the **embedding worker** (`worker-entry.ts`, `kind:
+demand and unloads on idle. The daemon now creates one process-scoped `EmbedScheduler` during
+startup (`server.ts:159-163`) and passes it into `ProfileManager`; the scheduler owns the embedding
+worker pool and one `VectorGenerationManager` (`embed-scheduler.ts:57-100`). Profile runtimes lease
+those process owners rather than constructing their own vector/model owners
+(`profile-manager.ts:101-153`), while still owning their profile-specific analyzer/search resources.
+
+The model itself still lives inside the **embedding worker** (`worker-entry.ts`, `kind:
 "embedding"`), which owns a single module-level `ModelSessionLifecycle` keyed by a stable provider key
-(`worker-entry.ts:49-51, 225-239`). The pool has `size = 1` by default
-(`OPTSIDIAN_SEARCH_EMBEDDING_WORKERS`, `pools.ts:426, 453-462`) and does not auto-warm.
+(`worker-entry.ts:49-51, 225-239`). The scheduler is the admission and fairness layer in front of that
+worker: priority lanes are `query > save > refresh > rebuild` (`embed-scheduler.ts:54-86`), query
+encodes are single-flighted (`embed-scheduler.ts:104-140`), and daemon close drains the scheduler before
+closing the model worker and vector manager (`embed-scheduler.ts:187-207`).
 
 ### Load triggers — encode is the only trigger
 
-The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` → `ensureSession`
-(`model-session/lifecycle.ts:69-136`). Two things trigger `EmbeddingWorkerPool.encode`
-(`pools.ts:342-344`), both routed through `worker-entry.ts:211-223` (`modelEncode`):
+The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` -> `ensureSession`
+(`model-session/lifecycle.ts:69-136`). Every encode now enters through `EmbedScheduler.encode`
+(`embed-scheduler.ts:104-140`):
 
-- **`origin=text` query encode** — a text retrieval query is embedded via
-  `encodeRetrieveQueryVector` (`service.ts:93-124`, `inputKind: "query"` → `origin: "query-text"`).
-- **Document embed** during retrieval-snapshot build — `createWorkerEmbeddingSetBuilder` batches every
-  document's dense text through the same pool (`inputKind: "document"` → `origin: "document-embed"`,
-  `snapshot-store.ts:1629-1676`, invoked from `buildRetrievalSnapshotPublication`
-  `snapshot-store.ts:922`).
+- **`origin=text` query encode** — a text retrieval query is embedded only after retrieve has pinned the
+  lexical corpus and attached a usable, space-comparable dense generation. If dense cannot contribute,
+  `resolveRetrieveOriginVector` returns without calling `encodeRetrieveQueryVector`
+  (`service.ts:699-716`).
+- **Document embed** during retrieval generation build — `createWorkerEmbeddingSetBuilder` batches
+  document dense text through the scheduler in 32-document slices (`snapshot-store.ts:334,
+  1883-1991`). Load/rebuild/refresh use their corresponding lanes, and save-on-write uses the `save`
+  lane through `publishSaveSnapshot` (`snapshot-store.ts:456-461`).
 
-**`origin=note` and note-path sides of `origin=pair` do NOT load the model.** They read a
-**precomputed** stored vector from the pinned retrieval snapshot's embedding set
-(`resolveRetrieveOrigin`, `service.ts:581-650`): `origin=note` and note-path `origin=pair` sides look
-the source note up by path in `pin.embeddingSet.records`; `origin=pair` encodes only a raw-text side.
-`origin=global` returns no query vector at all and never touches the model.
+**`origin=note`, `origin=pair`, and `origin=global` do NOT load the model.** They resolve source text
+from the pinned lexical corpus, then use stored vectors from the attached dense generation
+(`service.ts:631-765`). If a source vector is absent, stale by `contentHash`, or dense is not usable,
+the result is a soft `index-not-ready` with the dense signal attached, not an on-demand encode.
+`origin=pair` accepts note-path sides only; raw text in either side is rejected at the daemon boundary
+(`service.ts:659-667`).
 
 ### Device selection: GPU if VRAM headroom, else CPU
 
@@ -185,14 +195,15 @@ After a successful encode on a CPU session, `promoteCpuSessionIfGpuAvailable`
 (`lifecycle.ts:87, 174-196`) re-probes VRAM; if GPU is now available it loads a GPU session in the
 background, swaps it in, and closes the CPU one (guarded by a load generation so a superseded load is
 discarded). Promotion is suppressed once after a GPU OOM (`suppressPromotionAfterGpuOom`,
-`lifecycle.ts:145-148, 177-180`).
+`lifecycle.ts:145-148, 177-180`) and the scheduler also suppresses promotion while rebuild-lane work is
+active (`embed-scheduler.ts:116-137, 312-315`).
 
 ### Load deadline, cancellation, per-waiter cancellation
 
 - **Encode deadline**: `Date.now() + modelEncodeDeadlineMs()` (default `60_000`,
   `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts:211-216, 295-299`). If the request
   deadline is within 100 ms the daemon **skips** dense encode entirely and warns instead of failing
-  (`service.ts:100-103`).
+  (`DaemonSearchStoreService.encodeRetrieveQueryVector`).
 - **GPU OOM fallback**: a GPU load that throws an OOM error falls back to CPU
   (`startLoadWithFallback`, `lifecycle.ts:138-150`; `defaultIsOomError` `:381-384`).
 - **Deadline / abort**: `waitForLoadPromise` (`lifecycle.ts:267-317`) races the load against a
@@ -221,71 +232,77 @@ discarded). Promotion is suppressed once after a GPU OOM (`suppressPromotionAfte
 The client splits the transport (`client.ts:298-305`): a `search` request with `retrieval` `vector`
 or `hybrid` is rewritten into a `Retrieve` (`searchPayloadToRetrieve` sets `origin: "text"`,
 `client.ts:409-416`); plain lexical `search` uses `Search`; `explain` always uses `Retrieve` with
-`debug + explain` (`client.ts:306-321`). The daemon dispatch is `server.ts:292-311`.
+`debug + explain` (`client.ts:306-321`). Retrieve-derived search results carry the retrieve `dense`
+signal through `searchResultFromRetrieve` (`client.ts:418-438`). The daemon dispatch is
+`server.ts:292-311`.
 
 ### Lexical (`Search`, or `retrieval=lexical`)
 
-`DaemonSearchStoreService.search` (`service.ts:175-183`) rejects any non-lexical retrieval, then
-`executeSearch` (`service.ts:294-303`):
+`DaemonSearchStoreService.search` (`service.ts:214-222`) rejects any non-lexical retrieval, then
+`executeSearch` (`service.ts:350-359`):
 
 1. **Pin** the active corpus snapshot: `store.pin(vault, snapshotId?, ...)`
-   (`snapshot-store.ts:411-431`) — ensures an active snapshot exists (building it if needed via
+   (`snapshot-store.ts:517-537`) — ensures an active snapshot exists (building it if needed via
    `ensureActiveSnapshot`), loads it, `refCount += 1`, adds a `pinToken`.
 2. Analyze the query once (latency analyzer pool or inline analyzer, cached by analyzer identity + raw
    query + settings hash; `queryAnalysis`, `service.ts:533-579`).
 3. Run positional retrieval over the pinned corpus snapshot via `SearchQueryScheduler.execute`
-   (`service.ts:338-358`), which fans shard tasks onto the search-execution pool.
-4. **Release** the pin in `finally` (`service.ts:300-302`). Release is **refcount-only** — it deletes
+   (`service.ts:361-418`), which fans shard tasks onto the search-execution pool.
+4. **Release** the pin in `finally` (`service.ts:356-358`). Release is **refcount-only** — it deletes
    the pin token and decrements `refCount`; no file deletion or GC happens on the query path
-   (`snapshot-store.ts:635-643`).
+   (`snapshot-store.ts:869-877`).
 
 A metadata-only search (tag filter, no query text) skips positional retrieval and scans document
 metadata (`executeMetadataSearchFromSnapshotHandle`, `service.ts:323-331`).
 
 ### Vector / dense (`retrieval=vector`)
 
-`DaemonSearchStoreService.retrieve` (`service.ts:185-278`) is the dense/hybrid entry. The order is
-**pin-before-encode**:
+`DaemonSearchStoreService.retrieve` (`service.ts:245-334`) is the dense/hybrid entry. The order is
+**lexical pin first, dense attach second, encode only if dense can contribute**:
 
-1. **Pin the retrieval snapshot** first: `store.ensureActiveRetrievalSnapshot`
-   (`snapshot-store.ts:444-466`). This is the query path that **can build** — if the active retrieval
-   snapshot is missing or its `snapshotId`/`corpusSnapshotId` don't match the freshly-ensured corpus,
-   it publishes a retrieval snapshot *inline* and re-pins. If the pin is not ready, `retrieve` returns
-   `status: "index-not-ready"` with the pin `reason` (`service.ts:187-199`) — it never scans embedding
-   JSON in-process.
-2. Resolve the query vector (`resolveRetrieveOrigin`, `service.ts:581-650`): `origin=text` **encodes**
-   the query text through the model; `origin=note` uses the stored source vector; `origin=pair` uses
-   stored note vectors and encodes only a raw-text side; `origin=global` yields no vector.
-3. Dense search against the **pinned built coral-needle generation**: `searchActiveDenseGeneration`
-   (`service.ts:372-408`) calls `vectorPool.searchActiveBuiltIndex` with `expectedGenerationId =
-   pin.vector.generationId` and `candidateK = max(limit, limit*4)`. A generation mismatch or missing
-   active spec returns `index-not-ready` with `vector-active-spec-mismatched` /
-   `vector-active-spec-missing` (`service.ts:389-399`).
-4. Vector-only shaping (`vectorOnlyRetrieveResult`, `service.ts:410-478`): each dense hit is mapped to
-   a document via `documentsForPin`, filtered by path/tag, scored by `denseAgreementFromCosine`
-   (`provider.ts:70-73`), truncated to `limit`.
-5. **Release** the pin in `finally` (`service.ts:275-277`), refcount-only.
+1. **Pin the lexical corpus**: `store.pinLexicalReadContext` ensures and pins the active immutable
+   corpus snapshot, loads live documents, and builds the live `contentHash` map
+   (`service.ts:245-250`, `snapshot-store.ts:574-612`). It does **not** publish a retrieval snapshot or
+   require dense freshness.
+2. **Optionally attach dense**: `store.tryAttachDenseGeneration` validates the committed retrieval
+   envelope, corpus/link sidecars, vector active pointer, vector metadata, embedding-space identity, and
+   vector DB readability (`DaemonSnapshotStore.tryAttachDenseGeneration`). Failure records a dense
+   signal such as `cold`, `rebuilding`, or `stale`; it is not itself a ranking gate.
+3. **Resolve the origin vector**: `origin=text` encodes only when an attached dense generation is
+   space-comparable and the selected mode consumes dense (`resolveRetrieveOriginVector` /
+   `encodeRetrieveQueryVector`). When dense cannot contribute, `origin=text` stays vectorless and can
+   still execute the lexical fallback. `origin=note`, `origin=pair`, and `origin=global` read stored
+   vectors from the dense generation, masked against the live lexical `contentHash`; absent/stale source
+   vectors return soft `index-not-ready` with `reason:"source-vector-missing"` and the dense signal.
+4. **Search dense only when usable**: attached dense search uses the read lease's `searchVector`
+   (`service.ts:431-454`). Vector-only shaping still applies path/tag filters and the per-doc
+   `contentHash` mask before returning hits (`service.ts:456-528`).
+5. **Fallback and release**: for `origin=text`, if dense does not contribute, even `retrieval=vector`
+   falls through to the lexical execution path with the dense signal attached (`DaemonSearchStoreService.retrieve`).
+   Stored-vector origins do not synthesize a query vector; missing source vectors return the soft
+   not-ready result above. `releaseReadContext` releases the dense vector lease/GC pin, then the lexical
+   pin, exactly once.
 
 ### Hybrid (`retrieval=hybrid`)
 
-Same pin + encode + dense-search prefix as vector, then instead of vector-only shaping it runs the
-full ranked query with the dense hits fused in: `executeSearchWithPin({...searchPayload, debug:true},
-..., pin, { queryVector, denseSearchResults, sourceDocumentId, sourcePath, excludeDocumentIds })`
-(`service.ts:240-274`). Fusion happens **inside the search-execution worker**, not the daemon:
-`SearchQueryScheduler` carries `queryVector` / `denseSearchResults` / `rrfK` down into the shard job
-(`query-scheduler.ts:511-518`), and the worker fuses lexical + dense + link-adjacency candidate sets
-via **RRF** (`fuseCandidateSets`, `search-execution.ts:33, 426-428`), with dense candidates built from
-`denseSearchResults` + `denseAgreementFromCosine` (`search-execution.ts:437-455`) and link-adjacency
-candidates from the link graph carried on the snapshot handle. The pinned retrieval snapshot supplies
-the link graph and ranking identity; the daemon released the pin only after fusion completes.
+Hybrid follows the same lexical-first prefix. When dense contributes, `executeSearchWithPin` passes the
+query vector, attached embedding set, dense search hits, and live content hashes to the search-execution
+worker (`service.ts:287-304, 361-418`). Fusion happens **inside the search-execution worker**, not the
+daemon: lexical, dense, and link-adjacency candidate sets are fused by **RRF** (`fuseCandidateSets`,
+`search-execution.ts:33, 415-428`). Dense candidates are built only from attached dense hits whose
+stored `record.contentHash` still matches the live lexical document hash
+(`search-execution.ts:437-489`). For `origin=text`, if dense is cold, stale, rebuilding, unreadable, or
+space-mismatched, hybrid is lexical/link only; ranking is not influenced by the dense signal field
+itself. For `origin=note`, `origin=pair`, and `origin=global`, the source query vector must be a usable
+stored vector from the attached generation or the response is soft `index-not-ready`.
 
-> **DO** pin the retrieval snapshot before encoding the query and before dense search — the pinned
-> generation id is what dense search validates against.
-> **DON'T** GC anything on the query path; the query only bumps and drops refcounts.
+> **DO** pin the lexical corpus before optional dense attach and before any query encode.
+> **DON'T** treat dense freshness as a readiness gate; dense is an enrichment and the query only bumps
+> and drops refcounts.
 
 ### Request admission, deadlines, cancellation
 
-`SearchDaemon.handleRequest` (`server.ts:234-259`) validates protocol/nonce/deadline, registers the
+`SearchDaemon.handleRequest` (`server.ts:256-281`) validates protocol/nonce/deadline, registers the
 request cancellation id, and runs through the scheduler. Default query deadline is
 `SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 3000` for `Retrieve` (`protocol.ts:60, 528-532`); a cold
 lifecycle command gets a work-sized deadline `60s + 750ms·files + 5s·MiB`
@@ -305,15 +322,23 @@ GC'd.
 |----------|----------|----------|---------|
 | **Lexical corpus snapshot** (segments + manifest) | `corpusSnapshotId` = hash of segment content-hashes + identity tuple | `buildCanonicalSearchSnapshot` (analyzer throughput pool) | `stores/<vaultHash>/{segments,snapshots}` |
 | **Link-graph sidecar** | `linkGraphId` = `buildLinkGraphSidecar({corpusSnapshotId, edges})` | published with the corpus (`snapshot-store.ts:839-850`) | `stores/<vaultHash>/link-graphs` |
-| **coral-needle vector generation** | `generationId = gen-<embeddingSetId[:24]>`; `embeddingSetId` = content hash over recipe + every doc's projected vector (`embedding-set.ts:151-166`) | `vectorPool.buildStagingGeneration` → `promoteBuiltGeneration` | `vectors/stores/<profile>/<vaultHash>/<embeddingSetId>/generations` |
-| **Composite retrieval snapshot** (envelope) | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`snapshot-store.ts:1709-1723`) | `buildRetrievalSnapshotPublication` | `stores/<vaultHash>/retrievals` |
+| **coral-needle vector generation** | `generationId = vectorGenerationIdForManifest(embeddingSpaceId, embeddingRecipeFreshnessId, corpusRevision, docIds/content hashes/projection hashes)` (`embedding-set.ts:223-247`); `embeddingSetId` remains the content hash over recipe + projected vectors (`embedding-set.ts:206-221`) | `vectorManager.buildStagingGeneration` → `promoteBuiltGeneration` | `vectors/stores/<profile>/<vaultHash>/<embeddingSetId>/generations` |
+| **Composite retrieval snapshot** (envelope) | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`snapshot-store.ts:2145-2159`) | `buildRetrievalSnapshotPublication` | `stores/<vaultHash>/retrievals` |
 
 `retrieverPlanIdentity` folds the positional + dense + link-adjacency retrievers and the RRF fusion
-parameters (`retrievalPlanIdentityFor`, `snapshot-store.ts:1823-1848`). The whole point: **query-time
-pins recompute the expected `retrievalSnapshotId` and reject a served snapshot that was built under a
-different identity** (`tryPinActiveRetrievalSnapshot`, `snapshot-store.ts:503-599`), returning
-reasons `retrieval-snapshot-mismatched`, `embedding-set-mismatched`, `corpus-missing`,
-`link-graph-missing`, `vector-active-spec-*`, or a freshness reason.
+parameters (`retrievalPlanIdentityFor`, `snapshot-store.ts:1823-1848`). `embeddingSpaceId` and
+`embeddingRecipeFreshnessId` are additive sibling fields on vector metadata and retrieval envelopes
+(`types.ts:129-147`, `vector-store/types.ts:74-86`); they are intentionally not folded into
+`embeddingSetId` or `computeRetrievalSnapshotId` (`snapshot-store.ts:2145-2159`). Adding
+`embeddingSpaceId` to the retrieval envelope did bump `SNAPSHOT_PERSISTENCE_SCHEMA_HASH`
+(`types.ts:22-77`), so persisted retrieval envelopes self-heal once, but `INDEX_BUILD_VERSION` and
+`ANALYZER_VERSION` do not change.
+
+At read time, `tryAttachDenseGeneration` validates the committed retrieval envelope, lexical/link
+sidecars, vector active pointer, vector generation metadata, embedding-space comparability, and DB
+readability. For `origin=text`, a failure means lexical-only with a dense signal, not a failed retrieve.
+For stored-vector origins, no usable source vector can be resolved, so the response is soft
+`index-not-ready` / `source-vector-missing` with the same dense signal.
 
 Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~/.cache`, then
 `optsidian`, `cache-root.ts:4-6`):
@@ -330,72 +355,83 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
 
 ### Build / publish path
 
-- **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot` (`snapshot-store.ts:323-342`).
+- **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot` (`snapshot-store.ts:422-441,
+  927-967`).
 - **`Rebuild`** → always `publishFreshSnapshot(..., {prepareRetrieval:true})`
-  (`snapshot-store.ts:344-355`).
-- **`Refresh`** → `refreshIndexedSnapshot` (`snapshot-store.ts:697-733`): computes a **content delta**
+  (`snapshot-store.ts:443-454`).
+- **`Refresh`** → `refreshIndexedSnapshot` (`snapshot-store.ts:463-473, 931-967`): computes a **content delta**
   (sha256 per file vs stored `contentHash`, `snapshotContentDelta`); if `changedCount === 0` it keeps
   the active snapshot and only ensures the retrieval snapshot matches
   (`prepareRetrievalSnapshotForSnapshot`); otherwise it reports the delta
-  (`reportRefreshDelta`, `snapshot-store.ts:727, 2114-2132`) and rebuilds the whole snapshot. **The
+  (`reportRefreshDelta`, `snapshot-store.ts:2609-2617`) and rebuilds the whole snapshot. **The
   delta only decides rebuild-vs-not; there is no incremental segment patching.**
-- **`publishFreshSnapshot`** (`snapshot-store.ts:751-811`): builds the corpus, kicks off the retrieval
+- **`publishSaveSnapshot`** (`snapshot-store.ts:456-461`): save-on-write entrypoint. It runs the same
+  canonical full lexical rebuild as refresh/rebuild, but tags embedding work with the scheduler `save`
+  lane and prepares a retrieval publication for the new corpus revision.
+- **`publishFreshSnapshot`** (`snapshot-store.ts:985-1045`): builds the corpus, kicks off the retrieval
   publication (embedding + vector build) **concurrently**, publishes the corpus + flips the corpus
   active pointer, then awaits and publishes the retrieval snapshot.
-- **`publishBuiltSnapshot`** (`snapshot-store.ts:829-902`): stores the link-graph sidecar, writes +
+- **`publishBuiltSnapshot`** (`snapshot-store.ts:1063-1136`): stores the link-graph sidecar, writes +
   fsyncs + content-verifies each segment (skips segments already present with matching hash), writes
   the manifest, **durable-renames the active pointer**, then `recoverVault` + `markSweepGc`. All
   writes are temp-file + fsync + rename.
-- **`buildRetrievalSnapshotPublication`** (`snapshot-store.ts:916-1040`): builds the embedding set
-  (`embeddingSetBuilder.build`, `:922`) → builds a **staging** vector generation and **promotes** it
-  (`vectorPool.buildStagingGeneration` + `promoteBuiltGeneration`, `:961-968`) → constructs the
-  retrieval envelope with `freshness:{state:"fresh", corpusRevision: corpusSnapshotId}`.
-- **`publishRetrievalSnapshotPublication`** (`snapshot-store.ts:1042-1067`): stores the envelope,
+- **`buildRetrievalSnapshotPublication`** (`snapshot-store.ts:1150-1290`): builds the embedding set
+  (`embeddingSetBuilder.build`, `:1156`) → computes `embeddingSpaceId`, recipe freshness id, and
+  manifest-addressed `generationId` (`:1164-1185`) → builds a **staging** vector generation and
+  **promotes** it (`vectorPool.buildStagingGeneration` + `promoteBuiltGeneration`, `:1205-1216`) →
+  constructs the retrieval envelope with `embeddingSpaceId`, `embeddingRecipeFreshnessId`, and
+  `freshness:{state:"fresh", corpusRevision: corpusSnapshotId}`.
+- **`publishRetrievalSnapshotPublication`** (`snapshot-store.ts:1292-1317`): stores the envelope,
   writes freshness `markFresh`, durable-renames the **retrieval** active pointer, `markSweepGc`.
 
-Embedding happens **on load/rebuild/refresh** (inside `buildRetrievalSnapshotPublication`), **not on
-note-save** — see §6.
+Embedding happens on load/rebuild/refresh and on save-on-write. Save-on-write is intentionally a
+debounced **full lexical rebuild** followed by dense generation for that exact lexical revision; true
+incremental lexical patching is deferred (§6).
 
 ### Vector generation swap (drain by refcount)
 
 Promotion flips the active pointer and retires the old generation without disrupting in-flight readers
-(`VectorGenerationPool`, `vector-store/pool.ts`): `flipActive` sets the new handle active and calls
-`retire(old)` (`pool.ts:256-262`); `retire` marks the old handle `draining` and removes it from
-`activeByKey` (`:264-269`); `closeWhenDrained` waits until `refCount === 0` (readers released) before
-closing the native instance (`:271-284`). Each search acquires a pin (`acquireActive` bumps
-`refCount`, `pool.ts:238-245`) and releases it after `searchVector` (`:247-254`). A pinned old
-generation stays open until its last reader drains.
+(`VectorGenerationPool`, `vector-store/pool.ts`). The process-scoped `VectorGenerationManager`
+extends that pool but keeps handles keyed by profile/vault/embedding set/generation
+(`embed-scheduler.ts:18-20`, `profile-manager.ts:101-153`). `pinReadableGeneration` first reuses an
+active in-memory handle, then lazy-opens a committed active generation after daemon restart if needed
+(`pool.ts:240-280`).
+Concurrent lazy-opens for the same `(key, generationId)` are single-flighted by `lazyOpenByGeneration`
+(`pool.ts:95, 352-368`). A pinned old generation stays open until its last reader drains; a read context
+releases the vector lease and GC pin before releasing its lexical pin (`snapshot-store.ts:741-750`).
 
 ### Freshness state machine
 
 `RetrievalFreshnessStore` (`vector-store/freshness.ts`) persists `retrieval-freshness.json` with state
-`fresh | dirty | building | failed` (`freshness.ts:8`). Transitions: `markDirty` (`:60`),
-`markBuilding` (`:71`), `markFresh` (`:82`), `markFailed` (`:92`). On restart the **default read state
-is `dirty`/unknown** (`defaultDirtyUnknown`, `:157-164`). `startupReconcile` (`:104-127`) demotes a
-`building` record to `dirty` and re-marks `fresh` only if the on-disk corpus revision matches;
-`resetBuildingToDirty` (`:129-137`) and `recoverRetrievalStaging` (`:171-181`) sweep staging on
-recovery. `tryPinActiveRetrievalSnapshot` refuses to serve unless the state is `fresh` and every
-published field (retrievalSnapshotId, embeddingSetId, linkGraphId, corpusSnapshotId,
-vectorGenerationId, corpusRevision) matches the envelope (`snapshot-store.ts:547-567`), mapping any
-non-fresh state to a `retrieval-state-*` reason (`freshnessStateReason`, `snapshot-store.ts:2253-2258`).
+`fresh | dirty | building | failed` (`freshness.ts:8`). Transitions remain `markDirty` (`:60`),
+`markBuilding` (`:71`), `markFresh` (`:82`), and `markFailed` (`:92`), with startup reconciliation for
+stale `building` records (`:104-137`). Freshness is no longer a read-path gate. It feeds only the
+reported retrieve signal:
 
-> **Reality note**: the corpus-driven publish path only ever writes `markFresh`
-> (`snapshot-store.ts:1049`). `markDirty` / `markBuilding` / `markFailed` and the reconcile helpers are
-> only reachable from the currently-unwired embed-on-save watcher — see §6.
+- `cold`: no committed readable dense generation attached to the lexical pin.
+- `rebuilding`: embedding space mismatch or persisted freshness is `building`.
+- `stale`: space matches, no build is in flight, but at least one live lexical document is absent/masked
+  by `contentHash`, or freshness is `failed`.
+- `fresh`: space matches and every live lexical document has usable dense coverage.
+
+The derivation lives in `denseSignalForUsability` (`snapshot-store.ts:2295-2310`). `pendingCount` is the
+number of absent/masked live documents, and `generationAgeMs` is computed from vector generation
+metadata (`snapshot-store.ts:2312-2316`). The signal is returned on ready and soft-not-ready retrieve
+responses (`types.ts:176-220`) and is never part of scoring.
 
 ### Garbage collection — background, refcount-gated
 
-`markSweepGc` (`snapshot-store.ts:1176-1179`) → `queueGc` schedules a **background** sweep on
-`setImmediate(...)` + `unref()` (`:1252-1269`), serialized per vault. `runBackgroundGc`
-(`:1271-1276`) runs `markSweepSearchGc` (retrieval envelopes, snapshots, segments, link graphs) →
+`markSweepGc` (`snapshot-store.ts:1426-1429`) → `queueGc` schedules a **background** sweep on
+`setImmediate(...)` + `unref()` (`:1502-1519`), serialized per vault. `runBackgroundGc`
+(`:1521-1526`) runs `markSweepSearchGc` (retrieval envelopes, snapshots, segments, link graphs) →
 `markSweepVectorGc` (vector generation dirs, then empty store roots) → stale-tmp sweep.
 
-**GC roots** (`gcRootsAsync`, `snapshot-store.ts:1181-1236`) are refcount- and in-flight-gated: the
+**GC roots** (`gcRootsAsync`, `snapshot-store.ts:1431-1487`) are refcount- and in-flight-gated: the
 active corpus + active retrieval and their transitive artifacts, everything in the in-flight publish
 sets, **loaded snapshots with `refCount > 0`**, the newest `retentionCount` snapshot + retrieval files,
 and **pinned vector generations** (`pinnedVectorGenerations`, incremented per retrieval pin,
-`:1373-1393`). So a pinned or in-flight artifact always survives. Stale vector generations that are not
-a GC root are removed (`markSweepVectorGc`, `:1314-1358`); an empty vector store root is deleted and
+`:1623-1646`). So a pinned or in-flight artifact always survives. Stale vector generations that are not
+a GC root are removed (`markSweepVectorGc`, `:1564-1608`); an empty vector store root is deleted and
 removed from the `VectorCacheCatalog`.
 
 **Retention** (`retentionCount`) defaults to `2` in the running daemon — `ProfileManager` passes
@@ -404,14 +440,14 @@ removed from the `VectorCacheCatalog`.
 (`profile-manager.ts:95`). The store's own fallback when constructed without that option is
 `DEFAULT_RETENTION_COUNT = 8` (`snapshot-store.ts:245, 293-297`). In-memory loaded-snapshot budgets
 are separate: count cap and byte cap (`enforceBudget`, evicts only `refCount === 0`, LRU;
-`snapshot-store.ts:1160-1174`).
+`snapshot-store.ts:1407-1424`).
 
 **Manual GC**: `Prune` (`SearchCacheCatalog.prune`) removes store directories unused for
 `unusedDays` (default in catalog), skipping store ids protected by any live pin
 (`profile-manager.ts:270-290`).
 
 **Vector dedup**: there is **no per-vector deduplication before build** —
-`vectorChunksForEmbeddingSet` maps 1 record → 1 chunk (`snapshot-store.ts:1773-1787`). "Dedup" in this
+`vectorChunksForEmbeddingSet` maps 1 record → 1 chunk (`snapshot-store.ts:2209-2223`). "Dedup" in this
 subsystem is only cache-catalog record dedup by `storeId` (`cache-catalog.ts:369`). Content-addressing
 comes from the `embeddingSetId` being a hash over projected vectors, so identical corpora yield an
 identical generation.
@@ -453,36 +489,42 @@ doubles live under `test/` and are injected directly through `VectorGenerationPo
    snapshot, then runs the positional query (`service.ts:294-358`).
 4. Pin released refcount-only; a background GC is queued (`markSweepGc` on publish).
 
-### (b) Note edit → embed-on-save → republish (design vs reality)
+### (b) Note edit → save producer → lexical publish → dense attach
 
-The **intended** flow: a `.md` change fires `startRetrievalSaveWatcher` → `EmbedOnSaveIndexPlane`
-marks freshness `dirty`, debounces `250 ms`, marks `building`, embeds the changed note, builds +
-promotes a new vector generation, and marks `fresh` (or `failed` + rollback)
-(`vector-store/watcher.ts:32-141`). **Reality**: this watcher is not wired into the daemon (§6), so
-today a note edit produces a new snapshot only when the next `Refresh`/`Rebuild`/`LoadVault` (or an
-inline Retrieve rebuild) runs, at which point the corpus is rebuilt, the embedding set + vector
-generation are rebuilt, and both active pointers flip (`snapshot-store.ts:751-811`).
+A profile/vault runtime starts one `VaultChangeProducer` when a vault is known
+(`profile-manager.ts:161-174`). The producer coalesces `.md` file changes into dirty marks and falls
+back to periodic content-delta scanning when native watch registration fails (`watcher.ts:42-274`).
+Dirty marks enqueue `publishSaveSnapshot` on the scheduler `save` lane (`profile-manager.ts:205-223`).
+
+The save lane performs a debounced **full lexical rebuild** through the canonical
+`buildCanonicalSearchSnapshot` → `publishBuiltSnapshot` path, reusing unchanged segment bytes/hashes on
+disk (`snapshot-store.ts:456-461, 985-1136`). Dense generation is then built and promoted for the same
+lexical corpus revision (`snapshot-store.ts:1150-1317`). During the gap, reads pin the new lexical
+revision and changed/new docs simply ride lexical-only because their dense records are absent or
+`contentHash`-mismatched.
 
 ### (c) `origin=text` hybrid query — model cold vs warm
 
-- **Warm** (model loaded): `retrieve` pins the retrieval snapshot, `encodeRetrieveQueryVector` returns
-  from the live session (`clearIdleUnload`, no load; `lifecycle.ts:113-115`), dense search runs against
-  the pinned generation, RRF fuses in the worker, pin released (`service.ts:185-278`).
-- **Cold** (model unloaded): the encode triggers `ensureSession` → `pickDevice` (CPU by default) →
-  `startLoad` → session cached → `armIdleUnload` (`lifecycle.ts:69-89`). If the request deadline is
-  within 100 ms, the daemon skips dense encode and warns instead (`service.ts:100-103`). Subsequent
-  concurrent encodes coalesce onto the same load (`lifecycle.ts:117-136`).
+- **Warm and dense usable**: `retrieve` pins lexical, attaches dense, encodes the query from the live
+  model session, searches the attached vector lease, RRF fuses in the worker, and releases the read
+  context (`service.ts:245-334`).
+- **Model cold but dense usable**: `origin=text` encode triggers `ensureSession` -> `pickDevice` (CPU by
+  default) -> `startLoad` -> session cached -> `armIdleUnload` (`lifecycle.ts:69-89`). Query encodes
+  are single-flighted by the scheduler (`embed-scheduler.ts:104-140`).
+- **Dense cold/stale/rebuilding/unreadable**: no model load is attempted for `origin=text`; the query is
+  served lexical/link-only with `dense.state` explaining why dense did not contribute
+  (`resolveRetrieveOriginVector`).
 
 ### (d) Generation swap while a query is in flight
 
-1. Query A pins retrieval snapshot → `acquireActive` bumps the vector generation `refCount`
-   (`pool.ts:238-245`), starts `searchVector`.
-2. A `Rebuild` promotes a new generation → `flipActive` points active at the new handle and `retire`s
-   the old one (`draining = true`, removed from `activeByKey`, `pool.ts:256-269`).
-3. Query A's `searchVector` on the old handle completes; `release` drops `refCount` to 0
-   (`pool.ts:247-254`); `closeWhenDrained` then closes the old native instance
-   (`pool.ts:271-284`). Query B pins the new active generation. No query ever reads a half-closed
-   index.
+1. Query A pins lexical and attaches dense through `pinReadableGeneration`, which returns a vector
+   lease for the committed generation (`snapshot-store.ts:614-739`, `pool.ts:240-280`).
+2. A `Rebuild`, `Refresh`, or save-lane build promotes a new generation. The manager keeps handles
+   separate by vector key and generation id, and old handles drain by refcount (`pool.ts:88-99,
+   240-280`).
+3. Query A's `searchVector` on the old lease completes; `releaseReadContext` drops the vector lease/GC
+   pin and lexical pin (`snapshot-store.ts:741-750`). Query B can attach the new generation. No query
+   ever reads a half-closed index.
 
 ### (e) Model idle-unload
 
@@ -499,26 +541,19 @@ encode re-loads on demand.
 3. The daemon schedules startup recovery after `phase = "ready"`: `startupReconcile` demotes stale
    `building` records, re-marks matching published records as `fresh`, and `recoverRetrievalStaging`
    sweeps orphan vector/link/lexical staging.
+4. The first retrieve after restart can still attach an on-disk committed dense generation even if no
+   in-memory vector handle exists: `pinReadableGeneration` validates the active pointer and metadata,
+   then lazy-opens the generation with single-flight protection (`pool.ts:240-280, 352-368`).
 
 ---
 
-## 6. Known follow-ups (reality is incomplete here)
+## 6. Known follow-ups
 
-These are places where the code contains machinery that is **not exercised by the running daemon
-today**. They are documented so readers do not assume behavior the runtime does not deliver.
-
-1. **Profile runtime idle eviction is inert.** The daemon arms a 6-hour no-request shutdown timer by
-   default (`OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` / `settings.search.daemonIdleMs` override it), but
-   profile runtimes still retain their own resources until daemon shutdown.
-
-2. **Embed-on-save is unwired.** `EmbedOnSaveIndexPlane` and `startRetrievalSaveWatcher`
-   (`vector-store/watcher.ts`) are referenced only by their own module and one test — no code in
-   `server.ts` / `profile-manager.ts` instantiates the watcher. Consequently the freshness state
-   machine's `markDirty` / `markBuilding` / `markFailed` transitions and the 250 ms save debounce are
-   not exercised in production; the publish path only ever writes `markFresh`
-   (`snapshot-store.ts:1049`). Re-embedding happens on `LoadVault`/`Rebuild`/`Refresh`, not on save.
-
-3. **coral-needle release availability is external.** The production path uses the real native binding
-   by default. Whether the pinned GitHub release (`kangig94/coral-needle` v0.2.0) is available for the
-   current platform is external; an unsupported platform/arch raises `RuntimeError`, and a missing
-   `.node` raises `CORAL_NEEDLE_UNAVAILABLE` (`binding.ts:49-52`).
+1. **True incremental lexical rebuild is deferred.** Save-on-write currently performs a debounced full
+   lexical rebuild and relies on `publishBuiltSnapshot` to reuse unchanged segment hashes/bytes on disk
+   (`snapshot-store.ts:456-461, 1063-1136`). That is coherent with the dense generation for the same
+   corpus revision, but it still reparses the full corpus. A future true-incremental lexical builder
+   must preserve the canonical full-rebuild identity exactly: global link resolution, global BM25
+   reduction, reused segment decoding, affected partition selection by `partitionIdForDocument`, and a
+   determinism gate proving incremental output has the same `retrievalSnapshotId` and `linkGraphId` as a
+   full rebuild of identical content.

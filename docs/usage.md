@@ -161,11 +161,27 @@ Search returns only note path, title, tags, and body-focused snippets. Frontmatt
 
 With `format=json`, the search envelope carries a top-level `snapshotId` alongside `matches`: the 64-hex content-addressed id of the immutable snapshot the request was served from. Results are a pure function of that snapshot, so the id identifies exactly which index produced the matches; with `debug=true` the same id also appears under each match's `debug.snapshotId`.
 
-Search defaults to `retrieval=lexical` and `coverage=full`, which schedules all matching shard work for the pinned lexical snapshot before ranking the final result and does not load the vector model. `retrieval=vector` uses dense vector hits only, while `retrieval=hybrid` fuses dense/link signals with lexical ranking. `coverage=bounded` opts into a bounded shard/work prefix with `budget-shards=<n>` and/or `budget-work=<n>`. Bounded results always include a top-level `warnings` array containing `bounded`; text output renders this as `warning: bounded`. `budget-time-ms=<n>` is best-effort and can vary with runtime scheduling, so it also returns the exact warning label `non-reproducible`. Budgets are accepted only with bounded coverage; combining `coverage=full` with any `budget-*` flag is an error.
+Search defaults to `retrieval=lexical` and `coverage=full`, which schedules all matching shard work for the pinned lexical snapshot before ranking the final result and does not load the vector model. `retrieval=vector` uses dense hits when a committed dense generation is usable; if dense is cold, stale, rebuilding, unreadable, or space-mismatched, it falls back to lexical results instead of returning a blank result. `retrieval=hybrid` fuses dense/link signals with lexical ranking when dense contributes, and otherwise runs lexical/link only. `coverage=bounded` opts into a bounded shard/work prefix with `budget-shards=<n>` and/or `budget-work=<n>`. Bounded results always include a top-level `warnings` array containing `bounded`; text output renders this as `warning: bounded`. `budget-time-ms=<n>` is best-effort and can vary with runtime scheduling, so it also returns the exact warning label `non-reproducible`. Budgets are accepted only with bounded coverage; combining `coverage=full` with any `budget-*` flag is an error.
 
-The search daemon stores immutable corpus and retrieval snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with durable active pointers. Each corpus snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, resolved link graph data, and line snippet data. Each retrieval snapshot binds that corpus snapshot to an embedding recipe/provider, link resolver/scoring identity, retriever plan, ranking feature version, and promoted built vector generation. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query.
+Vector/hybrid `search` and `similarity` output include a top-level dense freshness signal when they route through daemon `Retrieve`:
 
-The daemon is resident and uses separate query/control sockets. Query RPC exposes `Search` for lexical search and `Retrieve` for vector, hybrid, similarity, and explain flows. CLI `search` uses `Search` by default and switches to `Retrieve` when `retrieval=vector` or `retrieval=hybrid` is requested. Control RPC owns `index rebuild`, `index refresh`, `index warm`, `index clear`, `index prune`, and maintenance GC. Query release is refcount-only and does not delete cache files. Dense retrieval lazily prepares and queries the active built vector generation through the vector generation pool; link retrieval uses the snapshot link graph; lexical scores stay stable when dense/link signals are absent. If the daemon cannot start or a retrieval envelope fails validation, commands fail clearly or return `status=index-not-ready` instead of falling back to in-process indexing.
+```json
+"dense": {
+  "state": "fresh",
+  "pendingCount": 0,
+  "generationAgeMs": 1240
+}
+```
+
+`state` is `fresh` when dense is attached, space-comparable, and every live lexical document has matching dense coverage; `stale` when comparable dense is attached but some live documents are absent or `contentHash`-masked, or the last build failed; `rebuilding` when a build/space migration is in flight or a committed generation is not embedding-space comparable; and `cold` when no committed readable dense generation is attached. `pendingCount` counts absent/masked live documents. `generationAgeMs` is the promoted generation age in milliseconds, or `null` when no dense generation is attached. This signal is diagnostic only and never changes ranking. Text output renders it before matches as:
+
+```text
+dense: state=fresh pending=0 generationAge=1240ms
+```
+
+The search daemon stores immutable corpus and retrieval snapshots outside the vault under the OS cache directory. The cache path is `$XDG_CACHE_HOME/optsidian/<vault-realpath-hash>/` or `~/.cache/optsidian/<vault-realpath-hash>/`; active snapshots live under the daemon snapshot store with durable active pointers. Each corpus snapshot contains canonical field text, analyzer token channels, positional postings, per-field term statistics, metadata features, resolved link graph data, and line snippet data. Each retrieval snapshot binds that corpus snapshot to an embedding set, embedding space id, embedding recipe freshness id, link resolver/scoring identity, retriever plan, ranking feature version, and promoted built vector generation. Query analysis runs once per request and is cached by analyzer identity, settings hash, fields, and raw query.
+
+The daemon is resident and uses separate query/control sockets. Query RPC exposes `Search` for lexical search and `Retrieve` for vector, hybrid, similarity, and explain flows. CLI `search` uses `Search` by default and switches to `Retrieve` when `retrieval=vector` or `retrieval=hybrid` is requested. Control RPC owns `index rebuild`, `index refresh`, `index warm`, `index clear`, `index prune`, and maintenance GC. Query release is refcount-only and does not delete cache files. Retrieve pins the active lexical corpus first, then optionally attaches a readable, embedding-space-comparable dense generation through the process vector manager; link retrieval uses the snapshot link graph; lexical scores stay stable when dense/link signals are absent. If the daemon cannot start or the lexical corpus cannot be pinned, commands fail clearly or return `status=index-not-ready` instead of falling back to in-process indexing.
 
 With `format=json`, similarity returns the Retrieve-derived envelope:
 
@@ -179,6 +195,11 @@ With `format=json`, similarity returns the Retrieve-derived envelope:
   "origin": "note",
   "snapshotId": "64-hex-corpus-snapshot",
   "retrievalSnapshotId": "64-hex-retrieval-snapshot",
+  "dense": {
+    "state": "fresh",
+    "pendingCount": 0,
+    "generationAgeMs": 1240
+  },
   "results": [
     {
       "path": "Projects/Beta.md",
@@ -192,7 +213,7 @@ With `format=json`, similarity returns the Retrieve-derived envelope:
 }
 ```
 
-The underlying daemon `Retrieve` payload supports `origin=text`, `origin=note`, and `origin=pair`, plus `path`, `topK`/`limit`, `minScore`, `providerModel`, `debug`, and `explain`. `debug=true` includes per-match ranking fields such as `denseAgreement`, `linkAgreement`, and `rrfScore`; `explain=true` includes a typed `explainTrace`. An unready retrieval snapshot returns:
+The underlying daemon `Retrieve` payload supports `origin=text`, `origin=note`, `origin=pair`, and `origin=global`, plus `path`, `topK`/`limit`, `minScore`, `providerModel`, `debug`, and `explain`. `origin=text` is the only origin that can load/encode the model; note, pair, and global origins use stored vectors and return soft `index-not-ready` with `reason:"source-vector-missing"` and dense `pendingCount` when a source/stored vector is unavailable. `debug=true` includes per-match ranking fields such as `denseAgreement`, `linkAgreement`, and `rrfScore`; `explain=true` includes a typed `explainTrace`. A soft not-ready retrieve response still carries the dense signal:
 
 ```json
 {
@@ -201,14 +222,19 @@ The underlying daemon `Retrieve` payload supports `origin=text`, `origin=note`, 
   "schemaVersion": 1,
   "available": false,
   "status": "index-not-ready",
-  "origin": "text",
-  "reason": "retrieval-snapshot-mismatched",
+  "origin": "note",
+  "reason": "source-vector-missing",
+  "dense": {
+    "state": "cold",
+    "pendingCount": 12,
+    "generationAgeMs": null
+  },
   "matches": [],
   "results": []
 }
 ```
 
-`similarity` currently supports `mode=left` with `left=<path>` or `left-text=<text|@file>`, `mode=pair` with note paths, `path=<dir|file>` candidate scope, `top-k`, `min-score`, and `model=<id>`. The model id must match the active built retrieval generation. Historical `paths=`, `path-glob=`, frontmatter filter, projection, and pair text flags are rejected with a UsageError rather than ignored.
+`similarity` currently supports `mode=left` with `left=<path>` or `left-text=<text|@file>`, `mode=pair` with note paths, `path=<dir|file>` candidate scope, `top-k`, `min-score`, and `model=<id>`. `left-text` uses `origin=text`: `model=<id>` selects the desired query embedding space, but if no usable dense generation can contribute the command returns lexical fallback with the `dense` signal instead of `index-not-ready`. `left=<path>` and `mode=pair` use stored vectors from a matching generation; when a source/stored vector is absent or stale, they return soft `index-not-ready` with `reason:"source-vector-missing"` and do not load the model. Historical `paths=`, `path-glob=`, frontmatter filter, projection, and pair text flags are rejected with a UsageError rather than ignored.
 
 `index status` reports daemon readiness, request metrics, and loaded vault snapshot states. `index rebuild`, `index refresh`, `index warm`, and `index clear` are daemon RPC mutations. Interactive `warm`, `rebuild`, and `refresh` render a single stderr progress bar unless `--no-progress` is passed.
 
@@ -385,11 +411,12 @@ Custom installs copy the plugin directory into `.obsidian/plugins/<manifest.id>`
 
 ## JSON Output
 
-The `read`, `search`, `grep`, `frontmatter`, `config`, and custom-source `plugin:install` commands support `format=json`.
+The `read`, `search`, `similarity`, `grep`, `frontmatter`, `config`, and custom-source `plugin:install` commands support `format=json`.
 
 ```bash
 optsidian read path=note.md lines=1:10 format=json
 optsidian search TODO format=json debug=true
+optsidian similarity mode=left left-text="project handoff" format=json
 optsidian grep query=TODO format=json
 optsidian frontmatter read path=note.md format=json
 optsidian config list format=json
@@ -407,6 +434,8 @@ command_map, command_run, write, edit, apply_patch
 ```
 
 MCP calls use JSON arguments, not shell tokens. This means values such as `$HOME`, backticks, `$(...)`, YAML frontmatter, and fenced code blocks are delivered as raw strings. `command_run` is the MCP-to-CLI bridge for CLI-only and native-delegated Optsidian commands.
+
+For search and similarity through MCP, call `command_run` with the CLI command and include `format=json` in `args`; the returned `stdout` contains the same JSON envelope documented above, including the `dense` signal for vector/hybrid/similarity retrieve flows. The `command_run` input schema stays generic (`command` plus argv-style `args`) because it can run read-only commands and mutating/native-delegated commands; its broad tool annotations are therefore unchanged.
 
 Call `command_map` first when work goes beyond the MCP mutation tools. It returns the CLI-only split, the available MCP tools, the current native delegated command list, and an explicit preference rule: prefer Optsidian for Obsidian vault work and use Optsidian CLI commands for CLI-only and native passthrough operations. It then points detailed syntax back to:
 
@@ -433,4 +462,4 @@ Example `apply_patch` arguments:
 }
 ```
 
-The MCP server does not expose a raw native Obsidian passthrough tool in V1. Use the CLI for native passthrough.
+The MCP server does not expose a raw shell passthrough tool in V1. Use `command_run` for Optsidian commands and native-delegated Optsidian command verbs.

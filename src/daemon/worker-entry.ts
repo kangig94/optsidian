@@ -212,7 +212,8 @@ async function modelEncode(input: ModelEncodeWorkerPayload) {
   const lifecycle = lifecycleForPayload(input.provider);
   const vectors = await lifecycle.encode(input.texts, {
     deadline: Date.now() + modelEncodeDeadlineMs(),
-    origin: input.inputKind === "query" ? "query-text" : "document-embed"
+    origin: input.inputKind === "query" ? "query-text" : "document-embed",
+    suppressCpuPromotion: input.suppressCpuPromotion
   });
   const provider = embeddingProviderIdentity;
   if (!provider) throw Object.assign(new Error("embedding provider identity is unavailable"), { code: "INTERNAL" });

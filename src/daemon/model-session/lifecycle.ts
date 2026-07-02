@@ -70,6 +70,7 @@ export class ModelSessionLifecycle {
     deadline: number;
     signal?: AbortSignal;
     origin: ModelEncodeOrigin;
+    suppressCpuPromotion?: boolean;
   }): Promise<readonly (readonly number[])[]> {
     const session = await this.ensureSession({
       deadline: options.deadline,
@@ -84,7 +85,9 @@ export class ModelSessionLifecycle {
       () => undefined
     );
     this.armIdleUnload();
-    await this.promoteCpuSessionIfGpuAvailable(options.signal);
+    if (!options.suppressCpuPromotion) {
+      await this.promoteCpuSessionIfGpuAvailable(options.signal);
+    }
     return output;
   }
 

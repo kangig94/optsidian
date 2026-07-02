@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { unpack } from "msgpackr";
+import { SEARCH_DAEMON_PROTOCOL_VERSION as CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION } from "../src/daemon/protocol.ts";
 import { createDeterministicEmbeddingSetBuilder, DeterministicHashProvider } from "./helpers/deterministic-embedding.mjs";
 
 const repoRoot = process.cwd();
@@ -254,7 +255,7 @@ async function requestRawRpc(socketPath, encodeFrame, request) {
 
 function statusRequest(requestId) {
   return {
-    protocolVersion: 2,
+    protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
     requestId,
     method: "Status",
     deadline: Date.now() + 1000,
@@ -1602,24 +1603,24 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
     const malformed = [
       {
         label: "deadline-string",
-        request: { protocolVersion: 2, requestId: "deadline-string", method: "Status", deadline: "nope", payload: {} }
+        request: { protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "deadline-string", method: "Status", deadline: "nope", payload: {} }
       },
       {
         label: "deadline-infinity",
-        request: { protocolVersion: 2, requestId: "deadline-infinity", method: "Status", deadline: Infinity, payload: {} }
+        request: { protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "deadline-infinity", method: "Status", deadline: Infinity, payload: {} }
       },
       {
         label: "payload-null",
-        request: { protocolVersion: 2, requestId: "payload-null", method: "Status", deadline: Date.now() + 1000, payload: null }
+        request: { protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "payload-null", method: "Status", deadline: Date.now() + 1000, payload: null }
       },
       {
         label: "payload-array",
-        request: { protocolVersion: 2, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
+        request: { protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "payload-array", method: "Status", deadline: Date.now() + 1000, payload: [] }
       },
       {
         label: "retrieve-primitive-payload",
         request: {
-          protocolVersion: 2,
+          protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
           requestId: "retrieve-primitive-payload",
           method: "Retrieve",
           nonce: owner.nonce,
@@ -1649,7 +1650,7 @@ test("AC10 owner registry treats a 20 second control lock age as the stale bound
     uid: process.getuid?.() ?? 0,
     runtimeHash: "runtime-lock",
     binaryVersion: "binary-lock",
-    protocolVersion: 2
+    protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION
   };
   const fresh = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-fresh-"), desired });
   fs.mkdirSync(fresh.lockPath, { recursive: true });
@@ -1950,6 +1951,13 @@ test("AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
 // require daemon construction hooks that are not exposed to tests without editing src/.
 
 test("AC1 protocol method coverage is split by query and control capability", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const {
+    createOwnerRecord,
+    createOwnerRegistry,
+    desiredOwnerIdentity,
+    socketPathsForOwner
+  } = await futureImport("src/daemon/owner-registry.ts");
   const {
     CONTROL_DAEMON_METHODS,
     QUERY_DAEMON_METHODS,
@@ -1972,7 +1980,42 @@ test("AC1 protocol method coverage is split by query and control capability", as
     assert.equal(CONTROL_DAEMON_METHODS.includes(mutating), true);
   }
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
-  assert.ok(SEARCH_DAEMON_PROTOCOL_VERSION > 0);
+  assert.equal(SEARCH_DAEMON_PROTOCOL_VERSION, 3);
+
+  const runtimeDir = tempRoot();
+  const desired = desiredOwnerIdentity(process.execPath);
+  assert.equal(desired.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
+  const sockets = socketPathsForOwner(runtimeDir, desired);
+  assert.match(sockets.querySocketPath, /optsidian-search-daemon-query-v3-/);
+  assert.match(sockets.controlSocketPath, /optsidian-search-daemon-control-v3-/);
+  assert.doesNotMatch(sockets.querySocketPath, /optsidian-search-daemon-query-v2-/);
+  assert.doesNotMatch(sockets.controlSocketPath, /optsidian-search-daemon-control-v2-/);
+
+  const registry = createOwnerRegistry({ runtimeDir, desired });
+  const owner = createOwnerRecord(desired, sockets, "nonce", process.pid);
+  registry.writeOwner(owner);
+  const requests = [];
+  const client = createSearchDaemonClient({
+    registry,
+    binaryPath: process.execPath,
+    connect: (record, capability) => ({
+      async request(request) {
+        requests.push({ record, capability, request });
+        return {
+          ok: true,
+          ready: true,
+          phase: "ready",
+          nonce: record.nonce,
+          protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
+        };
+      },
+      async close() {}
+    })
+  });
+  await client.status({ deadlineMs: 100 });
+  assert.equal(requests.length > 0, true);
+  assert.equal(requests[0].record.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
+  assert.equal(requests[0].request.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
 });
 
 test("lifecycle deadlines scale with vault markdown count and bytes", async () => {
@@ -1997,7 +2040,7 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, vaults: [] };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, vaults: [] };
         }
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
@@ -2046,7 +2089,7 @@ test("daemon client sends prune as a global cache request", async () => {
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, vaults: [] };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, vaults: [] };
         }
         if (request.method === "Prune") {
           return {
@@ -2426,7 +2469,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const spawns = [];
   const responses = [
     { method: "Status", result: { ready: false, phase: "starting" } },
-    { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: 2 } },
+    { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION } },
     {
       method: "Search",
       result: {
@@ -2503,7 +2546,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
       request: async (request) => {
         seen.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2, owner: { nonce: request.nonce } };
+          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, owner: { nonce: request.nonce } };
         }
         assert.equal(request.method, "Search");
         assert.equal(typeof request.nonce, "string");
@@ -2531,7 +2574,7 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
     binaryPath: path.join(repoRoot, "dist", "optsidian"),
     spawnDaemon: async () => ({ pid: 2003 }),
     connect: async () => ({
-      request: async () => ({ ok: true, ready: true, phase: "ready", nonce: "wrong-owner-nonce", protocolVersion: 2 }),
+      request: async () => ({ ok: true, ready: true, phase: "ready", nonce: "wrong-owner-nonce", protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION }),
       close: async () => {}
     })
   });
@@ -2565,7 +2608,7 @@ test("daemon client sends runtime profile per request even when owner is reused"
   const connect = async () => ({
     request: async (request) => {
       if (request.method === "Status") {
-        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: 2 };
+        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION };
       }
       assert.equal(request.method, "Search");
       searchRequests.push(request);
@@ -2673,10 +2716,13 @@ test("profile runtime cancellation reaches query scheduler and worker pools", as
   runtime.pools = {
     cancel: (cancellationId) => calls.push(`pools:${cancellationId}`)
   };
+  runtime.embedScheduler = {
+    cancel: (cancellationId) => calls.push(`embedScheduler:${cancellationId}`)
+  };
 
   runtime.cancel("cancel-query");
 
-  assert.deepEqual(calls, ["searchStore:cancel-query", "pools:cancel-query"]);
+  assert.deepEqual(calls, ["searchStore:cancel-query", "pools:cancel-query", "embedScheduler:cancel-query"]);
 });
 
 test("profile manager rejects remembered cancellation before runtime acquisition", async () => {
@@ -2865,7 +2911,7 @@ test("daemon readiness handshake authenticates owner nonce over RPC integration"
 
     assert.equal(status.ok, true);
     assert.equal(status.ready, true);
-    assert.equal(status.protocolVersion, 2);
+    assert.equal(status.protocolVersion, CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION);
     assert.equal(status.owner.nonce, status.nonce);
     assert.equal(status.owner.querySocketPath.endsWith(".sock"), true);
     assert.equal(status.owner.controlSocketPath.endsWith(".sock"), true);
@@ -2897,7 +2943,7 @@ test("daemon Status without nonce returns public health only", async () => {
   try {
     const authenticated = await client.status({ deadlineMs: 5000 });
     const response = await requestRawRpc(authenticated.owner.querySocketPath, encodeFrame, {
-      protocolVersion: 2,
+      protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
       requestId: "public-status",
       method: "Status",
       deadline: Date.now() + 1000,
@@ -2908,7 +2954,7 @@ test("daemon Status without nonce returns public health only", async () => {
     assert.equal(response.result.ok, true);
     assert.equal(response.result.ready, true);
     assert.equal(response.result.phase, "ready");
-    assert.equal(response.result.protocolVersion, 2);
+    assert.equal(response.result.protocolVersion, CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION);
     assert.equal("nonce" in response.result, false);
     assert.equal("owner" in response.result, false);
     assert.equal("metrics" in response.result, false);
@@ -4158,7 +4204,7 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     uid: process.getuid?.() ?? 0,
     runtimeHash: "runtime-a",
     binaryVersion: "binary-content-hash-b",
-    protocolVersion: 2
+    protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION
   };
   const scopeRuntimeDir = tempRoot("optsidian-owner-scope-");
   const peerDesired = { ...desired, protocolVersion: desired.protocolVersion + 1 };

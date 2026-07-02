@@ -67,6 +67,11 @@ export type DaemonPools = {
   stats(options: WorkerPoolRunOptions): Promise<unknown>;
 };
 
+export type DaemonPoolsOptions = {
+  embedding?: EmbeddingWorkerPool;
+  closeSharedEmbedding?: boolean;
+};
+
 export type SearchExecutionPreloadOptions = {
   minimumWorkers?: number;
   backgroundRemaining?: boolean;
@@ -417,16 +422,14 @@ export class VectorWorkerPool {
 
 export async function createDaemonPools(
   env: NodeJS.ProcessEnv = process.env,
-  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env),
+  options: DaemonPoolsOptions = {}
 ): Promise<DaemonPools> {
   const singleWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
   const queryWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (singleWorkers ? 1 : settings.search?.queryWorkers ?? 1);
   const indexWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (singleWorkers ? 1 : settings.search?.indexWorkers ?? 1);
   const searchWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? singleWorkers ?? settings.search?.executionWorkers ?? defaultSearchExecutionWorkerCount();
-  const embeddingWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EMBEDDING_WORKERS") ?? 1;
   const vectorWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_VECTOR_WORKERS") ?? 1;
-  const modelRssGuardBytes = envBytesForPool(env, "OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB") ??
-    envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB");
   const latencyAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
     name: "latency-analyzer",
     kind: "analyzer",
@@ -450,16 +453,7 @@ export async function createDaemonPools(
     env,
     microbatchSize: 1
   }));
-  const embedding = new EmbeddingWorkerPool(new DaemonWorkerPool({
-    name: "embedding-model",
-    kind: "embedding",
-    size: embeddingWorkers,
-    env,
-    microbatchSize: 1,
-    rssGuardBytes: modelRssGuardBytes,
-    rssGuardExempt: true,
-    autoWarmup: false
-  }));
+  const embedding = options.embedding ?? createEmbeddingWorkerPool(env, settings);
   const vector = new VectorWorkerPool(new DaemonWorkerPool({
     name: "vector-store",
     kind: "vector",
@@ -491,7 +485,7 @@ export async function createDaemonPools(
         latencyAnalyzer.close(),
         throughputAnalyzer.close(),
         searchExecution.close(),
-        embedding.close(),
+        options.embedding && options.closeSharedEmbedding !== true ? Promise.resolve() : embedding.close(),
         vector.close()
       ]);
     },
@@ -518,6 +512,26 @@ export async function createDaemonPools(
   };
   await pools.warmup();
   return pools;
+}
+
+export function createEmbeddingWorkerPool(
+  env: NodeJS.ProcessEnv = process.env,
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+): EmbeddingWorkerPool {
+  const embeddingWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EMBEDDING_WORKERS") ?? 1;
+  const modelRssGuardBytes = envBytesForPool(env, "OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB") ??
+    envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB");
+  void settings;
+  return new EmbeddingWorkerPool(new DaemonWorkerPool({
+    name: "embedding-model",
+    kind: "embedding",
+    size: embeddingWorkers,
+    env,
+    microbatchSize: 1,
+    rssGuardBytes: modelRssGuardBytes,
+    rssGuardExempt: true,
+    autoWarmup: false
+  }));
 }
 
 function envBytesForPool(env: NodeJS.ProcessEnv, key: string): number | undefined {

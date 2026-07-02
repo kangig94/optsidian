@@ -511,6 +511,7 @@ function shardTaskFromUnits(units: readonly ShardTaskPlan[], exactBound: SearchP
     denseEmbeddingSet: first.denseEmbeddingSet,
     queryVector: first.queryVector,
     denseSearchResults: first.denseSearchResults,
+    denseLiveContentHashes: first.denseLiveContentHashes,
     sourceDocumentId: first.sourceDocumentId,
     sourcePath: first.sourcePath,
     excludeDocumentIds: first.excludeDocumentIds,

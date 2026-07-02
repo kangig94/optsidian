@@ -29,6 +29,7 @@ export type SearchQueryPlanInput = {
   denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
   queryVector?: readonly number[];
   denseSearchResults?: readonly DenseVectorSearchHit[];
+  denseLiveContentHashes?: ReadonlyMap<string, string>;
   sourceDocumentId?: string;
   sourcePath?: string;
   excludeDocumentIds?: readonly string[];
@@ -49,6 +50,7 @@ export type ShardTaskPlan = {
   denseEmbeddingSet?: RetrievalEmbeddingSetEnvelope;
   queryVector?: readonly number[];
   denseSearchResults?: readonly DenseVectorSearchHit[];
+  denseLiveContentHashes?: ReadonlyMap<string, string>;
   sourceDocumentId?: string;
   sourcePath?: string;
   excludeDocumentIds?: readonly string[];
@@ -128,6 +130,7 @@ export function partitionJobPlans(
       denseEmbeddingSet: input.denseEmbeddingSet,
       queryVector: input.queryVector,
       denseSearchResults: input.denseSearchResults,
+      denseLiveContentHashes: input.denseLiveContentHashes,
       sourceDocumentId: input.sourceDocumentId,
       sourcePath: input.sourcePath,
       excludeDocumentIds: input.excludeDocumentIds,

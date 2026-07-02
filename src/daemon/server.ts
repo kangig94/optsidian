@@ -34,6 +34,7 @@ import { createRequestScheduler } from "./scheduler.js";
 import { ProfileManager, type ProfileRuntime } from "./profile-manager.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
 import { recoverRetrievalStartupState } from "./vector-store/freshness.js";
+import { createEmbedScheduler, type EmbedScheduler } from "./embed-scheduler.js";
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -104,6 +105,7 @@ class SearchDaemon {
   private phase: SearchDaemonPhase = "starting";
   private readonly metrics = new DaemonMetrics();
   private readonly scheduler = createRequestScheduler();
+  private readonly embedScheduler: EmbedScheduler;
   private readonly profiles: ProfileManager;
   private readonly shutdownPromise: Promise<void>;
   private resolveShutdown!: () => void;
@@ -118,11 +120,12 @@ class SearchDaemon {
   private readonly activeCancellationIds = new Map<string, string>();
   private idleTimer: NodeJS.Timeout | undefined;
 
-  private constructor(
+  constructor(
     registry: OwnerRegistry,
     owner: OwnerRecord,
     queryRpcServer: RpcServer,
     controlRpcServer: RpcServer,
+    embedScheduler: EmbedScheduler,
     profiles: ProfileManager,
     idleMs: number,
     env: NodeJS.ProcessEnv
@@ -131,6 +134,7 @@ class SearchDaemon {
     this.owner = owner;
     this.queryRpcServer = queryRpcServer;
     this.controlRpcServer = controlRpcServer;
+    this.embedScheduler = embedScheduler;
     this.profiles = profiles;
     this.idleMs = idleMs;
     this.env = env;
@@ -152,10 +156,12 @@ class SearchDaemon {
     removeOrphanSocket(owner.controlSocketPath);
     let queryRpcServer: RpcServer | undefined;
     let controlRpcServer: RpcServer | undefined;
+    let embedScheduler: EmbedScheduler | undefined;
     try {
       registry.writeOwner(owner);
       const settings = readOptsidianSettings(process.cwd(), options.env);
-      const profiles = new ProfileManager(options.env);
+      embedScheduler = createEmbedScheduler({ env: options.env, settings });
+      const profiles = new ProfileManager(options.env, embedScheduler);
 
       let daemon: SearchDaemon | undefined;
       queryRpcServer = await createRpcServer({
@@ -190,7 +196,7 @@ class SearchDaemon {
           }
         }
       });
-      daemon = new SearchDaemon(registry, owner, queryRpcServer, controlRpcServer, profiles, daemonIdleMs(options.env, settings), options.env);
+      daemon = new SearchDaemon(registry, owner, queryRpcServer, controlRpcServer, embedScheduler, profiles, daemonIdleMs(options.env, settings), options.env);
       daemon.initialize();
       return daemon;
     } catch (error) {
@@ -211,6 +217,11 @@ class SearchDaemon {
         logSearchDaemonProcessError("socket unlink cleanup failed", cleanupError);
       }
       try {
+        await embedScheduler?.close();
+      } catch (cleanupError) {
+        logSearchDaemonProcessError("embed scheduler cleanup failed", cleanupError);
+      }
+      try {
         registry.removeOwner(owner);
       } catch (cleanupError) {
         logSearchDaemonProcessError("owner cleanup failed", cleanupError);
@@ -223,7 +234,7 @@ class SearchDaemon {
     return this.shutdownPromise;
   }
 
-  private initialize(): void {
+  initialize(): void {
     this.phase = "ready";
     this.armIdleTimer();
     const recovery = setTimeout(() => {
@@ -307,14 +318,20 @@ class SearchDaemon {
       case "Search": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
           const result = await runtime.searchStore.search(request.payload, this.requestContext(request));
-          if (result.status === undefined || result.status === "ready") runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+          if (result.status === undefined || result.status === "ready") {
+            runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+            runtime.startSaveWatcherForVault(request.payload.vault);
+          }
           return result;
         }, { cancellationId: this.requestCancellationId(request) });
       }
       case "Retrieve": {
         return this.profiles.withRuntimeFor(request.payload, async (runtime) => {
           const result = await runtime.searchStore.retrieve(request.payload, this.requestContext(request));
-          if (result.status === "ready") runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+          if (result.status === "ready") {
+            runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: result.snapshotId });
+            runtime.startSaveWatcherForVault(request.payload.vault);
+          }
           return result;
         }, { cancellationId: this.requestCancellationId(request) });
       }
@@ -334,12 +351,17 @@ class SearchDaemon {
             const failed = result.vaults.find((vault) => vault.status === "failed");
             if (failed) {
               runtime.vaults.transition(request.payload.vault, "unloaded", { error: failed.error });
+              runtime.stopSaveWatcherForVault(request.payload.vault);
               return result;
             }
-            runtime.vaults.transition(request.payload.vault, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
+            const readyVault = result.vaults.find((vault) => vault.status === "ready");
+            const readyVaultRoot = readyVault?.vaultRoot ?? request.payload.vault;
+            runtime.vaults.transition(readyVaultRoot, "ready", { snapshotId: "snapshotId" in result ? result.snapshotId : undefined });
+            runtime.startSaveWatcherForVault(readyVaultRoot);
             return result;
           } catch (error) {
             runtime.vaults.transition(request.payload.vault, "unloaded", { error: errorMessage(error) });
+            runtime.stopSaveWatcherForVault(request.payload.vault);
             throw error;
           }
         }, { cancellationId: this.requestCancellationId(request) });
@@ -417,6 +439,7 @@ class SearchDaemon {
       const result = await fn(progress);
       const resultSnapshotId = snapshotId ?? snapshotIdFromResult(result);
       runtime.vaults.transition(vault, "ready", resultSnapshotId ? { snapshotId: resultSnapshotId } : {});
+      runtime.startSaveWatcherForVault(vault);
       return result;
     } catch (error) {
       runtime.vaults.transition(vault, "ready", { error: errorMessage(error) });
@@ -451,6 +474,10 @@ class SearchDaemon {
     return request.nonce === this.owner.nonce || request.payload.nonce === this.owner.nonce;
   }
 
+  async closeForTests(): Promise<void> {
+    await this.shutdown();
+  }
+
   private async shutdown(): Promise<void> {
     if (this.phase === "shutting-down") return;
     this.phase = "shutting-down";
@@ -466,6 +493,9 @@ class SearchDaemon {
     } catch {}
     try {
       await this.profiles.close();
+    } catch {}
+    try {
+      await this.embedScheduler.close();
     } catch {}
     try {
       removeOrphanSocket(this.owner.querySocketPath);
@@ -517,6 +547,60 @@ class SearchDaemon {
       });
     };
   }
+}
+
+export function createSearchDaemonIdleIsolationHarnessForTests(options: {
+  idleMs: number;
+  env?: NodeJS.ProcessEnv;
+  embedScheduler: EmbedScheduler;
+}): {
+  waitForShutdown(): Promise<void>;
+  close(): Promise<void>;
+  ownerRemoved(): boolean;
+} {
+  const env = options.env ?? process.env;
+  const owner: OwnerRecord = {
+    uid: currentUid(),
+    runtimeHash: "test-runtime",
+    binaryVersion: "test-binary",
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+    nonce: "test-nonce",
+    pid: process.pid,
+    querySocketPath: `/tmp/optsidian-search-daemon-test-query-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
+    controlSocketPath: `/tmp/optsidian-search-daemon-test-control-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
+    startedAt: new Date().toISOString()
+  };
+  let removed = false;
+  const registry: OwnerRegistry = {
+    runtimeDir: "/tmp",
+    ownerPath: "/tmp/optsidian-search-daemon-test.owner",
+    lockPath: "/tmp/optsidian-search-daemon-test.lock",
+    readOwner: () => owner,
+    writeOwner: () => undefined,
+    removeOwner: () => {
+      removed = true;
+    },
+    withControlLock: async (_deadlineMs, fn) => fn()
+  };
+  const queryRpcServer: RpcServer = { close: async () => undefined };
+  const controlRpcServer: RpcServer = { close: async () => undefined };
+  const profiles = new ProfileManager(env, options.embedScheduler);
+  const daemon = new SearchDaemon(
+    registry,
+    owner,
+    queryRpcServer,
+    controlRpcServer,
+    options.embedScheduler,
+    profiles,
+    options.idleMs,
+    env
+  );
+  daemon.initialize();
+  return {
+    waitForShutdown: () => daemon.waitForShutdown(),
+    close: () => daemon.closeForTests(),
+    ownerRemoved: () => removed
+  };
 }
 
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {

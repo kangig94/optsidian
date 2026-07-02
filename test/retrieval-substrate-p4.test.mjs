@@ -4,11 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DeterministicHashProvider } from "../src/core/search/dense/index.ts";
 import { ModelSessionLifecycle } from "../src/daemon/model-session/index.ts";
 import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
 import {
-  EmbedOnSaveIndexPlane,
   RetrievalFreshnessStore,
   VectorGenerationPool,
   recoverRetrievalStaging,
@@ -253,6 +251,87 @@ test("P4 test-only memory coral double is injected through VectorGenerationPool"
   assert.equal(result.status, "ready");
   assert.deepEqual(result.results.map((entry) => entry.entryId), ["near", "far"]);
   await pool.close();
+});
+
+test("AC1 post-restart pinReadableGeneration lazy-opens committed on-disk active generation", async () => {
+  const vault = tempRoot();
+  fs.writeFileSync(path.join(vault, "Restart.md"), "restart vector\n");
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
+  const firstPool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
+  await publishGeneration(firstPool, paths, spec, "gen-restart", [
+    makeChunk("near", [1, 0, 0], spec),
+    makeChunk("far", [0, 1, 0], spec)
+  ]);
+  await firstPool.close();
+
+  const restartedPool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
+  assert.deepEqual(restartedPool.statsForTests().active, {});
+  const result = await restartedPool.pinReadableGeneration({
+    paths,
+    expectedGenerationId: "gen-restart",
+    expectedSpec: spec
+  });
+  assert.equal(result.status, "ready");
+  const hits = await result.lease.searchVector([1, 0, 0], 2);
+  assert.deepEqual(hits.map((entry) => entry.entryId), ["near", "far"]);
+  const key = `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:gen-restart`;
+  assert.equal(restartedPool.statsForTests().refCounts[key], 1);
+  result.lease.release();
+  assert.equal(restartedPool.statsForTests().refCounts[key], 0);
+  await restartedPool.close();
+});
+
+test("AC1 concurrent post-restart pinReadableGeneration lazy-open is single-flighted", async () => {
+  const vault = tempRoot();
+  fs.writeFileSync(path.join(vault, "Concurrent.md"), "concurrent vector\n");
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
+  const firstPool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
+  await publishGeneration(firstPool, paths, spec, "gen-concurrent", [
+    makeChunk("near", [1, 0, 0], spec)
+  ]);
+  await firstPool.close();
+
+  const base = createMemoryCoralNeedleInstanceFactory();
+  const gate = deferred();
+  let queryCreates = 0;
+  const restartedPool = new VectorGenerationPool({
+    factory: {
+      async create(input) {
+        if (input.role === "query") {
+          queryCreates += 1;
+          await gate.promise;
+        }
+        return base.create(input);
+      }
+    }
+  });
+  const first = restartedPool.pinReadableGeneration({
+    paths,
+    expectedGenerationId: "gen-concurrent",
+    expectedSpec: spec
+  });
+  const second = restartedPool.pinReadableGeneration({
+    paths,
+    expectedGenerationId: "gen-concurrent",
+    expectedSpec: spec
+  });
+  await delay(10);
+  assert.equal(queryCreates, 1);
+  assert.deepEqual(restartedPool.statsForTests().active, {});
+  gate.resolve();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.status, "ready");
+  assert.equal(secondResult.status, "ready");
+  assert.equal(queryCreates, 1);
+  const key = `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:gen-concurrent`;
+  assert.equal(restartedPool.statsForTests().refCounts[key], 2);
+  firstResult.lease.release();
+  assert.equal(restartedPool.statsForTests().refCounts[key], 1);
+  secondResult.lease.release();
+  assert.equal(restartedPool.statsForTests().refCounts[key], 0);
+  await restartedPool.close();
 });
 
 test("AC7 Test C P4 multi-vault queries use distinct active query instances without eviction or re-init", async () => {
@@ -514,7 +593,7 @@ test("AC10 P4 model session lifecycle handles device pick idle unload promotion 
   }
 });
 
-test("AC11 P4 freshness persists dirty/building/fresh states and embed-on-save retains rollback on failure", async () => {
+test("AC11 P4 freshness persists dirty/building/fresh states across startup recovery", async () => {
   const vault = tempRoot();
   fs.writeFileSync(path.join(vault, "A.md"), "alpha\n");
   fs.writeFileSync(path.join(vault, "B.md"), "beta\n");
@@ -534,63 +613,19 @@ test("AC11 P4 freshness persists dirty/building/fresh states and embed-on-save r
     vectorGenerationId: "gen-initial"
   });
 
-  const provider = new DeterministicHashProvider({
-    fixtures: new Map([
-      ["alpha changed", [0, 0, 1]],
-      ["broken", [1, 1, 1]]
-    ])
-  });
-  const plane = new EmbedOnSaveIndexPlane({
-    paths,
-    freshness,
-    vectorPool: pool,
-    provider,
-    spec,
-    initialChunks,
-    debounceMs: 1000
-  });
-  const beforeB = Array.from(plane.chunkForTests("doc-b").vector);
-  await plane.noteSaved({
-    path: "A.md",
-    documentId: "doc-a",
-    text: "alpha changed",
-    contentHash: "hash-doc-a-2",
-    corpusRevision: "rev-2"
-  });
+  await freshness.markDirty("rev-2");
   assert.equal(freshness.read().state, "dirty");
-  await plane.flushNow();
+  assert.equal(freshness.isPubliclyServable("rev-2"), false);
+  await freshness.markBuilding("rev-2");
+  assert.equal(freshness.read().state, "building");
+  await freshness.markFresh({
+    corpusRevision: "rev-2",
+    embeddingSetId: paths.key.embeddingSetId,
+    vectorGenerationId: "gen-initial"
+  });
   assert.equal(freshness.read().state, "fresh");
   assert.equal(freshness.read().corpusRevision, "rev-2");
-  assert.notDeepEqual(Array.from(plane.chunkForTests("doc-a").vector), [1, 0, 0]);
-  assert.deepEqual(Array.from(plane.chunkForTests("doc-b").vector), beforeB);
   assert.equal(freshness.isPubliclyServable("rev-2"), true);
-
-  const failingProvider = {
-    identity: provider.identity,
-    async embed() {
-      throw new Error("embed killed");
-    }
-  };
-  const failingPlane = new EmbedOnSaveIndexPlane({
-    paths,
-    freshness,
-    vectorPool: pool,
-    provider: failingProvider,
-    spec,
-    initialChunks: [...fake.chunksByGeneration.get(freshness.read().published.vectorGenerationId)],
-    debounceMs: 1000
-  });
-  await failingPlane.noteSaved({
-    path: "A.md",
-    documentId: "doc-a",
-    text: "broken",
-    contentHash: "hash-doc-a-3",
-    corpusRevision: "rev-3"
-  });
-  await assert.rejects(failingPlane.flushNow(), /embed killed/);
-  assert.equal(freshness.read().state, "failed");
-  assert.equal(freshness.read().published.corpusRevision, "rev-2");
-  assert.equal(freshness.isPubliclyServable("rev-3"), false);
 
   await freshness.markDirty("rev-4");
   const restartedDirty = new RetrievalFreshnessStore({ paths });

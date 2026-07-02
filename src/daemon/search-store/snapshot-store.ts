@@ -29,13 +29,19 @@ import {
   buildEmbeddingSetFromVectors,
   DeterministicHashProvider,
   createLocalOnnxProviderFromConfig,
+  deterministicHashEmbeddingRecipeIdentity,
+  embeddingRecipeFreshnessId as computeEmbeddingRecipeFreshnessId,
   embeddingRecipeIdentityForProvider,
+  embeddingSpaceIdForRecipe,
+  vectorGenerationIdForManifest,
   type EmbeddingProviderIdentity,
   type BuiltEmbeddingSet,
   type EmbeddingProvider,
+  type EmbeddingRecipeFreshnessId,
   type EmbeddingRecipeIdentity,
   type EmbeddingSetDocumentInput,
   type EmbeddingSetRecord,
+  type EmbeddingSpaceId,
   type EmbeddingVector
 } from "../../core/search/dense/index.js";
 import { DENSE_RETRIEVER_VERSION } from "../../core/search/dense/retriever.js";
@@ -59,6 +65,7 @@ import {
   type SearchIndexProgressUpdate
 } from "../protocol.js";
 import type { EmbeddingWorkerPool } from "../pools.js";
+import type { EmbedSchedulerLane } from "../embed-scheduler.js";
 import { buildCanonicalSearchSnapshot, DEFAULT_PARTITION_BITS, snapshotIdentityTuple, snapshotIdentityTupleForAnalyzerIdentity } from "./builder.js";
 import { safeStoreFileName, searchStoreCachePaths, type SearchStoreCachePaths } from "./cache-paths.js";
 import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "../search-execution.js";
@@ -78,13 +85,17 @@ import {
 import {
   RetrievalFreshnessStore,
   VectorCacheCatalog,
+  loadVectorGenerationMetadata,
   readActiveVectorPointer,
   storeVectorGenerationMetadata,
   VectorGenerationPool,
+  vectorGenerationManifestHash,
   vectorStoreCachePaths,
   vectorStoreId,
   writeActiveVectorPointer,
   type CoralEmbeddingSpec,
+  type ReadableVectorGenerationLease,
+  type RetrievalFreshnessRecord,
   type VectorStoreCachePaths,
   type VectorGenerationMetadata
 } from "../vector-store/index.js";
@@ -100,7 +111,7 @@ import {
   type SnapshotEnvelope
 } from "./types.js";
 import { SearchCacheCatalog, type SearchCachePruneOptions } from "./cache-catalog.js";
-import type { SearchIndexPruneResult } from "../../core/types.js";
+import type { RetrieveDenseSignal, SearchIndexPruneResult } from "../../core/types.js";
 
 export type DaemonSnapshotStoreOptions = {
   env?: NodeJS.ProcessEnv;
@@ -142,6 +153,19 @@ export type SnapshotRequestContext = {
   deadline?: number;
   cancellationId?: string;
   progress?: (progress: SearchIndexProgressUpdate) => void;
+  embeddingLane?: EmbedSchedulerLane;
+};
+
+export type SnapshotDirtyMark = {
+  docId: string;
+  path: string;
+  contentHash?: string;
+};
+
+export type SnapshotDirtyFoldResult = {
+  requested: number;
+  folded: RetrievalEmbeddingBuildFoldResult[];
+  skipped: SnapshotDirtyMark[];
 };
 
 type SnapshotBuilderInput = {
@@ -159,11 +183,33 @@ export type RetrievalEmbeddingSetBuilderInput = {
   deadline?: number;
   cancellationId?: string;
   progress?: (progress: SearchIndexProgressUpdate) => void;
+  embeddingLane?: EmbedSchedulerLane;
+};
+
+export type RetrievalEmbeddingBuildLane = Exclude<EmbedSchedulerLane, "query">;
+
+export type RetrievalEmbeddingBuildFoldResult = {
+  target: "current" | "next";
+  lane: RetrievalEmbeddingBuildLane;
+  reason: "queued" | "in-flight" | "embedded" | "not-active";
+  pendingCount: number;
 };
 
 export type RetrievalEmbeddingSetBuilder = {
   readonly providerIdentity: EmbeddingProviderIdentity;
+  readonly recipeIdentity?: EmbeddingRecipeIdentity;
   build(input: RetrievalEmbeddingSetBuilderInput): Promise<BuiltEmbeddingSet>;
+  foldQueuedDocument?(lane: RetrievalEmbeddingBuildLane, document: EmbeddingSetDocumentInput): RetrievalEmbeddingBuildFoldResult;
+  drainNextIncrementalDocuments?(lane: RetrievalEmbeddingBuildLane): EmbeddingSetDocumentInput[];
+};
+
+type ScheduledEmbeddingEncoder = {
+  encode(
+    payload: Parameters<EmbeddingWorkerPool["encode"]>[0],
+    options: Parameters<EmbeddingWorkerPool["encode"]>[1],
+    lane?: EmbedSchedulerLane
+  ): ReturnType<EmbeddingWorkerPool["encode"]>;
+  withLaneScope?<T>(lane: EmbedSchedulerLane, fn: () => Promise<T>): Promise<T>;
 };
 
 type RetrievalSnapshotSource = Pick<
@@ -176,6 +222,29 @@ type RetrievalSnapshotPublication = {
   active: RetrievalActivePointer;
   vectorPaths: VectorStoreCachePaths;
   vectorGenerationGcKey: string;
+};
+
+type DenseUnavailableResult = {
+  status: "unavailable" | "unreadable" | "space-mismatch";
+  reason: string;
+  usability: DenseUsability;
+  signal: DenseSignal;
+};
+
+type DenseGenerationAttachCandidate = {
+  retrieval: RetrievalSnapshotEnvelope;
+  vectorPaths: VectorStoreCachePaths;
+  metadata: VectorGenerationMetadata;
+  freshness: RetrievalFreshnessRecord;
+  gcPin: DenseGenerationPin["gcPin"];
+};
+
+type DenseGenerationAttachCandidateResult =
+  | { status: "ready"; candidate: DenseGenerationAttachCandidate }
+  | DenseUnavailableResult;
+
+type GcRootOptions = {
+  ignoreInFlightVectorGenerationKey?: string;
 };
 
 type SnapshotContentDelta = {
@@ -207,6 +276,8 @@ export type PinnedRetrievalSnapshot = PinnedSnapshot & {
   corpusSnapshotId: string;
   linkGraphId: LinkGraphId;
   embeddingSetId: EmbeddingSetId;
+  embeddingSpaceId: EmbeddingSpaceId;
+  embeddingRecipeFreshnessId: EmbeddingRecipeFreshnessId;
   retrieverPlanIdentity: string;
   rankingFeatureVersion: string;
   embeddingSet: RetrievalEmbeddingSetEnvelope;
@@ -232,6 +303,58 @@ export type RetrievalPinResult =
   | { status: "ready"; pin: PinnedRetrievalSnapshot }
   | { status: "index-not-ready"; reason: RetrievalPinNotReadyReason };
 
+export type DenseSignalState = "fresh" | "stale" | "rebuilding" | "cold";
+
+export type DenseSignal = RetrieveDenseSignal;
+
+export type DenseUsability = {
+  spaceMatch: boolean;
+  usableDocumentIds: ReadonlySet<string>;
+  pendingDocumentIds: ReadonlySet<string>;
+};
+
+export type PinnedLexicalReadPin = PinnedSnapshot & {
+  corpusSnapshotId: string;
+  linkGraphId: LinkGraphId;
+};
+
+export type DenseGenerationPin = {
+  retrieval: RetrievalSnapshotEnvelope;
+  embeddingSet: RetrievalEmbeddingSetEnvelope;
+  recordsByDocumentId: ReadonlyMap<string, RetrievalEmbeddingSetEnvelope["records"][number]>;
+  embeddingSpaceId: EmbeddingSpaceId;
+  vectorGeneration: VectorGenerationMetadata;
+  vectorKey: VectorStoreKey;
+  vectorLease: ReadableVectorGenerationLease;
+  gcPin: {
+    vectorKey: VectorStoreKey;
+    generationId: string;
+  };
+};
+
+export type PinnedRetrievalReadContext = {
+  lexicalPin: PinnedLexicalReadPin;
+  liveDocuments: ReadonlyMap<string, PersistedDocumentRecord>;
+  liveContentHashes: ReadonlyMap<string, string>;
+  desiredEmbeddingSpace?: EmbeddingSpaceId;
+  densePin?: DenseGenerationPin;
+  denseUsability: DenseUsability;
+  denseSignal: DenseSignal;
+};
+
+export type LexicalReadContextResult =
+  | { status: "ready"; readContext: PinnedRetrievalReadContext }
+  | { status: "index-not-ready"; reason: "lexical-snapshot-unavailable" };
+
+export type DenseAttachmentResult =
+  | { status: "attached"; densePin: DenseGenerationPin; usability: DenseUsability; signal: DenseSignal }
+  | {
+      status: "unavailable" | "unreadable" | "space-mismatch";
+      reason: string;
+      usability: DenseUsability;
+      signal: DenseSignal;
+    };
+
 type GcRoots = {
   snapshotIds: Set<string>;
   segmentHashes: Set<string>;
@@ -244,6 +367,8 @@ const DEFAULT_COUNT_CAP = 8;
 const DEFAULT_BYTE_CAP = 128 * 1024 * 1024;
 const DEFAULT_RETENTION_COUNT = 8;
 const TMP_STALE_MS = 5 * 60 * 1000;
+const EMBEDDING_DOCUMENT_SLICE_SIZE = 32;
+const BACKGROUND_EMBEDDING_BUILD_LANES: readonly RetrievalEmbeddingBuildLane[] = ["save", "refresh", "rebuild"];
 
 export class DaemonSnapshotStore implements SnapshotStore {
   private readonly env: NodeJS.ProcessEnv;
@@ -275,6 +400,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly lifecycleStoreRefs = new Map<string, number>();
   private readonly pinnedVectorGenerations = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
+  private readonly releasedReadContexts = new WeakSet<PinnedRetrievalReadContext>();
 
   constructor(options: DaemonSnapshotStoreOptions = {}) {
     this.env = options.env ?? process.env;
@@ -320,6 +446,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return this.analyzerIdentity;
   }
 
+  currentEmbeddingRecipeIdentity(): EmbeddingRecipeIdentity {
+    return this.embeddingSetBuilder.recipeIdentity ??
+      deterministicHashEmbeddingRecipeIdentity(this.embeddingSetBuilder.providerIdentity);
+  }
+
+  currentEmbeddingSpaceId(): EmbeddingSpaceId {
+    return embeddingSpaceIdForRecipe(this.currentEmbeddingRecipeIdentity());
+  }
+
   async loadVault(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<LoadVaultResult> {
     try {
       const paths = this.paths(vaultRoot);
@@ -352,6 +487,55 @@ export class DaemonSnapshotStore implements SnapshotStore {
       action: "rebuild",
       snapshotId
     };
+  }
+
+  async publishSaveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
+    const paths = this.paths(vaultRoot);
+    return this.withLifecycleStore(paths, async () => {
+      return this.publishFreshSnapshot(paths.vaultRoot, { ...context, embeddingLane: "save" }, { prepareRetrieval: true });
+    });
+  }
+
+  async foldSaveDirtyMarks(
+    vaultRoot: string,
+    dirtyMarks: readonly SnapshotDirtyMark[],
+    context: SnapshotRequestContext = {}
+  ): Promise<SnapshotDirtyFoldResult> {
+    const foldQueuedDocument = this.embeddingSetBuilder.foldQueuedDocument?.bind(this.embeddingSetBuilder);
+    if (dirtyMarks.length === 0 || !foldQueuedDocument) {
+      return { requested: dirtyMarks.length, folded: [], skipped: [...dirtyMarks] };
+    }
+    const paths = this.paths(vaultRoot);
+    return this.withLifecycleStore(paths, async () => {
+      const built = this.snapshotBuilder
+        ? await this.snapshotBuilder({
+            vaultRoot: paths.vaultRoot,
+            partitionBits: this.partitionBits,
+            searchSettings: this.searchSettings,
+            deadline: context.deadline,
+            cancellationId: context.cancellationId,
+            progress: context.progress
+          })
+        : await this.buildSnapshotInProcess(paths.vaultRoot, context.progress);
+      const documents = denseDocumentsForRetrievalSource(retrievalSnapshotSourceFromEnvelope(snapshotEnvelope(built)));
+      const documentsByDocId = new Map(documents.map((document) => [document.documentId, document]));
+      const documentsByPath = new Map(documents.map((document) => [document.path, document]));
+      const folded: RetrievalEmbeddingBuildFoldResult[] = [];
+      const skipped: SnapshotDirtyMark[] = [];
+      for (const mark of dirtyMarks) {
+        const document = documentsByDocId.get(mark.docId) ?? documentsByPath.get(mark.path);
+        if (!document || (mark.contentHash !== undefined && document.contentHash !== mark.contentHash)) {
+          skipped.push(mark);
+          continue;
+        }
+        folded.push(foldQueuedDocument("save", document));
+      }
+      return {
+        requested: dirtyMarks.length,
+        folded,
+        skipped
+      };
+    });
   }
 
   async refresh(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<{ ok: true; command: "index"; action: "refresh"; rebuilt: boolean; snapshotId?: string }> {
@@ -465,6 +649,256 @@ export class DaemonSnapshotStore implements SnapshotStore {
     });
   }
 
+  async pinLexicalReadContext(
+    vaultRoot: string,
+    context: SnapshotRequestContext = {}
+  ): Promise<LexicalReadContextResult> {
+    const paths = this.paths(vaultRoot);
+    try {
+      const pinned = await this.withLifecycleStore(paths, async () => {
+        const snapshotId = await this.ensureActiveSnapshot(paths.vaultRoot, context);
+        const loaded = await this.ensureLoaded(paths, snapshotId, { touchCache: false });
+        loaded.refCount += 1;
+        loaded.lastAccessMs = Date.now();
+        this.vaultAccessMs.set(paths.vaultStateHash, loaded.lastAccessMs);
+        const pinToken = `${paths.vaultStateHash}:${snapshotId}:lexical:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        loaded.pinTokens.add(pinToken);
+        return { loaded, pinToken };
+      });
+      const liveDocuments = pinned.loaded.documentsByDocumentId;
+      const liveContentHashes = new Map([...liveDocuments.values()].map((document) => [document.documentId, document.contentHash]));
+      const denseUsability = denseUsabilityForLiveDocuments(liveDocuments);
+      return {
+        status: "ready",
+        readContext: {
+          lexicalPin: {
+            snapshotId: pinned.loaded.snapshotId,
+            view: pinned.loaded.view,
+            pinToken: pinned.pinToken,
+            corpusSnapshotId: pinned.loaded.envelope.corpusSnapshotId ?? corpusSnapshotIdFromManifest(pinned.loaded.envelope.manifest),
+            linkGraphId: pinned.loaded.envelope.linkGraphId
+          },
+          liveDocuments,
+          liveContentHashes,
+          denseUsability,
+          denseSignal: coldDenseSignal(liveDocuments.size)
+        }
+      };
+    } catch {
+      return { status: "index-not-ready", reason: "lexical-snapshot-unavailable" };
+    }
+  }
+
+  async tryAttachDenseGeneration(
+    readContext: PinnedRetrievalReadContext,
+    desiredEmbeddingSpace: EmbeddingSpaceId
+  ): Promise<DenseAttachmentResult> {
+    readContext.desiredEmbeddingSpace = desiredEmbeddingSpace;
+    const lexicalLoaded = this.loadedForPin(readContext.lexicalPin);
+    const paths = this.paths(lexicalLoaded.vaultRoot);
+    const candidate = await this.resolveDenseGenerationAttachCandidate(readContext, paths, desiredEmbeddingSpace);
+    if (candidate.status !== "ready") return candidate;
+    if (!this.vectorPool) return this.denseUnavailable(readContext, "unreadable", "vector-manager-unavailable");
+    const gcPin = candidate.candidate.gcPin;
+    this.retainDenseGenerationGcPin(gcPin);
+    try {
+      const lease = await this.vectorPool.pinReadableGeneration({
+        paths: candidate.candidate.vectorPaths,
+        key: candidate.candidate.vectorPaths.key,
+        expectedGenerationId: candidate.candidate.metadata.generationId,
+        expectedSpec: candidate.candidate.metadata.spec
+      });
+      if (lease.status !== "ready") {
+        this.releaseDenseGenerationGcPin(gcPin);
+        return this.denseUnavailable(readContext, "unreadable", lease.reason);
+      }
+      try {
+        return this.attachDenseGenerationLease(readContext, candidate.candidate, lease.lease);
+      } catch (error) {
+        lease.lease.release();
+        throw error;
+      }
+    } catch (error) {
+      // A thrown lazy-open (e.g. pinReadableGeneration hitting a close race via assertOpen) or a
+      // thrown attach must not leak the retained vector GC pin. The not-ready return path above
+      // releases it explicitly; every throw releases it here exactly once.
+      this.releaseDenseGenerationGcPin(gcPin);
+      throw error;
+    }
+  }
+
+  densePinnedGenerationCountForTests(): number {
+    let total = 0;
+    for (const count of this.pinnedVectorGenerations.values()) total += count;
+    return total;
+  }
+
+  private async resolveDenseGenerationAttachCandidate(
+    readContext: PinnedRetrievalReadContext,
+    paths: SearchStoreCachePaths,
+    desiredEmbeddingSpace: EmbeddingSpaceId
+  ): Promise<DenseGenerationAttachCandidateResult> {
+    const retrieval = await this.resolveDenseRetrievalEnvelope(readContext, paths);
+    if (retrieval.status !== "ready") return retrieval;
+    return this.resolveDenseVectorGeneration(readContext, paths, retrieval.retrieval, desiredEmbeddingSpace);
+  }
+
+  private async resolveDenseRetrievalEnvelope(
+    readContext: PinnedRetrievalReadContext,
+    paths: SearchStoreCachePaths
+  ): Promise<{ status: "ready"; retrieval: RetrievalSnapshotEnvelope } | DenseUnavailableResult> {
+    const active = this.readRetrievalActivePointer(paths);
+    if (!active) return this.denseUnavailable(readContext, "unavailable", "no-active-retrieval-snapshot");
+    const retrieval = this.readRetrievalSnapshotEnvelope(paths, active.retrievalSnapshotId);
+    if (!retrieval) return this.denseUnavailable(readContext, "unreadable", "retrieval-envelope-missing");
+    if (!retrievalEnvelopeMatchesPointer(retrieval, active)) {
+      return this.denseUnavailable(readContext, "unreadable", "retrieval-snapshot-mismatched");
+    }
+    const envelope = this.readSnapshotEnvelope(paths, retrieval.snapshotId);
+    if (!envelope || envelope.corpusSnapshotId !== retrieval.corpusSnapshotId) {
+      return this.denseUnavailable(readContext, "unreadable", "corpus-missing");
+    }
+    try {
+      await this.ensureLoaded(paths, retrieval.snapshotId, { touchCache: false });
+    } catch {
+      return this.denseUnavailable(readContext, "unreadable", "corpus-missing");
+    }
+    if (envelope.linkGraphId !== retrieval.linkGraphId || !linkGraphSidecarExists(paths, retrieval.linkGraphId)) {
+      return this.denseUnavailable(readContext, "unreadable", "link-graph-missing");
+    }
+    if (retrieval.embeddingSet.embeddingSetId !== retrieval.embeddingSetId) {
+      return this.denseUnavailable(readContext, "unreadable", "embedding-set-mismatched");
+    }
+    const expectedRetrievalSnapshotId = computeRetrievalSnapshotId({
+      corpusSnapshotId: retrieval.corpusSnapshotId,
+      linkGraphId: retrieval.linkGraphId,
+      embeddingSetId: retrieval.embeddingSetId,
+      retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+      rankingFeatureVersion: retrieval.rankingFeatureVersion
+    });
+    if (expectedRetrievalSnapshotId !== retrieval.retrievalSnapshotId) {
+      return this.denseUnavailable(readContext, "unreadable", "retrieval-snapshot-mismatched");
+    }
+    return { status: "ready", retrieval };
+  }
+
+  private resolveDenseVectorGeneration(
+    readContext: PinnedRetrievalReadContext,
+    paths: SearchStoreCachePaths,
+    retrieval: RetrievalSnapshotEnvelope,
+    desiredEmbeddingSpace: EmbeddingSpaceId
+  ): DenseGenerationAttachCandidateResult {
+    const vectorPaths = vectorStoreCachePaths({
+      vaultRoot: paths.vaultRoot,
+      profileHash: this.profileHash,
+      embeddingSetId: retrieval.embeddingSetId,
+      env: this.env
+    });
+    const activeVector = readActiveVectorPointer(vectorPaths);
+    if (!activeVector) return this.denseUnavailable(readContext, "unreadable", "vector-active-spec-missing");
+    if (
+      activeVector.generationId !== retrieval.vector.generationId ||
+      activeVector.embeddingSetId !== retrieval.embeddingSetId ||
+      activeVector.specId !== retrieval.vector.specId ||
+      activeVector.dbPath !== retrieval.vector.dbPath
+    ) {
+      return this.denseUnavailable(readContext, "unreadable", "vector-active-spec-mismatched");
+    }
+    const metadata = loadVectorGenerationMetadata(vectorPaths, activeVector.generationId);
+    if (!metadata) return this.denseUnavailable(readContext, "unreadable", "vector-generation-metadata-missing");
+    if (
+      metadata.generationId !== retrieval.vector.generationId ||
+      metadata.embeddingSetId !== retrieval.embeddingSetId ||
+      metadata.dbPath !== retrieval.vector.dbPath ||
+      metadata.spec.specId !== retrieval.vector.specId
+    ) {
+      return this.denseUnavailable(readContext, "unreadable", "vector-generation-metadata-mismatched");
+    }
+    if (metadata.embeddingSpaceId && metadata.embeddingSpaceId !== retrieval.embeddingSpaceId) {
+      return this.denseUnavailable(readContext, "unreadable", "embedding-space-mismatched");
+    }
+    const freshness = new RetrievalFreshnessStore({ paths: vectorPaths }).read();
+    const metadataSpace = metadata.embeddingSpaceId;
+    if (retrieval.embeddingSpaceId !== desiredEmbeddingSpace || metadataSpace !== desiredEmbeddingSpace) {
+      return this.denseUnavailable(
+        readContext,
+        "space-mismatch",
+        "embedding-space-mismatched",
+        {
+          state: "rebuilding",
+          pendingCount: readContext.liveDocuments.size,
+          generationAgeMs: generationAgeMs(metadata)
+        }
+      );
+    }
+    return {
+      status: "ready",
+      candidate: {
+        retrieval,
+        vectorPaths,
+        metadata,
+        freshness,
+        gcPin: {
+          vectorKey: vectorPaths.key,
+          generationId: metadata.generationId
+        }
+      }
+    };
+  }
+
+  private attachDenseGenerationLease(
+    readContext: PinnedRetrievalReadContext,
+    candidate: DenseGenerationAttachCandidate,
+    vectorLease: ReadableVectorGenerationLease
+  ): Extract<DenseAttachmentResult, { status: "attached" }> {
+    const recordsByDocumentId = new Map(candidate.retrieval.embeddingSet.records.map((record) => [record.documentId, record]));
+    const denseUsability = denseUsabilityForRecords(readContext.liveDocuments, recordsByDocumentId, true);
+    const denseSignal = denseSignalForUsability({
+      retrieval: candidate.retrieval,
+      metadata: candidate.metadata,
+      freshness: candidate.freshness,
+      usability: denseUsability
+    });
+    const densePin: DenseGenerationPin = {
+      retrieval: candidate.retrieval,
+      embeddingSet: candidate.retrieval.embeddingSet,
+      recordsByDocumentId,
+      embeddingSpaceId: candidate.retrieval.embeddingSpaceId,
+      vectorGeneration: candidate.metadata,
+      vectorKey: candidate.vectorPaths.key,
+      vectorLease,
+      gcPin: candidate.gcPin
+    };
+    readContext.densePin = densePin;
+    readContext.denseUsability = denseUsability;
+    readContext.denseSignal = denseSignal;
+    return { status: "attached", densePin, usability: denseUsability, signal: denseSignal };
+  }
+
+  private denseUnavailable(
+    readContext: PinnedRetrievalReadContext,
+    status: DenseUnavailableResult["status"],
+    reason: string,
+    signal?: DenseSignal
+  ): DenseUnavailableResult {
+    const denseUsability = denseUsabilityForLiveDocuments(readContext.liveDocuments);
+    const denseSignal = signal ?? coldDenseSignal(readContext.liveDocuments.size);
+    readContext.denseUsability = denseUsability;
+    readContext.denseSignal = denseSignal;
+    return { status, reason, usability: denseUsability, signal: denseSignal };
+  }
+
+  releaseReadContext(readContext: PinnedRetrievalReadContext): void {
+    if (this.releasedReadContexts.has(readContext)) return;
+    this.releasedReadContexts.add(readContext);
+    const densePin = readContext.densePin;
+    if (densePin) {
+      densePin.vectorLease.release();
+      this.releaseDenseGenerationGcPin(densePin.gcPin);
+    }
+    this.release(readContext.lexicalPin);
+  }
+
   private async prepareRetrievalSnapshotForSnapshot(
     paths: SearchStoreCachePaths,
     snapshotId: string,
@@ -513,58 +947,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     if (!envelope || envelope.corpusSnapshotId !== retrieval.corpusSnapshotId) {
       return { status: "index-not-ready", reason: "corpus-missing" };
     }
-    const currentIdentity = currentRetrievalIdentity({
-      linkGraphId: retrieval.linkGraphId,
-      rankingFeatureVersion: String(envelope.manifest.identityTuple.rankingFeatureVersion),
-      provider: this.embeddingSetBuilder.providerIdentity
-    });
-    if (
-      retrieval.retrieverPlanIdentity !== currentIdentity.retrieverPlanIdentity ||
-      retrieval.rankingFeatureVersion !== currentIdentity.rankingFeatureVersion
-    ) {
-      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
-    }
-    if (
-      retrieval.embeddingSet.model !== currentIdentity.provider.model ||
-      retrieval.embeddingSet.dim !== currentIdentity.provider.dim ||
-      retrieval.embeddingSet.recipe.provider.id !== currentIdentity.provider.id ||
-      retrieval.embeddingSet.recipe.provider.model !== currentIdentity.provider.model ||
-      retrieval.embeddingSet.recipe.provider.dim !== currentIdentity.provider.dim ||
-      retrieval.embeddingSet.recipe.provider.version !== currentIdentity.provider.version
-    ) {
-      return { status: "index-not-ready", reason: "embedding-set-mismatched" };
-    }
-    const expectedCurrentRetrievalSnapshotId = computeRetrievalSnapshotId({
-      corpusSnapshotId: retrieval.corpusSnapshotId,
-      linkGraphId: retrieval.linkGraphId,
-      embeddingSetId: retrieval.embeddingSetId,
-      retrieverPlanIdentity: currentIdentity.retrieverPlanIdentity,
-      rankingFeatureVersion: currentIdentity.rankingFeatureVersion
-    });
-    if (expectedCurrentRetrievalSnapshotId !== retrieval.retrievalSnapshotId) {
-      return { status: "index-not-ready", reason: "retrieval-snapshot-mismatched" };
-    }
-    const freshness = new RetrievalFreshnessStore({
-      paths: vectorStoreCachePaths({
-        vaultRoot: paths.vaultRoot,
-        profileHash: this.profileHash,
-        embeddingSetId: retrieval.embeddingSetId,
-        env: this.env
-      })
-    }).read();
-    if (freshness.state !== "fresh") {
-      return { status: "index-not-ready", reason: freshnessStateReason(freshness.state) };
-    }
-    if (
-      freshness.published?.retrievalSnapshotId !== retrieval.retrievalSnapshotId ||
-      freshness.published?.embeddingSetId !== retrieval.embeddingSetId ||
-      freshness.published?.linkGraphId !== retrieval.linkGraphId ||
-      freshness.published?.corpusSnapshotId !== retrieval.corpusSnapshotId ||
-      freshness.published?.vectorGenerationId !== retrieval.vector.generationId ||
-      freshness.corpusRevision !== retrieval.freshness.corpusRevision
-    ) {
-      return { status: "index-not-ready", reason: "retrieval-state-stale" };
-    }
     if (envelope.linkGraphId !== retrieval.linkGraphId || !linkGraphSidecarExists(paths, retrieval.linkGraphId)) {
       return { status: "index-not-ready", reason: "link-graph-missing" };
     }
@@ -611,6 +993,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
       corpusSnapshotId: retrieval.corpusSnapshotId,
       linkGraphId: retrieval.linkGraphId,
       embeddingSetId: retrieval.embeddingSetId,
+      embeddingSpaceId: retrieval.embeddingSpaceId,
+      embeddingRecipeFreshnessId: retrieval.embeddingRecipeFreshnessId,
       retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
       rankingFeatureVersion: retrieval.rankingFeatureVersion,
       embeddingSet: retrieval.embeddingSet,
@@ -919,15 +1303,23 @@ export class DaemonSnapshotStore implements SnapshotStore {
     envelope: SnapshotEnvelope,
     context: SnapshotRequestContext = {}
   ): Promise<RetrievalSnapshotPublication> {
+    const lane = backgroundEmbeddingLane(context.embeddingLane);
+    const documents = mergeEmbeddingDocuments(
+      denseDocumentsForRetrievalSource(source),
+      lane ? this.embeddingSetBuilder.drainNextIncrementalDocuments?.(lane) ?? [] : []
+    );
     const embeddingSet = await this.embeddingSetBuilder.build({
       vaultRoot: paths.vaultRoot,
-      documents: denseDocumentsForRetrievalSource(source),
+      documents,
       deadline: context.deadline,
       cancellationId: context.cancellationId,
-      progress: context.progress
+      progress: context.progress,
+      embeddingLane: context.embeddingLane
     });
     assertProviderIdentityMatches(embeddingSet.recipe.provider, this.embeddingSetBuilder.providerIdentity);
     const provider = embeddingSet.recipe.provider;
+    const embeddingSpaceId = embeddingSpaceIdForRecipe(embeddingSet.recipe);
+    const recipeFreshnessId = computeEmbeddingRecipeFreshnessId(embeddingSet.recipe);
     const vectorPaths = vectorStoreCachePaths({
       vaultRoot: paths.vaultRoot,
       profileHash: this.profileHash,
@@ -942,7 +1334,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
       normalization: "l2",
       createdAt: new Date(0).toISOString()
     };
-    const generationId = `gen-${embeddingSet.embeddingSetId.slice(0, 24)}`;
+    const generationId = vectorGenerationIdForManifest({
+      embeddingSpaceId,
+      embeddingRecipeFreshnessId: recipeFreshnessId,
+      corpusRevision: source.corpusSnapshotId,
+      records: embeddingSet.records
+    });
+    const vectorChunks = vectorChunksForEmbeddingSet(embeddingSet.records, spec);
     const vectorGcKey = vectorGenerationGcKeyForVectorKey(vectorPaths.key, generationId);
     this.inFlightVectorGenerations.add(vectorGcKey);
     const generation: VectorGenerationMetadata = {
@@ -954,22 +1352,43 @@ export class DaemonSnapshotStore implements SnapshotStore {
       chunkCount: embeddingSet.records.length,
       builtEngine: "auto",
       createdAt: new Date(0).toISOString(),
-      embeddingSetId: embeddingSet.embeddingSetId
+      embeddingSetId: embeddingSet.embeddingSetId,
+      embeddingSpaceId,
+      embeddingRecipeFreshnessId: recipeFreshnessId,
+      manifestHash: vectorGenerationManifestHash({
+        spec,
+        chunks: vectorChunks,
+        embeddingSpaceId,
+        embeddingRecipeFreshnessId: recipeFreshnessId
+      })
     };
     try {
       if (this.vectorPool) {
         const builtGeneration = await this.vectorPool.buildStagingGeneration({
           paths: vectorPaths,
           spec,
-          chunks: vectorChunksForEmbeddingSet(embeddingSet.records, spec),
+          chunks: vectorChunks,
           generationId,
-          progress: context.progress
+          embeddingSpaceId,
+          embeddingRecipeFreshnessId: recipeFreshnessId,
+          progress: context.progress,
+          canReplaceExistingGeneration: async () => {
+            const protectedGeneration = await this.vectorGenerationIsProtected(
+              paths,
+              vectorGcKey,
+              { ignoreInFlightVectorGenerationKey: vectorGcKey }
+            );
+            return !protectedGeneration;
+          }
         });
         await this.vectorPool.promoteBuiltGeneration(vectorPaths, builtGeneration.metadata);
         generation.dbPath = builtGeneration.metadata.dbPath;
         generation.chunkCount = builtGeneration.metadata.chunkCount;
         generation.builtEngine = builtGeneration.metadata.builtEngine;
         generation.createdAt = builtGeneration.metadata.createdAt;
+        generation.embeddingSpaceId = builtGeneration.metadata.embeddingSpaceId ?? embeddingSpaceId;
+        generation.embeddingRecipeFreshnessId = builtGeneration.metadata.embeddingRecipeFreshnessId ?? recipeFreshnessId;
+        generation.manifestHash = builtGeneration.metadata.manifestHash ?? generation.manifestHash;
       } else {
         context.progress?.({
           phase: "vector-indexing",
@@ -1007,6 +1426,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
         corpusSnapshotId: source.corpusSnapshotId,
         linkGraphId: source.linkGraphId,
         embeddingSetId: embeddingSet.embeddingSetId,
+        embeddingSpaceId,
+        embeddingRecipeFreshnessId: recipeFreshnessId,
         retrieverPlanIdentity,
         rankingFeatureVersion,
         canonicalManifestSha256: envelope.canonicalManifestSha256,
@@ -1178,7 +1599,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.queueGc(paths);
   }
 
-  private async gcRootsAsync(paths: SearchStoreCachePaths): Promise<GcRoots> {
+  private async gcRootsAsync(paths: SearchStoreCachePaths, options: GcRootOptions = {}): Promise<GcRoots> {
     const snapshotIds = new Set<string>();
     const segmentHashes = new Set<string>();
     const linkGraphIds = new Set<LinkGraphId>();
@@ -1228,6 +1649,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
     const vaultVectorPrefix = vectorGenerationGcPrefix(this.profileHash, paths.vaultStateHash);
     for (const key of this.inFlightVectorGenerations) {
+      if (key === options.ignoreInFlightVectorGenerationKey) continue;
       if (key.startsWith(vaultVectorPrefix)) vectorGenerationKeys.add(key);
     }
     for (const key of this.pinnedVectorGenerations.keys()) {
@@ -1357,8 +1779,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
-  private async vectorGenerationIsProtected(paths: SearchStoreCachePaths, key: string): Promise<boolean> {
-    return (await this.gcRootsAsync(paths)).vectorGenerationKeys.has(key);
+  private async vectorGenerationIsProtected(paths: SearchStoreCachePaths, key: string, options: GcRootOptions = {}): Promise<boolean> {
+    return (await this.gcRootsAsync(paths, options)).vectorGenerationKeys.has(key);
   }
 
   private async vectorStoreHasProtectedGeneration(paths: SearchStoreCachePaths, embeddingSetId: string): Promise<boolean> {
@@ -1371,22 +1793,25 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private retainPinnedVectorGeneration(pin: PinnedRetrievalSnapshot): void {
-    const key = vectorGenerationGcKey({
-      profileHash: pin.vectorKey.profileHash,
-      vaultStateHash: pin.vectorKey.vaultStateHash,
-      embeddingSetId: pin.vectorKey.embeddingSetId,
-      generationId: pin.vector.generationId
-    });
+    const key = vectorGenerationGcKeyForVectorKey(pin.vectorKey, pin.vector.generationId);
     this.pinnedVectorGenerations.set(key, (this.pinnedVectorGenerations.get(key) ?? 0) + 1);
   }
 
   private releasePinnedVectorGeneration(pin: PinnedRetrievalSnapshot): void {
-    const key = vectorGenerationGcKey({
-      profileHash: pin.vectorKey.profileHash,
-      vaultStateHash: pin.vectorKey.vaultStateHash,
-      embeddingSetId: pin.vectorKey.embeddingSetId,
-      generationId: pin.vector.generationId
-    });
+    const key = vectorGenerationGcKeyForVectorKey(pin.vectorKey, pin.vector.generationId);
+    this.releaseVectorGenerationGcKey(key);
+  }
+
+  private retainDenseGenerationGcPin(pin: DenseGenerationPin["gcPin"]): void {
+    const key = vectorGenerationGcKeyForVectorKey(pin.vectorKey, pin.generationId);
+    this.pinnedVectorGenerations.set(key, (this.pinnedVectorGenerations.get(key) ?? 0) + 1);
+  }
+
+  private releaseDenseGenerationGcPin(pin: DenseGenerationPin["gcPin"]): void {
+    this.releaseVectorGenerationGcKey(vectorGenerationGcKeyForVectorKey(pin.vectorKey, pin.generationId));
+  }
+
+  private releaseVectorGenerationGcKey(key: string): void {
     const next = (this.pinnedVectorGenerations.get(key) ?? 1) - 1;
     if (next > 0) this.pinnedVectorGenerations.set(key, next);
     else this.pinnedVectorGenerations.delete(key);
@@ -1594,10 +2019,11 @@ export function createDaemonSnapshotStore(options: DaemonSnapshotStoreOptions = 
 }
 
 export function createProviderEmbeddingSetBuilder(provider: EmbeddingProvider): RetrievalEmbeddingSetBuilder {
+  const recipe = embeddingRecipeIdentityForProvider(provider);
   return {
     providerIdentity: provider.identity,
+    recipeIdentity: recipe,
     async build(input) {
-      const recipe = embeddingRecipeIdentityForProvider(provider);
       const total = input.documents.length;
       const interval = progressReportInterval(total);
       let completed = 0;
@@ -1629,50 +2055,232 @@ export function createProviderEmbeddingSetBuilder(provider: EmbeddingProvider): 
 export function createWorkerEmbeddingSetBuilder(input: {
   provider: EmbeddingProvider;
   providerPayload: ModelProviderPayload;
-  embedding: Pick<EmbeddingWorkerPool, "encode">;
+  embedding: ScheduledEmbeddingEncoder;
   batchSize?: number;
 }): RetrievalEmbeddingSetBuilder {
-  const batchSize = positiveCap(input.batchSize ?? 32);
+  const batchSize = Math.max(1, Math.floor(input.batchSize ?? EMBEDDING_DOCUMENT_SLICE_SIZE));
   const recipe = embeddingRecipeIdentityForProvider(input.provider);
+  const activeWorkSets = new Map<RetrievalEmbeddingBuildLane, DocIdKeyedEmbeddingWorkSet>();
+  const nextIncremental = new Map<RetrievalEmbeddingBuildLane, DocIdKeyedDocumentSet>();
+  const enqueueNextIncremental = (
+    lane: RetrievalEmbeddingBuildLane,
+    document: EmbeddingSetDocumentInput,
+    reason: RetrievalEmbeddingBuildFoldResult["reason"]
+  ): RetrievalEmbeddingBuildFoldResult => {
+    let pending = nextIncremental.get(lane);
+    if (!pending) {
+      pending = new DocIdKeyedDocumentSet();
+      nextIncremental.set(lane, pending);
+    }
+    pending.upsert(document);
+    return {
+      target: "next",
+      lane,
+      reason,
+      pendingCount: pending.size
+    };
+  };
   return {
     providerIdentity: input.provider.identity,
-    async build(builderInput) {
-      const vectors: EmbeddingVector[] = [];
-      const total = builderInput.documents.length;
-      builderInput.progress?.({ phase: "embedding", total, completed: 0 });
-      for (let offset = 0; offset < builderInput.documents.length; offset += batchSize) {
-        const batch = builderInput.documents.slice(offset, offset + batchSize);
-        const encoded = await input.embedding.encode({
-          texts: batch.map((document) => document.text),
-          inputKind: "document",
-          provider: input.providerPayload
-        }, {
-          deadline: builderInput.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
-          cancellationId: builderInput.cancellationId ?? `${builderInput.vaultRoot}:embedding-build`,
-          vault: builderInput.vaultRoot,
-          onProgress: builderInput.progress
-        });
-        assertProviderIdentityMatches(encoded.provider, input.provider.identity);
-        if (encoded.vectors.length !== batch.length) {
-          throw new Error(`embedding worker returned ${encoded.vectors.length} vectors for ${batch.length} documents`);
+    recipeIdentity: recipe,
+    foldQueuedDocument(lane, document) {
+      const nextLane = embeddingBuildLane(lane);
+      for (const activeLane of BACKGROUND_EMBEDDING_BUILD_LANES) {
+        const workSet = activeWorkSets.get(activeLane);
+        if (!workSet) continue;
+        const state = workSet.stateFor(document.documentId);
+        if (state === "queued" && workSet.replaceQueued(document)) {
+          return {
+            target: "current",
+            lane: activeLane,
+            reason: "queued",
+            pendingCount: workSet.pendingCount
+          };
         }
-        vectors.push(...encoded.vectors);
-        builderInput.progress?.({
-          phase: "embedding",
-          total,
-          completed: Math.min(total, offset + batch.length),
-          current: batch[batch.length - 1]?.path,
-          message: `${vectors.length} vectors`
-        });
+        if (state === "in-flight" || state === "embedded") {
+          return enqueueNextIncremental(nextLane, document, state);
+        }
       }
-      return buildEmbeddingSetFromVectors({
-        provider: input.provider.identity,
-        recipe,
-        documents: builderInput.documents,
-        vectors
-      });
+      return enqueueNextIncremental(nextLane, document, "not-active");
+    },
+    drainNextIncrementalDocuments(lane) {
+      const pending = nextIncremental.get(lane);
+      if (!pending) return [];
+      nextIncremental.delete(lane);
+      return pending.documents();
+    },
+    async build(builderInput) {
+      const lane = embeddingBuildLane(builderInput.embeddingLane);
+      if (activeWorkSets.has(lane)) {
+        throw new Error(`embedding build lane ${lane} already has an active docId work set`);
+      }
+      const workSet = new DocIdKeyedEmbeddingWorkSet(builderInput.documents);
+      activeWorkSets.set(lane, workSet);
+      const build = async () => {
+        const total = workSet.totalCount;
+        builderInput.progress?.({ phase: "embedding", total, completed: 0 });
+        while (workSet.hasQueuedDocuments()) {
+          const batch = workSet.takeBatch(batchSize);
+          const encoded = await input.embedding.encode({
+            texts: batch.map((document) => document.text),
+            inputKind: "document",
+            provider: input.providerPayload
+          }, {
+            deadline: builderInput.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
+            cancellationId: builderInput.cancellationId ?? `${builderInput.vaultRoot}:embedding-build`,
+            vault: builderInput.vaultRoot,
+            onProgress: builderInput.progress
+          }, lane);
+          assertProviderIdentityMatches(encoded.provider, input.provider.identity);
+          if (encoded.vectors.length !== batch.length) {
+            throw new Error(`embedding worker returned ${encoded.vectors.length} vectors for ${batch.length} documents`);
+          }
+          workSet.completeBatch(batch, encoded.vectors);
+          builderInput.progress?.({
+            phase: "embedding",
+            total,
+            completed: workSet.completedCount,
+            current: batch[batch.length - 1]?.path,
+            message: `${workSet.completedCount} vectors`
+          });
+        }
+        return buildEmbeddingSetFromVectors({
+          provider: input.provider.identity,
+          recipe,
+          documents: workSet.completedDocuments,
+          vectors: workSet.completedVectors
+        });
+      };
+      try {
+        return await (input.embedding.withLaneScope
+          ? input.embedding.withLaneScope(lane, build)
+          : build());
+      } finally {
+        if (activeWorkSets.get(lane) === workSet) activeWorkSets.delete(lane);
+      }
     }
   };
+}
+
+function embeddingBuildLane(lane: EmbedSchedulerLane | undefined): RetrievalEmbeddingBuildLane {
+  if (lane === "save" || lane === "refresh" || lane === "rebuild") return lane;
+  return "rebuild";
+}
+
+class DocIdKeyedDocumentSet {
+  private readonly order: string[] = [];
+  private readonly byDocId = new Map<string, EmbeddingSetDocumentInput>();
+
+  constructor(documents: readonly EmbeddingSetDocumentInput[] = []) {
+    for (const document of documents) this.upsert(document);
+  }
+
+  get size(): number {
+    return this.byDocId.size;
+  }
+
+  upsert(document: EmbeddingSetDocumentInput): void {
+    if (!this.byDocId.has(document.documentId)) this.order.push(document.documentId);
+    this.byDocId.set(document.documentId, { ...document });
+  }
+
+  replace(document: EmbeddingSetDocumentInput): boolean {
+    if (!this.byDocId.has(document.documentId)) return false;
+    this.byDocId.set(document.documentId, { ...document });
+    return true;
+  }
+
+  takeBatch(limit: number): EmbeddingSetDocumentInput[] {
+    const batch: EmbeddingSetDocumentInput[] = [];
+    while (batch.length < limit && this.order.length > 0) {
+      const documentId = this.order.shift();
+      if (!documentId) continue;
+      const document = this.byDocId.get(documentId);
+      if (!document) continue;
+      this.byDocId.delete(documentId);
+      batch.push(document);
+    }
+    return batch;
+  }
+
+  has(documentId: string): boolean {
+    return this.byDocId.has(documentId);
+  }
+
+  documents(): EmbeddingSetDocumentInput[] {
+    const documents: EmbeddingSetDocumentInput[] = [];
+    for (const documentId of this.order) {
+      const document = this.byDocId.get(documentId);
+      if (document) documents.push(document);
+    }
+    return documents;
+  }
+}
+
+class DocIdKeyedEmbeddingWorkSet {
+  private readonly queued: DocIdKeyedDocumentSet;
+  private readonly inFlight = new Set<string>();
+  private readonly embedded = new Set<string>();
+  private readonly documents: EmbeddingSetDocumentInput[] = [];
+  private readonly vectors: EmbeddingVector[] = [];
+  readonly totalCount: number;
+
+  constructor(documents: readonly EmbeddingSetDocumentInput[]) {
+    this.queued = new DocIdKeyedDocumentSet(documents);
+    this.totalCount = this.queued.size;
+  }
+
+  get pendingCount(): number {
+    return this.queued.size;
+  }
+
+  get completedCount(): number {
+    return this.documents.length;
+  }
+
+  get completedDocuments(): readonly EmbeddingSetDocumentInput[] {
+    return this.documents;
+  }
+
+  get completedVectors(): readonly EmbeddingVector[] {
+    return this.vectors;
+  }
+
+  hasQueuedDocuments(): boolean {
+    return this.queued.size > 0;
+  }
+
+  takeBatch(limit: number): EmbeddingSetDocumentInput[] {
+    const batch = this.queued.takeBatch(limit);
+    for (const document of batch) this.inFlight.add(document.documentId);
+    return batch;
+  }
+
+  completeBatch(batch: readonly EmbeddingSetDocumentInput[], vectors: readonly EmbeddingVector[]): void {
+    if (batch.length !== vectors.length) {
+      throw new Error(`embedding work-set vector count ${vectors.length} does not match document count ${batch.length}`);
+    }
+    for (let index = 0; index < batch.length; index += 1) {
+      const document = batch[index];
+      const vector = vectors[index];
+      if (!document || !vector) continue;
+      this.inFlight.delete(document.documentId);
+      this.embedded.add(document.documentId);
+      this.documents.push(document);
+      this.vectors.push(vector);
+    }
+  }
+
+  replaceQueued(document: EmbeddingSetDocumentInput): boolean {
+    return this.queued.replace(document);
+  }
+
+  stateFor(documentId: string): RetrievalEmbeddingBuildFoldResult["reason"] {
+    if (this.queued.has(documentId)) return "queued";
+    if (this.inFlight.has(documentId)) return "in-flight";
+    if (this.embedded.has(documentId)) return "embedded";
+    return "not-active";
+  }
 }
 
 export function createLocalOnnxEmbeddingSetBuilder(
@@ -1747,6 +2355,27 @@ function denseDocumentsForRetrievalSource(source: RetrievalSnapshotSource): Embe
   }));
 }
 
+function backgroundEmbeddingLane(lane: EmbedSchedulerLane | undefined): RetrievalEmbeddingBuildLane | undefined {
+  if (lane === "save" || lane === "refresh" || lane === "rebuild") return lane;
+  return undefined;
+}
+
+function mergeEmbeddingDocuments(
+  base: readonly EmbeddingSetDocumentInput[],
+  replacements: readonly EmbeddingSetDocumentInput[]
+): EmbeddingSetDocumentInput[] {
+  if (replacements.length === 0) return [...base];
+  const order = base.map((document) => document.documentId);
+  const byDocId = new Map(base.map((document) => [document.documentId, document]));
+  for (const replacement of replacements) {
+    if (byDocId.has(replacement.documentId)) byDocId.set(replacement.documentId, replacement);
+  }
+  return order.flatMap((documentId) => {
+    const document = byDocId.get(documentId);
+    return document ? [document] : [];
+  });
+}
+
 function denseTextForDocument(document: PersistedDocumentRecord): string {
   const snippets = document.snippetCorpus.lines.map((line) => line.text).join("\n");
   const tags = document.tags.length > 0 ? `\n${document.tags.join(" ")}` : "";
@@ -1818,6 +2447,65 @@ function currentRetrievalIdentity(input: {
     }),
     rankingFeatureVersion: input.rankingFeatureVersion
   };
+}
+
+function denseUsabilityForLiveDocuments(
+  liveDocuments: ReadonlyMap<string, PersistedDocumentRecord>
+): DenseUsability {
+  return {
+    spaceMatch: false,
+    usableDocumentIds: new Set(),
+    pendingDocumentIds: new Set(liveDocuments.keys())
+  };
+}
+
+function denseUsabilityForRecords(
+  liveDocuments: ReadonlyMap<string, PersistedDocumentRecord>,
+  recordsByDocumentId: ReadonlyMap<string, Pick<RetrievalEmbeddingSetEnvelope["records"][number], "contentHash">>,
+  spaceMatch: boolean
+): DenseUsability {
+  const usableDocumentIds = new Set<string>();
+  const pendingDocumentIds = new Set<string>();
+  for (const document of liveDocuments.values()) {
+    const record = recordsByDocumentId.get(document.documentId);
+    if (spaceMatch && record?.contentHash === document.contentHash) {
+      usableDocumentIds.add(document.documentId);
+    } else {
+      pendingDocumentIds.add(document.documentId);
+    }
+  }
+  return { spaceMatch, usableDocumentIds, pendingDocumentIds };
+}
+
+function coldDenseSignal(pendingCount: number): DenseSignal {
+  return {
+    state: "cold",
+    pendingCount,
+    generationAgeMs: null
+  };
+}
+
+function denseSignalForUsability(input: {
+  retrieval: RetrievalSnapshotEnvelope;
+  metadata: VectorGenerationMetadata;
+  freshness: RetrievalFreshnessRecord;
+  usability: DenseUsability;
+}): DenseSignal {
+  const pendingCount = input.usability.pendingDocumentIds.size;
+  const ageMs = generationAgeMs(input.metadata);
+  if (!input.usability.spaceMatch || input.freshness.state === "building") {
+    return { state: "rebuilding", pendingCount, generationAgeMs: ageMs };
+  }
+  if (input.freshness.state === "failed" || pendingCount > 0) {
+    return { state: "stale", pendingCount, generationAgeMs: ageMs };
+  }
+  return { state: "fresh", pendingCount, generationAgeMs: ageMs };
+}
+
+function generationAgeMs(metadata: VectorGenerationMetadata): number | null {
+  const created = Date.parse(metadata.createdAt);
+  if (!Number.isFinite(created)) return null;
+  return Math.max(0, Date.now() - created);
 }
 
 function retrievalPlanIdentityFor(input: { linkGraphId: LinkGraphId; denseModel: string }): string {
@@ -2228,6 +2916,8 @@ function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshot
     typeof value.corpusSnapshotId === "string" &&
     typeof value.linkGraphId === "string" &&
     typeof value.embeddingSetId === "string" &&
+    typeof value.embeddingSpaceId === "string" &&
+    typeof value.embeddingRecipeFreshnessId === "string" &&
     typeof value.retrieverPlanIdentity === "string" &&
     typeof value.rankingFeatureVersion === "string" &&
     typeof value.canonicalManifestSha256 === "string" &&

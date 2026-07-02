@@ -8,6 +8,7 @@ import type {
   SearchIndexPruneResult,
   SearchIndexStatusResult,
   SearchIndexWarmResult,
+  RetrieveDenseSignal,
   SearchResult,
   SimilarityResult
 } from "../core/types.js";
@@ -57,14 +58,16 @@ export function renderSearch(result: SearchResult, format: OutputFormat): string
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
+  const dense = result.dense ? [formatDenseSignal(result.dense)] : [];
   if (result.status === "index-not-ready") {
-    return "Search index not ready.\n";
+    return `${["Search index not ready.", ...dense].join("\n")}\n`;
   }
   const warnings = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
   if (result.matches.length === 0) {
-    return `${warnings.length > 0 ? `${warnings.join("\n")}\n` : ""}No matches found.\n`;
+    const prefix = [...dense, ...warnings];
+    return `${prefix.length > 0 ? `${prefix.join("\n")}\n` : ""}No matches found.\n`;
   }
-  const out: string[] = [...warnings];
+  const out: string[] = [...dense, ...warnings];
   if (out.length > 0) out.push("");
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
@@ -83,11 +86,15 @@ export function renderSimilarity(result: SimilarityResult, format: OutputFormat)
   if (format === "json") {
     return `${JSON.stringify(result)}\n`;
   }
+  const dense = result.dense ? [formatDenseSignal(result.dense)] : [];
   if (result.status === "index-not-ready") {
-    return `Similarity index not ready${result.reason ? `: ${result.reason}` : ""}.\n`;
+    return `${[`Similarity index not ready${result.reason ? `: ${result.reason}` : ""}.`, ...dense].join("\n")}\n`;
   }
-  if (result.results.length === 0) return "No similar notes found.\n";
-  const out: string[] = [];
+  if (result.results.length === 0) {
+    return `${dense.length > 0 ? `${dense.join("\n")}\n` : ""}No similar notes found.\n`;
+  }
+  const out: string[] = [...dense];
+  if (out.length > 0) out.push("");
   result.results.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`score: ${formatScore(match.score)}`);
@@ -206,6 +213,11 @@ function formatBytes(bytes: number): string {
 function formatScore(score: number): string {
   if (!Number.isFinite(score)) return "0";
   return score.toFixed(6).replace(/\.?0+$/u, "");
+}
+
+function formatDenseSignal(dense: RetrieveDenseSignal): string {
+  const age = dense.generationAgeMs === null ? "null" : `${dense.generationAgeMs}ms`;
+  return `dense: state=${dense.state} pending=${dense.pendingCount} generationAge=${age}`;
 }
 
 function renderIndexProgress(progress: NonNullable<StatusResult["vaults"][number]["progress"]>): string {

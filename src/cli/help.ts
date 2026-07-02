@@ -85,13 +85,14 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "right=<path>", description: "Right note path for pair mode" },
       { name: "top-k=<n>", description: "Nearest-neighbor result cap for left mode (default: 10)" },
       { name: "min-score=<0..1>", description: "Minimum Retrieve score threshold (default: 0)" },
-      { name: "model=<id>", description: "Requested embedding model id; must match the active built retrieval generation" },
+      { name: "model=<id>", description: "Requested embedding model id; text inputs may fall back lexically, note inputs require matching stored vectors" },
       { name: "request-json=<json|@file>", description: "Structured request object using the same supported Retrieve-backed subset" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
-      "Similarity is CLI-only and is backed by the daemon Retrieve path over the active retrieval snapshot.",
-      "The retrieval snapshot must have a promoted built vector generation; otherwise the command returns index-not-ready.",
+      "Similarity is CLI-only and is backed by the daemon Retrieve path over the active lexical corpus plus optional dense generation.",
+      "mode=left left-text=... uses origin=text: when dense cannot contribute it returns lexical fallback with a dense signal instead of index-not-ready.",
+      "mode=left left=<path> and mode=pair use stored vectors; absent source vectors return soft index-not-ready/source-vector-missing and do not load the model.",
       "Only path= candidate scope is supported in Retrieve today. paths=, path-glob=, frontmatter filters, projection flags, and pair text inputs are rejected instead of ignored.",
       "Dense and link signals appear in JSON debug output when those retrievers contributed to the score."
     ]

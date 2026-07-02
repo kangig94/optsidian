@@ -43,6 +43,7 @@ import {
   desiredOwnerIdentity,
   socketPathsForOwner
 } from "../src/daemon/owner-registry.ts";
+import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
 
 const PROFILE_HASH = "retrieval-p5-profile";
 const REMOVED_STUB_NAME = ["similarity", "Unavailable", "Result"].join("");
@@ -298,18 +299,100 @@ function dot(left, right) {
   return sum;
 }
 
+function deferred() {
+  let settled = false;
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = (value) => {
+      settled = true;
+      res(value);
+    };
+    reject = (error) => {
+      settled = true;
+      rej(error);
+    };
+  });
+  return {
+    promise,
+    resolve,
+    reject,
+    get settled() {
+      return settled;
+    }
+  };
+}
+
+function createTrackingMemoryVectorFactory(options = {}) {
+  const base = createMemoryCoralNeedleInstanceFactory();
+  const calls = {
+    create: [],
+    initStore: [],
+    setActiveSpec: [],
+    upsertChunks: [],
+    buildIndex: [],
+    searchVector: [],
+    close: []
+  };
+  return {
+    calls,
+    factory: {
+      async create(input) {
+        calls.create.push({ ...input });
+        const instance = await base.create(input);
+        return {
+          instanceId: instance.instanceId,
+          role: instance.role,
+          key: instance.key,
+          generationId: instance.generationId,
+          dbPath: instance.dbPath,
+          async initStore(dbPath) {
+            calls.initStore.push({ role: input.role, generationId: input.generationId, dbPath });
+            await options.beforeInitStore?.(input, dbPath);
+            return instance.initStore(dbPath);
+          },
+          async setActiveSpec(spec) {
+            calls.setActiveSpec.push({ role: input.role, generationId: input.generationId, specId: spec.specId });
+            return instance.setActiveSpec(spec);
+          },
+          async upsertChunks(chunks) {
+            calls.upsertChunks.push({ role: input.role, generationId: input.generationId, count: chunks.length });
+            return instance.upsertChunks(chunks);
+          },
+          async buildIndex(engineName = "auto") {
+            calls.buildIndex.push({ role: input.role, generationId: input.generationId, engineName });
+            await options.beforeBuildIndex?.(input, engineName);
+            return instance.buildIndex(engineName);
+          },
+          async searchVector(vector, candidateK) {
+            calls.searchVector.push({ role: input.role, generationId: input.generationId, candidateK });
+            return instance.searchVector(vector, candidateK);
+          },
+          async close() {
+            calls.close.push({ role: input.role, generationId: input.generationId });
+            return instance.close();
+          },
+          getStats() {
+            return instance.getStats();
+          }
+        };
+      }
+    }
+  };
+}
+
 function createHarness(options = {}) {
-  const root = tempRoot();
-  const vault = path.join(root, "vault");
+  const root = options.root ?? tempRoot();
+  const vault = options.vault ?? path.join(root, "vault");
   fs.mkdirSync(vault, { recursive: true });
-  const env = {
+  const env = options.env ?? {
     ...process.env,
     XDG_CACHE_HOME: path.join(root, "cache"),
     XDG_CONFIG_HOME: path.join(root, "config")
   };
   const analyzer = testAnalyzer();
   let buildCount = 0;
-  const vector = createFakeVectorFactory(options.vectorFactoryOptions);
+  const vector = options.vector ?? createFakeVectorFactory(options.vectorFactoryOptions);
   const vectorPool = new VectorGenerationPool({ factory: vector.factory });
   const store = new DaemonSnapshotStore({
     env,
@@ -407,6 +490,19 @@ function activeRetrieval(paths) {
   return readJson(paths.retrievalActivePointerPath);
 }
 
+function resultPath(result, relPath) {
+  return result.results.find((entry) => entry.path === relPath);
+}
+
+function denseAgreementForPath(result, relPath) {
+  return resultPath(result, relPath)?.debug?.denseAgreement ?? 0;
+}
+
+function stripRetrieveDense(result) {
+  const { dense: _dense, ...rest } = result;
+  return JSON.parse(JSON.stringify(rest));
+}
+
 async function ensureActiveRetrieval(harness) {
   const ready = await harness.store.ensureActiveRetrievalSnapshot(harness.vault, context());
   assert.equal(ready.status, "ready");
@@ -475,6 +571,9 @@ test("AC5 single Retrieve powers search and similarity sugar", async () => {
   assert.equal(searchRetrieve.available, true);
   assert.equal(searchRetrieve.status, "ready");
   assert.equal(searchRetrieve.origin, "text");
+  assert.equal(searchRetrieve.dense.state, "fresh");
+  assert.equal(searchRetrieve.dense.pendingCount, 0);
+  assert.equal(typeof searchRetrieve.dense.generationAgeMs, "number");
   assert.ok(searchRetrieve.results.length > 0);
   assert.equal(searchRetrieve.results.length, searchRetrieve.matches.length);
   assert.equal(typeof searchRetrieve.results[0].path, "string");
@@ -510,11 +609,250 @@ test("public Retrieve dense path uses the active built vector generation", async
     debug: true
   }, context());
   assert.equal(result.status, "ready");
+  assert.equal(result.dense.state, "fresh");
+  assert.equal(result.dense.pendingCount, 0);
   assert.ok(harness.vector.calls.searchVector.length > beforeSearchCalls);
   const call = harness.vector.calls.searchVector.at(-1);
   assert.equal(call.role, "query");
   assert.equal(call.generationId, envelope.vector.generationId);
   assert.ok(result.results.some((entry) => (entry.debug?.denseAgreement ?? 0) > 0));
+});
+
+test("AC1 service Retrieve lazy-opens a committed dense generation after restart with single-flight concurrency", async () => {
+  const firstVector = createTrackingMemoryVectorFactory();
+  const first = await readyHarness({ vector: firstVector });
+  const { envelope } = await ensureActiveRetrieval(first);
+  await first.vectorPool.close();
+
+  const lazyOpenEntered = deferred();
+  const releaseLazyOpen = deferred();
+  let gateUsed = false;
+  const restartedVector = createTrackingMemoryVectorFactory({
+    async beforeInitStore(input) {
+      if (input.role !== "query" || input.generationId !== envelope.vector.generationId || gateUsed) return;
+      gateUsed = true;
+      lazyOpenEntered.resolve();
+      await releaseLazyOpen.promise;
+    }
+  });
+  const restarted = createHarness({
+    root: first.root,
+    vault: first.vault,
+    env: first.env,
+    vector: restartedVector
+  });
+  const restartedVectorPaths = retrievalVectorPaths(restarted, envelope.embeddingSetId);
+  const payload = {
+    vault: restarted.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    retrieval: "hybrid",
+    limit: 5,
+    debug: true
+  };
+
+  try {
+    const firstRetrieve = restarted.service.retrieve(payload, context());
+    await lazyOpenEntered.promise;
+    const secondRetrieve = restarted.service.retrieve(payload, context());
+    const thirdRetrieve = restarted.service.retrieve(payload, context());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(restarted.vectorPool.statsForTests().lazyOpens, [
+      [
+        restartedVectorPaths.key.profileHash,
+        restartedVectorPaths.key.vaultStateHash,
+        restartedVectorPaths.key.embeddingSetId,
+        envelope.vector.generationId
+      ].join(":")
+    ]);
+    assert.equal(restartedVector.calls.create.filter((call) =>
+      call.role === "query" && call.generationId === envelope.vector.generationId
+    ).length, 1);
+
+    releaseLazyOpen.resolve();
+    const results = await Promise.all([firstRetrieve, secondRetrieve, thirdRetrieve]);
+    for (const result of results) {
+      assert.equal(result.status, "ready");
+      assert.equal(result.available, true);
+      assert.equal(result.dense.state, "fresh");
+      assert.equal(result.dense.pendingCount, 0);
+      assert.equal(typeof result.dense.generationAgeMs, "number");
+      assert.match(result.retrievalSnapshotId, /^[a-f0-9]{64}$/);
+      assert.ok(result.results.length > 0);
+      assert.ok(result.results.some((entry) => (entry.debug?.denseAgreement ?? 0) > 0));
+    }
+    assert.equal(restartedVector.calls.initStore.filter((call) =>
+      call.role === "query" && call.generationId === envelope.vector.generationId
+    ).length, 1);
+  } finally {
+    if (!releaseLazyOpen.settled) releaseLazyOpen.resolve();
+    await restarted.vectorPool.close();
+  }
+});
+
+test("AC2 service Retrieve falls back lexically when committed dense metadata is corrupt", async () => {
+  const harness = await readyHarness();
+  const { envelope } = await ensureActiveRetrieval(harness);
+  const vectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
+  fs.writeFileSync(
+    path.join(vectorPaths.generationsDir, envelope.vector.generationId, "generation.json"),
+    "{ corrupt generation metadata\n"
+  );
+  const encodeBefore = harness.embedding.calls.encode;
+  const denseSearchBefore = harness.vector.calls.searchVector.length;
+
+  const result = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project",
+    query: "alpha project",
+    retrieval: "vector",
+    limit: 3,
+    debug: true
+  }, context());
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.available, true);
+  assert.ok(result.results.length > 0);
+  assert.equal(result.dense.state, "cold");
+  assert.equal(result.dense.pendingCount, 3);
+  assert.equal(result.dense.generationAgeMs, null);
+  assert.equal(result.retrievalSnapshotId, undefined);
+  assert.equal(harness.embedding.calls.encode, encodeBefore);
+  assert.equal(harness.vector.calls.searchVector.length, denseSearchBefore);
+  assert.equal(result.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+});
+
+test("AC4 dense usability applies space gate and per-doc content hash mask in hybrid and vector paths", async () => {
+  const harness = await readyHarness();
+  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
+  const vectorBuildsBefore = harness.vector.calls.buildIndex.length;
+
+  writeVaultFile(harness.vault, "Projects/Alpha.md", [
+    "---",
+    "tags: [project, alpha]",
+    "---",
+    "# Alpha",
+    "",
+    "alpha project semantic handle edited"
+  ].join("\n"));
+  writeVaultFile(harness.vault, "Projects/Delta.md", "# Delta\n\nalpha project semantic delta\n");
+
+  const hybrid = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 10,
+    debug: true
+  }, context());
+  assert.equal(hybrid.status, "ready");
+  assert.equal(hybrid.dense.state, "stale");
+  assert.equal(hybrid.dense.pendingCount, 2);
+  assert.equal(typeof hybrid.dense.generationAgeMs, "number");
+  assert.ok(resultPath(hybrid, "Projects/Alpha.md"));
+  assert.ok(resultPath(hybrid, "Projects/Beta.md"));
+  assert.ok(resultPath(hybrid, "Projects/Delta.md"));
+  assert.equal(denseAgreementForPath(hybrid, "Projects/Alpha.md"), 0);
+  assert.ok(denseAgreementForPath(hybrid, "Projects/Beta.md") > 0);
+  assert.equal(denseAgreementForPath(hybrid, "Projects/Delta.md"), 0);
+  assert.deepEqual(activeRetrieval(paths), active);
+  assert.equal(harness.vector.calls.buildIndex.length, vectorBuildsBefore);
+
+  const vector = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    retrieval: "vector",
+    limit: 10,
+    debug: true
+  }, context());
+  assert.equal(vector.status, "ready");
+  assert.equal(vector.dense.state, "stale");
+  assert.equal(vector.dense.pendingCount, 2);
+  assert.ok(resultPath(vector, "Projects/Beta.md"));
+  assert.equal(resultPath(vector, "Projects/Alpha.md"), undefined);
+  assert.equal(resultPath(vector, "Projects/Delta.md"), undefined);
+
+  writeVaultFile(harness.vault, "Projects/Beta.md", [
+    "---",
+    "tags: [project, beta]",
+    "---",
+    "# Beta",
+    "",
+    "alpha project semantic neighbor edited"
+  ].join("\n"));
+  const searchCallsBeforeAllMasked = harness.vector.calls.searchVector.length;
+  const allMaskedVector = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    retrieval: "vector",
+    path: "Projects",
+    limit: 10,
+    debug: true
+  }, context());
+  assert.equal(allMaskedVector.status, "ready");
+  assert.equal(allMaskedVector.available, true);
+  assert.equal(allMaskedVector.dense.state, "stale");
+  assert.equal(allMaskedVector.dense.pendingCount, 3);
+  assert.ok(harness.vector.calls.searchVector.length > searchCallsBeforeAllMasked);
+  assert.ok(resultPath(allMaskedVector, "Projects/Alpha.md"));
+  assert.ok(resultPath(allMaskedVector, "Projects/Beta.md"));
+  assert.ok(resultPath(allMaskedVector, "Projects/Delta.md"));
+  assert.equal(allMaskedVector.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+
+  const vectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
+  const mismatchedSpace = "space-mismatch-test";
+  const retrievalFile = path.join(paths.retrievalsDir, envelope.retrievalSnapshotId);
+  writeJson(retrievalFile, {
+    ...readJson(retrievalFile),
+    embeddingSpaceId: mismatchedSpace
+  });
+  const generationFile = path.join(vectorPaths.generationsDir, envelope.vector.generationId, "generation.json");
+  writeJson(generationFile, {
+    ...readJson(generationFile),
+    embeddingSpaceId: mismatchedSpace
+  });
+  const encodeBeforeMismatch = harness.embedding.calls.encode;
+
+  const hybridMismatch = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 10,
+    debug: true
+  }, context());
+  assert.equal(hybridMismatch.status, "ready");
+  assert.equal(hybridMismatch.dense.state, "rebuilding");
+  assert.equal(hybridMismatch.dense.pendingCount, 4);
+  assert.equal(typeof hybridMismatch.dense.generationAgeMs, "number");
+  assert.ok(hybridMismatch.results.length > 0);
+  assert.equal(hybridMismatch.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+
+  const vectorMismatch = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    retrieval: "vector",
+    limit: 10,
+    debug: true
+  }, context());
+  assert.equal(vectorMismatch.status, "ready");
+  assert.equal(vectorMismatch.dense.state, "rebuilding");
+  assert.equal(vectorMismatch.dense.pendingCount, 4);
+  assert.ok(resultPath(vectorMismatch, "Projects/Alpha.md"));
+  assert.ok(resultPath(vectorMismatch, "Projects/Beta.md"));
+  assert.ok(resultPath(vectorMismatch, "Projects/Delta.md"));
+  assert.equal(vectorMismatch.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+  assert.equal(harness.embedding.calls.encode, encodeBeforeMismatch);
+  assert.equal(vectorMismatch.retrievalSnapshotId, undefined);
 });
 
 test("Retrieve origin=note uses the stored vector without loading the model", async () => {
@@ -534,7 +872,107 @@ test("Retrieve origin=note uses the stored vector without loading the model", as
   assert.equal(result.results.some((entry) => entry.path === "Projects/Alpha.md"), false);
 });
 
-test("Retrieve origin=pair uses stored note vectors and encodes only raw-text sides", async () => {
+test("AC8 dense freshness signal is public and never affects scored ranking", async () => {
+  const harness = await readyHarness();
+  await ensureActiveRetrieval(harness);
+
+  const fresh = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 5,
+    debug: true
+  }, context());
+  assert.equal(fresh.status, "ready");
+  assert.equal(fresh.dense.state, "fresh");
+  assert.equal(fresh.dense.pendingCount, 0);
+  assert.equal(typeof fresh.dense.generationAgeMs, "number");
+
+  const originalAttach = harness.store.tryAttachDenseGeneration.bind(harness.store);
+  harness.store.tryAttachDenseGeneration = async (readContext, desiredEmbeddingSpace) => {
+    const attached = await originalAttach(readContext, desiredEmbeddingSpace);
+    readContext.denseSignal = {
+      state: "rebuilding",
+      pendingCount: 999,
+      generationAgeMs: null
+    };
+    return { ...attached, signal: readContext.denseSignal };
+  };
+  const signalPerturbed = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 5,
+    debug: true
+  }, context());
+  assert.equal(signalPerturbed.status, "ready");
+  assert.equal(signalPerturbed.dense.state, "rebuilding");
+  assert.deepEqual(stripRetrieveDense(signalPerturbed), stripRetrieveDense(fresh));
+  harness.store.tryAttachDenseGeneration = originalAttach;
+
+  const cold = createHarness();
+  writeSampleVault(cold.vault);
+  const coldResult = await cold.service.retrieve({
+    vault: cold.vault,
+    origin: "text",
+    text: "alpha project",
+    query: "alpha project",
+    limit: 3
+  }, context());
+  assert.equal(coldResult.status, "ready");
+  assert.equal(coldResult.dense.state, "cold");
+  assert.equal(coldResult.dense.pendingCount, 3);
+  assert.equal(coldResult.dense.generationAgeMs, null);
+
+  const building = await readyHarness();
+  const buildingRetrieval = await ensureActiveRetrieval(building);
+  writeVaultFile(building.vault, "Projects/Alpha.md", [
+    "---",
+    "tags: [project, alpha]",
+    "---",
+    "# Alpha",
+    "",
+    "alpha project semantic handle edited while building"
+  ].join("\n"));
+  await new RetrievalFreshnessStore({
+    paths: retrievalVectorPaths(building, buildingRetrieval.envelope.embeddingSetId)
+  }).markBuilding(buildingRetrieval.envelope.corpusSnapshotId);
+  const rebuildingResult = await building.service.retrieve({
+    vault: building.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 5,
+    debug: true
+  }, context());
+  assert.equal(rebuildingResult.status, "ready");
+  assert.equal(rebuildingResult.dense.state, "rebuilding");
+  assert.equal(rebuildingResult.dense.pendingCount, 1);
+  assert.notEqual(rebuildingResult.dense.state, "stale");
+
+  const failed = await readyHarness();
+  const failedRetrieval = await ensureActiveRetrieval(failed);
+  writeVaultFile(failed.vault, "Projects/Delta.md", "# Delta\n\nalpha project failed pending source\n");
+  await new RetrievalFreshnessStore({
+    paths: retrievalVectorPaths(failed, failedRetrieval.envelope.embeddingSetId)
+  }).markFailed(failedRetrieval.envelope.corpusSnapshotId, new Error("stuck build"));
+  const failedResult = await failed.service.retrieve({
+    vault: failed.vault,
+    origin: "text",
+    text: "alpha project",
+    query: "alpha project",
+    limit: 5,
+    debug: true
+  }, context());
+  assert.equal(failedResult.status, "ready");
+  assert.equal(failedResult.dense.state, "stale");
+  assert.equal(failedResult.dense.pendingCount, 1);
+  assert.notEqual(failedResult.dense.state, "fresh");
+});
+
+test("Retrieve origin=pair uses stored note vectors and does not encode raw-text sides", async () => {
   const harness = await readyHarness();
   await ensureActiveRetrieval(harness);
   assert.equal(harness.embedding.calls.encode, 0);
@@ -548,15 +986,61 @@ test("Retrieve origin=pair uses stored note vectors and encodes only raw-text si
   assert.equal(notePair.status, "ready");
   assert.equal(harness.embedding.calls.encode, 0);
 
-  const rawPair = await harness.service.retrieve({
+  await assert.rejects(
+    () => harness.service.retrieve({
+      vault: harness.vault,
+      origin: "pair",
+      left: { text: "raw alpha text" },
+      right: { path: "Projects/Beta.md" },
+      topK: 1
+    }, context()),
+    (error) => error.code === "BAD_REQUEST" && /origin=pair accepts note-path sides only/.test(error.message)
+  );
+  assert.equal(harness.embedding.calls.encode, 0);
+});
+
+test("AC9 note, pair, and global origins require stored vectors without model encode", async () => {
+  const harness = await readyHarness();
+  await ensureActiveRetrieval(harness);
+  assert.equal(harness.embedding.calls.encode, 0);
+
+  writeVaultFile(harness.vault, "Projects/Delta.md", "# Delta\n\nalpha project unembedded source\n");
+  const noteMissing = await harness.service.retrieve({
     vault: harness.vault,
-    origin: "pair",
-    left: { text: "raw alpha text" },
-    right: { path: "Projects/Beta.md" },
-    topK: 1
+    origin: "note",
+    sourcePath: "Projects/Delta.md",
+    limit: 2
   }, context());
-  assert.equal(rawPair.status, "ready");
-  assert.equal(harness.embedding.calls.encode, 1);
+  assert.equal(noteMissing.status, "index-not-ready");
+  assert.equal(noteMissing.available, false);
+  assert.equal(noteMissing.reason, "source-vector-missing");
+  assert.equal(noteMissing.dense.state, "stale");
+  assert.equal(noteMissing.dense.pendingCount, 1);
+  assert.equal(harness.embedding.calls.encode, 0);
+
+  const globalStored = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "global",
+    sourcePath: "Projects/Alpha.md",
+    limit: 2,
+    debug: true
+  }, context());
+  assert.equal(globalStored.status, "ready");
+  assert.equal(globalStored.dense.state, "stale");
+  assert.equal(globalStored.dense.pendingCount, 1);
+  assert.equal(harness.embedding.calls.encode, 0);
+  assert.ok(harness.vector.calls.searchVector.length > 0);
+
+  const globalMissing = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "global",
+    limit: 2
+  }, context());
+  assert.equal(globalMissing.status, "index-not-ready");
+  assert.equal(globalMissing.reason, "source-vector-missing");
+  assert.equal(globalMissing.dense.state, "stale");
+  assert.equal(globalMissing.dense.pendingCount, 1);
+  assert.equal(harness.embedding.calls.encode, 0);
 });
 
 test("Retrieve origin=text reuses lifecycle cold-load and unload closes the model session", async () => {
@@ -583,7 +1067,7 @@ test("AC8 query capability rejects mutators at type and runtime boundaries", asy
   const typeTestPath = path.join(process.cwd(), "test", ".retrieval-substrate-p5-negative.ts");
   const source = `
 import { createQueryServer, type QueryMethodRegistry } from "../src/daemon/server.ts";
-import type { QueryDaemonMethod, QueryDaemonRequest } from "../src/daemon/protocol.ts";
+import { SEARCH_DAEMON_PROTOCOL_VERSION, type QueryDaemonMethod, type QueryDaemonRequest } from "../src/daemon/protocol.ts";
 const runtime = {};
 const handler = async () => ({ ok: true });
 const readRegistry: QueryMethodRegistry<typeof runtime> = { Retrieve: handler };
@@ -618,19 +1102,19 @@ const badNamePrune: QueryDaemonMethod = "Prune";
 const badNameShutdown: QueryDaemonMethod = "Shutdown";
 void [badNameLoadVault, badNameRebuild, badNameRefresh, badNameCompact, badNameClear, badNamePrune, badNameShutdown];
 // @ts-expect-error query capability cannot request LoadVault
-const badRequestLoadVault: QueryDaemonRequest = { protocolVersion: 2, requestId: "1", method: "LoadVault", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
+const badRequestLoadVault: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "1", method: "LoadVault", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
 // @ts-expect-error query capability cannot request Rebuild
-const badRequestRebuild: QueryDaemonRequest = { protocolVersion: 2, requestId: "2", method: "Rebuild", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
+const badRequestRebuild: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "2", method: "Rebuild", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
 // @ts-expect-error query capability cannot request Refresh
-const badRequestRefresh: QueryDaemonRequest = { protocolVersion: 2, requestId: "3", method: "Refresh", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
+const badRequestRefresh: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "3", method: "Refresh", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
 // @ts-expect-error query capability cannot request Compact
-const badRequestCompact: QueryDaemonRequest = { protocolVersion: 2, requestId: "4", method: "Compact", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
+const badRequestCompact: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "4", method: "Compact", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
 // @ts-expect-error query capability cannot request Clear
-const badRequestClear: QueryDaemonRequest = { protocolVersion: 2, requestId: "5", method: "Clear", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
+const badRequestClear: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "5", method: "Clear", deadline: Date.now() + 1000, payload: { vault: "/tmp" } };
 // @ts-expect-error query capability cannot request Prune
-const badRequestPrune: QueryDaemonRequest = { protocolVersion: 2, requestId: "6", method: "Prune", deadline: Date.now() + 1000, payload: {} };
+const badRequestPrune: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "6", method: "Prune", deadline: Date.now() + 1000, payload: {} };
 // @ts-expect-error query capability cannot request Shutdown
-const badRequestShutdown: QueryDaemonRequest = { protocolVersion: 2, requestId: "7", method: "Shutdown", deadline: Date.now() + 1000, payload: { nonce: "x" } };
+const badRequestShutdown: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "7", method: "Shutdown", deadline: Date.now() + 1000, payload: { nonce: "x" } };
 void [badRequestLoadVault, badRequestRebuild, badRequestRefresh, badRequestCompact, badRequestClear, badRequestPrune, badRequestShutdown];
 `;
   fs.writeFileSync(typeTestPath, source);
@@ -771,34 +1255,60 @@ test("AC9 service Retrieve release is refcount-only and performs no cache file m
   }
 });
 
-test("AC9 Retrieve lazily prepares retrieval while low-level readiness gates fail closed before model encode", async () => {
+test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication or freshness gating", async () => {
   const absent = createHarness();
   writeSampleVault(absent.vault);
   const absentPin = await absent.store.tryPinActiveRetrievalSnapshot(absent.vault);
   assert.deepEqual(absentPin, { status: "index-not-ready", reason: "no-active-retrieval-snapshot" });
   assert.equal(absent.embedding.calls.encode, 0);
   assert.equal(absent.buildCount(), 0);
+  const absentPaths = searchStoreCachePaths(absent.vault, absent.env);
 
   const absentResult = await absent.service.retrieve({
     vault: absent.vault,
     origin: "text",
-    text: "alpha project"
+    text: "alpha project",
+    query: "alpha project",
+    limit: 3
   }, context());
   assert.equal(absentResult.status, "ready");
-  assert.ok(absent.embedding.calls.encode > 0);
+  assert.equal(absentResult.available, true);
+  assert.ok(absentResult.results.length > 0);
+  assert.equal(absent.embedding.calls.encode, 0);
   assert.equal(absent.buildCount(), 1);
+  assert.equal(fs.existsSync(absentPaths.retrievalActivePointerPath), false);
+  assert.equal(absentResult.retrievalSnapshotId, undefined);
 
-  await assertNotReadyAfter("retrieval-state-dirty", async (harness, envelope) => {
+  const absentVectorResult = await absent.service.retrieve({
+    vault: absent.vault,
+    origin: "text",
+    text: "alpha project",
+    query: "alpha project",
+    retrieval: "vector",
+    limit: 3
+  }, context());
+  assert.equal(absentVectorResult.status, "ready");
+  assert.equal(absentVectorResult.available, true);
+  assert.ok(absentVectorResult.results.length > 0);
+  assert.equal(absent.embedding.calls.encode, 0);
+  assert.equal(fs.existsSync(absentPaths.retrievalActivePointerPath), false);
+
+  await assertLexicalReadyAfterFreshnessChange("dirty", async (harness, envelope) => {
     await new RetrievalFreshnessStore({
       paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
     }).markDirty(envelope.corpusSnapshotId);
   });
-  await assertNotReadyAfter("retrieval-state-failed", async (harness, envelope) => {
+  await assertLexicalReadyAfterFreshnessChange("building", async (harness, envelope) => {
+    await new RetrievalFreshnessStore({
+      paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
+    }).markBuilding(envelope.corpusSnapshotId);
+  });
+  await assertLexicalReadyAfterFreshnessChange("failed", async (harness, envelope) => {
     await new RetrievalFreshnessStore({
       paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
     }).markFailed(envelope.corpusSnapshotId, new Error("boom"));
   });
-  await assertNotReadyAfter("retrieval-state-stale", async (harness, envelope) => {
+  await assertLexicalReadyAfterFreshnessChange("stale", async (harness, envelope) => {
     await new RetrievalFreshnessStore({
       paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
     }).markFresh({
@@ -810,6 +1320,7 @@ test("AC9 Retrieve lazily prepares retrieval while low-level readiness gates fai
       vectorGenerationId: envelope.vector.generationId
     });
   });
+
   await assertNotReadyAfter("retrieval-snapshot-mismatched", async (harness, envelope, paths) => {
     const pointer = activeRetrieval(paths);
     writeJson(paths.retrievalActivePointerPath, {
@@ -838,7 +1349,7 @@ test("AC9 Retrieve lazily prepares retrieval while low-level readiness gates fai
   });
 });
 
-test("active retrieval pin is refused after current fusion identity changes", async () => {
+test("active retrieval pin accepts self-consistent committed generation after current fusion identity changes", async () => {
   const harness = await readyHarness();
   const { paths, active, envelope } = await ensureActiveRetrieval(harness);
   const staleRetrieverPlanIdentity = `${envelope.retrieverPlanIdentity}:stale-fusion`;
@@ -871,8 +1382,9 @@ test("active retrieval pin is refused after current fusion identity changes", as
   });
 
   const result = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
-  assert.equal(result.status, "index-not-ready");
-  assert.equal(result.reason, "retrieval-snapshot-mismatched");
+  assert.equal(result.status, "ready");
+  assert.equal(result.pin.retrievalSnapshotId, staleRetrievalSnapshotId);
+  harness.store.release(result.pin);
   assert.equal(harness.embedding.calls.encode, 0);
 });
 
@@ -1139,6 +1651,35 @@ async function assertNotReadyAfter(expectedReason, mutate) {
   assert.equal(result.reason, expectedReason);
   assert.equal(harness.embedding.calls.encode, 0);
   assert.equal(harness.buildCount(), buildsBefore);
+}
+
+async function assertLexicalReadyAfterFreshnessChange(label, mutate, options = {}) {
+  const harness = await readyHarness();
+  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
+  const buildsBefore = harness.buildCount();
+  const encodeBefore = harness.embedding.calls.encode;
+  const vectorBuildBefore = harness.vector.calls.buildIndex.length;
+  await mutate(harness, envelope, paths);
+
+  const pin = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
+  assert.equal(pin.status, "ready", label);
+  harness.store.release(pin.pin);
+
+  const result = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project",
+    query: "alpha project",
+    limit: 3,
+    debug: true
+  }, context());
+  assert.equal(result.status, "ready", label);
+  assert.equal(result.available, true, label);
+  assert.ok(result.results.length > 0, label);
+  assert.deepEqual(activeRetrieval(paths), active, label);
+  assert.equal(harness.buildCount(), buildsBefore, label);
+  assert.equal(harness.vector.calls.buildIndex.length, vectorBuildBefore, label);
+  if (options.expectNoEncode) assert.equal(harness.embedding.calls.encode, encodeBefore, label);
 }
 
 function embeddingModel(id, dim = 3) {

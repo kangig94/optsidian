@@ -164,11 +164,20 @@ export type SearchResult = {
   matches: SearchMatch[];
   snapshotId?: string;
   retrievalSnapshotId?: string;
+  dense?: RetrieveDenseSignal;
   debug?: SearchDebugInfo;
   warnings?: string[];
 };
 
 export type RetrieveOrigin = "text" | "note" | "pair" | "global";
+
+export type RetrieveDenseSignalState = "fresh" | "stale" | "rebuilding" | "cold";
+
+export type RetrieveDenseSignal = {
+  state: RetrieveDenseSignalState;
+  pendingCount: number;
+  generationAgeMs: number | null;
+};
 
 export type RetrieveRankedResult = {
   path: string;
@@ -187,7 +196,8 @@ export type RetrieveReadyResult = {
   status: "ready";
   origin: RetrieveOrigin;
   snapshotId: string;
-  retrievalSnapshotId: string;
+  retrievalSnapshotId?: string;
+  dense: RetrieveDenseSignal;
   matches: SearchMatch[];
   results: RetrieveRankedResult[];
   debug?: SearchDebugInfo;
@@ -203,6 +213,7 @@ export type RetrieveIndexNotReadyResult = {
   status: "index-not-ready";
   origin: RetrieveOrigin;
   reason: string;
+  dense: RetrieveDenseSignal;
   matches: [];
   results: [];
   warnings?: string[];
@@ -300,6 +311,7 @@ export type SimilarityResult = {
   request: NormalizedSimilarityParams;
   snapshotId?: string;
   retrievalSnapshotId?: string;
+  dense?: RetrieveDenseSignal;
   results: SimilarityPairResult[];
   matches: SearchMatch[];
   reason?: string;
