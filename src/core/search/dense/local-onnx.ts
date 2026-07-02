@@ -148,6 +148,12 @@ export class LocalOnnxProvider implements EmbeddingProvider {
     const attempt = this.sessionAttempt;
     this.sessionAttempt = undefined;
     if (attempt && this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
+    // Await the in-flight load attempt's settlement AFTER detaching ownership. A superseded attempt
+    // closes its own produced session asynchronously (the Attempt `close` callback); if close()
+    // returned before that ran, a caller sequencing teardown/exit after close() could observe a
+    // use-after-close as the abandoned session releases in the background. Reading the active
+    // selection after the await also captures any session that installed before we detached.
+    if (attempt) await attempt.result.catch(() => undefined);
     const selection = this.activeSessionSelection;
     this.activeSessionSelection = undefined;
     this.selectedExecutionProvider = undefined;

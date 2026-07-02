@@ -6,6 +6,7 @@ import {
   createProcessToken,
   defaultProcessStartIdentityProvider,
   isAlive as defaultIsAlive,
+  processStartIdIsAuthoritative,
   processTokenEquals,
   type ProcessStartIdentityProvider,
   type ProcessToken
@@ -111,15 +112,30 @@ export function reclaimExclusiveClaim(claimDir: string, options: ExclusiveClaimR
   const owner = readExclusiveClaimOwner(claimDir);
   if (owner) {
     const alive = (options.isAlive ?? defaultIsAlive)(owner.token);
-    if (alive) return false;
-    removeClaimDir(claimDir);
-    return true;
+    // A live holder is protected ONLY when its start-id is authoritative (proves this is the same
+    // process, not a pid-reuse impostor). If the holder merely appears alive under an unverified
+    // start-id (non-Linux), liveness is unprovable — fall through to the wall-clock TTL backstop so
+    // a dead, pid-reused holder can still be reclaimed instead of deadlocking the claim forever.
+    if (alive && processStartIdIsAuthoritative(owner.token.startId)) return false;
+    if (!alive) {
+      removeClaimDir(claimDir);
+      return true;
+    }
+    return reclaimByTtl(claimDir, now, options.backstopTtlMs);
   }
 
   if (!fs.existsSync(claimDir)) return false;
-  const backstopTtlMs = options.backstopTtlMs ?? 60_000;
+  return reclaimByTtl(claimDir, now, options.backstopTtlMs);
+}
+
+function reclaimByTtl(claimDir: string, now: () => number, backstopTtlMs = 60_000): boolean {
   if (!Number.isFinite(backstopTtlMs)) return false;
-  const stat = fs.statSync(claimDir);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(claimDir);
+  } catch {
+    return false;
+  }
   if (now() - stat.mtimeMs < backstopTtlMs) return false;
   removeClaimDir(claimDir);
   return true;

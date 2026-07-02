@@ -276,13 +276,17 @@ export class VectorGenerationPool {
     const activePin = this.acquireActive(key);
     if (activePin) {
       if (
-        activePin.handle.generationId !== input.expectedGenerationId ||
-        !embeddingSpecEqual(activePin.handle.spec, input.expectedSpec)
+        activePin.handle.generationId === input.expectedGenerationId &&
+        embeddingSpecEqual(activePin.handle.spec, input.expectedSpec)
       ) {
-        this.release(activePin);
-        return { status: "index-not-ready", reason: "active-generation-mismatched" };
+        return { status: "ready", lease: this.leaseFromPin(activePin) };
       }
-      return { status: "ready", lease: this.leaseFromPin(activePin) };
+      // The single active slot holds a different generation than the edition names. Do not reject:
+      // the requested generation may be a committed, on-disk generation this pool simply has not
+      // cached as active (a reader legitimately pinning an edition whose dense generation differs
+      // from the currently-active one). Release the active pin and fall through to lazy-open the
+      // exact expected generation as its own handle.
+      this.release(activePin);
     }
 
     try {

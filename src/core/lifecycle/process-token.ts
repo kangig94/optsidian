@@ -13,11 +13,25 @@ export type IsAliveOptions = {
   startIdentityProvider?: ProcessStartIdentityProvider;
 };
 
+// A start-id carrying this prefix could not be tied to a real process start time, so it cannot
+// distinguish an original process from a later process that reused the same pid. `isAlive` still
+// works for the original holder, but reclaim logic must NOT treat such a token as proof of liveness
+// (see `processStartIdIsAuthoritative` / `reclaimExclusiveClaim`) — it falls through to the TTL
+// backstop instead, so a dead-but-pid-reused holder can never permanently deadlock a claim.
+export const UNVERIFIED_START_ID_PREFIX = "unverified:";
+
+export function processStartIdIsAuthoritative(startId: string): boolean {
+  return !startId.startsWith(UNVERIFIED_START_ID_PREFIX);
+}
+
 export const defaultProcessStartIdentityProvider: ProcessStartIdentityProvider = {
   readStartId(pid: number): string | undefined {
     assertValidPid(pid);
-    if (process.platform === "linux") return readLinuxProcStartTime(pid);
-    return `portable-unknown:${pid}`;
+    // Linux exposes an authoritative per-process start time via /proc; other platforms have no cheap
+    // native-free equivalent, so we emit an explicitly-unverified sentinel and let the claim TTL
+    // backstop guard pid reuse there.
+    if (process.platform === "linux") return readLinuxProcStartTime(pid) ?? `${UNVERIFIED_START_ID_PREFIX}${pid}`;
+    return `${UNVERIFIED_START_ID_PREFIX}${pid}`;
   }
 };
 
