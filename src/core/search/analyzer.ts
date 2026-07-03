@@ -3,7 +3,7 @@ import { UsageError } from "../../errors.js";
 import { ANALYZER_VERSION } from "./constants.js";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../kiwi/artifact.js";
 import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from "../kiwi/manager.js";
-import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
+import type { OptsidianSettings } from "../settings.js";
 import type { SearchAnalyzerRuntimeStatus } from "../types.js";
 
 export type SearchEmbeddingModelIdentity = {
@@ -549,7 +549,6 @@ function createKiwiAnalyzer(
   const normalizedDeclared = normalizeDeclaredSearchAnalyzers(declaredAnalyzers);
   const manager = getKiwiAnalyzerManager();
   const identity = kiwiRouterIdentity(normalizedDeclared, normalizedDeclared.includes("ko") ? ["ko"] : [], runtime);
-  let targetAnalyzer: SearchAnalyzer;
   const createLeasedAnalyzer = (activeAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi: { tokens(text: string): string[] } | null): SearchAnalyzer => {
     const active = normalizeDeclaredSearchAnalyzers(activeAnalyzers);
     if (!active.includes("ko")) {
@@ -567,7 +566,7 @@ function createKiwiAnalyzer(
     };
   };
 
-  targetAnalyzer = {
+  const targetAnalyzer: SearchAnalyzer = {
     identity,
     degradedAnalyzer,
     isTerminalLoadError: (error) => manager.isTerminalLoadError(error),

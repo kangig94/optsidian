@@ -27,7 +27,7 @@ import {
 } from "../search-execution.js";
 import type { AnalyzerWorkerPool, EmbeddingWorkerPool, SearchExecutionPreloadOptions, SearchExecutionWorkerPool } from "../pools.js";
 import {
-  DaemonSnapshotStore,
+  type DaemonSnapshotStore,
   type DenseSignal,
   type DenseGenerationPin,
   type PinnedRetrievalReadContext,
@@ -354,8 +354,6 @@ export class DaemonSearchStoreService {
   }
 
   private async executeSearch(payload: SearchRequestPayload, context: DaemonRequestContext, explain: boolean) {
-    const search = normalizeSearchParams(payload);
-    const pathFilter = search.path ? resolvePathFilter(payload.vault, search.path) : undefined;
     const pin = await this.store.pin(payload.vault, payload.snapshotId, snapshotContext(context));
     try {
       return await this.executeSearchWithPin(payload, context, explain, pin);

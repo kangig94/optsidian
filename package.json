@@ -12,6 +12,8 @@
     "docs"
   ],
   "scripts": {
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-bundle.mjs",
     "search:eval:ir-vault": "node scripts/generate-search-eval-ir-dataset.mjs",
@@ -19,16 +21,20 @@
     "retrieval:tune": "node scripts/retrieval-tuning-fixture.mjs",
     "package:release": "node scripts/package-release.mjs",
     "test:slow": "node --import tsx --test test/*.slow.mjs",
-    "test": "npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
+    "test": "npm run lint && npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=24.15.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.0.0",
     "esbuild": "^0.28.0",
+    "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
     "tsx": "^4.22.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.62.1"
   },
   "dependencies": {
     "@huggingface/tokenizers": "^0.1.3",

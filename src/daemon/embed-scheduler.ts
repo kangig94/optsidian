@@ -213,7 +213,9 @@ export class EmbedScheduler {
         cancellationId: "embed-scheduler-close",
         requestId: "embed-scheduler-close"
       });
-    } catch {}
+    } catch {
+      // Best-effort unload during close; owned resources are closed below.
+    }
     if (this.ownsEmbedding) {
       await this.embedding.close();
     }

@@ -10,6 +10,7 @@ import type {
 } from "../core/types.js";
 import type { ExplainTrace } from "../core/search/contracts.js";
 import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { SearchTextAnalysis, SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
 import type { EmbeddingInputKind, EmbeddingVector } from "../core/search/dense/index.js";
 import type { LocalOnnxModelKey, OnnxExecutionProviderPreference } from "../core/search/dense/index.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
@@ -112,12 +113,12 @@ export type WorkerWarmupResult = {
 
 export type AnalyzeQueryWorkerPayload = {
   rawQuery: string;
-  options?: import("../core/search/analysis/index.js").SearchTextAnalysisOptions;
+  options?: SearchTextAnalysisOptions;
 };
 
 export type AnalyzeQueryWorkerResult = {
   analyzerIdentity: SearchAnalyzerIdentity;
-  analysis: import("../core/search/analysis/index.js").SearchTextAnalysis;
+  analysis: SearchTextAnalysis;
 };
 
 export type TokenizeBatchWorkerPayload = {

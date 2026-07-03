@@ -122,7 +122,7 @@ import {
   loadVectorGenerationMetadata,
   storeVectorGenerationMetadata,
   vectorGenerationDbPath,
-  VectorGenerationPool,
+  type VectorGenerationPool,
   vectorGenerationManifestHash,
   vectorStoreCachePaths,
   vectorStoreId,
@@ -2025,7 +2025,9 @@ export class DaemonSnapshotStore implements SnapshotStore {
         try {
           await fs.promises.rm(vectorPaths.rootDir, { recursive: true, force: true });
           removedStoreIds.push(vectorStoreId(vectorPaths));
-        } catch {}
+        } catch {
+          // Best-effort GC; the catalog only records removal after the directory is gone.
+        }
       }
     }
     if (removedStoreIds.length > 0) {
@@ -3080,7 +3082,9 @@ async function rmBestEffort(target: string, options: { recursive?: boolean; forc
   // abort the whole mark-sweep pass and stall the vault's GC. Undeleted entries retry next pass.
   try {
     await fs.promises.rm(target, options);
-  } catch {}
+  } catch {
+    // Best-effort deletion; leftovers are retried by later GC passes.
+  }
 }
 
 async function retainedSnapshotFilesAsync(dirPath: string, count: number): Promise<string[]> {
@@ -3092,7 +3096,9 @@ async function retainedSnapshotFilesAsync(dirPath: string, count: number): Promi
     let mtimeMs = 0;
     try {
       mtimeMs = (await fs.promises.stat(path.join(dirPath, name))).mtimeMs;
-    } catch {}
+    } catch {
+      // Missing or unreadable files sort oldest and are eligible for GC.
+    }
     return { name, mtimeMs };
   }));
   return withMtime

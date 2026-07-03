@@ -208,5 +208,5 @@ function cleanedLabel(value: string): string {
 }
 
 function unescapeLinkEscapes(value: string): string {
-  return value.replace(/\\([\\[\]()<>\|#!"'])/gu, "$1");
+  return value.replace(/\\([\\[\]()<>|#!"'])/gu, "$1");
 }

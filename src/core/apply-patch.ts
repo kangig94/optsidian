@@ -265,7 +265,7 @@ function applyChunks(text: string, label: string, chunks: UpdateChunk[]): string
     lineIndex = found + pattern.length;
   }
 
-  let lines = [...original];
+  const lines = [...original];
   for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
     lines.splice(replacement.start, replacement.oldLength, ...replacement.newLines);
   }

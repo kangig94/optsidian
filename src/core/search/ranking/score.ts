@@ -14,8 +14,6 @@ import {
   SEARCH_TOKEN_CHANNELS,
   type SearchTokenChannel,
 } from "../analysis/index.js";
-import { identityScoreFromExactPriority } from "./identity.js";
-
 export { identityScoreFromExactPriority } from "./identity.js";
 
 export type RankDocument = {

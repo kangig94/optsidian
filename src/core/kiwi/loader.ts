@@ -180,7 +180,7 @@ async function readLoadableModelFiles(env: NodeJS.ProcessEnv, repairIfInvalid: b
   } catch (error) {
     if (!repairIfInvalid) throw new Error("Kiwi model artifact is not installed", { cause: error });
     const installed = await ensureKiwiModelArtifact(env, { forceInstall: true });
-    if (installed.status === "error") throw new Error(installed.message);
+    if (installed.status === "error") throw new Error(installed.message, { cause: error });
     return readVerifiedKiwiModelFiles(env);
   }
 }

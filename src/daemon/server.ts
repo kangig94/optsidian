@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { ensurePrivateDirSync } from "../core/private-path.js";
-import { createProcessToken, type ProcessToken } from "../core/lifecycle/process-token.js";
+import { createProcessToken } from "../core/lifecycle/process-token.js";
 import {
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type ControlDaemonRequest,
@@ -513,22 +513,34 @@ class SearchDaemon {
     this.wakeReadyWaiters();
     try {
       await this.rpcServer.relinquish();
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     try {
       removeSocketPath(this.owner.socketPath);
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     try {
       this.registry.removeOwner(this.owner);
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     try {
       await this.rpcServer.drain();
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     try {
       await this.profiles.close();
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     try {
       await this.embedScheduler.close();
-    } catch {}
+    } catch {
+      // Best-effort shutdown step.
+    }
     this.resolveShutdown();
   }
 
@@ -699,7 +711,9 @@ function logSearchDaemonProcessError(kind: string, error: unknown): void {
   const message = error instanceof Error && error.stack ? error.stack : errorMessage(error);
   try {
     process.stderr.write(`[optsidian search daemon] ${kind}: ${message}\n`);
-  } catch {}
+  } catch {
+    // Ignore stderr failures while reporting process-level errors.
+  }
 }
 
 function snapshotIdFromResult(result: unknown): string | undefined {

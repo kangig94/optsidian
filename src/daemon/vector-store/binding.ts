@@ -56,7 +56,9 @@ export function coralNeedleBindingLoadStatus(): CoralNeedleBindingLoadStatus {
   if (cachedStatus) return cachedStatus;
   try {
     loadCoralNeedleBinding();
-  } catch {}
+  } catch {
+    // Status reports the cached load error below.
+  }
   return cachedStatus ?? {
     loaded: false,
     attempted: coralNeedleCandidates(),

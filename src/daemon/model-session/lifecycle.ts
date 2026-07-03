@@ -127,8 +127,7 @@ export class ModelSessionLifecycle {
       return this.waitForLoadAttempt(current, options.deadline, options.signal);
     }
 
-    let attempt!: Attempt<ModelSession>;
-    attempt = Attempt.start(this.loadAttemptOwner, async (signal) => {
+    const attempt = Attempt.start(this.loadAttemptOwner, async (signal) => {
       const device = await this.pickDevice();
       throwIfLoadAborted(signal);
       return this.startLoadWithFallback(device, signal);

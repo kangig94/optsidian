@@ -708,17 +708,6 @@ function generationHandleMatchesMetadata(handle: GenerationHandle, metadata: Vec
     embeddingSpecEqual(handle.spec, metadata.spec);
 }
 
-function activeVectorPointerMatchesMetadata(
-  pointer: { generationId: string; embeddingSetId: string; specId: string; dbPath: string } | undefined,
-  metadata: VectorGenerationMetadata
-): boolean {
-  if (!pointer) return false;
-  return pointer.generationId === metadata.generationId &&
-    pointer.embeddingSetId === metadata.embeddingSetId &&
-    pointer.specId === metadata.spec.specId &&
-    pointer.dbPath === metadata.dbPath;
-}
-
 function safeReadDir(dirPath: string): string[] {
   try {
     return fs.readdirSync(dirPath);

@@ -225,7 +225,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
     options: ClientRequestOptions = {}
   ): Promise<unknown> {
-    const deadline = Date.now() + lifecycleDeadlineMs(capability, method, payload, options);
+    const deadline = Date.now() + lifecycleDeadlineMs(capability, method, payload, options, readyTimeoutMs);
     let lastError: unknown;
     const send = requestOnce as (
       owner: OwnerRecord,
@@ -384,15 +384,16 @@ function lifecycleDeadlineMs(
   capability: "query" | "control",
   method: QueryDaemonMethod | ControlDaemonMethod,
   payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
-  options: ClientRequestOptions
+  options: ClientRequestOptions,
+  readyTimeoutMs: number
 ): number {
   if (options.deadlineMs !== undefined) return options.deadlineMs;
   const requestMs = requestDeadlineMs(capability, method, payload, options);
-  if (requestMs !== undefined) return Math.max(requestMs, SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS);
+  if (requestMs !== undefined) return Math.max(requestMs, readyTimeoutMs);
   const defaultMs = capability === "query"
     ? queryDeadlineFromNow(method as QueryDaemonMethod, undefined, 0)
     : controlDeadlineFromNow(method as ControlDaemonMethod, undefined, 0);
-  return Math.max(defaultMs, SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS);
+  return Math.max(defaultMs, readyTimeoutMs);
 }
 
 function incarnationField(method: QueryDaemonMethod | ControlDaemonMethod, owner: OwnerRecord): { incarnation?: string } {

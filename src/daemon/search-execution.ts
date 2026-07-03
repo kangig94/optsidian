@@ -55,7 +55,7 @@ import {
   type SearchHitEvidence,
   type SearchShardFinalist
 } from "./search-store/result-shaping.js";
-import type { SnapshotEnvelope, PersistedDocumentRecord, RetrievalEmbeddingSetEnvelope } from "./search-store/types.js";
+import type { PersistedDocumentRecord, RetrievalEmbeddingSetEnvelope } from "./search-store/types.js";
 
 export type {
   SearchExecutionResult,
@@ -1085,10 +1085,6 @@ export function rankSignalsFromFeatures(
   return signals;
 }
 
-function canonicalPostingTerm(channel: SearchTokenChannel, term: string): string {
-  return `${channel}\u0000${term.normalize("NFC").trim()}`;
-}
-
 function deterministicRankedHits<T extends { candidate: RetrievalCandidate }>(
   hits: readonly T[],
   ranked: readonly RankedCandidate[]
@@ -1118,17 +1114,6 @@ function rawSearchLimit(documentCount: number, search: NormalizedSearchParams): 
     : search.path || search.tags
       ? documentCount
       : search.limit;
-}
-
-function positionalCandidateLimit(
-  documentCount: number,
-  search: NormalizedSearchParams,
-  channels: SearchTokenChannelTerms
-): number {
-  const perChannelLimit = rawSearchLimit(documentCount, search);
-  if (!search.query) return perChannelLimit;
-  const channelCount = SEARCH_TOKEN_CHANNELS.filter((channel) => channels[channel].length > 0).length || 1;
-  return Math.min(documentCount, perChannelLimit * channelCount);
 }
 
 function exhaustiveCandidateLimit(

@@ -1,3 +1,101 @@
-export * from "./fusion.js";
-export * from "./link.js";
-export * from "./positional/index.js";
+export {
+  computeRetrieverPlanIdentity,
+  createFusionRetriever,
+  DEFAULT_RRF_K,
+  fuseCandidateSets,
+  FUSION_RETRIEVER_VERSION,
+  retrieveWithFusion
+} from "./fusion.js";
+
+export type {
+  FusionOptions,
+  FusionParameters
+} from "./fusion.js";
+
+export {
+  canonicalLinkGraphBacklinks,
+  canonicalLinkGraphEdges,
+  createLinkAdjacencyRetriever,
+  createLinkGraphView,
+  LINK_ADJACENCY_DIRECT_SCORE,
+  LINK_ADJACENCY_RETRIEVER_VERSION,
+  LINK_ADJACENCY_SCORING_VERSION
+} from "./link.js";
+
+export type {
+  LinkAdjacencyRetrieverOptions
+} from "./link.js";
+
+export {
+  bm25CorpusStats,
+  bm25DocumentFrequency,
+  bm25FieldScore,
+  bm25TermScore,
+  bm25TermScoreFromGlobalStats,
+  bm25TermScoreFromStatsLookup,
+  bm25TermStats,
+  boostedBm25FieldScore,
+  buildPositionalPostings,
+  buildSearchSnapshotFromSegments,
+  CanonicalSegmentPostingsReader,
+  computeFieldBm25Stats,
+  createPositionalBm25StatsLookup,
+  createPositionalRetriever,
+  createQueryPostingsLookup,
+  createSearchEngine,
+  createSearchFieldLengthLookup,
+  fieldChannelBm25Boost,
+  findPhraseMatches,
+  findProximityMatches,
+  minimumTermWindow,
+  normalizeTerm,
+  phraseStartPositions,
+  POSITIONAL_FIELD_BY_ID,
+  POSITIONAL_FIELD_ID,
+  POSITIONAL_RETRIEVER_IDENTITY,
+  POSITIONAL_SEARCH_FIELDS,
+  positionsForTerm,
+  postingKeysForTerms,
+  postingsForChannel,
+  ProjectionReader,
+  proximityScore,
+  retrievePositionalCandidates,
+  splitCanonicalPostingTerm,
+  tokenChannelFusionWeight
+} from "./positional/index.js";
+
+export type {
+  Bm25DocumentFieldInput,
+  Bm25DocumentInput,
+  Bm25FieldStats,
+  Bm25Stats,
+  Bm25TermScoreOptions,
+  CanonicalDocProjectionDoc,
+  CanonicalDocProjectionFieldLength,
+  CanonicalDocProjectionIdentityKeys,
+  CanonicalDocProjectionOffsets,
+  PositionalBm25CorpusStats,
+  PositionalBm25GlobalStats,
+  PositionalBm25StatsLookup,
+  PositionalChannelDocumentInput,
+  PositionalChannelFieldInput,
+  PositionalChannelIndex,
+  PositionalDocId,
+  PositionalDocumentInput,
+  PositionalDocumentRecord,
+  PositionalFieldId,
+  PositionalFieldInput,
+  PositionalPhraseMatch,
+  PositionalPosting,
+  PositionalPostings,
+  PositionalProximityMatch,
+  PositionalQueryAnalysis,
+  PositionalSnapshotSegmentInput,
+  QueryPostingsLookup,
+  RankingInput,
+  SearchEngine,
+  SearchFieldLengthLookup,
+  SearchSnapshot,
+  SearchSnapshotSegment,
+  TermWindow
+} from "./positional/index.js";

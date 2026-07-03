@@ -376,7 +376,9 @@ function logSearchDaemonWorkerProcessError(kind: string, error: unknown): void {
   const message = error instanceof Error && error.stack ? error.stack : String(error);
   try {
     process.stderr.write(`[optsidian search worker] ${kind}: ${message}\n`);
-  } catch {}
+  } catch {
+    // Ignore stderr failures while reporting process-level errors.
+  }
 }
 
 function transferListForWorkerResult(result: unknown): TransferListItem[] {

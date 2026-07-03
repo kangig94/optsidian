@@ -185,8 +185,7 @@ export class KiwiAnalyzerManager {
     }
 
     this.clearIdleTimer();
-    let attempt!: Attempt<ActiveKiwiHandle>;
-    attempt = Attempt.start(this.loadAttemptOwner, () => this.loadFresh(env, installIfMissing), {
+    const attempt = Attempt.start(this.loadAttemptOwner, () => this.loadFresh(env, installIfMissing), {
       install: async (handle) => {
         if (this.closed) throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
         await this.replaceActiveHandle(handle);

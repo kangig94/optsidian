@@ -3,7 +3,6 @@ import path from "node:path";
 import { UsageError } from "../errors.js";
 import { optsidianCacheRoot } from "./cache-root.js";
 import { isPrivatePathError, writePrivateFileAtomicSync } from "./private-path.js";
-import { readOptsidianSettings, type OptsidianSettings } from "./settings.js";
 import type { SearchIndexWarmAccessStatus } from "./types.js";
 
 export type VaultAccessEntry = {
@@ -20,7 +19,6 @@ type VaultAccessFile = {
 type VaultAccessOptions = {
   env?: NodeJS.ProcessEnv;
   nowMs?: number;
-  settings?: OptsidianSettings;
 };
 
 const VAULT_ACCESS_SCHEMA_VERSION = 1;
@@ -34,7 +32,7 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
   try {
     const env = options.env ?? process.env;
     const nowMs = options.nowMs ?? Date.now();
-    const maxAgeMs = vaultAccessMaxAgeMs(env, settingsForAccess(options, env));
+    const maxAgeMs = vaultAccessMaxAgeMs(env);
     const realpath = fs.realpathSync(vaultRoot);
     const statePath = vaultAccessPath(env);
     const existing = readVaultAccessFile(statePath);
@@ -58,7 +56,7 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
 export function recentVaultAccessRoots(options: VaultAccessOptions = {}): string[] {
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? Date.now();
-  const maxAgeMs = vaultAccessMaxAgeMs(env, settingsForAccess(options, env));
+  const maxAgeMs = vaultAccessMaxAgeMs(env);
   const state = readVaultAccessFile(vaultAccessPath(env));
   if (!state) return [];
 
@@ -79,8 +77,7 @@ export function recentVaultAccessRoots(options: VaultAccessOptions = {}): string
 export function vaultAccessStatus(vaultRoot: string, options: VaultAccessOptions = {}): SearchIndexWarmAccessStatus {
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? Date.now();
-  const settings = settingsForAccess(options, env);
-  const maxAgeDays = vaultAccessMaxAgeDays(env, settings);
+  const maxAgeDays = vaultAccessMaxAgeDays(env);
   const maxAgeMs = maxAgeDaysToMs(maxAgeDays);
   const statePath = vaultAccessPath(env);
   const realpath = fs.realpathSync(vaultRoot);
@@ -134,11 +131,7 @@ function writeVaultAccessFile(filePath: string, entries: readonly VaultAccessEnt
   }, null, 2)}\n`, "Optsidian vault access file");
 }
 
-function settingsForAccess(options: VaultAccessOptions, env: NodeJS.ProcessEnv): OptsidianSettings {
-  return options.settings ?? readOptsidianSettings(process.cwd(), env);
-}
-
-function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
+function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv): number {
   return parsePositiveInteger(
     env[VAULT_ACCESS_MAX_AGE_DAYS_ENV],
     DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS,
@@ -146,8 +139,8 @@ function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv, settings: OptsidianSettin
   );
 }
 
-function vaultAccessMaxAgeMs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
-  return maxAgeDaysToMs(vaultAccessMaxAgeDays(env, settings));
+function vaultAccessMaxAgeMs(env: NodeJS.ProcessEnv): number {
+  return maxAgeDaysToMs(vaultAccessMaxAgeDays(env));
 }
 
 function maxAgeDaysToMs(days: number): number {

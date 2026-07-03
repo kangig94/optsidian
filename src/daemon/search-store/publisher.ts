@@ -656,7 +656,9 @@ function readLedgerRecordsFromDir(publicationsDir: string): EditionRecord[] {
     try {
       const record = decodeEditionRecord(fs.readFileSync(path.join(publicationsDir, entry), "utf8"));
       if (record && record.editionSeq === Number(entry)) records.push(record);
-    } catch {}
+    } catch {
+      // Ignore torn or unreadable ledger records; later valid records can still be used.
+    }
   }
   return records.sort((left, right) => left.editionSeq - right.editionSeq);
 }

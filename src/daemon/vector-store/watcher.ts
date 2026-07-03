@@ -327,7 +327,9 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
       try {
         const read = readVaultFileHardened(this.vaultRoot, safe.rel);
         if (read.stat.isFile()) hashes.set(read.safe.rel, sha256(read.bytes));
-      } catch {}
+      } catch {
+        // Unreadable files are ignored until the next content scan.
+      }
     }
     return hashes;
   }
