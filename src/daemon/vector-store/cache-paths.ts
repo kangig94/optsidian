@@ -17,9 +17,7 @@ export type VectorStoreCachePaths = {
   generationsDir: string;
   stagingDir: string;
   reservationsDir: string;
-  activeDir: string;
   tmpDir: string;
-  activePointerPath: string;
 };
 
 export function vectorStoreCachePaths(input: {
@@ -37,7 +35,6 @@ export function vectorStoreCachePaths(input: {
   const storesDir = path.join(vectorsRootDir, "stores");
   const vaultDir = path.join(storesDir, vaultStateHash);
   const rootDir = path.join(vaultDir, embeddingSetId);
-  const activeDir = path.join(rootDir, "active");
   const key: VectorStoreKey = { vaultStateHash, embeddingSetId };
   return {
     vaultRoot: root,
@@ -51,9 +48,7 @@ export function vectorStoreCachePaths(input: {
     generationsDir: path.join(rootDir, "generations"),
     stagingDir: path.join(rootDir, "staging"),
     reservationsDir: path.join(rootDir, "reservations"),
-    activeDir,
-    tmpDir: path.join(rootDir, "tmp"),
-    activePointerPath: path.join(activeDir, embeddingSetId)
+    tmpDir: path.join(rootDir, "tmp")
   };
 }
 

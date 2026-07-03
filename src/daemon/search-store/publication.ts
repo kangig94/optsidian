@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fsyncDirSync, fsyncFileSync } from "../../core/private-path.js";
 import type { CurrentWriterToken } from "../../core/lifecycle/conditional-commit.js";
 import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
 import type {
@@ -122,28 +123,7 @@ export async function durableRename(from: string, to: string): Promise<void> {
   await fs.promises.rename(from, to);
 }
 
-export function fsyncFileSync(filePath: string): void {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-export function fsyncDirSync(dirPath: string): void {
-  try {
-    const fd = fs.openSync(dirPath, "r");
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (error) {
-    if (process.platform === "win32") return;
-    throw error;
-  }
-}
+export { fsyncDirSync, fsyncFileSync };
 
 export function retrievalIdentityKey(identity: RetrievalIdentity): string {
   return [

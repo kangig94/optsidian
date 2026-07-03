@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { UsageError } from "../../errors.js";
+import { ANALYZER_VERSION } from "./constants.js";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../kiwi/artifact.js";
 import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from "../kiwi/manager.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../settings.js";
@@ -58,10 +59,6 @@ export type SearchDeclaredAnalyzer = KiwiDeclaredAnalyzer;
 
 export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
 
-// Single tokenizer-identity lever. Bump on any change to script routing, the Intl
-// latin baseline, or the Kiwi POS filter. Kept distinct from INDEX_BUILD_VERSION
-// because the analyzer identity is also the query-analysis cache key.
-const ANALYZER_VERSION = "router-intl-kiwi-link-render-v2";
 const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
 const REGISTERED_ANALYZERS = ["ko"] as const satisfies readonly SearchDeclaredAnalyzer[];
 const REGISTERED_ANALYZER_SET: ReadonlySet<string> = new Set(REGISTERED_ANALYZERS);

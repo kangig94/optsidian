@@ -19,7 +19,6 @@ export type SearchStoreCachePaths = {
   retrievalsDir: string;
   linkGraphsDir: string;
   ledgersDir: string;
-  activeDir: string;
   tmpDir: string;
 };
 
@@ -37,7 +36,6 @@ export function searchStoreCachePaths(
   const storesDir = path.join(searchRootDir, "stores");
   const vaultDir = path.join(storesDir, vaultStateHash);
   const rootDir = path.join(vaultDir, lexicalIdentityHash);
-  const activeDir = path.join(rootDir, "active");
   return {
     vaultRoot: root,
     vaultStateHash,
@@ -54,7 +52,6 @@ export function searchStoreCachePaths(
     retrievalsDir: path.join(rootDir, "retrievals"),
     linkGraphsDir: path.join(rootDir, "link-graphs"),
     ledgersDir: path.join(rootDir, "ledgers"),
-    activeDir,
     tmpDir: path.join(rootDir, "tmp")
   };
 }

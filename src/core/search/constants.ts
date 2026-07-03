@@ -1,6 +1,13 @@
 import type { SearchTokenChannel } from "./analysis/index.js";
 import { SEARCH_BOOST, SEARCH_FIELD_CHANNEL_BOOST } from "./schema.js";
 
+// Single tokenizer-identity lever. Bump on any change to script routing, the Intl
+// latin baseline, or the Kiwi POS filter. Kept distinct from INDEX_BUILD_VERSION
+// because the analyzer identity is also the query-analysis cache key. Lives here (a
+// side-effect-free constants module) so the daemon's runtime-profile can fold it into
+// the lexical store-dir identity without importing the heavy analyzer/Kiwi graph.
+export const ANALYZER_VERSION = "router-intl-kiwi-link-render-v2";
+
 export const CANDIDATE_LIMIT_MIN = 50;
 export const CANDIDATE_LIMIT_MULTIPLIER = 10;
 export const RANK_FINAL_SORT_POLICY = "unified-score-path-v1";

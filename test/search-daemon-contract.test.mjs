@@ -1739,7 +1739,6 @@ test("search store persists cache directories and snapshot files privately", asy
   assertPrivateMode(paths.storeStatePath, 0o600);
   assertPrivateMode(paths.segmentsDir, 0o700);
   assertPrivateMode(paths.snapshotsDir, 0o700);
-  assertPrivateMode(paths.activeDir, 0o700);
   assertPrivateMode(paths.ledgersDir, 0o700);
   assertPrivateMode(paths.tmpDir, 0o700);
 

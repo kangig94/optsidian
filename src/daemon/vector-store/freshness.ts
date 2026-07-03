@@ -4,32 +4,6 @@ import { optsidianCacheRoot } from "../../core/cache-root.js";
 import type { VectorStoreCachePaths } from "./cache-paths.js";
 import { sweepVectorStaging } from "./pool.js";
 
-export type RetrievalFreshnessState = "fresh" | "dirty" | "building" | "failed";
-
-export type RetrievalFreshnessRecord = {
-  schemaVersion: 1;
-  state: RetrievalFreshnessState;
-  corpusRevision: string | null;
-  published?: {
-    corpusRevision: string;
-    corpusSnapshotId?: string;
-    linkGraphId?: string;
-    embeddingSetId?: string;
-    retrievalSnapshotId?: string;
-    vectorGenerationId?: string;
-  };
-  rollback?: {
-    corpusRevision: string;
-    corpusSnapshotId?: string;
-    linkGraphId?: string;
-    embeddingSetId?: string;
-    retrievalSnapshotId?: string;
-    vectorGenerationId?: string;
-  };
-  error?: string;
-  updatedAt: string;
-};
-
 export async function recoverRetrievalStaging(input: {
   vectorPaths: VectorStoreCachePaths;
   lexicalTmpDir?: string;
@@ -102,7 +76,6 @@ function vectorPathsFromCacheParts(input: {
   const storesDir = path.join(vectorsRootDir, "stores");
   const vaultDir = path.join(storesDir, input.vaultStateHash);
   const rootDir = path.join(vaultDir, input.embeddingSetId);
-  const activeDir = path.join(rootDir, "active");
   return {
     vaultRoot: "",
     key: {
@@ -118,9 +91,7 @@ function vectorPathsFromCacheParts(input: {
     generationsDir: path.join(rootDir, "generations"),
     stagingDir: path.join(rootDir, "staging"),
     reservationsDir: path.join(rootDir, "reservations"),
-    activeDir,
-    tmpDir: path.join(rootDir, "tmp"),
-    activePointerPath: path.join(activeDir, input.embeddingSetId)
+    tmpDir: path.join(rootDir, "tmp")
   };
 }
 

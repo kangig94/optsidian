@@ -69,7 +69,6 @@ import type { EmbedSchedulerLane } from "../embed-scheduler.js";
 import {
   buildCanonicalSearchSnapshot,
   DEFAULT_PARTITION_BITS,
-  lexicalIdentityHashFromSnapshotIdentityTuple,
   snapshotIdentityTuple,
   snapshotIdentityTupleForAnalyzerIdentity
 } from "./builder.js";
@@ -120,7 +119,6 @@ import {
   vectorStoreId,
   type CoralEmbeddingSpec,
   type ReadableVectorGenerationLease,
-  type RetrievalFreshnessRecord,
   type VectorStoreCachePaths,
   type VectorGenerationMetadata
 } from "../vector-store/index.js";
@@ -263,7 +261,6 @@ type DenseGenerationAttachCandidate = {
   retrieval: RetrievalSnapshotEnvelope;
   vectorPaths: VectorStoreCachePaths;
   metadata: VectorGenerationMetadata;
-  freshness: RetrievalFreshnessRecord;
   gcPin: DenseGenerationPin["gcPin"];
 };
 
@@ -902,7 +899,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
         retrieval,
         vectorPaths,
         metadata,
-        freshness: freshnessRecordFromEdition(retrieval, metadata),
         gcPin: {
           vectorKey: vectorPaths.key,
           generationId: metadata.manifestHash ?? metadata.generationId
@@ -921,7 +917,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const denseSignal = denseSignalForUsability({
       retrieval: candidate.retrieval,
       metadata: candidate.metadata,
-      freshness: candidate.freshness,
       usability: denseUsability
     });
     const densePin: DenseGenerationPin = {
@@ -2107,7 +2102,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     ensurePrivateDirSync(paths.snapshotsDir, "Optsidian search snapshots directory");
     ensurePrivateDirSync(paths.retrievalsDir, "Optsidian retrieval snapshot directory");
     ensurePrivateDirSync(paths.linkGraphsDir, "Optsidian search link graph directory");
-    ensurePrivateDirSync(paths.activeDir, "Optsidian search active directory");
     ensurePrivateDirSync(paths.tmpDir, "Optsidian search tmp directory");
   }
 
@@ -2668,15 +2662,14 @@ function coldDenseSignal(pendingCount: number): DenseSignal {
 function denseSignalForUsability(input: {
   retrieval: RetrievalSnapshotEnvelope;
   metadata: VectorGenerationMetadata;
-  freshness: RetrievalFreshnessRecord;
   usability: DenseUsability;
 }): DenseSignal {
   const pendingCount = input.usability.pendingDocumentIds.size;
   const ageMs = generationAgeMs(input.metadata);
-  if (!input.usability.spaceMatch || input.freshness.state === "building") {
+  if (!input.usability.spaceMatch) {
     return { state: "rebuilding", pendingCount, generationAgeMs: ageMs };
   }
-  if (input.freshness.state === "failed" || pendingCount > 0) {
+  if (pendingCount > 0) {
     return { state: "stale", pendingCount, generationAgeMs: ageMs };
   }
   return { state: "fresh", pendingCount, generationAgeMs: ageMs };
@@ -3078,7 +3071,6 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
   );
 }
 
-
 function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshotEnvelope {
   return (
     isRecord(value) &&
@@ -3128,33 +3120,6 @@ function denseEditionUnavailableMessage(dense: DenseEdition): string {
   if (dense.state === "building") return "dense-generation-building";
   if (dense.state === "unavailable") return dense.reason;
   return "dense-generation-unavailable";
-}
-
-function freshnessRecordFromEdition(
-  retrieval: RetrievalSnapshotEnvelope,
-  metadata: VectorGenerationMetadata
-): RetrievalFreshnessRecord {
-  return {
-    schemaVersion: 1,
-    state: "fresh",
-    corpusRevision: retrieval.corpusSnapshotId,
-    published: {
-      corpusRevision: retrieval.corpusSnapshotId,
-      corpusSnapshotId: retrieval.corpusSnapshotId,
-      linkGraphId: retrieval.linkGraphId,
-      embeddingSetId: retrieval.embeddingSetId,
-      retrievalSnapshotId: retrieval.retrievalSnapshotId,
-      vectorGenerationId: metadata.generationId
-    },
-    updatedAt: metadata.createdAt
-  };
-}
-
-function freshnessStateReason(state: string): RetrievalPinNotReadyReason {
-  if (state === "dirty") return "retrieval-state-dirty";
-  if (state === "building") return "retrieval-state-building";
-  if (state === "failed") return "retrieval-state-failed";
-  return "retrieval-state-stale";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
