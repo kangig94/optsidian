@@ -109,10 +109,11 @@ and this daemon's later teardown would delete the successor's live socket.
 - **Crash / restart recovery**: a fresh daemon re-derives its desired slot from env, binds the single
   socket, reads the previous record, writes `epoch + 1` with a fresh random `incarnationId`, and starts
   serving. Process liveness is proven through `ProcessToken` start identity, so pid reuse cannot
-  deadlock or cause a live holder to be mis-reclaimed. On the index side, the corpus active pointer is
-  validated at read time and a dangling pointer is dropped (`recoverVault`,
-  `snapshot-store.ts:1395-1403`), and a background GC re-runs. At the daemon ready transition,
-  retrieval startup recovery demotes stale `building` records and sweeps orphan staging.
+  deadlock or cause a live holder to be mis-reclaimed. On the index side, `recoverVault` ensures the
+  cache directories exist and queues the edition-derived background GC; readable state is re-derived
+  from committed edition records. At the daemon ready transition, `recoverRetrievalStartupState` sweeps
+  orphan vector staging/tmp directories and search-store tmp directories; there is no persisted
+  retrieval freshness reconcile.
 - **Write fencing**: the production `TenancyFenceProvider` is bind-backed. Snapshot publish CAS receives
   `(epoch, incarnationId, claimId, processToken)`, so stale cross-incarnation publish work cannot commit
   after a successor takes over.
@@ -270,12 +271,13 @@ metadata (`executeMetadataSearchFromSnapshotHandle`, `service.ts:323-331`).
 
 1. **Pin the lexical corpus**: `store.pinLexicalReadContext` ensures and pins the active immutable
    corpus snapshot, loads live documents, and builds the live `contentHash` map
-   (`service.ts:245-250`, `snapshot-store.ts:574-612`). It does **not** publish a retrieval snapshot or
-   require dense freshness.
-2. **Optionally attach dense**: `store.tryAttachDenseGeneration` validates the committed retrieval
-   envelope, corpus/link sidecars, vector active pointer, vector metadata, embedding-space identity, and
-   vector DB readability (`DaemonSnapshotStore.tryAttachDenseGeneration`). Failure records a dense
-   signal such as `cold`, `rebuilding`, or `stale`; it is not itself a ranking gate.
+   (`DaemonSearchStoreService.retrieve`, `DaemonSnapshotStore.pinLexicalReadContext`). It does **not**
+   publish a retrieval snapshot or require dense freshness.
+2. **Optionally attach dense**: `store.tryAttachDenseGeneration` resolves the current or latest-fresh
+   edition, then validates the committed retrieval envelope, corpus/link sidecars, vector generation
+   metadata, embedding-space identity, and vector DB readability (`DaemonSnapshotStore.tryAttachDenseGeneration`,
+   `resolveDenseRetrievalEnvelope`, `resolveDenseVectorGeneration`). Failure records a dense signal such
+   as `cold`, `rebuilding`, or `stale`; it is not itself a ranking gate.
 3. **Resolve the origin vector**: `origin=text` encodes only when an attached dense generation is
    space-comparable and the selected mode consumes dense (`resolveRetrieveOriginVector` /
    `encodeRetrieveQueryVector`). When dense cannot contribute, `origin=text` stays vectorless and can
@@ -321,89 +323,95 @@ RPC connection cancels its in-flight requests.
 
 ## 4. Cache & index lifecycle (the lifelines)
 
-> **Superseded model note.** The active-pointer and `retrieval-freshness.json` mechanics described in
-> the remainder of this section are the *pre-ledger* model. Visible state is now an **append-only
-> edition ledger** (`search-store/publisher.ts` `EditionLedger`, `publications/<editionSeq>`): a
-> `VaultPublisher` (one per `retrievalIdentity = (vaultStateHash, lexicalIdentityHash,
-> embeddingSpaceId)`) is the sole writer; "current" is the max valid `editionSeq`; each `EditionRecord`
-> names the corpus + link graph + a dense union (`fresh|building|failed|unavailable`) atomically, so a
-> reader never chases separate pointers and freshness is *derived* from the edition's dense arm.
-> Reclamation is a daemon-wide `SharedReclamationAuthority`: vector-generation GC roots are the union
-> of live edition heads across every ledger sharing a `(vaultStateHash, embeddingSetId)` store, plus
-> in-memory pins and build reservations, swept under a per-key `ExclusiveClaim`. The corpus/retrieval
-> active-pointer files and `retrieval-freshness.json` remain only as legacy/startup-recovery artifacts,
-> not the live serving mechanism. (Full rewrite of the prose below is a tracked follow-up.)
-
 The search subsystem persists **four distinct artifacts**, each content-addressed and independently
-GC'd.
+GC'd. The visible publication state is the append-only **edition ledger**: `VaultPublisher` owns an
+`EditionLedger` per retrieval identity `(vaultStateHash, lexicalIdentityHash, embeddingSpaceId)`, and
+the current edition is the max valid committed `editionSeq` in that ledger. Each immutable
+`EditionRecord` names the corpus snapshot, link graph, and dense arm (`fresh | building | failed |
+unavailable`) atomically. Readers and GC derive serving state from the ledger; there is no separate
+persisted dense-freshness state.
 
 ### The four artifacts and their identities
 
 | Artifact | Identity | Built by | On disk |
 |----------|----------|----------|---------|
-| **Lexical corpus snapshot** (segments + manifest) | `corpusSnapshotId` = hash of segment content-hashes + identity tuple | `buildCanonicalSearchSnapshot` (analyzer throughput pool) | `stores/<vaultHash>/{segments,snapshots}` |
-| **Link-graph sidecar** | `linkGraphId` = `buildLinkGraphSidecar({corpusSnapshotId, edges})` | published with the corpus (`snapshot-store.ts:839-850`) | `stores/<vaultHash>/link-graphs` |
-| **coral-needle vector generation** | `generationId = vectorGenerationIdForManifest(embeddingSpaceId, embeddingRecipeFreshnessId, corpusRevision, docIds/content hashes/projection hashes)` (`embedding-set.ts:223-247`); `embeddingSetId` remains the content hash over recipe + projected vectors (`embedding-set.ts:206-221`) | `vectorManager.buildStagingGeneration` → `promoteBuiltGeneration` | `vectors/stores/<profile>/<vaultHash>/<embeddingSetId>/generations` |
-| **Composite retrieval snapshot** (envelope) | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`snapshot-store.ts:2145-2159`) | `buildRetrievalSnapshotPublication` | `stores/<vaultHash>/retrievals` |
+| **Lexical corpus snapshot** (segments + manifest) | `corpusSnapshotId` = hash of segment content-hashes + identity tuple | `buildCanonicalSearchSnapshot` (analyzer throughput pool) | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/{segments,snapshots}` |
+| **Link-graph sidecar** | `linkGraphId` = `buildLinkGraphSidecar({corpusSnapshotId, edges})` | published with the corpus (`publishBuiltSnapshot`) | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/link-graphs` |
+| **coral-needle vector generation** | `generationId = vectorGenerationIdForManifest(embeddingSpaceId, embeddingRecipeFreshnessId, corpusRevision, docIds/content hashes/projection hashes)`; `embeddingSetId` remains the content hash over recipe + projected vectors (`computeEmbeddingSetId`) | `vectorManager.buildStagingGeneration` -> `promoteBuiltGeneration` | `vectors/stores/<vaultStateHash>/<embeddingSetId>/generations` |
+| **Composite retrieval snapshot** (envelope) | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`computeRetrievalSnapshotId`) | `buildRetrievalSnapshotPublication` | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/retrievals` |
 
 `retrieverPlanIdentity` folds the positional + dense + link-adjacency retrievers and the RRF fusion
-parameters (`retrievalPlanIdentityFor`, `snapshot-store.ts:1823-1848`). `embeddingSpaceId` and
+parameters (`retrievalPlanIdentityFor`). `embeddingSpaceId` and
 `embeddingRecipeFreshnessId` are additive sibling fields on vector metadata and retrieval envelopes
-(`types.ts:129-147`, `vector-store/types.ts:74-86`); they are intentionally not folded into
-`embeddingSetId` or `computeRetrievalSnapshotId` (`snapshot-store.ts:2145-2159`). Adding
-`embeddingSpaceId` to the retrieval envelope did bump `SNAPSHOT_PERSISTENCE_SCHEMA_HASH`
-(`types.ts:22-77`), so persisted retrieval envelopes self-heal once, but `INDEX_BUILD_VERSION` and
-`ANALYZER_VERSION` do not change.
+(`RetrievalSnapshotEnvelope`, `VectorGenerationMetadata`); they are intentionally not folded into
+`embeddingSetId` or `computeRetrievalSnapshotId`. Adding `embeddingSpaceId` to the retrieval envelope
+did bump `SNAPSHOT_PERSISTENCE_SCHEMA_HASH`, so persisted retrieval envelopes self-heal once, but
+`INDEX_BUILD_VERSION` and `ANALYZER_VERSION` do not change.
 
-At read time, `tryAttachDenseGeneration` validates the committed retrieval envelope, lexical/link
-sidecars, vector active pointer, vector generation metadata, embedding-space comparability, and DB
-readability. For `origin=text`, a failure means lexical-only with a dense signal, not a failed retrieve.
-For stored-vector origins, no usable source vector can be resolved, so the response is soft
-`index-not-ready` / `source-vector-missing` with the same dense signal.
+### Edition ledger
+
+`searchStoreCachePaths` scopes a lexical store by `(vaultStateHash, lexicalIdentityHash)`, where
+`lexicalIdentityHashForSearchRuntimeProfile` folds `INDEX_BUILD_VERSION`, `ANALYZER_VERSION`,
+`SEARCH_SCHEMA_DIGEST`, `DEFAULT_PARTITION_BITS`, analyzer config, and index-affecting settings.
+Within that lexical store, `searchStoreLedgerRootDir` scopes ledgers by embedding space:
+`ledgers/<embeddingSpaceId>/{publications,frontier,diagnostics,reservations,claims}`. A committed
+edition is one checksum-protected file at `publications/<editionSeq>`.
+
+`EditionLedger.history()` reads numeric publication files, validates each decoded record against its
+filename, sorts by `editionSeq`, and `current()` returns the last record. `latestFresh()` returns the
+newest edition whose dense arm is `fresh` and has a retrieval snapshot, so reads after a lexical-only
+edition can still attach the last dense generation and mask per document by `contentHash`.
+
+At read time, `tryAttachDenseGeneration` uses the current edition when its dense arm is fresh, otherwise
+falls back to `latestFresh()`. It validates the edition-named retrieval envelope, lexical snapshot,
+link-graph sidecar, vector generation metadata, embedding-space comparability, and vector DB readability
+before returning a dense lease. For `origin=text`, attach failure means lexical-only with a dense signal,
+not a failed retrieve. For stored-vector origins, no usable source vector can be resolved, so the
+response is soft `index-not-ready` / `source-vector-missing` with the same dense signal.
 
 Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~/.cache`, then
-`optsidian`, `cache-root.ts:4-6`):
+`optsidian`, `optsidianCacheRoot`):
 
-- Lexical store: `search/stores/<vaultStateHash>/{segments,snapshots,retrievals,link-graphs,active,tmp}`
-  (`search-store/cache-paths.ts:24-49`). Two active pointers: corpus `active/<vaultHash>` and retrieval
-  `active/<vaultHash>.retrieval`.
-- Vector store: `vectors/stores/<profileHash>/<vaultStateHash>/<embeddingSetId>/{generations,staging,active,tmp}`
-  plus a per-vault `retrieval-freshness.json` (`vector-store/cache-paths.ts:26-62`).
+- Lexical store: `search/stores/<vaultStateHash>/<lexicalIdentityHash>/{segments,snapshots,retrievals,link-graphs,ledgers,tmp}`
+  (`searchStoreCachePaths`).
+- Edition ledger: `search/stores/<vaultStateHash>/<lexicalIdentityHash>/ledgers/<embeddingSpaceId>/publications/<editionSeq>`
+  plus `frontier`, `diagnostics`, `reservations`, and `claims` (`searchStoreLedgerRootDir`,
+  `VaultPublisher.pathsFor`).
+- Vector store: `vectors/stores/<vaultStateHash>/<embeddingSetId>/{generations,staging,reservations,tmp}`
+  (`vectorStoreCachePaths`). The vector store key is `(vaultStateHash, embeddingSetId)`.
 - coral-needle runtime binding: `coral-needle/<version>/<platform>-<arch>/coral-needle.node`
-  (`vector-store/artifact.ts:147-153`).
+  (`coralNeedleInstallDir`).
 - ONNX embedding model + tokenizer artifacts: under the same cache root, fetched from Hugging Face
   (`local-onnx.ts` / `dense/artifacts.ts:466`).
 
 ### Build / publish path
 
-- **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot` (`snapshot-store.ts:422-441,
-  927-967`).
+- **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot`.
 - **`Rebuild`** → always `publishFreshSnapshot(..., {prepareRetrieval:true})`
-  (`snapshot-store.ts:443-454`).
-- **`Refresh`** → `refreshIndexedSnapshot` (`snapshot-store.ts:463-473, 931-967`): computes a **content delta**
+  (`DaemonSnapshotStore.rebuild`).
+- **`Refresh`** → `refreshIndexedSnapshot`: computes a **content delta**
   (sha256 per file vs stored `contentHash`, `snapshotContentDelta`); if `changedCount === 0` it keeps
-  the active snapshot and only ensures the retrieval snapshot matches
+  the current edition's corpus snapshot and only ensures the retrieval snapshot matches
   (`prepareRetrievalSnapshotForSnapshot`); otherwise it reports the delta
-  (`reportRefreshDelta`, `snapshot-store.ts:2609-2617`) and rebuilds the whole snapshot. **The
-  delta only decides rebuild-vs-not; there is no incremental segment patching.**
-- **`publishSaveSnapshot`** (`snapshot-store.ts:456-461`): save-on-write entrypoint. It runs the same
+  (`reportRefreshDelta`) and rebuilds the whole snapshot. **The delta only decides rebuild-vs-not; there
+  is no incremental segment patching.**
+- **`publishSaveSnapshot`**: save-on-write entrypoint. It runs the same
   canonical full lexical rebuild as refresh/rebuild, but tags embedding work with the scheduler `save`
   lane and prepares a retrieval publication for the new corpus revision.
-- **`publishFreshSnapshot`** (`snapshot-store.ts:985-1045`): builds the corpus, kicks off the retrieval
-  publication (embedding + vector build) **concurrently**, publishes the corpus + flips the corpus
-  active pointer, then awaits and publishes the retrieval snapshot.
-- **`publishBuiltSnapshot`** (`snapshot-store.ts:1063-1136`): stores the link-graph sidecar, writes +
-  fsyncs + content-verifies each segment (skips segments already present with matching hash), writes
-  the manifest, **durable-renames the active pointer**, then `recoverVault` + `markSweepGc`. All
-  writes are temp-file + fsync + rename.
-- **`buildRetrievalSnapshotPublication`** (`snapshot-store.ts:1150-1290`): builds the embedding set
-  (`embeddingSetBuilder.build`, `:1156`) → computes `embeddingSpaceId`, recipe freshness id, and
-  manifest-addressed `generationId` (`:1164-1185`) → builds a **staging** vector generation and
-  **promotes** it (`vectorPool.buildStagingGeneration` + `promoteBuiltGeneration`, `:1205-1216`) →
-  constructs the retrieval envelope with `embeddingSpaceId`, `embeddingRecipeFreshnessId`, and
-  `freshness:{state:"fresh", corpusRevision: corpusSnapshotId}`.
-- **`publishRetrievalSnapshotPublication`** (`snapshot-store.ts:1292-1317`): stores the envelope,
-  writes freshness `markFresh`, durable-renames the **retrieval** active pointer, `markSweepGc`.
+- **`publishFreshSnapshot`**: calls `recoverVault`, records the expected ledger head, builds the corpus,
+  starts the retrieval publication (embedding + vector build) **concurrently** when requested, writes the
+  corpus artifacts, stores the retrieval envelope if it built successfully, and commits one edition
+  record through `commitEditionForSnapshot`. The commit is the durable publication step.
+- **`publishBuiltSnapshot`**: stores the link-graph sidecar, writes + fsyncs + content-verifies each
+  segment (skips segments already present with matching hash), writes the snapshot manifest with
+  temp-file + fsync + rename, then calls `recoverVault`.
+- **`buildRetrievalSnapshotPublication`**: builds the embedding set (`embeddingSetBuilder.build`),
+  computes `embeddingSpaceId`, recipe freshness id, and manifest-addressed `generationId`, builds a
+  **staging** vector generation, **promotes** it (`vectorPool.buildStagingGeneration` +
+  `promoteBuiltGeneration`), constructs the retrieval envelope, and returns a `DenseEditionFresh` arm for
+  the edition.
+- **`publishRetrievalSnapshot`**: for an already-committed lexical edition, builds/stores a retrieval
+  envelope and commits a same-frontier edition whose dense arm names the fresh generation.
 
 Embedding happens on load/rebuild/refresh and on save-on-write. Save-on-write is intentionally a
 debounced **full lexical rebuild** followed by dense generation for that exact lexical revision; true
@@ -411,49 +419,52 @@ incremental lexical patching is deferred (§6).
 
 ### Vector generation swap (drain by refcount)
 
-Promotion flips the active pointer and retires the old generation without disrupting in-flight readers
-(`VectorGenerationPool`, `vector-store/pool.ts`). The process-scoped `VectorGenerationManager`
-extends that pool but keeps handles keyed by profile/vault/embedding set/generation
-(`embed-scheduler.ts:18-20`, `profile-manager.ts:101-153`). `pinReadableGeneration` first reuses an
-active in-memory handle, then lazy-opens a committed active generation after daemon restart if needed
-(`pool.ts:240-280`).
-Concurrent lazy-opens for the same `(key, generationId)` are single-flighted by `lazyOpenByGeneration`
-(`pool.ts:95, 352-368`). A pinned old generation stays open until its last reader drains; a read context
-releases the vector lease and GC pin before releasing its lexical pin (`snapshot-store.ts:741-750`).
+`VectorGenerationPool.promoteBuiltGeneration` opens the promoted generation as a query handle and
+updates the in-memory `activeByKey` slot with `flipActive`. The previous handle is retired only after
+its refcount reaches zero, so in-flight readers keep their lease. `pinReadableGeneration` first reuses a
+matching in-memory handle; otherwise it validates the edition-named committed metadata
+(`generationId`, manifest hash, DB path, key, and spec) and lazy-opens that exact generation with
+single-flight protection. A read context releases the vector lease and GC pin before releasing its
+lexical pin.
 
-### Freshness state machine
+### Dense freshness signal
 
-`RetrievalFreshnessStore` (`vector-store/freshness.ts`) persists `retrieval-freshness.json` with state
-`fresh | dirty | building | failed` (`freshness.ts:8`). Transitions remain `markDirty` (`:60`),
-`markBuilding` (`:71`), `markFresh` (`:82`), and `markFailed` (`:92`), with startup reconciliation for
-stale `building` records (`:104-137`). Freshness is no longer a read-path gate. It feeds only the
-reported retrieve signal:
+The retrieve `dense` field is a read-time `DenseSignal`, not a persisted store. `pinLexicalReadContext`
+starts with `coldDenseSignal(liveDocuments.size)`. When a dense generation attaches,
+`attachDenseGenerationLease` builds a per-doc usability mask by comparing each live lexical document's
+`contentHash` with the retrieval embedding-set record, then `denseSignalForUsability` derives:
 
-- `cold`: no committed readable dense generation attached to the lexical pin.
-- `rebuilding`: embedding space mismatch or persisted freshness is `building`.
-- `stale`: space matches, no build is in flight, but at least one live lexical document is absent/masked
-  by `contentHash`, or freshness is `failed`.
-- `fresh`: space matches and every live lexical document has usable dense coverage.
+- `cold`: no committed readable dense generation attached (`generationAgeMs: null`).
+- `rebuilding`: an attached generation is not comparable to the requested embedding space.
+- `stale`: a comparable generation is attached, but at least one live document is absent or masked by
+  `contentHash`.
+- `fresh`: a comparable generation is attached and every live document has matching dense coverage.
 
-The derivation lives in `denseSignalForUsability` (`snapshot-store.ts:2295-2310`). `pendingCount` is the
-number of absent/masked live documents, and `generationAgeMs` is computed from vector generation
-metadata (`snapshot-store.ts:2312-2316`). The signal is returned on ready and soft-not-ready retrieve
-responses (`types.ts:176-220`) and is never part of scoring.
+`pendingCount` is the number of live documents absent/masked by that content-hash check, and
+`generationAgeMs` comes from vector generation metadata. The signal is returned on ready and
+soft-not-ready retrieve responses and is never part of scoring or a read-path gate.
 
 ### Garbage collection — background, refcount-gated
 
-`markSweepGc` (`snapshot-store.ts:1426-1429`) → `queueGc` schedules a **background** sweep on
-`setImmediate(...)` + `unref()` (`:1502-1519`), serialized per vault. `runBackgroundGc`
-(`:1521-1526`) runs `markSweepSearchGc` (retrieval envelopes, snapshots, segments, link graphs) →
-`markSweepVectorGc` (vector generation dirs, then empty store roots) → stale-tmp sweep.
+`markSweepGc` → `queueGc` schedules a **background** sweep on `setImmediate(...)` + `unref()`,
+serialized per vault. `runBackgroundGc` runs `markSweepSearchGc` (retrieval envelopes, snapshots,
+segments, link graphs) → `markSweepVectorGc` (vector generation dirs, then empty store roots) → stale
+tmp sweep.
 
-**GC roots** (`gcRootsAsync`, `snapshot-store.ts:1431-1487`) are refcount- and in-flight-gated: the
-active corpus + active retrieval and their transitive artifacts, everything in the in-flight publish
-sets, **loaded snapshots with `refCount > 0`**, the newest `retentionCount` snapshot + retrieval files,
-and **pinned vector generations** (`pinnedVectorGenerations`, incremented per retrieval pin,
-`:1623-1646`). So a pinned or in-flight artifact always survives. Stale vector generations that are not
-a GC root are removed (`markSweepVectorGc`, `:1564-1608`); an empty vector store root is deleted and
-removed from the `VectorCacheCatalog`.
+**GC roots** (`gcRootsAsync`) are refcount-, ledger-, and in-flight-gated:
+
+- `liveEditionsForGcUnder(paths.rootDir)`: every ledger's head edition plus its latest-fresh edition,
+  and each edition's transitive corpus, link graph, retrieval envelope, and vector generation.
+- In-flight corpus manifests/link graphs and in-flight retrieval envelopes.
+- Loaded snapshots with `refCount > 0`.
+- The newest `retentionCount` snapshot and retrieval files.
+- Pinned vector generations held by live read contexts.
+
+Stale vector generations that are not rooted are swept through the daemon-wide
+`SharedReclamationAuthority`, which protects sibling ledgers sharing the same
+`(vaultStateHash, embeddingSetId)` vector store by considering latest-fresh editions, in-memory pins,
+and build reservations under a per-key `ExclusiveClaim`. A pinned or in-flight artifact always
+survives.
 
 **Retention** (`retentionCount`) defaults to `2` in the running daemon — `ProfileManager` passes
 `normalized.cache.snapshotRetention` (`runtime-profile.ts:98`, default 2; env
@@ -518,11 +529,11 @@ back to periodic content-delta scanning when native watch registration fails (`w
 Dirty marks enqueue `publishSaveSnapshot` on the scheduler `save` lane (`profile-manager.ts:205-223`).
 
 The save lane performs a debounced **full lexical rebuild** through the canonical
-`buildCanonicalSearchSnapshot` → `publishBuiltSnapshot` path, reusing unchanged segment bytes/hashes on
-disk (`snapshot-store.ts:456-461, 985-1136`). Dense generation is then built and promoted for the same
-lexical corpus revision (`snapshot-store.ts:1150-1317`). During the gap, reads pin the new lexical
-revision and changed/new docs simply ride lexical-only because their dense records are absent or
-`contentHash`-mismatched.
+`buildCanonicalSearchSnapshot` -> `publishFreshSnapshot` path, reusing unchanged segment bytes/hashes on
+disk through `publishBuiltSnapshot`. The final durable publication is the edition commit; dense
+generation is built and promoted for the same lexical corpus revision when retrieval preparation
+completes. During the gap, reads pin the new lexical revision and changed/new docs simply ride
+lexical-only because their dense records are absent or `contentHash`-mismatched.
 
 ### (c) `origin=text` hybrid query — model cold vs warm
 
@@ -558,14 +569,14 @@ encode re-loads on demand.
 
 1. New daemon binds the single owner socket, proves the previous holder is not listening when needed,
    increments the slot epoch, and writes a fresh tenancy record.
-2. On the next lifecycle/query, `recoverVault` validates the corpus active pointer and drops it if the
-   manifest is missing, then queues a background GC (`snapshot-store.ts:1395-1403`).
-3. The daemon schedules startup recovery after `phase = "ready"`: `startupReconcile` demotes stale
-   `building` records, re-marks matching published records as `fresh`, and `recoverRetrievalStaging`
-   sweeps orphan vector/link/lexical staging.
+2. On the next lifecycle/query, `recoverVault` ensures the search-store directories exist and queues
+   the edition-derived background GC.
+3. The daemon schedules startup recovery after `phase = "ready"`: `recoverRetrievalStartupState` sweeps
+   vector store staging/tmp directories and search-store tmp directories.
 4. The first retrieve after restart can still attach an on-disk committed dense generation even if no
-   in-memory vector handle exists: `pinReadableGeneration` validates the active pointer and metadata,
-   then lazy-opens the generation with single-flight protection (`pool.ts:240-280, 352-368`).
+   in-memory vector handle exists: `pinReadableGeneration` validates the committed generation metadata
+   against the edition-named generation id, manifest hash, DB path, key, and spec, then lazy-opens the
+   generation with single-flight protection.
 
 ---
 

@@ -15,7 +15,7 @@ non-canonical index must be detectable. Latency may vary; results may not.
 
 - **One daemon, not three.** A single per-user, per-runtime `search-daemon` serves every vault over framed RPC. There is no analyzer daemon, no index-warm daemon, no foreground `searchVault` fallback, and no read-path reconcile. CLI and MCP are thin RPC clients that auto-start the daemon, wait for ready, and fail clearly if it cannot — never an in-process search.
 
-- **One immutable snapshot, not three drifting paths.** A search pins exactly one immutable snapshot for the request's full lifetime; background indexing builds a new snapshot and atomically swaps the active pointer (MVCC). There is no overlay / persisted / live merge to keep "in agreement" — readers never block writers, and a rebuild during a search cannot change that request's pinned snapshot.
+- **One immutable snapshot, not three drifting paths.** A search pins exactly one immutable snapshot for the request's full lifetime; background indexing builds a new snapshot and commits a new edition to the append-only ledger (MVCC). The ledger head is the active snapshot. There is no overlay / persisted / live merge to keep "in agreement" — readers never block writers, and a rebuild during a search cannot change that request's pinned snapshot.
 
 - **Content-addressed, canonical identity.** `snapshot id = hash(segment content-hashes + identity tuple)` — content-true, not an mtime/size proxy. Rebuilding identical logical content yields byte-identical segments (stable byte order, fixed integer encoding, canonical floats). The identity tuple carries every index-affecting input — build version (segment encoding + partition scheme + engine + identity normalizer), field-set version, partition bits, analyzer identity, search settings, ranking-feature version — plus a reserved `retrieverIdentity` slot. Any change to indexed contents flows into this id; an index built under an old identity must never be served as current.
 
@@ -34,7 +34,7 @@ non-canonical index must be detectable. Latency may vary; results may not.
 | DO | DON'T |
 |----|-------|
 | Fold every index-affecting input into the snapshot id (incl. builder + ranking version) | Change what gets indexed and serve an existing snapshot id as current |
-| Pin one immutable snapshot per request; swap the active pointer atomically | Mutate active reader state, or merge overlay / persisted / live paths |
+| Pin one immutable snapshot per request; commit a new ledger edition atomically | Mutate active reader state, or merge overlay / persisted / live paths |
 | Emit canonical bytes — stable order, fixed ints, canonical floats | Reproduce old persist→restore divergence with non-canonical encoding |
 | Serve phrase/proximity by reading positions from the postings | Reconstruct positions/phrases from a split token stream at query time |
 | Reach the search core only via daemon RPC | Call the search core in-process or re-export it through the adapter barrel |

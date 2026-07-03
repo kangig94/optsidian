@@ -14,7 +14,7 @@ Kiwi runtime code lives under `src/core/kiwi/*` as Korean text-analysis infrastr
 - `retrieval/*` owns positional candidate retrieval, channel weights, candidate limits, and per-channel result merging.
 - `ranking/*` owns exact identity ranking, phrase ranking, coverage ranking, RRF, and final scoring.
 - `segments/*` owns canonical snapshot bytes and snapshot-resident field text.
-- `src/daemon/search-store/*` owns snapshot publication, MVCC pinning, retention, active pointers, and daemon cache paths.
+- `src/daemon/search-store/*` owns snapshot publication, MVCC pinning, retention, the edition ledger, and daemon cache paths.
 - `src/daemon/pools.ts` and `src/daemon/*worker*` own analyzer/search-execution worker pools. Query and index analyzer parallelism must go through those pools.
 
 Layout-only skeleton files are allowed only while an active search migration is in progress. A functional search change should populate the matching module and avoid adding new behavior to `index.ts` unless it is preserving the public entrypoint, re-exporting public helpers, or coordinating modules.
