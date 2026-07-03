@@ -9,7 +9,7 @@ names; exact line numbers are included only where they are useful orientation, n
 maintained citation set.
 
 Iron law (unchanged): results are a pure function of `(snapshot id, query, filters, limit, ranking
-version, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
+version, ranking tuning hash, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
 and *lifecycle* half — the resident daemon, the load/unload of the model, and the build/publish/GC of
 caches — none of which may change a served result.
 
@@ -320,6 +320,19 @@ RPC connection cancels its in-flight requests.
 ---
 
 ## 4. Cache & index lifecycle (the lifelines)
+
+> **Superseded model note.** The active-pointer and `retrieval-freshness.json` mechanics described in
+> the remainder of this section are the *pre-ledger* model. Visible state is now an **append-only
+> edition ledger** (`search-store/publisher.ts` `EditionLedger`, `publications/<editionSeq>`): a
+> `VaultPublisher` (one per `retrievalIdentity = (vaultStateHash, lexicalIdentityHash,
+> embeddingSpaceId)`) is the sole writer; "current" is the max valid `editionSeq`; each `EditionRecord`
+> names the corpus + link graph + a dense union (`fresh|building|failed|unavailable`) atomically, so a
+> reader never chases separate pointers and freshness is *derived* from the edition's dense arm.
+> Reclamation is a daemon-wide `SharedReclamationAuthority`: vector-generation GC roots are the union
+> of live edition heads across every ledger sharing a `(vaultStateHash, embeddingSetId)` store, plus
+> in-memory pins and build reservations, swept under a per-key `ExclusiveClaim`. The corpus/retrieval
+> active-pointer files and `retrieval-freshness.json` remain only as legacy/startup-recovery artifacts,
+> not the live serving mechanism. (Full rewrite of the prose below is a tracked follow-up.)
 
 The search subsystem persists **four distinct artifacts**, each content-addressed and independently
 GC'd.
