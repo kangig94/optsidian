@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ensurePrivateDirSync, writePrivateFileSync } from "../private-path.js";
+import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from "../private-path.js";
 import { ExclusiveClaim, type ExclusiveClaimAcquireOptions } from "./exclusive-claim.js";
 import {
   createProcessToken,
@@ -198,29 +198,6 @@ function removeEmptyDir(dirPath: string): void {
     fsyncDirSync(path.dirname(dirPath));
   } catch (error) {
     if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTEMPTY") return;
-    throw error;
-  }
-}
-
-function fsyncFileSync(filePath: string): void {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function fsyncDirSync(dirPath: string): void {
-  try {
-    const fd = fs.openSync(dirPath, "r");
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (error) {
-    if (process.platform === "win32" && errorCode(error) === "EISDIR") return;
     throw error;
   }
 }

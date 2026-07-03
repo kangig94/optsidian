@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ensurePrivateDirSync, writePrivateFileSync } from "../private-path.js";
+import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from "../private-path.js";
 
 export type FrontierEntry =
   | { op: "upsert"; path: string; contentHash: string }
@@ -298,29 +298,3 @@ function tombstoneProofCovers(
   return value === true || value === operation.tombstoneSeq;
 }
 
-function fsyncFileSync(filePath: string): void {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function fsyncDirSync(dirPath: string): void {
-  try {
-    const fd = fs.openSync(dirPath, "r");
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (error) {
-    if (process.platform === "win32" && errorCode(error) === "EISDIR") return;
-    throw error;
-  }
-}
-
-function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
-}

@@ -73,6 +73,29 @@ export function writePrivateFileAtomicSync(filePath: string, data: string | Node
   }
 }
 
+export function fsyncFileSync(filePath: string): void {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export function fsyncDirSync(dirPath: string): void {
+  try {
+    const fd = fs.openSync(dirPath, "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if (process.platform === "win32" && errorCode(error) === "EISDIR") return;
+    throw error;
+  }
+}
+
 function assertExistingPrivateFileTarget(filePath: string, label: string): void {
   ensureExistingPrivateFileTarget(filePath, label);
 }

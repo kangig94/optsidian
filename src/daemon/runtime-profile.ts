@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
 import { DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS } from "../core/search/constants.js";
+import { SEARCH_SCHEMA_DIGEST } from "../core/search/schema.js";
 import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
 import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
-import { INDEX_BUILD_VERSION } from "./search-store/builder.js";
+import { DEFAULT_PARTITION_BITS, INDEX_BUILD_VERSION } from "./search-store/builder.js";
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
@@ -185,6 +186,8 @@ export function lexicalIdentityHashForSearchRuntimeProfile(profile: SearchRuntim
   const normalized = normalizeSearchRuntimeProfile(profile);
   return sha256(canonicalJson({
     buildVersion: INDEX_BUILD_VERSION,
+    fieldSetVersion: SEARCH_SCHEMA_DIGEST,
+    partitionBits: DEFAULT_PARTITION_BITS,
     analyzer: normalized.analyzer,
     index: normalized.index
   }));

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { ensurePrivateDirSync, writePrivateFileSync } from "../private-path.js";
+import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from "../private-path.js";
 import {
   createProcessToken,
   defaultProcessStartIdentityProvider,
@@ -204,29 +204,6 @@ function isProcessToken(value: unknown): value is ProcessToken {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function fsyncFileSync(filePath: string): void {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function fsyncDirSync(dirPath: string): void {
-  try {
-    const fd = fs.openSync(dirPath, "r");
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (error) {
-    if (process.platform === "win32" && errorCode(error) === "EISDIR") return;
-    throw error;
-  }
 }
 
 function errorCode(error: unknown): string | undefined {

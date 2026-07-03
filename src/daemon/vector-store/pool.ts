@@ -646,44 +646,6 @@ function loadVectorGenerationMetadataFromDir(
   }
 }
 
-export async function writeActiveVectorPointer(
-  paths: VectorStoreCachePaths,
-  metadata: VectorGenerationMetadata,
-  renameActive: DurableRename = durableRename
-): Promise<void> {
-  ensurePrivateDirSync(paths.activeDir, "Optsidian vector active pointer directory");
-  ensurePrivateDirSync(paths.tmpDir, "Optsidian vector tmp directory");
-  const pointer = {
-    schemaVersion: 1,
-    generationId: metadata.generationId,
-    embeddingSetId: metadata.embeddingSetId,
-    specId: metadata.spec.specId,
-    dbPath: metadata.dbPath
-  };
-  const tmp = path.join(paths.tmpDir, `${metadata.generationId}.${process.pid}.vector-active.tmp`);
-  writePrivateFileSync(tmp, `${JSON.stringify(pointer)}\n`, "Optsidian vector active pointer");
-  fsyncFileSync(tmp);
-  await renameActive(tmp, paths.activePointerPath);
-  fsyncDirSync(paths.activeDir);
-}
-
-export function readActiveVectorPointer(paths: VectorStoreCachePaths): { generationId: string; embeddingSetId: string; specId: string; dbPath: string } | undefined {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8")) as unknown;
-    if (!isRecord(parsed) || parsed.schemaVersion !== 1) return undefined;
-    if (typeof parsed.generationId !== "string" || typeof parsed.embeddingSetId !== "string") return undefined;
-    if (typeof parsed.specId !== "string" || typeof parsed.dbPath !== "string") return undefined;
-    return {
-      generationId: parsed.generationId,
-      embeddingSetId: parsed.embeddingSetId,
-      specId: parsed.specId,
-      dbPath: parsed.dbPath
-    };
-  } catch {
-    return undefined;
-  }
-}
-
 export function sweepVectorStaging(paths: VectorStoreCachePaths): void {
   if (!fs.existsSync(paths.stagingDir)) return;
   for (const entry of fs.readdirSync(paths.stagingDir)) {
