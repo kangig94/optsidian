@@ -184,6 +184,9 @@ export function searchRuntimeProfileHash(profile: SearchRuntimeProfile): string 
 
 export function lexicalIdentityHashForSearchRuntimeProfile(profile: SearchRuntimeProfile): string {
   const normalized = normalizeSearchRuntimeProfile(profile);
+  // partitionBits folds the constant DEFAULT_PARTITION_BITS, matching every production build (the
+  // partition scheme is not runtime-configurable). If it ever becomes per-profile, thread the profile's
+  // value here — otherwise the store-dir identity would diverge from the built snapshot's identity tuple.
   return sha256(canonicalJson({
     buildVersion: INDEX_BUILD_VERSION,
     analyzerVersion: ANALYZER_VERSION,

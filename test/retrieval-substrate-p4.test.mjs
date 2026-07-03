@@ -874,21 +874,12 @@ test("AC11 P4 stronger equivalent: edition ledger replay reports stale after res
     env: harness.env
   });
   fs.mkdirSync(vectorPaths.stagingDir, { recursive: true });
+  fs.mkdirSync(vectorPaths.tmpDir, { recursive: true });
   fs.writeFileSync(path.join(vectorPaths.stagingDir, "orphan"), "x");
-  const lexicalTmp = path.join(tempRoot(), "lexical-tmp");
-  const linkTmp = path.join(tempRoot(), "link-tmp");
-  fs.mkdirSync(lexicalTmp, { recursive: true });
-  fs.mkdirSync(linkTmp, { recursive: true });
-  fs.writeFileSync(path.join(lexicalTmp, "orphan"), "x");
-  fs.writeFileSync(path.join(linkTmp, "orphan"), "x");
-  await recoverRetrievalStaging({
-    vectorPaths,
-    lexicalTmpDir: lexicalTmp,
-    linkGraphTmpDir: linkTmp
-  });
+  fs.writeFileSync(path.join(vectorPaths.tmpDir, "orphan.tmp"), "x");
+  recoverRetrievalStaging({ vectorPaths });
   assert.deepEqual(fs.readdirSync(vectorPaths.stagingDir), []);
-  assert.deepEqual(fs.readdirSync(lexicalTmp), []);
-  assert.deepEqual(fs.readdirSync(linkTmp), []);
+  assert.deepEqual(fs.readdirSync(vectorPaths.tmpDir), []);
 
   await closeRetrievalHarness(harness);
   writeRetrievalVaultFile(harness.vault, "Projects/Alpha.md", [

@@ -7,15 +7,9 @@ import { sweepVectorStaging } from "./pool.js";
 // Orphan staging/tmp cleanup after a crash. The sweep is synchronous fs so the daemon can run it
 // to completion BEFORE it accepts requests — a client that boots a build must never race a sweep that
 // then deletes its staging.
-export function recoverRetrievalStaging(input: {
-  vectorPaths: VectorStoreCachePaths;
-  lexicalTmpDir?: string;
-  linkGraphTmpDir?: string;
-}): void {
+export function recoverRetrievalStaging(input: { vectorPaths: VectorStoreCachePaths }): void {
   sweepVectorStaging(input.vectorPaths);
   sweepTmpDir(input.vectorPaths.tmpDir);
-  sweepTmpDir(input.lexicalTmpDir);
-  sweepTmpDir(input.linkGraphTmpDir);
 }
 
 export function recoverRetrievalStartupState(input: {
