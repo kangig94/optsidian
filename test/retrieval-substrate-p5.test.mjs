@@ -729,6 +729,69 @@ test("AC2 service Retrieve falls back lexically when committed dense metadata is
   assert.equal(result.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
 });
 
+test("AC3 cold-start failed dense head is unreadable and Retrieve stays lexical-only", async () => {
+  const cause = "cold-start dense generation failed";
+  const baseBuilder = createDeterministicEmbeddingSetBuilder();
+  const failingBuilder = {
+    ...baseBuilder,
+    build: async () => {
+      throw new Error(cause);
+    }
+  };
+  const harness = createHarness({
+    snapshotStoreOptions: { embeddingSetBuilder: failingBuilder }
+  });
+  writeSampleVault(harness.vault);
+  const loaded = await harness.service.loadVault(harness.vault, context(), { preload: false, warmupQueryAnalyzer: false });
+  assert.equal(loaded.vaults[0].status, "ready");
+  assert.equal(harness.buildCount(), 1);
+
+  const paths = searchStoreCachePaths(harness.vault, harness.env);
+  const denseHead = editionDense(paths);
+  assert.equal(denseHead.state, "failed");
+  assert.equal(denseHead.cause, cause);
+  assert.throws(() => activeRetrievalFromEdition(paths), /no fresh dense edition/);
+
+  const readContextResult = await harness.store.pinLexicalReadContext(harness.vault, context());
+  assert.equal(readContextResult.status, "ready");
+  try {
+    const attached = await harness.store.tryAttachDenseGeneration(
+      readContextResult.readContext,
+      harness.store.currentEmbeddingSpaceId()
+    );
+    assert.equal(attached.status, "unreadable");
+    assert.equal(attached.reason, cause);
+    assert.equal(attached.signal.state, "cold");
+    assert.equal(attached.signal.pendingCount, 3);
+    assert.equal(attached.signal.generationAgeMs, null);
+  } finally {
+    harness.store.releaseReadContext(readContextResult.readContext);
+  }
+
+  const encodeBefore = harness.embedding.calls.encode;
+  const denseSearchBefore = harness.vector.calls.searchVector.length;
+  const result = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 5,
+    debug: true
+  }, context());
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.available, true);
+  assert.ok(result.results.length > 0);
+  assert.equal(result.dense.state, "cold");
+  assert.equal(result.dense.pendingCount, 3);
+  assert.equal(result.dense.generationAgeMs, null);
+  assert.notEqual(result.dense.state, "fresh");
+  assert.equal(result.retrievalSnapshotId, undefined);
+  assert.equal(harness.embedding.calls.encode, encodeBefore);
+  assert.equal(harness.vector.calls.searchVector.length, denseSearchBefore);
+  assert.equal(result.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+});
+
 test("AC4 dense usability applies space gate and per-doc content hash mask in hybrid and vector paths", async () => {
   const harness = await readyHarness();
   const { paths, active, envelope } = await ensureActiveRetrieval(harness);

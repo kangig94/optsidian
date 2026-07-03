@@ -11,8 +11,10 @@ import {
   createLocalTenancyFenceProvider,
   denseFreshFromEdition,
   editionCoverageFromCorpus,
-  liveEditionHeadsUnder
+  liveEditionHeadsUnder,
+  liveEditionsForGcUnder
 } from "../src/daemon/search-store/publisher.ts";
+import { encodeEditionRecord } from "../src/daemon/search-store/publication.ts";
 import {
   searchStoreCachePaths,
   searchStoreLedgerRootDir
@@ -88,6 +90,52 @@ test("AC2 fresh dense edition carries the vector generation identity readers and
     assert.deepEqual(denseFreshFromEdition(publisher.ledger.current().dense), dense);
     assert.equal(publisher.ledger.current().identity.retrievalSnapshotId, "retrieval-manifest-a");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("AC2 edition ledger skips torn crash records and keeps GC rooted at the last valid edition", async () => {
+  const root = tempRoot();
+  let publisher;
+  try {
+    const fence = createLocalTenancyFenceProvider();
+    const identity = retrievalIdentity("vault-a", "lex-a", "space-a");
+    publisher = publisherAt(root, identity, fence);
+    const first = await commitFreshEditionOnPublisher(publisher, identity, fence, "manifest-a", "snapshot-a");
+    const second = await commitFreshEditionOnPublisher(publisher, identity, fence, "manifest-b", "snapshot-b");
+    const third = await commitFreshEditionOnPublisher(publisher, identity, fence, "manifest-c", "snapshot-c");
+
+    assert.deepEqual([first.editionSeq, second.editionSeq, third.editionSeq], [1, 2, 3]);
+
+    const publicationsDir = publisher.ledger.publicationsDir;
+    fs.writeFileSync(path.join(publicationsDir, "4"), "{\"schemaVersion\":1", { mode: 0o600 });
+    fs.writeFileSync(path.join(publicationsDir, "5"), "not an edition record\n", { mode: 0o600 });
+    const mismatchedDense = fresh("manifest-torn", identity);
+    fs.writeFileSync(
+      path.join(publicationsDir, "6"),
+      encodeEditionRecord({
+        ...third,
+        editionSeq: 99,
+        frontierSeq: third.frontierSeq + 1,
+        corpus: corpus("snapshot-torn"),
+        dense: mismatchedDense,
+        identity: editionIdentity(identity, mismatchedDense),
+        committedAt: "2030-01-01T00:00:00.000Z"
+      }),
+      { mode: 0o600 }
+    );
+
+    assert.deepEqual(publisher.ledger.history().map((edition) => edition.editionSeq), [1, 2, 3]);
+    assert.equal(publisher.ledger.current().corpus.snapshotId, "snapshot-c");
+    assert.equal(publisher.ledger.latestFresh().dense.manifestHash, "manifest-c");
+
+    const gcEditions = liveEditionsForGcUnder(root);
+    assert.deepEqual(gcEditions.map((edition) => edition.corpus.snapshotId), ["snapshot-c"]);
+    assert.deepEqual(gcEditions.map((edition) => edition.linkGraphId), ["link-graph"]);
+    assert.deepEqual(gcEditions.map((edition) => edition.dense.manifestHash), ["manifest-c"]);
+    assert.equal(gcEditions.some((edition) => edition.corpus.snapshotId === "snapshot-torn"), false);
+  } finally {
+    await publisher?.stop().catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -340,6 +388,27 @@ async function commitFreshEdition(searchStoresDir, identity, fence, manifestHash
   );
   assert.equal(committed.ok, true);
   await publisher.stop();
+}
+
+async function commitFreshEditionOnPublisher(publisher, identity, fence, manifestHash, snapshotId) {
+  const document = doc(`${snapshotId}-doc`, `${snapshotId}.md`, `${snapshotId}-hash`);
+  publisher.markDirty({ op: "upsert", docId: document.documentId, path: document.path, contentHash: document.contentHash });
+  const boundary = publisher.recordScanBoundary();
+  const expectedHeadSeq = publisher.ledger.current()?.editionSeq;
+  const committed = await publisher.commit(
+    candidate({
+      identity,
+      frontierSeq: boundary.frontierSeq,
+      scanBoundaryJournalSeq: boundary.scanBoundaryJournalSeq,
+      corpus: corpus(snapshotId),
+      documents: [document],
+      dense: fresh(manifestHash, identity)
+    }),
+    expectedHeadSeq,
+    fence.writerToken
+  );
+  assert.equal(committed.ok, true, committed.message);
+  return committed.value.record;
 }
 
 async function commitFreshEditionAtLedgerRoot(ledgerRootDir, identity, fence, manifestHash, snapshotId) {

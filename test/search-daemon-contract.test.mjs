@@ -15,23 +15,6 @@ import {
 } from "./helpers/edition-ledger.mjs";
 
 const repoRoot = process.cwd();
-const AC17_PUBLICATION_STEPS = [
-  "tmpSegmentWrite",
-  "fsyncSegmentFile",
-  "fsyncSegmentDir",
-  "hashVerify",
-  "manifestTempWrite",
-  "fsyncManifestFile",
-  "durableRenameManifest",
-  "fsyncSnapshotsDir",
-  "activePointerTempWrite",
-  "fsyncActivePointerFile",
-  "durableRenameActivePointer",
-  "fsyncActiveDir",
-  "recoveryScan",
-  "markSweepGc"
-];
-
 const AC18_OWNER_FIELDS = [
   "slot",
   "epoch",
@@ -1679,6 +1662,139 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
   } finally {
     await client.shutdown({ deadlineMs: 1000 }).catch(() => {});
   }
+});
+
+test("AC1 stale incarnations reject work while status handshakes and client retry resync stay live", async () => {
+  const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const {
+    createOwnerRecord,
+    createOwnerRegistry,
+    desiredOwnerIdentity,
+    socketPathForOwner
+  } = await futureImport("src/daemon/owner-registry.ts");
+  const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
+  const runtimeDir = tempRoot();
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(runtimeDir, "cache"),
+    XDG_CONFIG_HOME: path.join(runtimeDir, "config"),
+    OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir,
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: "1000"
+  };
+  const client = createSearchDaemonClient({
+    runtimeDir,
+    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    env,
+    readyTimeoutMs: 30000
+  });
+
+  try {
+    const status = await client.status({ deadlineMs: 5000 });
+    const owner = status.owner;
+    assert.ok(owner);
+    const wrongIncarnation = `${owner.incarnationId}-stale`;
+
+    const staleSearch = await requestRawRpc(owner.socketPath, encodeFrame, {
+      protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: "stale-search",
+      method: "Search",
+      incarnation: wrongIncarnation,
+      deadline: Date.now() + 1000,
+      payload: { vault: tempRoot("optsidian-stale-incarnation-vault-"), query: "alpha", limit: 1 }
+    });
+    assert.equal(staleSearch.ok, false);
+    assert.equal(staleSearch.error.code, "STALE_INCARNATION");
+    assert.match(staleSearch.error.message, /incarnation is stale/);
+
+    const staleStatus = await requestRawRpc(owner.socketPath, encodeFrame, {
+      ...statusRequest("stale-status"),
+      incarnation: wrongIncarnation
+    });
+    assert.equal(staleStatus.ok, true);
+    assert.equal(staleStatus.result.ready, true);
+    assert.equal(staleStatus.result.incarnationId, owner.incarnationId);
+
+    const absentWaitReady = await requestRawRpc(owner.socketPath, encodeFrame, {
+      protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: "absent-wait-ready",
+      method: "WaitReady",
+      deadline: Date.now() + 1000,
+      payload: {}
+    });
+    assert.equal(absentWaitReady.ok, true);
+    assert.equal(absentWaitReady.result.ready, true);
+    assert.equal(absentWaitReady.result.incarnationId, owner.incarnationId);
+
+    const staleWaitReady = await requestRawRpc(owner.socketPath, encodeFrame, {
+      protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: "stale-wait-ready",
+      method: "WaitReady",
+      incarnation: wrongIncarnation,
+      deadline: Date.now() + 1000,
+      payload: {}
+    });
+    assert.equal(staleWaitReady.ok, true);
+    assert.equal(staleWaitReady.result.ready, true);
+    assert.equal(staleWaitReady.result.incarnationId, owner.incarnationId);
+  } finally {
+    await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
+  }
+
+  const retryRuntimeDir = tempRoot();
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const desired = desiredOwnerIdentity(binaryPath);
+  const retryRegistry = createOwnerRegistry({ runtimeDir: retryRuntimeDir, desired });
+  const socketPath = socketPathForOwner(retryRuntimeDir, desired);
+  const staleOwner = createOwnerRecord(desired, socketPath, 1, "incarnation-stale", process.pid);
+  const liveOwner = createOwnerRecord(desired, socketPath, 2, "incarnation-live", process.pid);
+  retryRegistry.writeOwner(staleOwner);
+  const seen = [];
+  let searchAttempts = 0;
+  const retryClient = createSearchDaemonClient({
+    registry: retryRegistry,
+    binaryPath,
+    spawnDaemon: async () => {
+      throw new Error("retry fixture should reuse the published owner");
+    },
+    connect: async (record) => ({
+      request: async (request) => {
+        seen.push({ record, request });
+        if (request.method === "Status") return statusResult(record);
+        assert.equal(request.method, "Search");
+        searchAttempts += 1;
+        if (searchAttempts === 1) {
+          assert.equal(request.incarnation, "incarnation-stale");
+          retryRegistry.writeOwner(liveOwner);
+          throw Object.assign(new Error("search daemon incarnation is stale"), { code: "STALE_INCARNATION" });
+        }
+        assert.equal(record.incarnationId, "incarnation-live");
+        assert.equal(request.incarnation, "incarnation-live");
+        return {
+          ok: true,
+          command: "search",
+          schemaVersion: 1,
+          available: true,
+          status: "ready",
+          snapshotId: "snap-live",
+          matches: [{ path: "Live.md", snippets: [] }],
+          results: [{ path: "Live.md", score: 1, snippets: [] }]
+        };
+      },
+      close: async () => {}
+    })
+  });
+
+  const result = await retryClient.search({ vault: retryRuntimeDir, query: "alpha", limit: 1, deadlineMs: 1000 });
+  assert.equal(result.snapshotId, "snap-live");
+  assert.deepEqual(seen.map(({ request }) => request.method), ["Status", "Search", "Status", "Search"]);
+  assert.deepEqual(
+    seen.filter(({ request }) => request.method === "Search").map(({ request }) => request.incarnation),
+    ["incarnation-stale", "incarnation-live"]
+  );
 });
 
 test("AC10 owner registry has no client-side control lock or time-stale reclaim path", async () => {
@@ -4169,40 +4285,6 @@ test("AC16 real request scheduler enforces deadline cancellation and throughput 
   assert.deepEqual(pressure.shedQueues, ["throughput-rebuild", "throughput-refresh"]);
   assert.equal(pressure.queryWorkShed, false);
   assert.equal(pressure.backgroundQueueDepth, 42);
-});
-
-test("AC17 publication seam crash-injection preserves last valid snapshot and GC roots", async () => {
-  const {
-    PUBLICATION_STEPS,
-    computeGcRootsForTests,
-    createSnapshotPublisherForTests,
-    durableRename
-  } = await futureImport("src/daemon/search-store/publication.ts");
-
-  assert.deepEqual(PUBLICATION_STEPS, AC17_PUBLICATION_STEPS);
-  assert.equal(typeof durableRename, "function");
-
-  const roots = computeGcRootsForTests({
-    activePointers: ["snap-active"],
-    inFlightPublishManifests: ["snap-publishing"],
-    retainedSnapshotManifests: ["snap-retained"],
-    inMemoryPins: ["snap-pinned"]
-  });
-  assert.deepEqual([...roots.snapshotIds].sort(), ["snap-active", "snap-pinned", "snap-publishing", "snap-retained"]);
-
-  for (const failAt of AC17_PUBLICATION_STEPS) {
-    const root = tempRoot();
-    const publisher = createSnapshotPublisherForTests({ root, failAt });
-    await publisher.seedActiveSnapshot({ snapshotId: "snap-old", segmentHashes: ["seg-old"] });
-    await assert.rejects(
-      () => publisher.publish({ snapshotId: "snap-new", segmentHashes: ["seg-new"], bytes: Buffer.from("new") }),
-      new RegExp(failAt)
-    );
-    const recovered = await publisher.recover();
-    assert.equal(recovered.activeSnapshotId, "snap-old", `${failAt} must leave last valid snapshot active`);
-    assert.equal(recovered.validSnapshotIds.includes("snap-old"), true);
-    assert.equal(recovered.validSnapshotIds.includes("snap-new"), false);
-  }
 });
 
 test("AC18 owner registry records stable fields and converges stale starts to one compatible daemon", async () => {
