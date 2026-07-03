@@ -10,10 +10,10 @@ import type {
   RetrievalQuery,
 } from '../contracts.js';
 import { DEFAULT_RRF_K } from '../constants.js';
-import { canonicalValueBytes } from '../segments/index.js';
+import { canonicalValueBytes } from '../segments/canonical.js';
 
 export { DEFAULT_RRF_K };
-export const FUSION_RETRIEVER_VERSION = '1';
+const FUSION_RETRIEVER_VERSION = '1';
 
 export type FusionParameters = {
   algorithm: 'rrf';
@@ -38,30 +38,6 @@ type CandidateAccumulator = {
   signals: RetrieverSignal[];
   retrieverOrder: number[];
 };
-
-export function createFusionRetriever(retrievers: readonly Retriever[], options: FusionOptions = {}): Retriever {
-  const parameters = fusionParameters(
-    retrievers.map((retriever) => retriever.retrieverIdentity),
-    options,
-  );
-  const retrieverPlanIdentity = computeRetrieverPlanIdentity(
-    retrievers.map((retriever) => retriever.retrieverIdentity),
-    parameters,
-  );
-  const retrieverIdentity: RetrieverIdentity = {
-    id: 'fusion',
-    version: FUSION_RETRIEVER_VERSION,
-    parameters: {
-      retrieverPlanIdentity,
-      fusion: parameters,
-      retrievers: retrievers.map((retriever) => retriever.retrieverIdentity),
-    },
-  };
-  return {
-    retrieverIdentity,
-    retrieve: async (query) => retrieveWithFusion(retrievers, query, options, retrieverIdentity, retrieverPlanIdentity),
-  };
-}
 
 export async function retrieveWithFusion(
   retrievers: readonly Retriever[],

@@ -84,7 +84,7 @@ export type Re2Regex = {
 let cachedRE2: Re2Constructor | undefined;
 let cachedRuntimeDir: string | undefined;
 
-export function re2RuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
+function re2RuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), 're2-wasm', RE2_WASM_INSTALL_ID);
 }
 
@@ -140,7 +140,7 @@ export function getRe2ClassSync(env: NodeJS.ProcessEnv = process.env): Re2Constr
   }
 }
 
-export function isRe2RuntimeInstalled(runtimeDir = re2RuntimeDir()): boolean {
+function isRe2RuntimeInstalled(runtimeDir = re2RuntimeDir()): boolean {
   try {
     assertRe2RuntimeInstalled(runtimeDir);
     return true;

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
-import type { SearchTokenChannelTerms, UnresolvedNoteLink } from '../../core/search/analysis/index.js';
+import type { SearchTokenChannelTerms } from '../../core/search/analysis/channels.js';
+import type { UnresolvedNoteLink } from '../../core/search/analysis/links.js';
 import type {
   CorpusSnapshotId,
   EmbeddingSetId,
@@ -14,15 +15,15 @@ import type {
   EmbeddingRecipeIdentity,
   EmbeddingSetRecord,
   EmbeddingSpaceId,
-} from '../../core/search/dense/index.js';
+} from '../../core/search/dense/embedding-set.js';
 import type { VectorStoreKey } from '../vector-store/types.js';
-import {
-  canonicalValueBytes,
-  type CanonicalBm25FieldStats,
-  type CanonicalDocumentRecord,
-  type CanonicalSnapshotManifest,
-  type SnapshotIdentityTuple,
-} from '../../core/search/segments/index.js';
+import { canonicalValueBytes } from '../../core/search/segments/canonical.js';
+import type {
+  CanonicalBm25FieldStats,
+  CanonicalDocumentRecord,
+  CanonicalSnapshotManifest,
+  SnapshotIdentityTuple,
+} from '../../core/search/segments/canonical.js';
 import type { SearchBuildDocument } from '../../core/search/markdown.js';
 import type { SearchField, SearchSnippet } from '../../core/types.js';
 
@@ -92,7 +93,7 @@ export type PersistedDocumentRecord = {
   snippetCorpus: SnapshotSnippetCorpus;
 };
 
-export type SnapshotDiagnostics = {
+type SnapshotDiagnostics = {
   schemaHash: string;
   analyzer: SearchAnalyzerIdentity;
   warnings?: readonly string[];
@@ -119,7 +120,7 @@ export type RetrievalEmbeddingSetEnvelope = {
   records: readonly Omit<EmbeddingSetRecord, 'shardDocRef'>[];
 };
 
-export type RetrievalVectorSpecEnvelope = {
+type RetrievalVectorSpecEnvelope = {
   embeddingSetId: EmbeddingSetId;
   generationId: string;
   specId: string;
@@ -194,9 +195,9 @@ export type SnapshotSnippetLine = SearchSnippet & {
   channels: SearchTokenChannelTerms;
 };
 
-export type SnapshotSnippetFallback = { kind: 'line'; snippetId: string } | { kind: 'title'; line: 1 };
+type SnapshotSnippetFallback = { kind: 'line'; snippetId: string } | { kind: 'title'; line: 1 };
 
-export type SnapshotSnippetCorpus = {
+type SnapshotSnippetCorpus = {
   bodyStartLine: number;
   lines: SnapshotSnippetLine[];
   fallback: SnapshotSnippetFallback;

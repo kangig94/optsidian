@@ -336,10 +336,7 @@ function run(args, options = {}) {
 let pluginInstallModules;
 
 async function runPluginInstallDirect(args, options = {}) {
-  pluginInstallModules ??= Promise.all([
-    import(path.resolve('src/cli/args.ts')),
-    import(path.resolve('src/cli/commands/plugin.ts')),
-  ]);
+  pluginInstallModules ??= Promise.all([import('../src/cli/args.ts'), import('../src/cli/commands/plugin.ts')]);
   const [{ parseArgs }, { runPluginInstall }] = await pluginInstallModules;
   const env = { OPTSIDIAN_NO_UPDATE_CHECK: '1', ...options.env };
   const previousEnv = new Map();
@@ -430,13 +427,13 @@ async function shutdownSearchDaemonEnv(env) {
   if (!runtimeDir) return;
   try {
     const mergedEnv = { ...process.env, ...env };
-    const { createOwnerRegistry, desiredOwnerIdentity } = await import(path.resolve('src/daemon/owner-registry.ts'));
+    const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
     const registry = createOwnerRegistry({ runtimeDir, env: mergedEnv, desired: desiredOwnerIdentity(cli) });
     const owner = registry.readOwner();
     if (!owner) return;
 
     try {
-      const { createSearchDaemonClient } = await import(path.resolve('src/daemon/client.ts'));
+      const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
       const client = createSearchDaemonClient({
         runtimeDir,
         binaryPath: cli,
@@ -470,8 +467,8 @@ after(async () => {
 });
 
 test('search CLI request payload carries explicit retrieval and bounded coverage budgets', async () => {
-  const { parseArgs } = await import(path.resolve('src/cli/args.ts'));
-  const { searchRequestFromArgs } = await import(path.resolve('src/cli/commands/search.ts'));
+  const { parseArgs } = await import('../src/cli/args.ts');
+  const { searchRequestFromArgs } = await import('../src/cli/commands/search.ts');
   const vault = '/tmp/optsidian-search-cli-contract';
   const request = (tokens) => searchRequestFromArgs(parseArgs(['search', ...tokens]), vault);
 
@@ -490,8 +487,8 @@ test('search CLI request payload carries explicit retrieval and bounded coverage
 });
 
 test('search CLI rejects invalid retrieval, coverage, and full budget combinations', async () => {
-  const { parseArgs } = await import(path.resolve('src/cli/args.ts'));
-  const { searchRequestFromArgs } = await import(path.resolve('src/cli/commands/search.ts'));
+  const { parseArgs } = await import('../src/cli/args.ts');
+  const { searchRequestFromArgs } = await import('../src/cli/commands/search.ts');
   const vault = '/tmp/optsidian-search-cli-contract';
   const request = (tokens) => searchRequestFromArgs(parseArgs(['search', ...tokens]), vault);
 
@@ -508,10 +505,10 @@ test('search CLI rejects invalid retrieval, coverage, and full budget combinatio
 });
 
 test('search CLI treats positional bounded as a lexical query term', async () => {
-  const { parseArgs } = await import(path.resolve('src/cli/args.ts'));
-  const { normalizeSearchParams } = await import(path.resolve('src/core/search/params.ts'));
-  const { searchExecutionWarningLabels } = await import(path.resolve('src/core/search/internal-types.ts'));
-  const { searchRequestFromArgs } = await import(path.resolve('src/cli/commands/search.ts'));
+  const { parseArgs } = await import('../src/cli/args.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { searchExecutionWarningLabels } = await import('../src/core/search/internal-types.ts');
+  const { searchRequestFromArgs } = await import('../src/cli/commands/search.ts');
 
   const payload = searchRequestFromArgs(parseArgs(['search', 'bounded']), '/tmp/optsidian-search-cli-contract');
   const normalized = normalizeSearchParams(payload);
@@ -526,7 +523,7 @@ test('search CLI treats positional bounded as a lexical query term', async () =>
 });
 
 test('search help documents retrieval, coverage, and budgets', async () => {
-  const { commandHelpText } = await import(path.resolve('src/cli/help.ts'));
+  const { commandHelpText } = await import('../src/cli/help.ts');
   const help = commandHelpText('search');
 
   assert.match(help, /retrieval=lexical\|vector\|hybrid/);
@@ -538,7 +535,7 @@ test('search help documents retrieval, coverage, and budgets', async () => {
 });
 
 test('index help documents refresh and progress control', async () => {
-  const { commandHelpText } = await import(path.resolve('src/cli/help.ts'));
+  const { commandHelpText } = await import('../src/cli/help.ts');
   const help = commandHelpText('index');
 
   assert.match(help, /optsidian index rebuild \[--no-progress\]/);
@@ -585,7 +582,7 @@ test('top-level and implemented command help stay local', async () => {
   assert.equal(bareReadHelp.status, 2);
   assert.match(bareReadHelp.stderr, /Missing required argument: path=<value>/);
 
-  const { commandHelpText } = await import(path.resolve('src/cli/help.ts'));
+  const { commandHelpText } = await import('../src/cli/help.ts');
   const pluginInstallHelp = commandHelpText('plugin:install');
   assert.match(pluginInstallHelp, /Command: plugin:install/);
   assert.match(pluginInstallHelp, /url=<git-url>/);
@@ -999,7 +996,7 @@ test('plugin:install rejects combining native ids with custom sources', () => {
 });
 
 test('plugin:install normalizes scheme-less GitHub URLs', async () => {
-  const { normalizeGitSource } = await import(path.resolve('src/cli/commands/plugin.ts'));
+  const { normalizeGitSource } = await import('../src/cli/commands/plugin.ts');
 
   assert.equal(normalizeGitSource('example-owner/example-plugin'), 'https://github.com/example-owner/example-plugin');
   assert.equal(normalizeGitSource('github.com/user/sample-plugin'), 'https://github.com/user/sample-plugin');
@@ -1044,7 +1041,7 @@ test('top-level help recovers GUI env from a running Obsidian process when the c
 });
 
 test('policy table does not implement native-sufficient commands', async () => {
-  const policy = await import(path.resolve('src/cli/policy.ts'));
+  const policy = await import('../src/cli/policy.ts');
   for (const command of policy.implementedCommands()) {
     assert.equal(
       policy.NATIVE_SUFFICIENT_COMMANDS.has(command),
@@ -1431,11 +1428,10 @@ test('search ranks notes and renders CLI output', async (t) => {
 });
 
 test('similarity command parses retrieve sugar', async () => {
-  const { parseArgs } = await import(path.resolve('src/cli/args.ts'));
-  const { normalizeSimilarityParams } = await import(path.resolve('src/core/similarity.ts'));
-  const { retrievePayloadFromSimilarity, similarityRequestFromArgs } = await import(
-    path.resolve('src/cli/commands/similarity.ts')
-  );
+  const { parseArgs } = await import('../src/cli/args.ts');
+  const { normalizeSimilarityParams } = await import('../src/core/similarity.ts');
+  const { retrievePayloadFromSimilarity, similarityRequestFromArgs } =
+    await import('../src/cli/commands/similarity.ts');
 
   const request = normalizeSimilarityParams(
     similarityRequestFromArgs(
@@ -1576,7 +1572,7 @@ test('similarity command parses retrieve sugar', async () => {
 });
 
 test('index mutation rendering stays stable', async () => {
-  const { renderIndexResult } = await import(path.resolve('src/cli/render.ts'));
+  const { renderIndexResult } = await import('../src/cli/render.ts');
   assert.equal(renderIndexResult({ ok: true, command: 'index', action: 'rebuild' }), 'Index rebuilt.\n');
   assert.equal(
     renderIndexResult({ ok: true, command: 'index', action: 'refresh', rebuilt: true }),
@@ -1676,7 +1672,7 @@ test('index warm prepares discovered Obsidian registry vaults', async (t) => {
       },
     }),
   );
-  const { discoverObsidianVaultRoots } = await import(path.resolve('src/native/obsidian.ts'));
+  const { discoverObsidianVaultRoots } = await import('../src/native/obsidian.ts');
   assert.deepEqual(
     discoverObsidianVaultRoots({ env: { ...env, OBSIDIAN_CONFIG: overrideRegistry } }).vaults.map(
       (entry) => entry.path,

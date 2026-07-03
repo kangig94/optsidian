@@ -44,7 +44,7 @@ export type GrepLine = {
   text: string;
 };
 
-export type GrepMatch = {
+type GrepMatch = {
   path: string;
   line: number;
   text: string;
@@ -89,7 +89,7 @@ export type SearchSnippet = {
   text: string;
 };
 
-export type SearchAnalyzerDebug = {
+type SearchAnalyzerDebug = {
   name: string;
   version: string;
   runtime?: string;
@@ -98,7 +98,7 @@ export type SearchAnalyzerDebug = {
   activeAnalyzers?: string[];
 };
 
-export type SearchMatchDebug = {
+type SearchMatchDebug = {
   source: 'persisted';
   queryTerms: string[];
   queryChannels?: Record<string, string[]>;
@@ -134,7 +134,7 @@ export type SearchMatch = {
   debug?: SearchMatchDebug;
 };
 
-export type SearchDebugInfo = {
+type SearchDebugInfo = {
   query?: {
     raw: string;
     terms: string[];
@@ -171,7 +171,7 @@ export type SearchResult = {
 
 export type RetrieveOrigin = 'text' | 'note' | 'pair' | 'global';
 
-export type RetrieveDenseSignalState = 'fresh' | 'stale' | 'rebuilding' | 'cold';
+type RetrieveDenseSignalState = 'fresh' | 'stale' | 'rebuilding' | 'cold';
 
 export type RetrieveDenseSignal = {
   state: RetrieveDenseSignalState;
@@ -179,7 +179,7 @@ export type RetrieveDenseSignal = {
   generationAgeMs: number | null;
 };
 
-export type RetrieveRankedResult = {
+type RetrieveRankedResult = {
   path: string;
   title: string;
   score: number;
@@ -188,7 +188,7 @@ export type RetrieveRankedResult = {
   debug?: SearchMatchDebug;
 };
 
-export type RetrieveReadyResult = {
+type RetrieveReadyResult = {
   ok: true;
   command: 'retrieve';
   schemaVersion: 1;
@@ -205,7 +205,7 @@ export type RetrieveReadyResult = {
   warnings?: string[];
 };
 
-export type RetrieveIndexNotReadyResult = {
+type RetrieveIndexNotReadyResult = {
   ok: true;
   command: 'retrieve';
   schemaVersion: 1;
@@ -235,20 +235,20 @@ export type SimilarityFrontmatterFilter = {
   value: SimilarityFilterValue;
 };
 
-export type SimilarityScope = {
+type SimilarityScope = {
   path?: string;
   paths?: string[];
   pathGlob?: string;
   frontmatter?: SimilarityFrontmatterFilter[];
 };
 
-export type SimilarityProjection = {
+type SimilarityProjection = {
   fields?: SimilarityProjectionField[];
   stripFrontmatter?: boolean;
   markdown?: SimilarityMarkdownProjection;
 };
 
-export type SimilarityProviderParams = {
+type SimilarityProviderParams = {
   model?: string;
 };
 
@@ -292,7 +292,7 @@ export type NormalizedSimilarityParams = {
   minScore: number;
 };
 
-export type SimilarityPairResult = {
+type SimilarityPairResult = {
   path: string;
   title: string;
   score: number;
@@ -318,7 +318,7 @@ export type SimilarityResult = {
   warnings?: string[];
 };
 
-export type SearchIndexProjectionStatus = {
+type SearchIndexProjectionStatus = {
   key: string;
   tier: 'intl' | 'kiwi';
   roles: Array<'active' | 'baseline' | 'cached'>;
@@ -330,7 +330,7 @@ export type SearchIndexProjectionStatus = {
   builtAt?: string;
 };
 
-export type SearchAnalyzerRuntimeStatus = {
+type SearchAnalyzerRuntimeStatus = {
   targetTier: 'intl' | 'kiwi';
   declaredAnalyzers: string[];
   activeAnalyzers: string[];
@@ -352,7 +352,7 @@ export type SearchIndexWarmAccessStatus = {
   expiresAt?: string;
 };
 
-export type SearchIndexWarmScheduleStatus = {
+type SearchIndexWarmScheduleStatus = {
   path: string;
   intervalMinutes: number;
   throttled: boolean;
@@ -443,7 +443,7 @@ export type FrontmatterReadResult = {
 
 export type ChangeCode = 'A' | 'M' | 'D';
 
-export type FileChange = {
+type FileChange = {
   code: ChangeCode;
   path: string;
   from?: string;

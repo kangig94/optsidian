@@ -51,10 +51,6 @@ function writeVaultFile(vault, rel, content) {
   fs.writeFileSync(file, content);
 }
 
-function futureImport(relativePath) {
-  return import(path.join(repoRoot, relativePath));
-}
-
 function sharedHandle(bytes) {
   const buffer = new SharedArrayBuffer(bytes.byteLength);
   new Uint8Array(buffer).set(bytes);
@@ -97,9 +93,9 @@ test('search:eval offline explain trace replay validates mutations deterministic
   writeVaultFile(vault, 'Beta Project.md', '# Beta Project\n\nalpha project target beta beta\n');
   writeVaultFile(vault, 'Gamma.md', '# Gamma\n\nunrelated\n');
   const analyzer = testAnalyzer();
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const built = await buildCanonicalSearchSnapshot({
     vaultRoot: vault,
     analyzer,

@@ -8,13 +8,15 @@ import test from 'node:test';
 import {
   ensureLocalOnnxModelArtifact,
   inspectLocalOnnxModelArtifact,
-  LocalOnnxProvider,
-  createOnnxSessionWithFallback,
   localOnnxManifestPath,
   localOnnxModelDir,
   localOnnxModelDescriptor,
+} from '../src/core/search/dense/artifacts.ts';
+import {
+  LocalOnnxProvider,
+  createOnnxSessionWithFallback,
   resolveLocalOnnxProviderSelection,
-} from '../src/core/search/dense/index.ts';
+} from '../src/core/search/dense/local-onnx.ts';
 import { ExclusiveClaim } from '../src/core/lifecycle/exclusive-claim.ts';
 import { createProcessToken } from '../src/core/lifecycle/process-token.ts';
 import { tokenizeRoutedText } from '../src/core/search/analyzer.ts';

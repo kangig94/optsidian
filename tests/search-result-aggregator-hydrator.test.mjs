@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { normalizeSearchParams } from '../src/core/search/params.ts';
-import { POSITIONAL_RETRIEVER_IDENTITY } from '../src/core/search/retrieval/positional/index.ts';
+import { POSITIONAL_RETRIEVER_IDENTITY } from '../src/core/search/retrieval/positional/retriever.ts';
 import { finalistsInBaseRankOrder, sortedSearchShardFinalists } from '../src/daemon/search-store/finalist-order.ts';
 import { ResultAggregator } from '../src/daemon/search-store/result-aggregator.ts';
 import { ResultHydrator } from '../src/daemon/search-store/result-hydrator.ts';

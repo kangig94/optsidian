@@ -73,13 +73,22 @@ function rankSignal(overrides = {}) {
 }
 
 async function core() {
-  return import(path.join(repoRoot, 'src/core/index.ts'));
+  const [patch, copy, edit, frontmatter, grep, read, similarity, write] = await Promise.all([
+    import('../src/core/apply-patch.ts'),
+    import('../src/core/copy.ts'),
+    import('../src/core/edit.ts'),
+    import('../src/core/frontmatter.ts'),
+    import('../src/core/grep.ts'),
+    import('../src/core/read.ts'),
+    import('../src/core/similarity.ts'),
+    import('../src/core/write.ts'),
+  ]);
+  return { ...patch, ...copy, ...edit, ...frontmatter, ...grep, ...read, ...similarity, ...write };
 }
 
 test('settings helpers normalize supported config keys and apply local overrides', async () => {
-  const { configPathResult, getConfigValue, readOptsidianSettings, setConfigValue, unsetConfigValue } = await import(
-    path.join(repoRoot, 'src/core/settings.ts')
-  );
+  const { configPathResult, getConfigValue, readOptsidianSettings, setConfigValue, unsetConfigValue } =
+    await import('../src/core/settings.ts');
   const project = tempVault();
   const env = { XDG_CONFIG_HOME: path.join(project, 'config') };
   const globalSettings = path.join(env.XDG_CONFIG_HOME, 'optsidian', 'settings.json');
@@ -160,11 +169,9 @@ test('settings helpers normalize supported config keys and apply local overrides
 });
 
 test('AC6 search query and Hangul ngram analysis are length-bounded', async () => {
-  const { UsageError } = await import(path.join(repoRoot, 'src/errors.ts'));
-  const { MAX_SEARCH_QUERY_LENGTH, normalizeSearchParams } = await import(
-    path.join(repoRoot, 'src/core/search/params.ts')
-  );
-  const { ngramSearchTerms } = await import(path.join(repoRoot, 'src/core/search/analysis/korean.ts'));
+  const { UsageError } = await import('../src/errors.ts');
+  const { MAX_SEARCH_QUERY_LENGTH, normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { ngramSearchTerms } = await import('../src/core/search/analysis/korean.ts');
 
   const maxQuery = 'a'.repeat(MAX_SEARCH_QUERY_LENGTH);
   assert.equal(normalizeSearchParams({ query: maxQuery }).query, maxQuery);
@@ -216,7 +223,7 @@ test('AC6 search query and Hangul ngram analysis are length-bounded', async () =
 });
 
 test('search text analysis keeps ngram disabled by default', async () => {
-  const { analyzeSearchText } = await import(path.join(repoRoot, 'src/core/search/analysis/query.ts'));
+  const { analyzeSearchText } = await import('../src/core/search/analysis/query.ts');
 
   const disabled = analyzeSearchText('한국어검색', ['한국어검색']);
   const enabled = analyzeSearchText('한국어검색', ['한국어검색'], { ngram: true });
@@ -277,8 +284,8 @@ test('similarity contract normalizes vector request', async () => {
 });
 
 test('body ngram field text can be capped without changing other channels', async () => {
-  const { BODY_NGRAM_SHORT_MAX_TERMS } = await import(path.join(repoRoot, 'src/core/search/analysis/budget.ts'));
-  const { searchFieldTokenTexts } = await import(path.join(repoRoot, 'src/core/search/analysis/fields.ts'));
+  const { BODY_NGRAM_SHORT_MAX_TERMS } = await import('../src/core/search/analysis/budget.ts');
+  const { searchFieldTokenTexts } = await import('../src/core/search/analysis/fields.ts');
   const longHangul = Array.from({ length: BODY_NGRAM_SHORT_MAX_TERMS + 100 }, (_, index) =>
     String.fromCodePoint(0xac00 + index),
   ).join('');
@@ -297,9 +304,8 @@ test('body ngram field text can be capped without changing other channels', asyn
 });
 
 test('body index budget samples oversized bodies across the full text', async () => {
-  const { BODY_FULL_ANALYSIS_MAX_CHARS, BODY_LEXICAL_SAMPLE_MAX_CHARS, bodyIndexBudgetForText } = await import(
-    path.join(repoRoot, 'src/core/search/analysis/budget.ts')
-  );
+  const { BODY_FULL_ANALYSIS_MAX_CHARS, BODY_LEXICAL_SAMPLE_MAX_CHARS, bodyIndexBudgetForText } =
+    await import('../src/core/search/analysis/budget.ts');
   const body = ['front-marker', '가'.repeat(BODY_FULL_ANALYSIS_MAX_CHARS + 1000), 'tail-marker'].join('\n');
 
   const budget = bodyIndexBudgetForText(body);
@@ -311,7 +317,7 @@ test('body index budget samples oversized bodies across the full text', async ()
 });
 
 test('markdown search parser extracts title aliases tags headings and body', async () => {
-  const { parseMarkdownNote } = await import(path.join(repoRoot, 'src/core/search/markdown.ts'));
+  const { parseMarkdownNote } = await import('../src/core/search/markdown.ts');
   const doc = parseMarkdownNote(
     'Projects/alpha.md',
     `---
@@ -336,7 +342,7 @@ Body with #rollout tag.
 });
 
 test('search surface analyzer expands compound path title and acronym terms', async () => {
-  const { surfaceSearchTerms } = await import(path.join(repoRoot, 'src/core/search/analysis/index.ts'));
+  const { surfaceSearchTerms } = await import('../src/core/search/analysis/channels.ts');
   const terms = surfaceSearchTerms('Research/HumanoidMotionTracking-DDPMScheduler Sim2Real.md');
   for (const term of [
     'research',
@@ -356,9 +362,7 @@ test('search surface analyzer expands compound path title and acronym terms', as
 });
 
 test('reranker does not let weak metadata ngram coverage outrank stronger body retrieval', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const strongBody = searchDocument({
     path: 'STS/strong-body.md',
     bodyNgramTokens: '숙소',
@@ -395,9 +399,7 @@ test('reranker does not let weak metadata ngram coverage outrank stronger body r
 });
 
 test('reranker keeps exact body phrases ahead of weak Kiwi metadata coverage', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const strongBody = searchDocument({
     path: 'STS/exact-body.md',
     bodySurfaceTokens: '독일을 다음에 또간다면 이숙소에 머물겁니다',
@@ -436,9 +438,7 @@ test('reranker keeps exact body phrases ahead of weak Kiwi metadata coverage', a
 });
 
 test('reranker keeps higher-priority phrase fields ahead of stronger retrieval score', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const titlePhrase = searchDocument({
     path: 'Alpha Calibration Guide.md',
     title: 'Alpha Calibration Guide',
@@ -481,9 +481,7 @@ test('reranker keeps higher-priority phrase fields ahead of stronger retrieval s
 });
 
 test('reranker does not promote one-character identity fragments to phrase matches', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const exactBody = searchDocument({
     path: 'WOS/exact-body.md',
     bodySurfaceTokens: '3 일간이요',
@@ -518,9 +516,7 @@ test('reranker does not promote one-character identity fragments to phrase match
 });
 
 test('reranker ignores weak English function words for metadata coverage', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const strongBody = searchDocument({
     path: 'SciFact/strong-body.md',
     bodyTokens: 'aspirin inhibit product pge2',
@@ -557,9 +553,7 @@ test('reranker ignores weak English function words for metadata coverage', async
 });
 
 test('reranker keeps English polarity terms eligible for metadata coverage', async () => {
-  const { rankBucketName, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/index.ts')
-  );
+  const { rankBucketName, rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const polarityMetadata = searchDocument({
     path: 'SciFact/not-title.md',
     titleTokens: 'not',
@@ -583,7 +577,7 @@ test('reranker keeps English polarity terms eligible for metadata coverage', asy
 });
 
 test('reranker ignores legacy body signal as a separate scoring bonus', async () => {
-  const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, 'src/core/search/ranking/index.ts'));
+  const { rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const weakBody = searchDocument({
     path: 'SciFact/weak-body.md',
     titleTokens: 'aspirin',
@@ -621,7 +615,7 @@ test('intl search analyzer segments CJK text for lexical search', async () => {
     searchTextNeedsBlockingAnalyzer,
     tokenizeIntlText,
     tokenizeRoutedText,
-  } = await import(path.join(repoRoot, 'src/core/search/analyzer.ts'));
+  } = await import('../src/core/search/analyzer.ts');
 
   assert.ok(tokenizeIntlText('検索方式を改善する').includes('検索'));
   assert.ok(tokenizeIntlText('中文搜索方式需要改善').includes('搜索'));
@@ -658,7 +652,7 @@ test('intl search analyzer segments CJK text for lexical search', async () => {
 });
 
 test('kiwi search token filter drops Korean function tokens', async () => {
-  const { __filterKiwiTokensForTests } = await import(path.join(repoRoot, 'src/core/kiwi/loader.ts'));
+  const { __filterKiwiTokensForTests } = await import('../src/core/kiwi/loader.ts');
 
   assert.deepEqual(
     __filterKiwiTokensForTests([
@@ -695,7 +689,7 @@ test('kiwi search token filter drops Korean function tokens', async () => {
 });
 
 test('kiwi analyzer manager supports non-blocking and blocking modes', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
 
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
@@ -757,7 +751,7 @@ test('kiwi analyzer manager supports non-blocking and blocking modes', async () 
 });
 
 test('kiwi analyzer manager does not share an in-flight load across cache envs', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
   let releaseFirstLoad;
   const firstLoadGate = new Promise((resolve) => {
     releaseFirstLoad = resolve;
@@ -838,7 +832,7 @@ test('kiwi analyzer manager does not share an in-flight load across cache envs',
 });
 
 test('kiwi analyzer manager retires active leases before disposing old envs', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
   const loadCalls = [];
   const disposals = [];
   const manager = new KiwiAnalyzerManager({
@@ -911,7 +905,7 @@ test('kiwi analyzer manager retires active leases before disposing old envs', as
 });
 
 test('kiwi analyzer manager reports runtime status for the requested cache env', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
   const inspectModes = [];
   const manager = new KiwiAnalyzerManager({
     inspectModelArtifact: (env, options = {}) => {
@@ -964,7 +958,7 @@ test('kiwi analyzer manager reports runtime status for the requested cache env',
 });
 
 test('kiwi analyzer manager reuses active handles without rechecking model files', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
   let inspectCalls = 0;
   let loadCalls = 0;
   const manager = new KiwiAnalyzerManager({
@@ -1027,9 +1021,7 @@ test('kiwi analyzer manager reuses active handles without rechecking model files
 });
 
 test('kiwi analyzer manager does not apply failed load state across cache envs', async () => {
-  const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import(
-    path.join(repoRoot, 'src/core/kiwi/manager.ts')
-  );
+  const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import('../src/core/kiwi/manager.ts');
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
     inspectModelArtifact: (env) => ({
@@ -1111,7 +1103,7 @@ test('kiwi analyzer manager does not apply failed load state across cache envs',
 });
 
 test('kiwi analyzer manager retries transient missing wasm failures', async () => {
-  const { KiwiAnalyzerManager } = await import(path.join(repoRoot, 'src/core/kiwi/manager.ts'));
+  const { KiwiAnalyzerManager } = await import('../src/core/kiwi/manager.ts');
   let wasmInstalled = false;
   let attempts = 0;
   const manager = new KiwiAnalyzerManager({
@@ -1207,8 +1199,8 @@ test('kiwi wasm binary installs at runtime instead of using a bundled wasm impor
       arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength),
     };
   };
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, 'src/core/kiwi/loader.ts'));
-  const { inspectKiwiWasmArtifact } = await import(path.join(repoRoot, 'src/core/kiwi/artifact.ts'));
+  const { loadKiwiWasmBinary } = await import('../src/core/kiwi/loader.ts');
+  const { inspectKiwiWasmArtifact } = await import('../src/core/kiwi/artifact.ts');
   try {
     const env = { XDG_CACHE_HOME: cache };
     const binary = await loadKiwiWasmBinary(env);
@@ -1225,7 +1217,7 @@ test('kiwi wasm binary installs at runtime instead of using a bundled wasm impor
 });
 
 test('kiwi loader resolves direct and wrapped wasm initializer imports', async () => {
-  const { __resolveKiwiWasmInitializerForTests } = await import(path.join(repoRoot, 'src/core/kiwi/loader.ts'));
+  const { __resolveKiwiWasmInitializerForTests } = await import('../src/core/kiwi/loader.ts');
   const wasmModule = {
     FS: {},
     api: () => 'null',
@@ -1247,10 +1239,10 @@ test('kiwi wasm install recovers dead install claims', async () => {
     status: 200,
     arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength),
   });
-  const { inspectKiwiWasmArtifact, kiwiDataDir } = await import(path.join(repoRoot, 'src/core/kiwi/artifact.ts'));
-  const { ExclusiveClaim } = await import(path.join(repoRoot, 'src/core/lifecycle/exclusive-claim.ts'));
-  const { createProcessToken } = await import(path.join(repoRoot, 'src/core/lifecycle/process-token.ts'));
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, 'src/core/kiwi/loader.ts'));
+  const { inspectKiwiWasmArtifact, kiwiDataDir } = await import('../src/core/kiwi/artifact.ts');
+  const { ExclusiveClaim } = await import('../src/core/lifecycle/exclusive-claim.ts');
+  const { createProcessToken } = await import('../src/core/lifecycle/process-token.ts');
+  const { loadKiwiWasmBinary } = await import('../src/core/kiwi/loader.ts');
   const env = { XDG_CACHE_HOME: cache };
   const claimDir = path.join(kiwiDataDir(env), 'wasm-install.claim');
 
@@ -1295,8 +1287,8 @@ test('kiwi wasm install repairs corrupt installed wasm files', async () => {
     kiwiWasmDir,
     kiwiWasmFilePath,
     kiwiWasmManifestPath,
-  } = await import(path.join(repoRoot, 'src/core/kiwi/artifact.ts'));
-  const { loadKiwiWasmBinary } = await import(path.join(repoRoot, 'src/core/kiwi/loader.ts'));
+  } = await import('../src/core/kiwi/artifact.ts');
+  const { loadKiwiWasmBinary } = await import('../src/core/kiwi/loader.ts');
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
@@ -1347,7 +1339,7 @@ test('kiwi wasm inspection can skip digest for lightweight status', async () => 
     kiwiWasmFilePath,
     kiwiWasmManifestPath,
     readVerifiedKiwiWasmBinary,
-  } = await import(path.join(repoRoot, 'src/core/kiwi/artifact.ts'));
+  } = await import('../src/core/kiwi/artifact.ts');
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiWasmDir(env), { recursive: true });
@@ -1393,7 +1385,7 @@ test('kiwi model inspection rejects corrupt installed model files', async () => 
     kiwiModelFilePath,
     kiwiModelManifestPath,
     readVerifiedKiwiModelFiles,
-  } = await import(path.join(repoRoot, 'src/core/kiwi/artifact.ts'));
+  } = await import('../src/core/kiwi/artifact.ts');
   const env = { XDG_CACHE_HOME: cache };
 
   fs.mkdirSync(kiwiModelDir(env), { recursive: true });
@@ -1455,7 +1447,7 @@ test('read caps by lines and pages without gaps', async () => {
 
 test('read edit and direct grep reject vault files over the byte cap', async () => {
   const vault = tempVault();
-  const { DEFAULT_VAULT_FILE_MAX_BYTES } = await import(path.join(repoRoot, 'src/limits.ts'));
+  const { DEFAULT_VAULT_FILE_MAX_BYTES } = await import('../src/limits.ts');
   const { editVaultFile, grepVault, readVaultFile, writeVaultFile } = await core();
   fs.writeFileSync(path.join(vault, 'large.md'), Buffer.alloc(DEFAULT_VAULT_FILE_MAX_BYTES + 1, 0x61));
   writeVaultFile(vault, { path: 'small.md', content: 'needle\n' });
@@ -1489,9 +1481,8 @@ test('vault access registry keeps recent realpaths only', async () => {
   fs.mkdirSync(thirdVault, { recursive: true });
   const env = { XDG_CACHE_HOME: cache };
   const dayMs = 24 * 60 * 60 * 1000;
-  const { recordVaultAccess, recentVaultAccessRoots, vaultAccessPath, vaultAccessStatus } = await import(
-    path.join(repoRoot, 'src/core/vault-access.ts')
-  );
+  const { recordVaultAccess, recentVaultAccessRoots, vaultAccessPath, vaultAccessStatus } =
+    await import('../src/core/vault-access.ts');
   const firstReal = fs.realpathSync(firstVault);
   const secondReal = fs.realpathSync(secondVault);
   const thirdReal = fs.realpathSync(thirdVault);
@@ -1536,7 +1527,7 @@ test('vault access registry keeps recent realpaths only', async () => {
 });
 
 test('private path helper tightens optsidian-owned cache modes', async () => {
-  const { ensurePrivateDirSync, writePrivateFileSync } = await import(path.join(repoRoot, 'src/core/private-path.ts'));
+  const { ensurePrivateDirSync, writePrivateFileSync } = await import('../src/core/private-path.ts');
   const dir = path.join(tempVault(), 'cache', 'optsidian');
   const file = path.join(dir, 'state.json');
   fs.mkdirSync(dir, { recursive: true });
@@ -1556,7 +1547,7 @@ test('private path helper tightens optsidian-owned cache modes', async () => {
 
 test('private path helper rejects symlinked private targets', async () => {
   if (process.platform === 'win32') return;
-  const { ensurePrivateDirSync, writePrivateFileSync } = await import(path.join(repoRoot, 'src/core/private-path.ts'));
+  const { ensurePrivateDirSync, writePrivateFileSync } = await import('../src/core/private-path.ts');
   const root = tempVault();
   const realDir = path.join(root, 'real-dir');
   const realFile = path.join(root, 'real-file.json');
@@ -1584,7 +1575,7 @@ test('vault access registry surfaces private path policy failures', async () => 
   fs.mkdirSync(realCache);
   fs.mkdirSync(vault);
   fs.symlinkSync(realCache, path.join(cache, 'optsidian'), 'dir');
-  const { recordVaultAccess } = await import(path.join(repoRoot, 'src/core/vault-access.ts'));
+  const { recordVaultAccess } = await import('../src/core/vault-access.ts');
 
   assert.throws(() => recordVaultAccess(vault, { env: { XDG_CACHE_HOME: cache } }), /must not be a symlink/);
 });

@@ -1,4 +1,5 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../../analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../../analysis/channels.js';
+import type { SearchTokenChannel } from '../../analysis/channels.js';
 import type {
   CandidateChannelRank,
   CandidateFieldScore,
@@ -22,7 +23,7 @@ import type { SearchSnapshot, SearchSnapshotSegment } from './engine.js';
 import { normalizeTerm, phraseStartPositions } from './postings.js';
 import { minimumTermWindow } from './proximity.js';
 import { POSITIONAL_FIELD_BY_ID, POSITIONAL_FIELD_ID, POSITIONAL_SEARCH_FIELDS } from './types.js';
-import type { CanonicalPosting } from '../../segments/index.js';
+import type { CanonicalPosting } from '../../segments/canonical.js';
 
 export const POSITIONAL_RETRIEVER_IDENTITY: RetrieverIdentity = {
   id: 'positional-lexical',
@@ -91,7 +92,7 @@ export function createPositionalRetriever(
   };
 }
 
-export function retrievePositionalCandidates(
+function retrievePositionalCandidates(
   snapshot: SearchSnapshot,
   query: RetrievalQuery,
   postingsLookup = createQueryPostingsLookup(),

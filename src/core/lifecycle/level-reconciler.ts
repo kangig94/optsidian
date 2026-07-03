@@ -1,6 +1,6 @@
-export type MaybePromise<T> = T | Promise<T>;
+type MaybePromise<T> = T | Promise<T>;
 
-export type LevelReconcilerBatch<TIntent> = {
+type LevelReconcilerBatch<TIntent> = {
   dirty: boolean;
   intents: readonly TIntent[];
   signal: AbortSignal;

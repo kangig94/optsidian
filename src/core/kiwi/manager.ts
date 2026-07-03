@@ -328,7 +328,7 @@ export function getKiwiAnalyzerManager(): KiwiAnalyzerManager {
   return singleton;
 }
 
-export function __setKiwiAnalyzerManagerForTests(manager: KiwiAnalyzerManager | null): void {
+function __setKiwiAnalyzerManagerForTests(manager: KiwiAnalyzerManager | null): void {
   singleton = manager;
   singletonThreadId = threadId;
 }

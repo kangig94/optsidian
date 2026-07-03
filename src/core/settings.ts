@@ -126,7 +126,7 @@ export function unsetConfigValue(cwd: string, key: string, env: NodeJS.ProcessEn
   return { ok: true, command: 'config', action: 'unset', path, key, config: settings };
 }
 
-export function resolveSettingsPath(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
+function resolveSettingsPath(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
   const override = env[SETTINGS_PATH_ENV]?.trim();
   if (override) return path.resolve(cwd, override);
   const configured = env.XDG_CONFIG_HOME?.trim();

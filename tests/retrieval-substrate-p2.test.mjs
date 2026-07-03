@@ -4,11 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { DeterministicHashProvider, createDenseRetriever } from '../src/core/search/dense/index.ts';
+import { DeterministicHashProvider } from '../src/core/search/dense/provider.ts';
+import { createDenseRetriever } from '../src/core/search/dense/retriever.ts';
 import { SEARCH_SCORING_LAMBDAS } from '../src/core/search/constants.ts';
 import { fuseCandidateSets, retrieveWithFusion } from '../src/core/search/retrieval/fusion.ts';
-import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/index.ts';
-import { rerankCandidatesWithSignals, rerankScore } from '../src/core/search/ranking/index.ts';
+import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/types.ts';
+import { rerankCandidatesWithSignals, rerankScore } from '../src/core/search/ranking/score.ts';
 import { rankSignalsFromFeatures } from '../src/daemon/search-execution.ts';
 import {
   buildCanonicalSearchSnapshot,

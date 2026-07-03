@@ -1,11 +1,11 @@
 import crypto from 'node:crypto';
-import { canonicalValueBytes } from './segments/index.js';
+import { canonicalValueBytes } from './segments/canonical.js';
 
 export type IndexAffectingSearchSettings = {
   ngram: boolean;
 };
 
-export const DEFAULT_INDEX_AFFECTING_SEARCH_SETTINGS: IndexAffectingSearchSettings = Object.freeze({
+const DEFAULT_INDEX_AFFECTING_SEARCH_SETTINGS: IndexAffectingSearchSettings = Object.freeze({
   ngram: false,
 });
 

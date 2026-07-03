@@ -5,7 +5,7 @@ import { optsidianCacheRoot } from './cache-root.js';
 import { isPrivatePathError, writePrivateFileAtomicSync } from './private-path.js';
 import type { SearchIndexWarmAccessStatus } from './types.js';
 
-export type VaultAccessEntry = {
+type VaultAccessEntry = {
   realpath: string;
   lastAccessAtMs: number;
   lastAccessAt: string;

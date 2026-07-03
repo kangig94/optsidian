@@ -17,7 +17,7 @@ import {
 import { encodeEditionRecord } from '../src/daemon/search-store/publication.ts';
 import { searchStoreCachePaths, searchStoreLedgerRootDir } from '../src/daemon/search-store/cache-paths.ts';
 import { DaemonSnapshotStore } from '../src/daemon/search-store/snapshot-store.ts';
-import { vectorGenerationDir, vectorStoreCachePaths } from '../src/daemon/vector-store/index.ts';
+import { vectorGenerationDir, vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
 
 test('AC2 atomic edition records dense failure without blocking lexical visibility', async () => {
   const root = tempRoot();

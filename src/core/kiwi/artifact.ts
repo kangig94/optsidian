@@ -10,15 +10,15 @@ import { ensurePrivateDirSync, writePrivateFileSync } from '../private-path.js';
 export const KIWI_NLP_VERSION = '0.23.0';
 export const KIWI_MODEL_VERSION = '0.23.0';
 export const KIWI_MODEL_TYPE = 'cong-global';
-export const KIWI_MODEL_RELEASE_TAG = `v${KIWI_MODEL_VERSION}`;
-export const KIWI_MODEL_ASSET_NAME = `kiwi_model_v${KIWI_MODEL_VERSION}_base.tgz`;
+const KIWI_MODEL_RELEASE_TAG = `v${KIWI_MODEL_VERSION}`;
+const KIWI_MODEL_ASSET_NAME = `kiwi_model_v${KIWI_MODEL_VERSION}_base.tgz`;
 export const KIWI_MODEL_URL = `https://github.com/bab2min/Kiwi/releases/download/${KIWI_MODEL_RELEASE_TAG}/${KIWI_MODEL_ASSET_NAME}`;
 export const KIWI_MODEL_SHA256 = '355a006ab0bd4dec171cdca8e0b0d951e82bd5bc5993265421d8961876f20430';
 export const KIWI_MODEL_ARCHIVE_SIZE_BYTES = 88_069_544;
-export const KIWI_MODEL_TAR_PREFIX = 'models/cong/base/';
+const KIWI_MODEL_TAR_PREFIX = 'models/cong/base/';
 export const KIWI_WASM_FILE_NAME = 'kiwi-wasm.wasm';
 export const KIWI_WASM_NPM_TARBALL_URL = `https://registry.npmjs.org/kiwi-nlp/-/kiwi-nlp-${KIWI_NLP_VERSION}.tgz`;
-export const KIWI_WASM_TAR_PATH = `package/dist/${KIWI_WASM_FILE_NAME}`;
+const KIWI_WASM_TAR_PATH = `package/dist/${KIWI_WASM_FILE_NAME}`;
 export const KIWI_WASM_SHA256 = '1b78e48701468610cbb49b34105fd297dc1252774ef5c861ebf80fd6cc7d664e';
 export const KIWI_WASM_SIZE_BYTES = 3_779_034;
 export const KIWI_MODEL_FILES = [
@@ -48,7 +48,7 @@ const KIWI_MODEL_FILE_SHA256: Record<KiwiModelFileName, string> = {
   'nounchr.mdl': '4b687e36836dd60dcb7addcfcf369ac082b339bab76549574ac1ce2b7ccd6836',
 };
 
-export type KiwiModelArtifactManifest = {
+type KiwiModelArtifactManifest = {
   packageId: 'kiwi';
   kiwiNlpVersion: string;
   modelVersion: string;
@@ -76,7 +76,7 @@ export type KiwiModelArtifactEnsureOptions = KiwiModelArtifactInspectOptions & {
   forceInstall?: boolean;
 };
 
-export type KiwiWasmArtifactManifest = {
+type KiwiWasmArtifactManifest = {
   packageId: 'kiwi-wasm';
   kiwiNlpVersion: string;
   sourceUrl: string;

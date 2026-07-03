@@ -5,17 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  createLinkAdjacencyRetriever,
-  createLinkGraphView,
-  retrieveWithFusion,
-} from '../src/core/search/retrieval/index.ts';
-import {
-  buildSearchSnapshotFromSegments,
-  createPositionalRetriever,
-  POSITIONAL_FIELD_ID,
-} from '../src/core/search/retrieval/positional/index.ts';
-import { rerankCandidatesWithSignals, rerankScore } from '../src/core/search/ranking/index.ts';
+import { retrieveWithFusion } from '../src/core/search/retrieval/fusion.ts';
+import { createLinkAdjacencyRetriever, createLinkGraphView } from '../src/core/search/retrieval/link.ts';
+import { createPositionalRetriever } from '../src/core/search/retrieval/positional/retriever.ts';
+import { buildSearchSnapshotFromSegments } from '../src/core/search/retrieval/positional/snapshot.ts';
+import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/types.ts';
+import { rerankCandidatesWithSignals, rerankScore } from '../src/core/search/ranking/score.ts';
 import { rankSignalsFromFeatures } from '../src/daemon/search-execution.ts';
 import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder.ts';
 import {

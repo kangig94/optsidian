@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/index.ts';
+import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/channels.ts';
 import { uniqueSearchTerms } from '../src/core/search/analysis/channels.ts';
 import {
   CANDIDATE_LIMIT_MIN,

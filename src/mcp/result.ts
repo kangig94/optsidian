@@ -3,14 +3,14 @@ import { RuntimeError, UsageError } from '../errors.js';
 
 export type ToolPayload = Record<string, unknown>;
 
-export function toolResult(payload: ToolPayload): CallToolResult {
+function toolResult(payload: ToolPayload): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
     structuredContent: payload,
   };
 }
 
-export function toolError(error: unknown): CallToolResult {
+function toolError(error: unknown): CallToolResult {
   const payload = {
     ok: false,
     errorType: errorType(error),

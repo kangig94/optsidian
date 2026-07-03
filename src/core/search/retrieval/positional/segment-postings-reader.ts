@@ -4,8 +4,8 @@ import {
   canonicalSegmentSectionBytes,
   lookupCanonicalTermDictionaryEntry,
   readCanonicalPostingRow,
-  type CanonicalPosting,
-} from '../../segments/index.js';
+} from '../../segments/canonical.js';
+import type { CanonicalPosting } from '../../segments/canonical.js';
 
 export class CanonicalSegmentPostingsReader {
   private readonly postingsBytes: Uint8Array;

@@ -31,11 +31,11 @@ export type RunObsidianOptions = {
 let cachedLinuxGuiEnv: GuiEnvSnapshot | undefined;
 let hasCachedLinuxGuiEnv = false;
 
-export function obsidianBin(env: NodeJS.ProcessEnv = process.env): string {
+function obsidianBin(env: NodeJS.ProcessEnv = process.env): string {
   return env.OPTSIDIAN_OBSIDIAN_BIN ? env.OPTSIDIAN_OBSIDIAN_BIN : 'obsidian';
 }
 
-export function clearObsidianLaunchEnvCache(): void {
+function clearObsidianLaunchEnvCache(): void {
   cachedLinuxGuiEnv = undefined;
   hasCachedLinuxGuiEnv = false;
 }

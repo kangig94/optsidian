@@ -1,5 +1,5 @@
 import type { SearchCoverageBudget, SearchCoverageMode, SearchField, SearchRetrievalMode } from '../types.js';
-import type { SearchTokenChannelTerms } from './analysis/index.js';
+import type { SearchTokenChannelTerms } from './analysis/channels.js';
 
 export type PathFilter = {
   rel: string;

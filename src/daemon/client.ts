@@ -64,17 +64,17 @@ export type SearchDaemonClient = {
   shutdown(options?: ClientRequestOptions): Promise<ShutdownResult>;
 };
 
-export type ClientRequestOptions = {
+type ClientRequestOptions = {
   deadlineMs?: number;
   cancellationId?: string;
   traceId?: string;
 };
 
-export type SearchClientRequest = SearchRequestPayload & ClientRequestOptions;
-export type ExplainClientRequest = ExplainRequestPayload & ClientRequestOptions;
-export type RetrieveClientRequest = RetrieveRequestPayload & ClientRequestOptions;
-export type VaultClientRequest = VaultRequestPayload & ClientRequestOptions;
-export type PruneClientRequest = PruneRequestPayload & ClientRequestOptions;
+type SearchClientRequest = SearchRequestPayload & ClientRequestOptions;
+type ExplainClientRequest = ExplainRequestPayload & ClientRequestOptions;
+type RetrieveClientRequest = RetrieveRequestPayload & ClientRequestOptions;
+type VaultClientRequest = VaultRequestPayload & ClientRequestOptions;
+type PruneClientRequest = PruneRequestPayload & ClientRequestOptions;
 
 export type SearchDaemonClientOptions = {
   runtimeDir?: string;

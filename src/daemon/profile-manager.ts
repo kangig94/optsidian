@@ -2,19 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createDaemonPools, type DaemonPools } from './pools.js';
 import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from './protocol.js';
-import {
-  createDaemonSnapshotStore,
-  createWorkerEmbeddingSetBuilder,
-  DaemonSearchStoreService,
-  SharedReclamationAuthority,
-  VaultPublisherRegistry,
-  type DaemonSnapshotStore,
-  type SnapshotDirtyMark,
-} from './search-store/index.js';
+import { SharedReclamationAuthority, VaultPublisherRegistry } from './search-store/publisher.js';
+import { DaemonSearchStoreService } from './search-store/service.js';
+import { createDaemonSnapshotStore, createWorkerEmbeddingSetBuilder } from './search-store/snapshot-store.js';
+import type { DaemonSnapshotStore, SnapshotDirtyMark } from './search-store/snapshot-store.js';
 import { SearchCacheCatalog } from './search-store/cache-catalog.js';
 import { createEmbedScheduler, type EmbedScheduler, type VectorGenerationManager } from './embed-scheduler.js';
 import type { SearchIndexPruneResult } from '../core/types.js';
-import { DeterministicHashProvider, createLocalOnnxProviderFromConfig } from '../core/search/dense/index.js';
+import { createLocalOnnxProviderFromConfig } from '../core/search/dense/local-onnx.js';
+import { DeterministicHashProvider } from '../core/search/dense/provider.js';
 import { VaultRegistry } from './vault-registry.js';
 import {
   effectiveSearchRuntimeProfile,

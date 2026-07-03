@@ -1,6 +1,4 @@
-import type { SearchTextAnalysis, SearchTokenChannel } from '../../analysis/index.js';
 import { SEARCH_PROPERTIES } from '../../schema.js';
-import type { ShardDocRef } from '../../contracts.js';
 import type { SearchField } from '../../../types.js';
 
 export type PositionalDocId = number;
@@ -24,7 +22,7 @@ export type PositionalPosting = {
 
 export type PositionalPostings = ReadonlyMap<string, readonly PositionalPosting[]>;
 
-export type PositionalFieldInput = {
+type PositionalFieldInput = {
   fieldId: PositionalFieldId;
   tokens: readonly string[];
 };
@@ -33,29 +31,3 @@ export type PositionalDocumentInput = {
   docId: PositionalDocId;
   fields: readonly PositionalFieldInput[];
 };
-
-export type PositionalDocumentRecord = {
-  shardDocRef: ShardDocRef;
-  documentId: string;
-  documentKey: string;
-  path?: string;
-  tags?: readonly string[];
-};
-
-export type PositionalChannelFieldInput = {
-  field: SearchField;
-  tokens: readonly string[];
-};
-
-export type PositionalChannelDocumentInput = {
-  docId: PositionalDocId;
-  documentId?: string;
-  documentKey: string;
-  path?: string;
-  tags?: readonly string[];
-  channels: Partial<Record<SearchTokenChannel, readonly PositionalChannelFieldInput[]>>;
-};
-
-export type PositionalChannelIndex = Partial<Record<SearchTokenChannel, PositionalPostings>>;
-
-export type PositionalQueryAnalysis = SearchTextAnalysis;

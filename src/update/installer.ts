@@ -26,7 +26,7 @@ const UPDATE_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_NOTICE_NOTIFICATION_INTERVAL_MS = 3 * 60 * 60 * 1000;
 const UPDATE_NOTICE_TIMEOUT_MS = 2500;
 
-export type InstallManifest = {
+type InstallManifest = {
   version: string;
   tag: string;
   binDir: string;
@@ -106,7 +106,7 @@ type UpdateNoticeState = {
 // TODO(v0.4.0): delete this mode switch and always enforce attestation verification.
 type ReleaseVerifyMode = 'required' | 'best-effort' | 'checksum';
 
-export function stateBaseDir(env: NodeJS.ProcessEnv = process.env): string {
+function stateBaseDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.OPTSIDIAN_STATE_BASE) {
     return path.resolve(env.OPTSIDIAN_STATE_BASE);
   }
@@ -114,26 +114,19 @@ export function stateBaseDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(cacheRoot, 'optsidian');
 }
 
-export function manifestFilePath(env: NodeJS.ProcessEnv = process.env): string {
+function manifestFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(stateBaseDir(env), 'install.json');
 }
 
-export function releasesCacheDir(env: NodeJS.ProcessEnv = process.env): string {
+function releasesCacheDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(stateBaseDir(env), 'releases');
 }
 
-export function updateNoticeStatePath(env: NodeJS.ProcessEnv = process.env): string {
+function updateNoticeStatePath(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(stateBaseDir(env), 'update-check.json');
 }
 
-export function defaultBinDir(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.OPTSIDIAN_BIN_DIR) {
-    return path.resolve(env.OPTSIDIAN_BIN_DIR);
-  }
-  return path.join(os.homedir(), '.local', 'bin');
-}
-
-export function normalizeTag(input: string): string {
+function normalizeTag(input: string): string {
   const trimmed = input.trim();
   const tag = trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
@@ -142,32 +135,32 @@ export function normalizeTag(input: string): string {
   return tag;
 }
 
-export function versionFromTag(tag: string): string {
+function versionFromTag(tag: string): string {
   return normalizeTag(tag).slice(1);
 }
 
-export function assetNameForTag(tag: string): string {
+function assetNameForTag(tag: string): string {
   return `optsidian-${normalizeTag(tag)}`;
 }
 
-export function mcpAssetNameForTag(tag: string): string {
+function mcpAssetNameForTag(tag: string): string {
   return `optsidian-mcp-${normalizeTag(tag)}`;
 }
 
-export function checksumsAssetNameForTag(tag: string): string {
+function checksumsAssetNameForTag(tag: string): string {
   return `checksums-${normalizeTag(tag)}.txt`;
 }
 
-export function attestationAssetNameForTag(tag: string): string {
+function attestationAssetNameForTag(tag: string): string {
   return `attestation-${normalizeTag(tag)}.json`;
 }
 
-export function releaseApiBase(env: NodeJS.ProcessEnv = process.env): string {
+function releaseApiBase(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.OPTSIDIAN_RELEASE_API_BASE?.trim();
   return (configured ? configured : DEFAULT_RELEASE_API_BASE).replace(/\/+$/, '');
 }
 
-export function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): InstallManifest | undefined {
+function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): InstallManifest | undefined {
   ensurePrivateDirSync(stateBaseDir(env), 'Optsidian state directory');
   const file = manifestFilePath(env);
   if (!ensureExistingPrivateFileSync(file, 'Optsidian install manifest')) return undefined;
@@ -200,7 +193,7 @@ export function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): Insta
   };
 }
 
-export function saveInstallManifest(manifest: InstallManifest, env: NodeJS.ProcessEnv = process.env): void {
+function saveInstallManifest(manifest: InstallManifest, env: NodeJS.ProcessEnv = process.env): void {
   const file = manifestFilePath(env);
   writePrivateFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`, 'Optsidian install manifest');
 }

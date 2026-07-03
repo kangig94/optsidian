@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Worker, type TransferListItem } from 'node:worker_threads';
 import type { SearchIndexProgressUpdate } from './protocol.js';
 
-export type DaemonWorkerKind = 'analyzer' | 'search' | 'embedding' | 'vector';
+type DaemonWorkerKind = 'analyzer' | 'search' | 'embedding' | 'vector';
 
 export type DaemonWorkerRequest = {
   type: string;
@@ -680,7 +680,7 @@ export class DaemonWorkerPool {
   }
 }
 
-export function logicalCpuWorkerBudget(): number {
+function logicalCpuWorkerBudget(): number {
   return Math.max(4, os.availableParallelism?.() ?? os.cpus().length ?? 4);
 }
 

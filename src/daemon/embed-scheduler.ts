@@ -7,7 +7,8 @@ import {
 } from './protocol.js';
 import { createEmbeddingWorkerPool, type EmbeddingWorkerPool } from './pools.js';
 import type { WorkerPoolRunOptions } from './worker-pool.js';
-import { VectorGenerationPool, type VectorGenerationPoolOptions } from './vector-store/index.js';
+import { VectorGenerationPool } from './vector-store/pool.js';
+import type { VectorGenerationPoolOptions } from './vector-store/pool.js';
 
 export type EmbedSchedulerLane = 'query' | 'save' | 'refresh' | 'rebuild';
 

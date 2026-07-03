@@ -10,9 +10,9 @@ import { RuntimeError } from '../../../errors.js';
 export type LocalOnnxModelKey = 'bge-m3' | 'multilingual-e5-small';
 export type LocalOnnxModelAlias = LocalOnnxModelKey | 'e5-small' | 'BAAI/bge-m3' | 'intfloat/multilingual-e5-small';
 
-export type LocalOnnxArtifactFileRole = 'model' | 'tokenizer';
+type LocalOnnxArtifactFileRole = 'model' | 'tokenizer';
 
-export type LocalOnnxArtifactFile = {
+type LocalOnnxArtifactFile = {
   path: string;
   role: LocalOnnxArtifactFileRole;
   sha256: string;
@@ -41,7 +41,7 @@ export type LocalOnnxModelDescriptor = {
   files: readonly LocalOnnxArtifactFile[];
 };
 
-export type LocalOnnxArtifactManifest = {
+type LocalOnnxArtifactManifest = {
   packageId: 'dense-onnx';
   modelKey: LocalOnnxModelKey;
   modelId: string;
@@ -92,7 +92,7 @@ export const LOCAL_ONNX_RECIPE_VERSION = 'local-onnx-embedding-recipe-v1';
 export const ONNXRUNTIME_NODE_RUNTIME_VERSION = '1.27.0';
 export const HUGGINGFACE_TOKENIZERS_RUNTIME_VERSION = '0.1.3';
 
-export const LOCAL_ONNX_MODELS: Readonly<Record<LocalOnnxModelKey, LocalOnnxModelDescriptor>> = {
+const LOCAL_ONNX_MODELS: Readonly<Record<LocalOnnxModelKey, LocalOnnxModelDescriptor>> = {
   'bge-m3': {
     key: 'bge-m3',
     modelId: 'BAAI/bge-m3',
@@ -227,7 +227,7 @@ export function localOnnxModelDescriptor(input: LocalOnnxModelAlias | string | u
   return LOCAL_ONNX_MODELS[resolveLocalOnnxModelKey(input)];
 }
 
-export function localOnnxDataDir(env: NodeJS.ProcessEnv = process.env): string {
+function localOnnxDataDir(env: NodeJS.ProcessEnv = process.env): string {
   return path.join(optsidianCacheRoot(env), 'dense-onnx');
 }
 
@@ -246,7 +246,7 @@ export function localOnnxManifestPath(
   return path.join(localOnnxModelDir(model, env), 'manifest.json');
 }
 
-export function localOnnxModelFilePath(
+function localOnnxModelFilePath(
   model: LocalOnnxModelAlias | string | undefined,
   filePath: string,
   env: NodeJS.ProcessEnv = process.env,

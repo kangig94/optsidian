@@ -5,8 +5,6 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import test from 'node:test';
 
-const repoRoot = process.cwd();
-
 function tempRoot(prefix = 'optsidian-search-ac5-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
@@ -39,7 +37,7 @@ function createSyntheticVault(documentCount) {
 }
 
 async function buildWithIndexWorkers(vault, workers) {
-  const { createDaemonPools } = await import(path.join(repoRoot, 'src/daemon/pools.ts'));
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const pools = await createDaemonPools(
     {
       ...process.env,
@@ -79,11 +77,10 @@ test(
   'AC5 parallel index build is byte-identical to one-worker build and reports speedup',
   { timeout: 240_000 },
   async () => {
-    const { INDEX_BUILD_VERSION } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
-    const { reduceCanonicalBm25GlobalStats, canonicalValueBytes } = await import(
-      path.join(repoRoot, 'src/core/search/segments/index.ts')
-    );
-    const { SEARCH_TOKEN_CHANNELS } = await import(path.join(repoRoot, 'src/core/search/analysis/index.ts'));
+    const { INDEX_BUILD_VERSION } = await import('../src/daemon/search-store/builder.ts');
+    const { reduceCanonicalBm25GlobalStats, canonicalValueBytes } =
+      await import('../src/core/search/segments/canonical.ts');
+    const { SEARCH_TOKEN_CHANNELS } = await import('../src/core/search/analysis/channels.ts');
     const documentCount = 160;
     const vault = createSyntheticVault(documentCount);
 

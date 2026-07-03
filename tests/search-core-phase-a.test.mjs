@@ -5,7 +5,6 @@ import path from 'node:path';
 import test from 'node:test';
 import { createDeterministicEmbeddingSetBuilder } from './helpers/deterministic-embedding.mjs';
 
-const repoRoot = process.cwd();
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -176,8 +175,8 @@ function assertPersistedRecordsArePrivate(records, serialized, phrases, label) {
 }
 
 test('AC1 persisted document records serialize without SearchDocument body or token fields', async () => {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
-  const { SEARCH_DB_SCHEMA } = await import(path.join(repoRoot, 'src/core/search/schema.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { SEARCH_DB_SCHEMA } = await import('../src/core/search/schema.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '---\ntags: [phase-a]\n---\n# Alpha\n\nAlpha body text.\n');
 
@@ -210,10 +209,10 @@ test('AC1 persisted document records serialize without SearchDocument body or to
 });
 
 test('AC7 persisted worker bytes and decoded segments carry no plaintext body copies', async () => {
-  const { createDaemonSnapshotStore } = await import(path.join(repoRoot, 'src/daemon/search-store/snapshot-store.ts'));
-  const { searchStoreCachePaths } = await import(path.join(repoRoot, 'src/daemon/search-store/cache-paths.ts'));
-  const { decodeCanonicalSegment } = await import(path.join(repoRoot, 'src/core/search/segments/canonical.ts'));
-  const { POSITIONAL_FIELD_ID } = await import(path.join(repoRoot, 'src/core/search/retrieval/positional/types.ts'));
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { decodeCanonicalSegment } = await import('../src/core/search/segments/canonical.ts');
+  const { POSITIONAL_FIELD_ID } = await import('../src/core/search/retrieval/positional/types.ts');
   const cacheRoot = tempRoot('optsidian-search-phase-a-cache-');
   const vault = tempRoot('optsidian-search-phase-a-vault-');
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -274,7 +273,7 @@ test('AC7 persisted worker bytes and decoded segments carry no plaintext body co
 });
 
 test('AC6 reranking requires complete documentId-keyed rank signals', async () => {
-  const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, 'src/core/search/ranking/score.ts'));
+  const { rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const document = { id: 'doc-alpha', path: 'Alpha.md', title: 'Alpha', tags: [] };
   const hit = { document, score: 99, queryChannels: { morph: ['alpha'], surface: [], ngram: [] } };
   const complete = rankSignal({ lexicalScore: 7 });
@@ -305,9 +304,9 @@ test('AC6 reranking requires complete documentId-keyed rank signals', async () =
 });
 
 test('AC6 metadata-only tag search reads trimmed persisted title and tags', async () => {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
-  const { executeSearchJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '---\ntitle: Alpha Title\ntags: [phase-a, keep]\n---\n# Alpha\n\nalpha body\n');
   writeVaultFile(vault, 'Beta.md', '---\ntitle: Beta Title\ntags: [skip]\n---\n# Beta\n\nbeta body\n');
@@ -331,9 +330,9 @@ test('AC6 metadata-only tag search reads trimmed persisted title and tags', asyn
 });
 
 test('AC6 body phrase matches keep phrase priority without persisted full body text', async () => {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
-  const { executeSearchJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const vault = tempRoot();
   const phrase = 'alpha beta gamma';
   writeVaultFile(vault, 'StrongBody.md', `# Strong\n\n${phrase}\n`);

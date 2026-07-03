@@ -207,10 +207,7 @@ function runCliAsync(args, env) {
 let updateModules;
 
 async function runUpdateDirect(args, env) {
-  updateModules ??= Promise.all([
-    import(path.resolve('src/cli/args.ts')),
-    import(path.resolve('src/cli/commands/update.ts')),
-  ]);
+  updateModules ??= Promise.all([import('../src/cli/args.ts'), import('../src/cli/commands/update.ts')]);
   const [{ parseArgs }, { runUpdate }] = await updateModules;
   let stdout = '';
   await runUpdate(parseArgs(['update', ...args]), {
@@ -684,7 +681,7 @@ test('automatic update notice skips failed lookups and still caches the attempt'
 
 test('automatic update notice reports private state write failures as diagnostics', async () => {
   if (process.platform === 'win32') return;
-  const { maybeCheckForUpdateNotice } = await import(path.resolve('src/update/installer.ts'));
+  const { maybeCheckForUpdateNotice } = await import('../src/update/installer.ts');
   const dir = tempRoot();
   const home = path.join(dir, 'home');
   const cache = path.join(dir, 'cache');
@@ -713,8 +710,8 @@ test('automatic update notice reports private state write failures as diagnostic
 });
 
 test('network requests reject direct responses over the byte cap', async () => {
-  const { DEFAULT_HTTP_RESPONSE_MAX_BYTES } = await import(path.resolve('src/limits.ts'));
-  const { requestBuffer } = await import(path.resolve('src/net/github.ts'));
+  const { DEFAULT_HTTP_RESPONSE_MAX_BYTES } = await import('../src/limits.ts');
+  const { requestBuffer } = await import('../src/net/github.ts');
   const server = await startBodyServer({ body: Buffer.from('abcd') });
 
   try {
@@ -729,7 +726,7 @@ test('network requests reject direct responses over the byte cap', async () => {
 });
 
 test('network requests reject direct streamed responses over the byte cap', async () => {
-  const { requestBuffer } = await import(path.resolve('src/net/github.ts'));
+  const { requestBuffer } = await import('../src/net/github.ts');
   const server = await startBodyServer({ body: Buffer.from('abcd'), contentLength: false });
 
   try {
@@ -743,7 +740,7 @@ test('network requests reject direct streamed responses over the byte cap', asyn
 });
 
 test('network auth token lookup disables interactive credential prompts', async () => {
-  const { requestBuffer } = await import(path.resolve('src/net/github.ts'));
+  const { requestBuffer } = await import('../src/net/github.ts');
   const server = await startBodyServer({ body: Buffer.from('ok') });
   const dir = tempRoot();
   const credentialLog = path.join(dir, 'credentials.log');
@@ -777,7 +774,7 @@ test('network auth token lookup disables interactive credential prompts', async 
 });
 
 test('network requests reject curl fallback responses over the byte cap', async () => {
-  const { requestBuffer } = await import(path.resolve('src/net/github.ts'));
+  const { requestBuffer } = await import('../src/net/github.ts');
   const dir = tempRoot();
   const binDir = path.join(dir, 'network-cap-curl-bin');
   fs.mkdirSync(binDir, { recursive: true });

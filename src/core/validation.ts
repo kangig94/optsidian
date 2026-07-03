@@ -7,7 +7,7 @@ export function assertPositiveInteger(value: number, name: string): void {
   }
 }
 
-export function assertNonNegativeInteger(value: number, name: string): void {
+function assertNonNegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new UsageError(`${name} must be a non-negative integer`);
   }

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ModelSessionLifecycle } from '../src/daemon/model-session/index.ts';
+import { ModelSessionLifecycle } from '../src/daemon/model-session/lifecycle.ts';
 import { executeSearchShardJob } from '../src/daemon/search-execution.ts';
 import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder.ts';
 import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts';
@@ -16,11 +16,9 @@ import {
   DeterministicHashProvider,
 } from './helpers/deterministic-embedding.mjs';
 import { editionDense } from './helpers/edition-ledger.mjs';
-import {
-  VectorGenerationPool,
-  recoverRetrievalStaging,
-  vectorStoreCachePaths,
-} from '../src/daemon/vector-store/index.ts';
+import { vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
+import { recoverRetrievalStaging } from '../src/daemon/vector-store/freshness.ts';
+import { VectorGenerationPool } from '../src/daemon/vector-store/pool.ts';
 
 const RETRIEVAL_PROFILE_HASH = 'retrieval-p4-profile';
 

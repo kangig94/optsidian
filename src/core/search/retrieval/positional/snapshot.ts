@@ -1,4 +1,5 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../../analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../../analysis/channels.js';
+import type { SearchTokenChannel } from '../../analysis/channels.js';
 import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1 } from '../../constants.js';
 import { CanonicalSegmentPostingsReader } from './segment-postings-reader.js';
 import { ProjectionReader } from './segment-projection-reader.js';
@@ -30,7 +31,7 @@ export type PositionalBm25GlobalStats = {
   hash: string;
 };
 
-export type PositionalBm25CorpusStats = PositionalBm25GlobalStats['corpusStats'][number];
+type PositionalBm25CorpusStats = PositionalBm25GlobalStats['corpusStats'][number];
 
 export type Bm25TermScoreOptions = {
   k1?: number;
@@ -78,15 +79,7 @@ export function buildSearchSnapshotFromSegments(input: {
   };
 }
 
-export function splitCanonicalPostingTerm(value: string): { channel: SearchTokenChannel; term: string } | undefined {
-  const separator = value.indexOf('\u0000');
-  if (separator < 1) return undefined;
-  const channel = value.slice(0, separator);
-  if (!SEARCH_TOKEN_CHANNELS.includes(channel as SearchTokenChannel)) return undefined;
-  return { channel: channel as SearchTokenChannel, term: value.slice(separator + 1) };
-}
-
-export function bm25CorpusStats(
+function bm25CorpusStats(
   globalStats: PositionalBm25GlobalStats,
   channel: SearchTokenChannel,
   fieldId: number,

@@ -15,7 +15,7 @@ import {
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash,
 } from '../src/daemon/runtime-profile.ts';
-import { vectorStoreCachePaths } from '../src/daemon/vector-store/index.ts';
+import { vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
 import { docIdForVaultPath } from '../src/daemon/vector-store/watcher.ts';
 import { activeSnapshotFromEdition } from './helpers/edition-ledger.mjs';
 

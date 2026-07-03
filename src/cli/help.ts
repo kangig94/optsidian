@@ -16,7 +16,7 @@ type CommandHelp = {
   notes?: string[];
 };
 
-export const CLI_ONLY_COMMANDS = [
+const CLI_ONLY_COMMANDS = [
   'read',
   'search',
   'similarity',

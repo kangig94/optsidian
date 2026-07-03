@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import path from 'node:path';
 import test from 'node:test';
 
 function makeReader({ parents = {}, envs = {}, cmdlines = {}, pids = [] }) {
@@ -20,7 +19,7 @@ function makeReader({ parents = {}, envs = {}, cmdlines = {}, pids = [] }) {
 }
 
 test('recoverLinuxGuiEnv prefers the parent chain over process scanning', async () => {
-  const { recoverLinuxGuiEnv } = await import(path.resolve('src/native/launcher.ts'));
+  const { recoverLinuxGuiEnv } = await import('../src/native/launcher.ts');
   const reader = makeReader({
     parents: { 300: 200, 200: 1 },
     envs: {
@@ -57,7 +56,7 @@ test('recoverLinuxGuiEnv prefers the parent chain over process scanning', async 
 });
 
 test('recoverLinuxGuiEnv falls back to the main Obsidian process when parent env is missing', async () => {
-  const { recoverLinuxGuiEnv } = await import(path.resolve('src/native/launcher.ts'));
+  const { recoverLinuxGuiEnv } = await import('../src/native/launcher.ts');
   const reader = makeReader({
     parents: { 300: 200, 200: 1 },
     envs: {
@@ -96,7 +95,7 @@ test('recoverLinuxGuiEnv falls back to the main Obsidian process when parent env
 });
 
 test('mergeObsidianLaunchEnv preserves explicit values and derives DBUS from XDG runtime', async () => {
-  const { mergeObsidianLaunchEnv } = await import(path.resolve('src/native/launcher.ts'));
+  const { mergeObsidianLaunchEnv } = await import('../src/native/launcher.ts');
 
   const merged = mergeObsidianLaunchEnv(
     {
@@ -115,7 +114,7 @@ test('mergeObsidianLaunchEnv preserves explicit values and derives DBUS from XDG
 });
 
 test('shouldRefreshObsidianLaunch matches the known recoverable runtime errors', async () => {
-  const { shouldRefreshObsidianLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { shouldRefreshObsidianLaunch } = await import('../src/native/launcher.ts');
 
   assert.equal(
     shouldRefreshObsidianLaunch(
@@ -128,7 +127,7 @@ test('shouldRefreshObsidianLaunch matches the known recoverable runtime errors',
 });
 
 test('findObsidianAppLaunch honors OPTSIDIAN_OBSIDIAN_APP_BIN unconditionally', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch(
     { OPTSIDIAN_OBSIDIAN_APP_BIN: '/custom/obsidian' },
@@ -139,7 +138,7 @@ test('findObsidianAppLaunch honors OPTSIDIAN_OBSIDIAN_APP_BIN unconditionally', 
 });
 
 test('findObsidianAppLaunch returns the bundled binary on Linux', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch(
     {},
@@ -153,14 +152,14 @@ test('findObsidianAppLaunch returns the bundled binary on Linux', async () => {
 });
 
 test('findObsidianAppLaunch returns undefined on Linux when the bundled binary is absent', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch({}, { platform: 'linux', existsSync: () => false });
   assert.equal(result, undefined);
 });
 
 test('findObsidianAppLaunch prefers ~/Applications over /Applications on darwin', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch(
     { HOME: '/Users/test' },
@@ -178,7 +177,7 @@ test('findObsidianAppLaunch prefers ~/Applications over /Applications on darwin'
 });
 
 test('findObsidianAppLaunch falls back to /Applications on darwin', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch(
     { HOME: '/Users/test' },
@@ -195,14 +194,14 @@ test('findObsidianAppLaunch falls back to /Applications on darwin', async () => 
 });
 
 test('findObsidianAppLaunch returns undefined on darwin when no install is found', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch({ HOME: '/Users/test' }, { platform: 'darwin', existsSync: () => false });
   assert.equal(result, undefined);
 });
 
 test('findObsidianAppLaunch returns undefined on unsupported platforms', async () => {
-  const { findObsidianAppLaunch } = await import(path.resolve('src/native/launcher.ts'));
+  const { findObsidianAppLaunch } = await import('../src/native/launcher.ts');
 
   const result = findObsidianAppLaunch({}, { platform: 'win32', existsSync: () => true });
   assert.equal(result, undefined);

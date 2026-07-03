@@ -42,16 +42,6 @@ export type CreateOwnerRegistryOptions = {
   desired: DesiredOwnerIdentity;
 };
 
-export class SearchDaemonOwnerError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = 'SearchDaemonOwnerError';
-    this.code = code;
-  }
-}
-
 const DAEMON_SCOPE_HASH_PREFIX_LENGTH = 24;
 
 export function createOwnerRegistry(options: CreateOwnerRegistryOptions): OwnerRegistry {
@@ -184,7 +174,7 @@ export function createBindBackedTenancyFenceProvider(
   };
 }
 
-export function sameOwnerIncarnation(left: OwnerRecord, right: OwnerRecord): boolean {
+function sameOwnerIncarnation(left: OwnerRecord, right: OwnerRecord): boolean {
   return (
     left.epoch === right.epoch &&
     left.incarnationId === right.incarnationId &&
@@ -211,17 +201,6 @@ export function ownerSharesDesiredSlot(owner: OwnerRecord, desired: DesiredOwner
     owner.slot.runtimeHash === desired.runtimeHash &&
     owner.slot.protocolVersion === desired.protocolVersion
   );
-}
-
-export function ownerPidIsLive(owner: OwnerRecord): boolean {
-  if (owner.pid <= 0) return false;
-  try {
-    process.kill(owner.pid, 0);
-    return true;
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
-    return code === 'EPERM';
-  }
 }
 
 export async function convergeOnCompatibleDaemonForTests(
@@ -284,6 +263,7 @@ export function createOwnerRegistryForTests(options: {
     default:
       throw new Error(`Unknown owner-registry test scenario: ${options.scenario}`);
   }
+
   return registry;
 }
 

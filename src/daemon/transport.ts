@@ -309,7 +309,7 @@ function writeBadRequestAndDestroy(socket: net.Socket, message: string): void {
   );
 }
 
-export function isRpcRequestLike(message: unknown): message is RpcRequestLike {
+function isRpcRequestLike(message: unknown): message is RpcRequestLike {
   return (
     message !== null &&
     typeof message === 'object' &&

@@ -41,20 +41,13 @@ export function encodeZigZagLeb128(value: number): Uint8Array {
   return encodeUnsignedLeb128(encoded);
 }
 
-export function decodeZigZagLeb128(bytes: Uint8Array, offset = 0): Leb128Read {
-  const read = decodeUnsignedLeb128(bytes, offset);
-  const value = read.value % 2 === 0 ? read.value / 2 : -(read.value + 1) / 2;
-  assertSafeSignedInteger(value, 'zig-zag LEB128');
-  return { value, offset: read.offset };
-}
-
 export function assertSafeUnsignedInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${label} must be a non-negative safe integer`);
   }
 }
 
-export function assertSafeSignedInteger(value: number, label: string): void {
+function assertSafeSignedInteger(value: number, label: string): void {
   if (!Number.isSafeInteger(value)) {
     throw new Error(`${label} must be a safe integer`);
   }

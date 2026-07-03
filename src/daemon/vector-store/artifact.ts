@@ -14,7 +14,7 @@ const CORAL_NEEDLE_MANIFEST = 'optsidian-coral-needle.json';
 const CORAL_NEEDLE_BINDING = 'coral-needle.node';
 const CORAL_NEEDLE_INSTALL_TIMEOUT_MS = 30_000;
 
-export type CoralNeedlePlatform = 'darwin' | 'linux' | 'win32';
+type CoralNeedlePlatform = 'darwin' | 'linux' | 'win32';
 export type CoralNeedleArch = 'amd64' | 'arm64';
 type CoralNeedleArchiveType = 'tar.gz' | 'zip';
 

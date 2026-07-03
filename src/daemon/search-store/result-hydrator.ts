@@ -1,9 +1,9 @@
-import type { SearchTextAnalysis } from '../../core/search/analysis/index.js';
-import type { ExactDominanceBound } from '../../core/search/ranking/index.js';
+import type { SearchTextAnalysis } from '../../core/search/analysis/channels.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/score.js';
 import type { NormalizedSearchParams } from '../../core/search/internal-types.js';
 import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
 import type { SearchMatch } from '../../core/types.js';
-import { POSITIONAL_RETRIEVER_IDENTITY } from '../../core/search/retrieval/positional/index.js';
+import { POSITIONAL_RETRIEVER_IDENTITY } from '../../core/search/retrieval/positional/retriever.js';
 import {
   documentsByPath,
   documentsFromHandle,
@@ -18,7 +18,7 @@ import {
 import type { PersistedDocumentRecord } from './types.js';
 import { finalistsInBaseRankOrder } from './finalist-order.js';
 
-export type ResultHydrationAggregation = {
+type ResultHydrationAggregation = {
   finalists: readonly SearchShardFinalist[];
   scoredCount: number;
   exactBound?: ExactDominanceBound;

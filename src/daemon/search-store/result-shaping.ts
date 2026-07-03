@@ -1,11 +1,10 @@
 import crypto from 'node:crypto';
-import {
-  SEARCH_TOKEN_CHANNELS,
-  emptySearchTokenChannels,
-  type SearchTextAnalysis,
-  type SearchTokenChannel,
-  type SearchTokenChannelTerms,
-} from '../../core/search/analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS, emptySearchTokenChannels } from '../../core/search/analysis/channels.js';
+import type {
+  SearchTextAnalysis,
+  SearchTokenChannel,
+  SearchTokenChannelTerms,
+} from '../../core/search/analysis/channels.js';
 import type {
   CandidateFeaturePayload,
   CandidateRef,
@@ -17,8 +16,9 @@ import type {
 import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from '../../core/search/contracts.js';
 import { RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from '../../core/search/constants.js';
 import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
-import { nullableRankPriority, rankBucketName, type ExactDominanceBound } from '../../core/search/ranking/index.js';
-import type { PositionalBm25GlobalStats } from '../../core/search/retrieval/positional/index.js';
+import { nullableRankPriority, rankBucketName } from '../../core/search/ranking/score.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/score.js';
+import type { PositionalBm25GlobalStats } from '../../core/search/retrieval/positional/snapshot.js';
 import {
   SEARCH_WARNING_BOUNDED,
   type NormalizedSearchParams,

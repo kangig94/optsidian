@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
-import { canonicalValueBytes } from '../../core/search/segments/index.js';
+import { canonicalValueBytes } from '../../core/search/segments/canonical.js';
 
 const BASE_REUSE_IMPLEMENTATION_IDENTITY_SCHEMA_VERSION = 1;
 const TEST_ARTIFACT_ENV = 'OPTSIDIAN_SEARCH_DAEMON_BUILD_ARTIFACT_PATH';

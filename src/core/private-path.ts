@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { RuntimeError } from '../errors.js';
 
-export const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_DIR_MODE = 0o700;
 export const PRIVATE_FILE_MODE = 0o600;
 
 type PrivatePathKind = 'directory' | 'file';

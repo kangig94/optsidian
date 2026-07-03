@@ -5,16 +5,15 @@ import { resolveVaultPath, vaultRelative, vaultRealpath, walkFiles } from '../..
 import type { SearchAnalyzer } from '../../core/search/analyzer.js';
 import {
   BODY_INDEX_BUDGET_IDENTITY,
-  SEARCH_TOKEN_CHANNELS,
   SNIPPET_LINE_MORPH_MAX_TERMS,
   SNIPPET_LINE_NGRAM_MAX_TERMS,
   SNIPPET_LINE_SURFACE_MAX_TERMS,
   bodyIndexBudgetForText,
-  emptySearchTokenChannels,
-  searchFieldTokenTexts,
-  type BodyIndexBudget,
-  type SearchTokenChannel,
-} from '../../core/search/analysis/index.js';
+} from '../../core/search/analysis/budget.js';
+import type { BodyIndexBudget } from '../../core/search/analysis/budget.js';
+import { SEARCH_TOKEN_CHANNELS, emptySearchTokenChannels } from '../../core/search/analysis/channels.js';
+import type { SearchTokenChannel } from '../../core/search/analysis/channels.js';
+import { searchFieldTokenTexts } from '../../core/search/analysis/fields.js';
 import { parseNoteLinks, type ParsedNoteLinks, type UnresolvedNoteLink } from '../../core/search/analysis/links.js';
 import { MIN_NGRAM, MAX_NGRAM } from '../../core/search/analysis/korean.js';
 import { RANKING_CONSTANTS, SEARCH_SCORING_LAMBDAS } from '../../core/search/constants.js';
@@ -41,16 +40,18 @@ import {
   encodeCanonicalSegment,
   partitionIdForDocument,
   reduceCanonicalBm25GlobalStats,
-  type CanonicalBm25FieldStats,
-  type CanonicalDocumentRecord,
-  type CanonicalFieldText,
-  type CanonicalPartitionDescriptor,
-  type CanonicalPosting,
-  type CanonicalSegment,
-  type SearchModelIdentity,
-  type SearchSnapshotAnalyzerIdentity,
-  type SnapshotIdentityTuple,
-} from '../../core/search/segments/index.js';
+} from '../../core/search/segments/canonical.js';
+import type {
+  CanonicalBm25FieldStats,
+  CanonicalDocumentRecord,
+  CanonicalFieldText,
+  CanonicalPartitionDescriptor,
+  CanonicalPosting,
+  CanonicalSegment,
+  SearchModelIdentity,
+  SearchSnapshotAnalyzerIdentity,
+  SnapshotIdentityTuple,
+} from '../../core/search/segments/canonical.js';
 import {
   SEARCH_FIELD_CHANNEL_INDEX_PROPERTY,
   SEARCH_PROPERTIES,
@@ -58,7 +59,7 @@ import {
 } from '../../core/search/schema.js';
 import { decodeUtf8 } from '../../core/text.js';
 import type { SearchField, SearchSnippet } from '../../core/types.js';
-import { POSITIONAL_FIELD_ID } from '../../core/search/retrieval/positional/index.js';
+import { POSITIONAL_FIELD_ID } from '../../core/search/retrieval/positional/types.js';
 import { POSITIONAL_RETRIEVER_IDENTITY } from '../../core/search/retrieval/positional/retriever.js';
 import type { SearchIndexProgressUpdate } from '../protocol.js';
 import { buildLinkGraphSidecar } from './link-graph.js';
@@ -88,7 +89,7 @@ export const DEFAULT_PARTITION_BITS = 4;
 // a separate reuse fence that can force a full recompute without changing any
 // content-addressed snapshot or corpus identity.
 export const INDEX_BUILD_VERSION = 'daemon-positional-build-v7';
-export { INDEX_AFFECTING_SEARCH_SETTINGS_HASH, indexAffectingSearchSettingsHash };
+export { INDEX_AFFECTING_SEARCH_SETTINGS_HASH };
 
 type BuildInput = {
   vaultRoot: string;
@@ -133,7 +134,7 @@ export type ParseBuildDocumentBatchResult = {
 
 export type ReduceBuildSegmentInput = ReduceBuildSegmentFullInput | ReduceBuildSegmentBaseVariantInput;
 
-export type ReduceBuildSegmentFullInput = {
+type ReduceBuildSegmentFullInput = {
   mode: 'full';
   partitionId: number;
   documents: readonly ParsedBuildDocument[];
@@ -141,7 +142,7 @@ export type ReduceBuildSegmentFullInput = {
   base?: never;
 };
 
-export type ReduceBuildSegmentBaseVariantInput = {
+type ReduceBuildSegmentBaseVariantInput = {
   mode: 'base';
   partitionId: number;
   freshDocuments: readonly ParsedBuildDocument[];
@@ -149,13 +150,13 @@ export type ReduceBuildSegmentBaseVariantInput = {
   documents?: never;
 };
 
-export type ReduceBuildSegmentBaseInput = {
+type ReduceBuildSegmentBaseInput = {
   segmentsDir: string;
   segmentHash: string;
   retainedDocumentIds: readonly string[];
 };
 
-export type BuildSnapshotLiveDocumentProjection = {
+type BuildSnapshotLiveDocumentProjection = {
   documentId: string;
   path: string;
   contentHash: string;
@@ -163,14 +164,14 @@ export type BuildSnapshotLiveDocumentProjection = {
   snippetLineSpanHash?: string;
 };
 
-export type BuildSnapshotPersistedDocumentProjection = {
+type BuildSnapshotPersistedDocumentProjection = {
   partitionId: number;
   title: string;
   tags: readonly string[];
   snippetCorpus: ParsedSnippetCorpus;
 };
 
-export type BuildSnapshotDocumentLinkProjection = {
+type BuildSnapshotDocumentLinkProjection = {
   documentId: string;
   path: string;
   unresolvedLinks: readonly UnresolvedNoteLink[];
@@ -192,11 +193,11 @@ export type BuildSnapshotFromSegmentsInput = {
   segments: readonly BuiltSegment[];
 };
 
-export type DocumentSegmentPostingContribution = Omit<CanonicalPosting, 'docId'>;
+type DocumentSegmentPostingContribution = Omit<CanonicalPosting, 'docId'>;
 
-export type DocumentSegmentFieldTextContribution = Omit<CanonicalFieldText, 'docId'>;
+type DocumentSegmentFieldTextContribution = Omit<CanonicalFieldText, 'docId'>;
 
-export type DocumentSegmentFieldLengthContribution = {
+type DocumentSegmentFieldLengthContribution = {
   channel: SearchTokenChannel;
   fieldId: number;
   length: number;
@@ -210,7 +211,7 @@ export type DocumentSegmentContribution = {
   fieldTexts: readonly DocumentSegmentFieldTextContribution[];
 };
 
-export type ReduceBuildSegmentInputs = (
+type ReduceBuildSegmentInputs = (
   inputs: readonly ReduceBuildSegmentInput[],
   progress?: (progress: SearchIndexProgressUpdate) => void,
 ) => BuiltSegment[] | Promise<BuiltSegment[]>;
@@ -566,7 +567,7 @@ export async function parseBuildDocumentBatch(
   };
 }
 
-export function resolveParsedDocumentLinkEdges(
+function resolveParsedDocumentLinkEdges(
   vaultRoot: string,
   documents: readonly BuildSnapshotDocumentLinkProjection[],
   scannedPaths: readonly string[],
@@ -1179,7 +1180,7 @@ function baseSnapshotIdentityMatches(base: BuildSnapshotBase, expected: Snapshot
   );
 }
 
-export function contributionFromParse(document: ParsedBuildDocument): DocumentSegmentContribution {
+function contributionFromParse(document: ParsedBuildDocument): DocumentSegmentContribution {
   const postings: DocumentSegmentPostingContribution[] = [];
   const fieldLengths: DocumentSegmentFieldLengthContribution[] = [];
   const fieldTexts: DocumentSegmentFieldTextContribution[] = [];

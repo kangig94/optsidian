@@ -15,9 +15,9 @@ import {
   type EmbeddingVector,
 } from './provider.js';
 
-export type DenseMetric = 'cosine';
+type DenseMetric = 'cosine';
 
-export type DenseEmbeddingRecord = {
+type DenseEmbeddingRecord = {
   candidateId?: string;
   documentId: string;
   shardDocRef: ShardDocRef;
@@ -26,7 +26,7 @@ export type DenseEmbeddingRecord = {
   vector: EmbeddingVector;
 };
 
-export type DenseEmbeddingSet = {
+type DenseEmbeddingSet = {
   embeddingSetId: EmbeddingSetId;
   model: string;
   records: readonly DenseEmbeddingRecord[];

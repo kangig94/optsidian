@@ -1,31 +1,31 @@
 const KIB = 1024;
 const MIB = 1024 * KIB;
 
-export const BODY_SHORT_MAX_CHARS = 64 * KIB;
+const BODY_SHORT_MAX_CHARS = 64 * KIB;
 export const BODY_FULL_ANALYSIS_MAX_CHARS = 512 * KIB;
-export const BODY_LONG_MAX_CHARS = 2 * MIB;
+const BODY_LONG_MAX_CHARS = 2 * MIB;
 
 export const BODY_NGRAM_SHORT_MAX_TERMS = 4096;
-export const BODY_NGRAM_PAPER_MAX_TERMS = 8192;
-export const BODY_NGRAM_LONG_MAX_TERMS = 12288;
-export const BODY_NGRAM_HUGE_MAX_TERMS = 16384;
+const BODY_NGRAM_PAPER_MAX_TERMS = 8192;
+const BODY_NGRAM_LONG_MAX_TERMS = 12288;
+const BODY_NGRAM_HUGE_MAX_TERMS = 16384;
 
 export const BODY_LEXICAL_SAMPLE_MAX_CHARS = 512 * KIB;
-export const BODY_NGRAM_LONG_SAMPLE_MAX_CHARS = 384 * KIB;
-export const BODY_NGRAM_HUGE_SAMPLE_MAX_CHARS = 512 * KIB;
-export const BODY_SAMPLE_WINDOWS = 32;
+const BODY_NGRAM_LONG_SAMPLE_MAX_CHARS = 384 * KIB;
+const BODY_NGRAM_HUGE_SAMPLE_MAX_CHARS = 512 * KIB;
+const BODY_SAMPLE_WINDOWS = 32;
 
-export const BODY_SURFACE_MAX_TERMS = 50000;
-export const BODY_MORPH_MAX_TOKENS = 100000;
+const BODY_SURFACE_MAX_TERMS = 50000;
+const BODY_MORPH_MAX_TOKENS = 100000;
 
-export const SNIPPET_LINE_ANALYSIS_MAX_CHARS = 4096;
+const SNIPPET_LINE_ANALYSIS_MAX_CHARS = 4096;
 export const SNIPPET_LINE_NGRAM_MAX_TERMS = 512;
 export const SNIPPET_LINE_SURFACE_MAX_TERMS = 512;
 export const SNIPPET_LINE_MORPH_MAX_TERMS = 512;
-export const SNIPPET_DOC_ANALYZED_CHARS_MAX = 512 * KIB;
+const SNIPPET_DOC_ANALYZED_CHARS_MAX = 512 * KIB;
 export const SNIPPET_DOC_ANALYZED_LINES_MAX = 3000;
 
-export type BodyIndexBudgetTier = 'short' | 'paper' | 'long' | 'huge';
+type BodyIndexBudgetTier = 'short' | 'paper' | 'long' | 'huge';
 
 export type BodyIndexBudget = {
   tier: BodyIndexBudgetTier;
@@ -113,7 +113,7 @@ export function bodyIndexBudgetForText(body: string): BodyIndexBudget {
   });
 }
 
-export function sampleTextWindows(text: string, maxChars: number, windows: number): string {
+function sampleTextWindows(text: string, maxChars: number, windows: number): string {
   const limit = Number.isFinite(maxChars) ? Math.max(0, Math.trunc(maxChars)) : text.length;
   if (text.length <= limit) return text;
   if (limit === 0) return '';

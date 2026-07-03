@@ -86,10 +86,6 @@ function pidIsLive(pid) {
   }
 }
 
-function futureImport(relativePath) {
-  return import(path.join(repoRoot, relativePath));
-}
-
 function sha256(raw) {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
@@ -350,9 +346,9 @@ function testQueryAnalysis(raw) {
 }
 
 async function createPinnedSearchFixture(files, options = {}) {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   for (const [rel, content] of Object.entries(files)) writeVaultFile(vault, rel, content);
@@ -405,8 +401,8 @@ function searchIdentityPayload(result) {
 }
 
 test('AC2/AC3 transport rejects nil and malformed frames without killing the server', async () => {
-  const { createRpcServer } = await futureImport('src/daemon/transport.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createRpcServer } = await import('../src/daemon/transport.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const root = tempRoot();
   const socketPath = path.join(root, 'rpc.sock');
   const server = await createRpcServer({
@@ -433,8 +429,8 @@ test('AC2/AC3 transport rejects nil and malformed frames without killing the ser
 });
 
 test('AC3 transport survives an abruptly destroyed client socket mid-request', async () => {
-  const { createRpcServer } = await futureImport('src/daemon/transport.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createRpcServer } = await import('../src/daemon/transport.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const root = tempRoot();
   const socketPath = path.join(root, 'rpc.sock');
   let slowRequestSeen = false;
@@ -474,8 +470,8 @@ test('AC3 transport survives an abruptly destroyed client socket mid-request', a
 });
 
 test('AC3 transport converts synchronous handler throws into RPC errors without killing the server', async () => {
-  const { createRpcServer } = await futureImport('src/daemon/transport.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createRpcServer } = await import('../src/daemon/transport.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const root = tempRoot();
   const socketPath = path.join(root, 'rpc.sock');
   const server = await createRpcServer({
@@ -503,8 +499,8 @@ test('AC3 transport converts synchronous handler throws into RPC errors without 
 });
 
 test('AC11 transport closes unused idle sockets and incomplete frames without killing the server', async () => {
-  const { createRpcServer } = await futureImport('src/daemon/transport.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createRpcServer } = await import('../src/daemon/transport.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const root = tempRoot();
   const socketPath = path.join(root, 'rpc.sock');
   const server = await createRpcServer({
@@ -539,8 +535,8 @@ test('AC11 transport closes unused idle sockets and incomplete frames without ki
 });
 
 test('AC11 transport rejects oversized declared frames and keeps serving', async () => {
-  const { createRpcServer } = await futureImport('src/daemon/transport.ts');
-  const { SEARCH_DAEMON_MAX_FRAME_BYTES, encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createRpcServer } = await import('../src/daemon/transport.ts');
+  const { SEARCH_DAEMON_MAX_FRAME_BYTES, encodeFrame } = await import('../src/daemon/protocol.ts');
   const root = tempRoot();
   const socketPath = path.join(root, 'rpc.sock');
   const server = await createRpcServer({
@@ -563,7 +559,7 @@ test('AC11 transport rejects oversized declared frames and keeps serving', async
 });
 
 test('AC5 worker pool warmup failures reject instead of hanging or degrading', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'warmup-fails.mjs');
   fs.writeFileSync(
@@ -613,7 +609,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool can serve jobs after the first worker is ready', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'partial-ready.mjs');
   const firstMarker = path.join(root, 'first-worker.marker');
@@ -689,7 +685,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool can defer warmup until first job', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'lazy-warmup.mjs');
   const logPath = path.join(root, 'events.log');
@@ -741,7 +737,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool retargets a targeted retry after the assigned worker crashes', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'targeted-retry-crash-once.mjs');
   const crashMarker = path.join(root, 'crashed.marker');
@@ -800,7 +796,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool routes targeted jobs FIFO without requestId rotation', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'targeted-request-fairness.mjs');
   const releasePath = path.join(root, 'release.marker');
@@ -906,7 +902,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool leases idle-ready slots atomically before drain', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'idle-ready-lease.mjs');
   const jobLog = path.join(root, 'jobs.log');
@@ -977,7 +973,7 @@ test('AC3 worker pool source has no targeted requestId rotation', () => {
 });
 
 test('daemon pools defer latency analyzer warmup until query analysis', async () => {
-  const { createDaemonPools } = await futureImport('src/daemon/pools.ts');
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const pools = await createDaemonPools(
     {
       ...process.env,
@@ -1000,7 +996,7 @@ test('daemon pools defer latency analyzer warmup until query analysis', async ()
 });
 
 test('daemon pools treat OPTSIDIAN_SEARCH_WORKERS as search execution workers only', async () => {
-  const { createDaemonPools } = await futureImport('src/daemon/pools.ts');
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const env = {
     ...process.env,
     OPTSIDIAN_SEARCH_WORKERS: '2',
@@ -1023,7 +1019,7 @@ test('daemon pools treat OPTSIDIAN_SEARCH_WORKERS as search execution workers on
 });
 
 test('default search execution worker count is one per four logical CPUs capped at four', async () => {
-  const { defaultSearchExecutionWorkerCount } = await futureImport('src/daemon/worker-pool.ts');
+  const { defaultSearchExecutionWorkerCount } = await import('../src/daemon/worker-pool.ts');
 
   assert.equal(defaultSearchExecutionWorkerCount(1), 1);
   assert.equal(defaultSearchExecutionWorkerCount(4), 1);
@@ -1034,7 +1030,7 @@ test('default search execution worker count is one per four logical CPUs capped 
 });
 
 test('daemon pools use search.executionWorkers setting when worker env is unset', async () => {
-  const { createDaemonPools } = await futureImport('src/daemon/pools.ts');
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const env = {
     ...process.env,
     OPTSIDIAN_SEARCH_WORKERS: undefined,
@@ -1057,7 +1053,7 @@ test('daemon pools use search.executionWorkers setting when worker env is unset'
 });
 
 test('worker pool memory restart guard ignores shared/native memory when heap is below limit', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'memory-guard.mjs');
   const warmupLog = path.join(root, 'warmups.log');
@@ -1115,7 +1111,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool heap guard ignores legacy memoryRss-only replies', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'legacy-memory-rss-only.mjs');
   const warmupLog = path.join(root, 'warmups.log');
@@ -1168,7 +1164,7 @@ parentPort.on("message", (message) => {
 });
 
 test('worker pool optional rss guard restarts only after configured strikes', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'rss-guard.mjs');
   const warmupLog = path.join(root, 'warmups.log');
@@ -1225,7 +1221,7 @@ parentPort.on("message", (message) => {
 });
 
 test('search store loadVault preloads the active snapshot into search workers', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const calls = [];
   const pin = { snapshotId: 'snap-a', pinToken: 'pin-a' };
@@ -1297,13 +1293,12 @@ test('search store loadVault preloads the active snapshot into search workers', 
 });
 
 test('search store loadVault warms exact-bound cache for the query planner', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
-  const { exactDominanceBoundForSearchHandle } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
-  const { CanonicalSegmentPostingsReader } = await futureImport(
-    'src/core/search/retrieval/positional/segment-postings-reader.ts',
-  );
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
+  const { exactDominanceBoundForSearchHandle } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { CanonicalSegmentPostingsReader } =
+    await import('../src/core/search/retrieval/positional/segment-postings-reader.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'PlannerWarm.md', '# Planner Warm\n\nplannerwarmunique target plannerwarmunique\n');
   const analyzer = testAnalyzer();
@@ -1380,7 +1375,7 @@ test('search store loadVault warms exact-bound cache for the query planner', asy
 });
 
 test('search store loadVault can skip search worker preload', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const calls = [];
   const fakeStore = {
@@ -1431,7 +1426,7 @@ test('search store loadVault can skip search worker preload', async () => {
 });
 
 test('search store loadVault can warm the query analyzer alongside preload', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const calls = [];
   const pin = { snapshotId: 'snap-a', pinToken: 'pin-a' };
@@ -1503,10 +1498,9 @@ test('search store loadVault can warm the query analyzer alongside preload', asy
 });
 
 test('index rebuild overlaps retrieval vector build with lexical snapshot publish', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { createDaemonSnapshotStore, createProviderEmbeddingSetBuilder } = await futureImport(
-    'src/daemon/search-store/snapshot-store.ts',
-  );
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { createDaemonSnapshotStore, createProviderEmbeddingSetBuilder } =
+    await import('../src/daemon/search-store/snapshot-store.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Parallel.md', '# Parallel\n\nalpha project\n');
   const analyzer = testAnalyzer();
@@ -1582,7 +1576,7 @@ test('index rebuild overlaps retrieval vector build with lexical snapshot publis
 });
 
 test('search store service metadata path uses loaded documents for a pinned snapshot', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const analyzer = testAnalyzer();
   const pin = { snapshotId: 'snap-a', pinToken: 'pin-a' };
@@ -1663,7 +1657,7 @@ test('search store service metadata path uses loaded documents for a pinned snap
 });
 
 test('search store service analyzes non-Hangul queries inline without warming Kiwi', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const analyzerIdentity = {
     name: 'router',
@@ -1712,7 +1706,7 @@ test('search store service analyzes non-Hangul queries inline without warming Ki
 });
 
 test('search store service keeps Hangul query analysis on the analyzer worker', async () => {
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const vault = tempRoot();
   const analyzerIdentity = {
     name: 'router',
@@ -1765,8 +1759,8 @@ test('search store service keeps Hangul query analysis on the analyzer worker', 
 });
 
 test('search store service rejects excessive analyzed query terms per channel', async () => {
-  const { UsageError } = await futureImport('src/errors.ts');
-  const { DaemonSearchStoreService } = await futureImport('src/daemon/search-store/service.ts');
+  const { UsageError } = await import('../src/errors.ts');
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const released = [];
   const fakeStore = {
     pin: async () => ({ snapshotId: 'snap-a', pinToken: 'pin-a' }),
@@ -1818,8 +1812,8 @@ test('search store service rejects excessive analyzed query terms per channel', 
 });
 
 test('AC3 daemon rejects malformed deadlines and payload shapes without dying', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const runtimeDir = tempRoot();
   const env = { ...process.env, OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir };
   const client = createSearchDaemonClient({
@@ -1903,10 +1897,10 @@ test('AC3 daemon rejects malformed deadlines and payload shapes without dying', 
 });
 
 test('AC1 stale incarnations reject work while status handshakes and client retry resync stay live', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { createOwnerRecord, createOwnerRegistry, desiredOwnerIdentity, socketPathForOwner } =
-    await futureImport('src/daemon/owner-registry.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+    await import('../src/daemon/owner-registry.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const runtimeDir = tempRoot();
   const env = {
     ...process.env,
@@ -2035,7 +2029,7 @@ test('AC1 stale incarnations reject work while status handshakes and client retr
 });
 
 test('AC10 owner registry has no client-side control lock or time-stale reclaim path', async () => {
-  const { createOwnerRegistry } = await futureImport('src/daemon/owner-registry.ts');
+  const { createOwnerRegistry } = await import('../src/daemon/owner-registry.ts');
   const desired = {
     uid: process.getuid?.() ?? 0,
     runtimeHash: 'runtime-lock',
@@ -2048,8 +2042,8 @@ test('AC10 owner registry has no client-side control lock or time-stale reclaim 
 });
 
 test('AC8 snapshot tmp sweep removes only files aged at least five minutes', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -2074,8 +2068,8 @@ test('AC8 snapshot tmp sweep removes only files aged at least five minutes', asy
 });
 
 test('search store persists cache directories and snapshot files privately', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -2117,8 +2111,8 @@ test('search store persists cache directories and snapshot files privately', asy
 });
 
 test('search cache catalog prunes stores by last-used time and skips loaded stores', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const oldVault = tempRoot();
   const loadedVault = tempRoot();
@@ -2160,9 +2154,9 @@ test('search cache catalog prunes stores by last-used time and skips loaded stor
 });
 
 test('search cache prune skips stores with a lifecycle mutation in progress', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -2213,8 +2207,8 @@ test('search cache prune skips stores with a lifecycle mutation in progress', as
 });
 
 test('search cache prune falls back to mtimes when metadata JSON is corrupt', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -2239,8 +2233,8 @@ test('search cache prune falls back to mtimes when metadata JSON is corrupt', as
 });
 
 test('AC4 snapshot envelope stores runtime documents outside diagnostics', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
@@ -2271,7 +2265,7 @@ test('AC4 snapshot envelope stores runtime documents outside diagnostics', async
 });
 
 test('AC9 request scheduler caps remembered cancellations and detects post-task cancellation', async () => {
-  const { createRequestScheduler } = await futureImport('src/daemon/scheduler.ts');
+  const { createRequestScheduler } = await import('../src/daemon/scheduler.ts');
   const scheduler = createRequestScheduler();
   for (let index = 0; index < 4097; index += 1) scheduler.cancel(`cancel-${index}`);
 
@@ -2308,8 +2302,8 @@ test('AC9 request scheduler caps remembered cancellations and detects post-task 
 });
 
 test('AC7 snapshot GC keeps active snapshot segment files after count-cap eviction', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
   const cacheRoot = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   const vaultA = tempRoot();
@@ -2350,11 +2344,11 @@ test('AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
 // require daemon construction hooks that are not exposed to tests without editing src/.
 
 test('AC1 protocol method coverage is split by query and control capability', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { createOwnerRecord, createOwnerRegistry, desiredOwnerIdentity, socketPathForOwner } =
-    await futureImport('src/daemon/owner-registry.ts');
+    await import('../src/daemon/owner-registry.ts');
   const { CONTROL_DAEMON_METHODS, QUERY_DAEMON_METHODS, SEARCH_DAEMON_PROTOCOL_VERSION } =
-    await futureImport('src/daemon/protocol.ts');
+    await import('../src/daemon/protocol.ts');
 
   assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ['Retrieve', 'Search', 'Status', 'WaitReady']);
   assert.deepEqual([...CONTROL_DAEMON_METHODS].sort(), [
@@ -2405,10 +2399,10 @@ test('AC1 protocol method coverage is split by query and control capability', as
 });
 
 test('lifecycle deadlines scale with vault markdown count and bytes', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport('src/daemon/owner-registry.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
   const { SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS, vaultLifecycleDeadlineMs } =
-    await futureImport('src/daemon/protocol.ts');
+    await import('../src/daemon/protocol.ts');
   const vault = tempRoot();
   const alpha = '# Alpha\n';
   const beta = `# Beta\n\n${'x'.repeat(1024 * 1024)}\n`;
@@ -2476,8 +2470,8 @@ test('lifecycle deadlines scale with vault markdown count and bytes', async () =
 });
 
 test('daemon client sends prune as a global cache request', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport('src/daemon/owner-registry.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
   const requests = [];
   const runtimeDir = tempRoot();
   const binaryPath = path.join(repoRoot, 'dist', 'optsidian');
@@ -2522,7 +2516,7 @@ test('daemon client sends prune as a global cache request', async () => {
 });
 
 test('snapshot build reports deterministic progress counts', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nproject alpha\n');
   writeVaultFile(vault, 'Beta.md', '# Beta\n\nproject beta\n');
@@ -2548,10 +2542,10 @@ test('snapshot build reports deterministic progress counts', async () => {
 });
 
 test('snapshot build caps body ngram terms without capping metadata ngrams', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { BODY_NGRAM_SHORT_MAX_TERMS } = await futureImport('src/core/search/analysis/budget.ts');
-  const { decodeCanonicalSegment } = await futureImport('src/core/search/segments/canonical.ts');
-  const { POSITIONAL_FIELD_ID } = await futureImport('src/core/search/retrieval/positional/types.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { BODY_NGRAM_SHORT_MAX_TERMS } = await import('../src/core/search/analysis/budget.ts');
+  const { decodeCanonicalSegment } = await import('../src/core/search/segments/canonical.ts');
+  const { POSITIONAL_FIELD_ID } = await import('../src/core/search/retrieval/positional/types.ts');
   const vault = tempRoot();
   const longHangul = Array.from({ length: BODY_NGRAM_SHORT_MAX_TERMS + 100 }, (_, index) =>
     String.fromCodePoint(0xac00 + index),
@@ -2579,9 +2573,9 @@ test('snapshot build caps body ngram terms without capping metadata ngrams', asy
 });
 
 test('snapshot build disables ngram tokens and identity by default', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { decodeCanonicalSegment } = await futureImport('src/core/search/segments/canonical.ts');
-  const { POSITIONAL_FIELD_ID } = await futureImport('src/core/search/retrieval/positional/types.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { decodeCanonicalSegment } = await import('../src/core/search/segments/canonical.ts');
+  const { POSITIONAL_FIELD_ID } = await import('../src/core/search/retrieval/positional/types.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# 한국어검색\n\n한국어검색 본문\n');
 
@@ -2601,9 +2595,9 @@ test('snapshot build disables ngram tokens and identity by default', async () =>
 });
 
 test('search execution state cache is scoped by immutable snapshot id, not request pin token', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '---\ntags: [alpha]\n---\n# Alpha\n\nproject alpha\n');
   const analyzer = testAnalyzer();
@@ -2650,12 +2644,11 @@ test('search execution state cache is scoped by immutable snapshot id, not reque
 });
 
 test('query execution shares postings cache between retrieval and feature scoring', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { exactDominanceBoundForSearchHandle, executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
-  const { CanonicalSegmentPostingsReader } = await futureImport(
-    'src/core/search/retrieval/positional/segment-postings-reader.ts',
-  );
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { exactDominanceBoundForSearchHandle, executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { CanonicalSegmentPostingsReader } =
+    await import('../src/core/search/retrieval/positional/segment-postings-reader.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'CacheProbe.md', '# Cache Probe Unique\n\ncacheprobeunique target cacheprobeunique\n');
   const analyzer = testAnalyzer();
@@ -2706,9 +2699,9 @@ test('query execution shares postings cache between retrieval and feature scorin
 });
 
 test('metadata-only search does not hydrate positional segments', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const vault = tempRoot();
   writeVaultFile(
     vault,
@@ -2743,10 +2736,9 @@ test('metadata-only search does not hydrate positional segments', async () => {
 });
 
 test('search execution preload materializes snapshot cache before search', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { preloadSearchExecutionSnapshot, searchExecutionCacheStats } = await futureImport(
-    'src/daemon/search-execution.ts',
-  );
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { preloadSearchExecutionSnapshot, searchExecutionCacheStats } =
+    await import('../src/daemon/search-execution.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nproject alpha\n');
   const analyzer = testAnalyzer();
@@ -2780,14 +2772,12 @@ test('search execution preload materializes snapshot cache before search', async
 });
 
 test('search execution preload warms exact-bound cache', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { exactDominanceBoundForSearchHandle, preloadSearchExecutionSnapshot } = await futureImport(
-    'src/daemon/search-execution.ts',
-  );
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
-  const { CanonicalSegmentPostingsReader } = await futureImport(
-    'src/core/search/retrieval/positional/segment-postings-reader.ts',
-  );
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { exactDominanceBoundForSearchHandle, preloadSearchExecutionSnapshot } =
+    await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { CanonicalSegmentPostingsReader } =
+    await import('../src/core/search/retrieval/positional/segment-postings-reader.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'BoundWarm.md', '# Bound Warm\n\npreloadboundunique target preloadboundunique\n');
   const analyzer = testAnalyzer();
@@ -2828,11 +2818,9 @@ test('search execution preload warms exact-bound cache', async () => {
 });
 
 test('search shard execution reuses preloaded segment readers', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchShardJob, preloadSearchExecutionSnapshot } = await futureImport(
-    'src/daemon/search-execution.ts',
-  );
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchShardJob, preloadSearchExecutionSnapshot } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nalpha target\n');
   writeVaultFile(vault, 'Beta.md', '# Beta\n\nalpha target beta\n');
@@ -2885,8 +2873,8 @@ test('search shard execution reuses preloaded segment readers', async () => {
 });
 
 test('AC1 shared search-daemon client starts daemon, waits ready, and has no direct fallback', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport('src/daemon/owner-registry.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
   const runtimeDir = tempRoot();
   const binaryPath = path.join(repoRoot, 'dist', 'optsidian');
   const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
@@ -2967,8 +2955,8 @@ test('AC1 shared search-daemon client starts daemon, waits ready, and has no dir
 });
 
 test('daemon client sends incarnation on work requests and omits nonce from v4', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport('src/daemon/owner-registry.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
   const runtimeDir = tempRoot();
   const binaryPath = path.join(repoRoot, 'dist', 'optsidian');
   const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
@@ -3015,11 +3003,9 @@ test('daemon client sends incarnation on work requests and omits nonce from v4',
 });
 
 test('daemon client sends runtime profile per request even when owner is reused', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport('src/daemon/owner-registry.ts');
-  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
   const runtimeDir = tempRoot();
   const configHome = tempRoot('optsidian-profile-config-');
   const binaryPath = path.join(repoRoot, 'dist', 'optsidian');
@@ -3093,10 +3079,8 @@ test('daemon client sends runtime profile per request even when owner is reused'
 });
 
 test('profile manager keeps idle runtimes resident after request release', async () => {
-  const { ProfileManager } = await futureImport('src/daemon/profile-manager.ts');
-  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
   const configHome = tempRoot('optsidian-profile-idle-config-');
   const env = {
     ...process.env,
@@ -3134,7 +3118,7 @@ test('profile manager keeps idle runtimes resident after request release', async
 });
 
 test('profile runtime cancellation reaches query scheduler and worker pools', async () => {
-  const { ProfileRuntime } = await futureImport('src/daemon/profile-manager.ts');
+  const { ProfileRuntime } = await import('../src/daemon/profile-manager.ts');
   const calls = [];
   const runtime = Object.create(ProfileRuntime.prototype);
   runtime.searchStore = {
@@ -3153,7 +3137,7 @@ test('profile runtime cancellation reaches query scheduler and worker pools', as
 });
 
 test('profile manager rejects remembered cancellation before runtime acquisition', async () => {
-  const { ProfileManager } = await futureImport('src/daemon/profile-manager.ts');
+  const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
   const manager = new ProfileManager({
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-precancel-config-'),
@@ -3187,10 +3171,8 @@ test('profile manager rejects remembered cancellation before runtime acquisition
 });
 
 test('profile manager keeps no-Kiwi and Kiwi runtimes isolated', async () => {
-  const { ProfileManager } = await futureImport('src/daemon/profile-manager.ts');
-  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
   const configHome = tempRoot('optsidian-profile-isolation-config-');
   const baseEnv = {
     ...process.env,
@@ -3225,9 +3207,8 @@ test('profile manager keeps no-Kiwi and Kiwi runtimes isolated', async () => {
 });
 
 test('runtime profile canonicalizes extra language payloads', async () => {
-  const { effectiveSearchRuntimeProfile, normalizeSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { effectiveSearchRuntimeProfile, normalizeSearchRuntimeProfile, searchRuntimeProfileHash } =
+    await import('../src/daemon/runtime-profile.ts');
   const env = {
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-canonical-config-'),
@@ -3247,7 +3228,7 @@ test('runtime profile canonicalizes extra language payloads', async () => {
 });
 
 test('runtime profile defaults query-analysis cache to 64 and allows disabling it', async () => {
-  const { effectiveSearchRuntimeProfile } = await futureImport('src/daemon/runtime-profile.ts');
+  const { effectiveSearchRuntimeProfile } = await import('../src/daemon/runtime-profile.ts');
 
   assert.equal(effectiveSearchRuntimeProfile(repoRoot, {}, {}).cache.queryAnalysisEntries, 64);
   assert.equal(
@@ -3261,9 +3242,8 @@ test('runtime profile defaults query-analysis cache to 64 and allows disabling i
 });
 
 test('runtime profile maps single worker setting to search execution only', async () => {
-  const { effectiveSearchRuntimeProfile, envForSearchRuntimeProfile } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { effectiveSearchRuntimeProfile, envForSearchRuntimeProfile } =
+    await import('../src/daemon/runtime-profile.ts');
   const env = {
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-workers-config-'),
@@ -3285,7 +3265,7 @@ test('runtime profile maps single worker setting to search execution only', asyn
 });
 
 test('runtime profile uses search.executionWorkers setting below worker env overrides', async () => {
-  const { effectiveSearchRuntimeProfile } = await futureImport('src/daemon/runtime-profile.ts');
+  const { effectiveSearchRuntimeProfile } = await import('../src/daemon/runtime-profile.ts');
   const env = {
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-execution-workers-config-'),
@@ -3318,9 +3298,7 @@ test('runtime profile uses search.executionWorkers setting below worker env over
 });
 
 test('runtime profile tracks ngram as an index-affecting setting', async () => {
-  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
   const baseEnv = {
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-ngram-config-'),
@@ -3334,9 +3312,8 @@ test('runtime profile tracks ngram as an index-affecting setting', async () => {
 });
 
 test('runtime profile folds partitionBits into the lexical store identity from one source', async () => {
-  const { effectiveSearchRuntimeProfile, lexicalIdentityHashForSearchRuntimeProfile } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
+  const { effectiveSearchRuntimeProfile, lexicalIdentityHashForSearchRuntimeProfile } =
+    await import('../src/daemon/runtime-profile.ts');
   const baseEnv = {
     ...process.env,
     XDG_CONFIG_HOME: tempRoot('optsidian-profile-partitionbits-config-'),
@@ -3356,7 +3333,7 @@ test('runtime profile folds partitionBits into the lexical store identity from o
 });
 
 test('daemon readiness handshake publishes protocol-v4 tenancy status over RPC integration', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const runtimeDir = tempRoot();
   const env = {
     ...process.env,
@@ -3392,8 +3369,8 @@ test('daemon readiness handshake publishes protocol-v4 tenancy status over RPC i
 });
 
 test('daemon Status returns one protocol-v4 shape without nonce', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { encodeFrame } = await futureImport('src/daemon/protocol.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const runtimeDir = tempRoot();
   const env = {
     ...process.env,
@@ -3439,7 +3416,7 @@ test('daemon Status returns one protocol-v4 shape without nonce', async () => {
 });
 
 test('daemon idle shutdown uses configured timeout and next client call auto-boots', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const runtimeDir = tempRoot();
   const env = {
     ...process.env,
@@ -3471,12 +3448,10 @@ test('daemon idle shutdown uses configured timeout and next client call auto-boo
 });
 
 test('daemon boot recovery sweeps orphan vector and search staging tmp', async () => {
-  const { createSearchDaemonClient } = await futureImport('src/daemon/client.ts');
-  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport(
-    'src/daemon/runtime-profile.ts',
-  );
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
-  const { vectorStoreCachePaths } = await futureImport('src/daemon/vector-store/index.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { vectorStoreCachePaths } = await import('../src/daemon/vector-store/cache-paths.ts');
   const runtimeDir = tempRoot();
   const cacheRoot = tempRoot('optsidian-boot-recovery-cache-');
   const vault = tempRoot('optsidian-boot-recovery-vault-');
@@ -3557,10 +3532,10 @@ test('AC1 import boundary forbids direct search/index execution outside daemon a
 });
 
 test('AC9 canonical segment bytes and snapshot id are history-independent', async () => {
-  const { buildCanonicalSnapshotForTests } = await futureImport('src/core/search/segments/canonical.ts');
-  const { canonicalValueBytes } = await futureImport('src/core/search/segments/index.ts');
-  const { RANKING_CONSTANTS } = await futureImport('src/core/search/constants.ts');
-  const { BODY_INDEX_BUDGET_IDENTITY } = await futureImport('src/core/search/analysis/budget.ts');
+  const { buildCanonicalSnapshotForTests } = await import('../src/core/search/segments/canonical.ts');
+  const { canonicalValueBytes } = await import('../src/core/search/segments/canonical.ts');
+  const { RANKING_CONSTANTS } = await import('../src/core/search/constants.ts');
+  const { BODY_INDEX_BUDGET_IDENTITY } = await import('../src/core/search/analysis/budget.ts');
   const identityTuple = {
     buildVersion: 'positional-build-v1',
     fieldSetVersion: 'field-set-v1',
@@ -3617,9 +3592,9 @@ test('AC9 canonical segment bytes and snapshot id are history-independent', asyn
 });
 
 test('golden ranking identity is derived from canonical RANKING_CONSTANTS bytes', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { canonicalValueBytes } = await futureImport('src/core/search/segments/index.ts');
-  const { RANKING_CONSTANTS } = await futureImport('src/core/search/constants.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { canonicalValueBytes } = await import('../src/core/search/segments/canonical.ts');
+  const { RANKING_CONSTANTS } = await import('../src/core/search/constants.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nNeedle project alpha\n');
 
@@ -3634,9 +3609,7 @@ test('golden ranking identity is derived from canonical RANKING_CONSTANTS bytes'
 });
 
 test('snapshot identity carries the production INDEX_BUILD_VERSION lever', async () => {
-  const { buildCanonicalSearchSnapshot, INDEX_BUILD_VERSION } = await futureImport(
-    'src/daemon/search-store/builder.ts',
-  );
+  const { buildCanonicalSearchSnapshot, INDEX_BUILD_VERSION } = await import('../src/daemon/search-store/builder.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nNeedle project alpha\n');
 
@@ -3650,7 +3623,7 @@ test('snapshot identity carries the production INDEX_BUILD_VERSION lever', async
 });
 
 test('AC7 rebuild during an in-flight search keeps the pinned snapshot stable', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nproject alpha\n');
@@ -3676,7 +3649,7 @@ test('AC7 rebuild during an in-flight search keeps the pinned snapshot stable', 
 });
 
 test('AC8 daemon restart reloads latest valid persisted snapshot with identity preserved', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nproject alpha\n');
@@ -3693,7 +3666,7 @@ test('AC8 daemon restart reloads latest valid persisted snapshot with identity p
 });
 
 test('AC11 cross-vault count budget evicts cold snapshots and reloads on demand', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const vaultA = tempRoot();
   const vaultB = tempRoot();
@@ -3722,7 +3695,7 @@ test('AC11 cross-vault count budget evicts cold snapshots and reloads on demand'
 });
 
 test('snapshot pin survives snapshots larger than the byte budget', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Large.md', `# Large\n\n${'needle '.repeat(4096)}\n`);
@@ -3746,9 +3719,9 @@ test('snapshot pin survives snapshots larger than the byte budget', async () => 
 });
 
 test('AC4 snippets resolve from the pinned snapshot without rereading vault files or tokenizing lines', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nfirst line\nNeedle channel target\n');
@@ -3851,9 +3824,9 @@ test('AC6 concurrent scoring order equals sequential scoring order on one pinned
 });
 
 test('AC12 debug output explains channels, scores, rerank signals, analyzer identity, and snapshot id', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha.md', '# Alpha\n\nNeedle project alpha\n');
@@ -3956,9 +3929,9 @@ test('Hangul ngram retrieval falls back to morph and surface when ngram candidat
 });
 
 test('refresh after mutation makes new files visible and removed files disappear', async () => {
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Seed.md', '# Seed\n\nordinary content\n');
@@ -4010,8 +3983,8 @@ test('refresh after mutation makes new files visible and removed files disappear
 });
 
 test('refresh skips corpus and retrieval rebuild when active snapshot is fresh', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const vault = tempRoot();
   writeVaultFile(vault, 'Stable.md', '# Stable\n\nordinary content\n');
@@ -4068,9 +4041,9 @@ test('refresh skips corpus and retrieval rebuild when active snapshot is fresh',
 });
 
 test('refresh repairs missing retrieval without rebuilding a fresh corpus snapshot', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   const vault = tempRoot();
@@ -4123,9 +4096,9 @@ test('refresh repairs missing retrieval without rebuilding a fresh corpus snapsh
 });
 
 test('refresh surfaces retrieval repair failures without rebuilding a fresh corpus snapshot', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { searchStoreCachePaths } = await futureImport('src/daemon/search-store/cache-paths.ts');
-  const { createDaemonSnapshotStore } = await futureImport('src/daemon/search-store/snapshot-store.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
   const cacheRoot = tempRoot();
   const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
   const vault = tempRoot();
@@ -4173,8 +4146,8 @@ test('refresh surfaces retrieval repair failures without rebuilding a fresh corp
 });
 
 test('query-analysis cache key is deterministic and does not become result identity', async () => {
-  const { QueryAnalysisCache, queryAnalysisCacheKey } = await futureImport('src/daemon/query-analysis-cache.ts');
-  const { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } = await futureImport('src/daemon/query-analysis-cache-defaults.ts');
+  const { QueryAnalysisCache, queryAnalysisCacheKey } = await import('../src/daemon/query-analysis-cache.ts');
+  const { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } = await import('../src/daemon/query-analysis-cache-defaults.ts');
   const analyzerIdentity = { name: 'test-analyzer', version: '1', node: 'test' };
   const input = {
     analyzerIdentity,
@@ -4210,8 +4183,8 @@ test('query-analysis cache key is deterministic and does not become result ident
 });
 
 test('AC19 search-execution pool serves a second search while a heavy search is in-flight', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
-  const { SearchExecutionWorkerPool } = await futureImport('src/daemon/pools.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const { SearchExecutionWorkerPool } = await import('../src/daemon/pools.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'search-execution-concurrency.mjs');
   const logPath = path.join(root, 'events.log');
@@ -4297,8 +4270,8 @@ parentPort.on("message", (message) => {
 });
 
 test('search-execution pool preload and cacheStats still route to targeted slots', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
-  const { SearchExecutionWorkerPool } = await futureImport('src/daemon/pools.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const { SearchExecutionWorkerPool } = await import('../src/daemon/pools.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'targeted-preload-stats.mjs');
   const claimDir = path.join(root, 'claims');
@@ -4403,8 +4376,8 @@ parentPort.on("message", (message) => {
 });
 
 test('search-execution pool leases idle-ready slots atomically for targeted shard dispatch', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
-  const { SearchExecutionWorkerPool } = await futureImport('src/daemon/pools.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const { SearchExecutionWorkerPool } = await import('../src/daemon/pools.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'idle-ready-lease.mjs');
   const claimDir = path.join(root, 'claims');
@@ -4487,8 +4460,8 @@ parentPort.on("message", (message) => {
 });
 
 test('search-execution idle-ready lease excludes busy targeted slots', async () => {
-  const { DaemonWorkerPool } = await futureImport('src/daemon/worker-pool.ts');
-  const { SearchExecutionWorkerPool } = await futureImport('src/daemon/pools.ts');
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const { SearchExecutionWorkerPool } = await import('../src/daemon/pools.ts');
   const root = tempRoot();
   const workerScript = path.join(root, 'idle-ready-busy-exclusion.mjs');
   const claimDir = path.join(root, 'claims');
@@ -4611,7 +4584,7 @@ test('AC3 analyzer-daemon socket client symbols are removed from analyzer constr
 });
 
 test('AC16 deterministic scheduler preserves stable ordering under deadline cancellation and backpressure', async () => {
-  const { createDeterministicSearchSchedulerForTests } = await futureImport('src/daemon/scheduler.ts');
+  const { createDeterministicSearchSchedulerForTests } = await import('../src/daemon/scheduler.ts');
   const scheduler = createDeterministicSearchSchedulerForTests({
     activeSnapshotId: 'snap-old',
     nextSnapshotId: 'snap-new',
@@ -4653,7 +4626,7 @@ test('AC16 deterministic scheduler preserves stable ordering under deadline canc
 });
 
 test('AC16 real request scheduler enforces deadline cancellation and throughput backpressure', async () => {
-  const { createRequestScheduler } = await futureImport('src/daemon/scheduler.ts');
+  const { createRequestScheduler } = await import('../src/daemon/scheduler.ts');
   const expired = createRequestScheduler();
   await assert.rejects(
     () => expired.run({ deadline: Date.now() - 1, cancellationId: 'past-deadline' }, async () => 'unreachable'),
@@ -4715,7 +4688,7 @@ test('AC18 owner registry records stable fields and converges stale starts to on
     createOwnerRegistry,
     createOwnerRegistryForTests,
     socketPathForOwner,
-  } = await futureImport('src/daemon/owner-registry.ts');
+  } = await import('../src/daemon/owner-registry.ts');
 
   assert.deepEqual(OWNER_RECORD_FIELDS, AC18_OWNER_FIELDS);
 

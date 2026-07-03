@@ -1,20 +1,17 @@
-import {
-  SEARCH_TOKEN_CHANNELS,
-  type SearchTextAnalysis,
-  type SearchTokenChannel,
-} from '../../core/search/analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../../core/search/analysis/channels.js';
+import type { SearchTextAnalysis, SearchTokenChannel } from '../../core/search/analysis/channels.js';
 import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
 import type { SearchScoringLambdas } from '../../core/search/constants.js';
 import { matchesPathFilter } from '../../core/search/params.js';
-import type { ExactDominanceBound } from '../../core/search/ranking/index.js';
-import { POSITIONAL_FIELD_ID } from '../../core/search/retrieval/positional/index.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/score.js';
+import { POSITIONAL_FIELD_ID } from '../../core/search/retrieval/positional/types.js';
 import { SEARCH_PROPERTIES } from '../../core/search/schema.js';
 import {
   CANONICAL_SEGMENT_SECTION,
   canonicalSegmentSectionBytes,
   lookupCanonicalTermDictionaryEntry,
   ProjectionReader,
-} from '../../core/search/segments/index.js';
+} from '../../core/search/segments/canonical.js';
 import type { NormalizedSearchParams, PathFilter } from '../../core/search/internal-types.js';
 import type { SearchField } from '../../core/types.js';
 import { compareByteStrings } from './finalist-order.js';
@@ -104,10 +101,7 @@ export class SearchQueryPlanner {
   }
 }
 
-export function partitionJobPlans(
-  input: SearchQueryPlanInput,
-  channels: readonly SearchTokenChannel[],
-): ShardTaskPlan[] {
+function partitionJobPlans(input: SearchQueryPlanInput, channels: readonly SearchTokenChannel[]): ShardTaskPlan[] {
   const needsDenseFanout = Boolean(input.queryVector && input.denseEmbeddingSet);
   const needsLinkFanout = Boolean(input.sourceDocumentId ? input.sourceDocumentId : input.sourcePath);
   return [...input.snapshot.segments]
@@ -151,7 +145,7 @@ export function partitionJobPlans(
     }));
 }
 
-export function fanoutSearchChannels(
+function fanoutSearchChannels(
   snapshot: SearchExecutionSnapshotHandle,
   analysis: SearchTextAnalysis,
   fields: readonly SearchField[] | undefined,
@@ -166,7 +160,7 @@ export function fanoutSearchChannels(
   return SEARCH_TOKEN_CHANNELS;
 }
 
-export function estimateSegmentWork(
+function estimateSegmentWork(
   segment: SearchExecutionSnapshotHandle['segments'][number],
   analysis: SearchTextAnalysis,
   fields: readonly SearchField[] | undefined,

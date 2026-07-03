@@ -8,7 +8,7 @@ import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder
 import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts';
 import { encodeEditionRecord } from '../src/daemon/search-store/publication.ts';
 import { createDaemonSnapshotStore } from '../src/daemon/search-store/snapshot-store.ts';
-import { corpusSnapshotIdFromManifest, snapshotIdFromManifest } from '../src/core/search/segments/index.ts';
+import { corpusSnapshotIdFromManifest, snapshotIdFromManifest } from '../src/core/search/segments/canonical.ts';
 import { createDeterministicEmbeddingSetBuilder } from './helpers/deterministic-embedding.mjs';
 import { currentEdition } from './helpers/edition-ledger.mjs';
 

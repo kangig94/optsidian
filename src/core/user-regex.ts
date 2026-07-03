@@ -1,8 +1,8 @@
 import { UsageError } from '../errors.js';
 import { ensureRe2Runtime, getRe2ClassSync, type Re2Regex } from './re2-runtime.js';
 
-export const DEFAULT_USER_REGEX_MAX_LENGTH = 1024;
-export const DEFAULT_EDIT_REGEX_MAX_MATCHES = 10_000;
+const DEFAULT_USER_REGEX_MAX_LENGTH = 1024;
+const DEFAULT_EDIT_REGEX_MAX_MATCHES = 10_000;
 
 export type RegexMatch = {
   index: number;

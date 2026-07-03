@@ -1,4 +1,5 @@
-import type { SearchTextAnalysis, SearchTextAnalysisOptions } from '../core/search/analysis/index.js';
+import type { SearchTextAnalysis } from '../core/search/analysis/channels.js';
+import type { SearchTextAnalysisOptions } from '../core/search/analysis/query.js';
 import type { SearchAnalyzer, SearchAnalyzerIdentity } from '../core/search/analyzer.js';
 import {
   normalizeIndexAffectingSearchSettings,
@@ -459,7 +460,7 @@ export class EmbeddingWorkerPool {
   }
 }
 
-export class VectorWorkerPool {
+class VectorWorkerPool {
   private readonly pool: DaemonWorkerPool;
 
   constructor(pool: DaemonWorkerPool) {

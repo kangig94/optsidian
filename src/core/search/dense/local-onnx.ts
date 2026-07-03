@@ -287,7 +287,7 @@ export function createLocalOnnxProviderFromConfig(
   });
 }
 
-export function localOnnxEmbeddingRecipeIdentity(input: {
+function localOnnxEmbeddingRecipeIdentity(input: {
   descriptor: LocalOnnxModelDescriptor;
   provider: EmbeddingProviderIdentity;
   runtimeVersion?: string;
@@ -374,7 +374,7 @@ export async function createOnnxSessionWithFallback(input: {
   throw new RuntimeError(`failed to create ONNX inference session${detail ? ` (${detail})` : ''}`);
 }
 
-export function candidateExecutionProviders(
+function candidateExecutionProviders(
   preference: OnnxExecutionProviderPreference = 'auto',
   platform: NodeJS.Platform = process.platform,
 ): OnnxExecutionProvider[] {
@@ -384,7 +384,7 @@ export function candidateExecutionProviders(
   return ['cpu'];
 }
 
-export function renderLocalOnnxEmbeddingInput(
+function renderLocalOnnxEmbeddingInput(
   descriptor: LocalOnnxModelDescriptor,
   text: string,
   inputKind: EmbeddingInputKind = 'document',
@@ -393,7 +393,7 @@ export function renderLocalOnnxEmbeddingInput(
   return template.replace('{text}', text);
 }
 
-export function truncateEncoding(encoding: LocalOnnxTokenizerEncoding, maxTokens: number): LocalOnnxTokenizerEncoding {
+function truncateEncoding(encoding: LocalOnnxTokenizerEncoding, maxTokens: number): LocalOnnxTokenizerEncoding {
   const length = Math.min(maxTokens, encoding.ids.length, encoding.attention_mask.length);
   return {
     ids: encoding.ids.slice(0, length),
@@ -403,7 +403,7 @@ export function truncateEncoding(encoding: LocalOnnxTokenizerEncoding, maxTokens
   };
 }
 
-export function meanPoolLastHiddenState(
+function meanPoolLastHiddenState(
   output: Record<string, LocalOnnxTensor>,
   attentionMask: readonly number[],
   expectedDim: number,

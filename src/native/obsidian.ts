@@ -4,14 +4,7 @@ import path from 'node:path';
 import { RuntimeError } from '../errors.js';
 import { runObsidianSync } from './launcher.js';
 
-export {
-  clearObsidianLaunchEnvCache,
-  mergeObsidianLaunchEnv,
-  obsidianBin,
-  recoverLinuxGuiEnv,
-  runObsidianSync,
-  shouldRefreshObsidianLaunch,
-} from './launcher.js';
+export { runObsidianSync, shouldRefreshObsidianLaunch } from './launcher.js';
 
 export type ObsidianCapture = {
   stdout: string;
@@ -19,7 +12,7 @@ export type ObsidianCapture = {
   status: number;
 };
 
-export type ObsidianVaultDiscoveryEntry = {
+type ObsidianVaultDiscoveryEntry = {
   path: string;
   source: 'active' | 'config';
   id?: string;

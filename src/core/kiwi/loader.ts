@@ -160,7 +160,7 @@ function isSearchableKiwiToken(token: KiwiTokenInfo): boolean {
   return false;
 }
 
-export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
+function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
   return {
     engine: 'kiwi',
     kiwiNlpVersion: KIWI_NLP_VERSION,

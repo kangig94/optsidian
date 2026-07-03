@@ -42,14 +42,6 @@ export function uniqueSearchTerms(terms: readonly string[]): string[] {
   return [...new Set(terms.map((term) => term.trim()).filter(Boolean))];
 }
 
-export function tokenChannelsOverlap(left: SearchTokenChannelTerms, right: SearchTokenChannelTerms): boolean {
-  for (const channel of SEARCH_TOKEN_CHANNELS) {
-    const available = new Set(left[channel]);
-    if (right[channel].some((term) => available.has(term))) return true;
-  }
-  return false;
-}
-
 function normalizeSurfaceTerm(term: string): string {
   return term.normalize('NFKC').toLowerCase().trim();
 }

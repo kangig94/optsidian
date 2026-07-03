@@ -1,7 +1,1 @@
-export {
-  ProjectionReader,
-  type CanonicalDocProjectionDoc,
-  type CanonicalDocProjectionFieldLength,
-  type CanonicalDocProjectionIdentityKeys,
-  type CanonicalDocProjectionOffsets,
-} from '../../segments/index.js';
+export { ProjectionReader } from '../../segments/canonical.js';

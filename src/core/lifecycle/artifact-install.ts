@@ -12,7 +12,7 @@ import {
 
 export type ArtifactVerifyDepth = 'metadata' | 'digest' | (string & {});
 
-export type ArtifactInstallContext<TDepth extends ArtifactVerifyDepth> = {
+type ArtifactInstallContext<TDepth extends ArtifactVerifyDepth> = {
   claim: ExclusiveClaim;
   stagingDir: string;
   verifyDepth: TDepth;
@@ -45,7 +45,7 @@ export type InstallArtifactResult<TArtifact, TDepth extends ArtifactVerifyDepth 
   verifyDepth: TDepth;
 };
 
-export type SweepArtifactStagingOptions = {
+type SweepArtifactStagingOptions = {
   isAlive?: (token: ProcessToken) => boolean;
   backstopTtlMs?: number;
   now?: () => number;
@@ -121,10 +121,7 @@ export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDe
   }
 }
 
-export async function sweepDeadArtifactStaging(
-  stagingRoot: string,
-  options: SweepArtifactStagingOptions = {},
-): Promise<void> {
+async function sweepDeadArtifactStaging(stagingRoot: string, options: SweepArtifactStagingOptions = {}): Promise<void> {
   if (!fs.existsSync(stagingRoot)) return;
   const now = options.now ?? Date.now;
   const isAlive = options.isAlive ?? defaultIsAlive;

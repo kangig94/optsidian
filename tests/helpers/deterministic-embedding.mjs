@@ -1,4 +1,5 @@
-import { DeterministicHashProvider, buildEmbeddingSet } from '../../src/core/search/dense/index.ts';
+import { buildEmbeddingSet } from '../../src/core/search/dense/embedding-set.ts';
+import { DeterministicHashProvider } from '../../src/core/search/dense/provider.ts';
 
 export { DeterministicHashProvider, buildEmbeddingSet };
 

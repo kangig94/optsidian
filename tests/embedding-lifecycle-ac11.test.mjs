@@ -13,7 +13,7 @@ import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts
 import { durableRename } from '../src/daemon/search-store/publication.ts';
 import { DaemonSnapshotStore, createWorkerEmbeddingSetBuilder } from '../src/daemon/search-store/snapshot-store.ts';
 import { DaemonSearchStoreService } from '../src/daemon/search-store/service.ts';
-import { VectorGenerationPool } from '../src/daemon/vector-store/index.ts';
+import { VectorGenerationPool } from '../src/daemon/vector-store/pool.ts';
 import { VaultChangeProducer, docIdForVaultPath } from '../src/daemon/vector-store/watcher.ts';
 import { createMemoryCoralNeedleInstanceFactory } from './helpers/memory-coral-needle.mjs';
 import { activeRetrievalFromEdition, activeSnapshotFromEdition } from './helpers/edition-ledger.mjs';

@@ -60,10 +60,6 @@ export function searchStoreLedgerRootDir(paths: SearchStoreCachePaths, embedding
   return path.join(paths.ledgersDir, safeStoreFileName(embeddingSpaceId));
 }
 
-export function searchStoreId(paths: SearchStoreCachePaths): string {
-  return paths.storeId;
-}
-
 export function safeStoreFileName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'value';
 }

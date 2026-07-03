@@ -2,7 +2,7 @@ import path from 'node:path';
 
 const CONTENT_HASH_PATTERN = /^[0-9a-f]{64}$/u;
 
-export function isValidContentHash(value: unknown): value is string {
+function isValidContentHash(value: unknown): value is string {
   return typeof value === 'string' && CONTENT_HASH_PATTERN.test(value);
 }
 

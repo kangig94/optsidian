@@ -46,6 +46,9 @@ type ControlRuntime = SearchDaemon;
 type RegistryHandler<R> = (request: RpcRequestLike, runtime: R) => unknown | Promise<unknown>;
 type RejectMutatingKeys<T> = Extract<keyof T, MutatingControlDaemonMethod> extends never ? T : never;
 
+/**
+ * @lintignore Runtime-generated type tests import this contract.
+ */
 export type QueryMethodRegistry<R> = Partial<{
   [M in QueryDaemonRequest['method']]: (
     request: Extract<QueryDaemonRequest, { method: M }>,
@@ -54,13 +57,6 @@ export type QueryMethodRegistry<R> = Partial<{
 }> & {
   [M in MutatingControlDaemonMethod]?: never;
 };
-
-export type ControlMethodRegistry<R> = Partial<{
-  [M in ControlDaemonRequest['method']]: (
-    request: Extract<ControlDaemonRequest, { method: M }>,
-    runtime: R,
-  ) => unknown | Promise<unknown>;
-}>;
 
 export type CapabilityDispatchServer = {
   readonly methods: readonly string[];
@@ -75,7 +71,7 @@ export function createQueryServer<R, Registry extends Record<string, RegistryHan
   return createCapabilityDispatchServer(readRegistry, runtime, 'query daemon');
 }
 
-export function createControlServer<R>(
+function createControlServer<R>(
   controlRegistry: Record<string, RegistryHandler<R>>,
   runtime: R,
 ): CapabilityDispatchServer {

@@ -20,11 +20,7 @@ type NativeCoralNeedleBinding = {
   getStats?(): CoralStoreStats;
 };
 
-export type CoralNeedleBindingLoadStatus =
-  { loaded: true; path: string } | { loaded: false; attempted: readonly string[]; error: string };
-
 let cachedBinding: CoralNeedleBinding | undefined;
-let cachedStatus: CoralNeedleBindingLoadStatus | undefined;
 
 export function loadCoralNeedleBinding(): CoralNeedleBinding {
   if (cachedBinding) return cachedBinding;
@@ -37,7 +33,6 @@ export function loadCoralNeedleBinding(): CoralNeedleBinding {
       if (!fs.existsSync(candidate)) continue;
       const native = require(candidate) as NativeCoralNeedleBinding;
       cachedBinding = adaptNativeBinding(native);
-      cachedStatus = { loaded: true, path: candidate };
       return cachedBinding;
     } catch (error) {
       lastError = error;
@@ -49,27 +44,10 @@ export function loadCoralNeedleBinding(): CoralNeedleBinding {
       : lastError === undefined
         ? 'coral-needle binary was not found'
         : 'coral-needle binary failed to load';
-  cachedStatus = { loaded: false, attempted, error: message };
   throw Object.assign(new Error(`coral-needle native binding is not available: ${message}`), {
     code: 'CORAL_NEEDLE_UNAVAILABLE',
     attempted,
   });
-}
-
-export function coralNeedleBindingLoadStatus(): CoralNeedleBindingLoadStatus {
-  if (cachedStatus) return cachedStatus;
-  try {
-    loadCoralNeedleBinding();
-  } catch {
-    // Status reports the cached load error below.
-  }
-  return (
-    cachedStatus ?? {
-      loaded: false,
-      attempted: coralNeedleCandidates(),
-      error: 'coral-needle binary was not found',
-    }
-  );
 }
 
 function adaptNativeBinding(native: NativeCoralNeedleBinding): CoralNeedleBinding {

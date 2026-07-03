@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { SearchTextAnalysis } from '../core/search/analysis/index.js';
+import type { SearchTextAnalysis } from '../core/search/analysis/channels.js';
 import type { SearchAnalyzerIdentity } from '../core/search/analyzer.js';
 import type { SearchField } from '../core/types.js';
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from './query-analysis-cache-defaults.js';

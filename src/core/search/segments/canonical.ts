@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import type { SearchAnalyzerIdentity } from '../analyzer.js';
-import type { SearchTokenChannel } from '../analysis/index.js';
+import type { SearchTokenChannel } from '../analysis/channels.js';
 import type { RetrieverIdentity } from '../contracts.js';
 import { identityPhraseCandidates } from '../ranking/identity.js';
 import { SEARCH_PROPERTIES } from '../schema.js';
 import type { SearchField } from '../../types.js';
 import { decodeUnsignedLeb128, encodeUnsignedLeb128, encodeZigZagLeb128, assertSafeUnsignedInteger } from './leb128.js';
 
-export const CANONICAL_SEGMENT_MAGIC = Uint8Array.from([0x4f, 0x53, 0x53, 0x47]);
+const CANONICAL_SEGMENT_MAGIC = Uint8Array.from([0x4f, 0x53, 0x53, 0x47]);
 export const CANONICAL_SEGMENT_VERSION = 1;
 
 export const CANONICAL_SEGMENT_SECTION = {
@@ -68,19 +68,14 @@ export type CanonicalBm25FieldStats = {
   }[];
 };
 
-export type CanonicalBm25CorpusStats = {
+type CanonicalBm25CorpusStats = {
   channel: string;
   fieldId: number;
   documentCount: number;
   totalFieldLength: number;
 };
 
-export type CanonicalBm25GlobalStatsRow = readonly [
-  channel: string,
-  fieldId: number,
-  term: string,
-  documentFrequency: number,
-];
+type CanonicalBm25GlobalStatsRow = readonly [channel: string, fieldId: number, term: string, documentFrequency: number];
 
 export type CanonicalBm25GlobalStats = {
   bm25StatsSchemaId: typeof CANONICAL_BM25_STATS_SCHEMA_ID;
@@ -144,7 +139,7 @@ export type SearchSnapshotAnalyzerIdentity = {
   };
 };
 
-export type SearchSegmentSchemaIdentity = {
+type SearchSegmentSchemaIdentity = {
   format: 'canonical-segment';
   version: typeof CANONICAL_SEGMENT_VERSION;
   sections: readonly {
@@ -154,12 +149,12 @@ export type SearchSegmentSchemaIdentity = {
   }[];
 };
 
-export type SearchCorpusStatsSchemaIdentity = {
+type SearchCorpusStatsSchemaIdentity = {
   id: 'bm25-global-stats';
   schemaId: typeof CANONICAL_BM25_STATS_SCHEMA_ID;
 };
 
-export type SearchScoringModelIdentity = {
+type SearchScoringModelIdentity = {
   id: string;
   rankingFeatureVersion: string;
   retrieverIdentity: RetrieverIdentity;
@@ -191,7 +186,7 @@ export type SnapshotIdentityTuple = {
   searchModelIdentity: SearchModelIdentity;
 };
 
-export type LexicalCorpusIdentity = {
+type LexicalCorpusIdentity = {
   schemaVersion: 1;
   buildVersion: string;
   fieldSetVersion: string;
@@ -240,7 +235,7 @@ export type CanonicalSnapshotForTests = {
   }[];
 };
 
-export type CanonicalSnapshotTestDocument = {
+type CanonicalSnapshotTestDocument = {
   path: string;
   content: string;
 };
@@ -391,7 +386,7 @@ export function snapshotIdFromManifest(manifest: CanonicalSnapshotManifest): str
   return sha256(canonicalSnapshotManifestBytes(manifest));
 }
 
-export function lexicalCorpusIdentityFromManifest(manifest: CanonicalSnapshotManifest): LexicalCorpusIdentity {
+function lexicalCorpusIdentityFromManifest(manifest: CanonicalSnapshotManifest): LexicalCorpusIdentity {
   return {
     schemaVersion: 1,
     buildVersion: manifest.identityTuple.buildVersion,
@@ -447,9 +442,7 @@ export function canonicalValueBytes(value: unknown): Uint8Array {
   return writer.bytes();
 }
 
-export function canonicalBm25GlobalStatsBytes(
-  stats: Omit<CanonicalBm25GlobalStats, 'bm25GlobalStatsHash'>,
-): Uint8Array {
+function canonicalBm25GlobalStatsBytes(stats: Omit<CanonicalBm25GlobalStats, 'bm25GlobalStatsHash'>): Uint8Array {
   return canonicalValueBytes({
     schemaId: stats.bm25StatsSchemaId,
     corpusStats: stats.corpusStats.map((field) => ({
@@ -1783,7 +1776,7 @@ function encodeTermDictionaryEntry(entry: CanonicalTermDictionaryEntry): Uint8Ar
   return writer.bytes();
 }
 
-export function decodeCanonicalTermDictionarySection(bytes: Uint8Array): CanonicalTermDictionaryEntry[] {
+function decodeCanonicalTermDictionarySection(bytes: Uint8Array): CanonicalTermDictionaryEntry[] {
   const view = termDictionaryView(bytes);
   const offsets = termDictionaryEntryOffsets(bytes, view);
   const entries: CanonicalTermDictionaryEntry[] = [];

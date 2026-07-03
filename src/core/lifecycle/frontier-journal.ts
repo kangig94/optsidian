@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from '../private-path.js';
 
-export type FrontierEntry =
+type FrontierEntry =
   { op: 'upsert'; path: string; contentHash: string } | { op: 'delete'; path: string; tombstoneSeq: number };
 
 export type FrontierDirtyOperation = FrontierEntry & {
@@ -23,12 +23,12 @@ export type FrontierSubject = {
   path: string;
 };
 
-export type FrontierCommittedHashBySubject =
+type FrontierCommittedHashBySubject =
   | ReadonlyMap<string, string>
   | Readonly<Record<string, string | undefined>>
   | ((subject: FrontierSubject) => string | undefined);
 
-export type FrontierTombstoneProof =
+type FrontierTombstoneProof =
   | ReadonlySet<string>
   | ReadonlyMap<string, boolean | string | number | undefined>
   | Readonly<Record<string, boolean | string | number | undefined>>

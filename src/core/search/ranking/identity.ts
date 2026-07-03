@@ -63,10 +63,6 @@ export function bestPhrasePriority(doc: IdentityDocument, context: QueryContext)
   return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
 }
 
-export function normalizeIdentityText(value: string): string {
-  return identityPhraseCandidates(value)[0] ?? '';
-}
-
 export function identityPhraseCandidates(value: string): string[] {
   const cleaned = value.replace(/["']/g, '').replace(/#/g, ' ').normalize('NFKC');
   const terms = surfaceSearchTerms(cleaned);

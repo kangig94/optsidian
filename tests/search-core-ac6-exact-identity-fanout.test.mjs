@@ -103,7 +103,7 @@ function snapshotHandle(built, pinToken) {
 //     rare term in a short title field), so a per-shard recompute of the exact-dominance
 //     bound diverges from the corpus-wide bound.
 async function buildIdentitySnapshot(partitionBits = 4) {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
   const vault = tempRoot();
   const titles = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
   for (let index = 0; index < 80; index += 1) {
@@ -182,7 +182,7 @@ class RecordingSearchExecutionPool {
 }
 
 async function createExecutionPools(workers) {
-  const { createDaemonPools } = await import(path.join(repoRoot, 'src/daemon/pools.ts'));
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const env = {
     ...process.env,
     OPTSIDIAN_SEARCH_ANALYZER: 'intl',
@@ -197,8 +197,8 @@ async function createExecutionPools(workers) {
 }
 
 async function executeScheduledSearch(input, ordering) {
-  const { SearchQueryPlanner } = await import(path.join(repoRoot, 'src/daemon/search-store/query-planner.ts'));
-  const { SearchQueryScheduler } = await import(path.join(repoRoot, 'src/daemon/search-store/query-scheduler.ts'));
+  const { SearchQueryPlanner } = await import('../src/daemon/search-store/query-planner.ts');
+  const { SearchQueryScheduler } = await import('../src/daemon/search-store/query-scheduler.ts');
   const { pool: searchExecutionPool, ...schedulerInput } = input;
   const planner = new SearchQueryPlanner();
   const plan = planner.plan(schedulerInput);
@@ -248,10 +248,9 @@ function assertExhaustiveDispatchedEveryPlanUnit(plan, jobs, label) {
 }
 
 test('AC6 exact dominance bound computation reuses cached snapshot state by snapshotId', async () => {
-  const { exactDominanceBoundForSearchHandle, searchExecutionCacheStats } = await import(
-    path.join(repoRoot, 'src/daemon/search-execution.ts')
-  );
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+  const { exactDominanceBoundForSearchHandle, searchExecutionCacheStats } =
+    await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const { built } = await buildIdentitySnapshot(4);
   const search = normalizeSearchParams({ query: 'alpha', limit: 10 });
   const analysis = testQueryAnalysis('alpha');
@@ -273,8 +272,8 @@ test(
   'AC6 scheduler pipeline is byte-identical to monolithic for exact-identity queries across batch orders',
   { timeout: 240_000 },
   async () => {
-    const { executeSearchJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-    const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+    const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+    const { normalizeSearchParams } = await import('../src/core/search/params.ts');
     const { analyzer, built, vault } = await buildIdentitySnapshot(4);
 
     // Each query exactly equals a document title, so the matched documents earn an exact
@@ -390,8 +389,8 @@ test(
 );
 
 test('AC6 bounded budget is deterministic and labeled bounded', { timeout: 240_000 }, async () => {
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
-  const { SEARCH_WARNING_BOUNDED } = await import(path.join(repoRoot, 'src/core/search/internal-types.ts'));
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { SEARCH_WARNING_BOUNDED } = await import('../src/core/search/internal-types.ts');
   const { analyzer, built, vault } = await buildIdentitySnapshot(4);
   const search = normalizeSearchParams({
     query: 'needle',

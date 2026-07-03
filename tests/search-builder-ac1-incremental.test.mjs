@@ -9,7 +9,8 @@ import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder
 import { createDaemonPools } from '../src/daemon/pools.ts';
 import { computeRetrievalSnapshotId } from '../src/daemon/search-store/snapshot-store.ts';
 import { SNAPSHOT_PERSISTENCE_SCHEMA_HASH } from '../src/daemon/search-store/types.ts';
-import { DeterministicHashProvider, buildEmbeddingSet } from '../src/core/search/dense/index.ts';
+import { buildEmbeddingSet } from '../src/core/search/dense/embedding-set.ts';
+import { DeterministicHashProvider } from '../src/core/search/dense/provider.ts';
 
 const AC3_REQUIRED_CASES = [
   'add',

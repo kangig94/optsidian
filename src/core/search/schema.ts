@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { SearchBuildDocument } from './markdown.js';
 import type { SearchField } from '../types.js';
-import type { SearchTokenChannel } from './analysis/index.js';
+import type { SearchTokenChannel } from './analysis/channels.js';
 
 export const SEARCH_PROPERTIES = [
   'title',
@@ -55,7 +55,7 @@ export const SEARCH_DB_SCHEMA = {
   },
 } as const;
 export const SEARCH_SCHEMA_DIGEST = crypto.createHash('sha256').update(JSON.stringify(SEARCH_DB_SCHEMA)).digest('hex');
-export const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchBuildDocument> = {
+const SEARCH_FIELD_INDEX_PROPERTY: Record<SearchField, keyof SearchBuildDocument> = {
   title: 'titleTokens',
   aliases: 'aliasesTokens',
   tags: 'tagsTokens',

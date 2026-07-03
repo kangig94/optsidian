@@ -9,16 +9,16 @@ import type {
   LinkGraphId,
   LinkGraphView,
 } from '../../core/search/contracts.js';
-import { canonicalValueBytes } from '../../core/search/segments/index.js';
+import { canonicalValueBytes } from '../../core/search/segments/canonical.js';
 import {
   canonicalLinkGraphBacklinks,
   canonicalLinkGraphEdges,
   createLinkGraphView,
-} from '../../core/search/retrieval/index.js';
+} from '../../core/search/retrieval/link.js';
 import { durableRename, fsyncDirSync, fsyncFileSync, type DurableRename } from './publication.js';
 import type { SearchStoreCachePaths } from './cache-paths.js';
 
-export const LINK_GRAPH_SIDECAR_SCHEMA_VERSION = 1;
+const LINK_GRAPH_SIDECAR_SCHEMA_VERSION = 1;
 export const LINK_GRAPH_RESOLVER_VERSION = 'daemon-link-resolver-v1';
 
 export type LinkGraphSidecar = LinkGraphData & {
@@ -120,14 +120,6 @@ export function linkGraphSidecarExists(paths: SearchStoreCachePaths, linkGraphId
   return loadLinkGraphSidecar(paths, linkGraphId) !== undefined;
 }
 
-export function sweepLinkGraphSidecars(paths: SearchStoreCachePaths, roots: ReadonlySet<LinkGraphId>): void {
-  ensureLinkGraphDir(paths);
-  for (const file of safeReadDir(paths.linkGraphsDir)) {
-    if (!isValidLinkGraphId(file) || roots.has(file)) continue;
-    fs.rmSync(path.join(paths.linkGraphsDir, file), { force: true });
-  }
-}
-
 export function linkGraphSidecarPath(paths: SearchStoreCachePaths, linkGraphId: LinkGraphId): string {
   return path.join(paths.linkGraphsDir, linkGraphId);
 }
@@ -165,24 +157,12 @@ function sameCanonicalJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function safeReadDir(dirPath: string): string[] {
-  try {
-    return fs.readdirSync(dirPath).sort(compareCodePoint);
-  } catch {
-    return [];
-  }
-}
-
 function isValidLinkGraphId(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
 }
 
 function sha256(bytes: Uint8Array): string {
   return crypto.createHash('sha256').update(bytes).digest('hex');
-}
-
-function compareCodePoint(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

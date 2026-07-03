@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { normalizeSearchParams } from '../src/core/search/params.ts';
-import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/index.ts';
+import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/types.ts';
 import { CANONICAL_BM25_STATS_SCHEMA_ID, encodeCanonicalSegment } from '../src/core/search/segments/canonical.ts';
 import { SearchQueryPlanner } from '../src/daemon/search-store/query-planner.ts';
 

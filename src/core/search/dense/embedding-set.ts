@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { EmbeddingSetId, ShardDocRef } from '../contracts.js';
-import { canonicalValueBytes } from '../segments/index.js';
+import { canonicalValueBytes } from '../segments/canonical.js';
 import {
   normalizeEmbeddingVector,
   type EmbeddingProvider,
@@ -8,11 +8,11 @@ import {
   type EmbeddingVector,
 } from './provider.js';
 
-export const DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION = 'deterministic-hash-embedding-recipe-v1';
-export const EMBEDDING_VECTOR_PROJECTION_VERSION = 'l2-float64-projection-v1';
-export const EMBEDDING_SPACE_ID_VERSION = 'embedding-space-v1';
-export const EMBEDDING_RECIPE_FRESHNESS_ID_VERSION = 'embedding-recipe-freshness-v1';
-export const VECTOR_GENERATION_MANIFEST_ID_VERSION = 'vector-generation-manifest-v1';
+const DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION = 'deterministic-hash-embedding-recipe-v1';
+const EMBEDDING_VECTOR_PROJECTION_VERSION = 'l2-float64-projection-v1';
+const EMBEDDING_SPACE_ID_VERSION = 'embedding-space-v1';
+const EMBEDDING_RECIPE_FRESHNESS_ID_VERSION = 'embedding-recipe-freshness-v1';
+const VECTOR_GENERATION_MANIFEST_ID_VERSION = 'vector-generation-manifest-v1';
 
 export type EmbeddingSpaceId = string & { readonly __brand: 'EmbeddingSpaceId' };
 export type EmbeddingRecipeFreshnessId = string & { readonly __brand: 'EmbeddingRecipeFreshnessId' };
@@ -210,7 +210,7 @@ export function embeddingRecipeFreshnessId(recipe: EmbeddingRecipeIdentity): Emb
   ) as EmbeddingRecipeFreshnessId;
 }
 
-export function computeEmbeddingSetId(input: {
+function computeEmbeddingSetId(input: {
   recipe: EmbeddingRecipeIdentity;
   records: readonly Pick<
     EmbeddingSetRecord,
@@ -261,7 +261,7 @@ export function vectorGenerationIdForManifest(input: {
   )}`;
 }
 
-export function vectorProjectionHash(vector: EmbeddingVector): string {
+function vectorProjectionHash(vector: EmbeddingVector): string {
   return sha256(
     canonicalValueBytes({
       projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,

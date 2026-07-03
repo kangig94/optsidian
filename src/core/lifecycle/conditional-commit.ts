@@ -16,15 +16,6 @@ export type TenancyFenceProvider<TToken extends CurrentWriterToken = CurrentWrit
 export type ConditionalCommitResult<TResult> =
   { ok: true; value: TResult } | { ok: false; reason: 'not-current' | 'not-head' | 'rejected'; message?: string };
 
-export type ConditionalCommit<
-  TCandidate,
-  TExpected,
-  TResult,
-  TToken extends CurrentWriterToken = CurrentWriterToken,
-> = {
-  commit(candidate: TCandidate, expected: TExpected, writerToken: TToken): Promise<ConditionalCommitResult<TResult>>;
-};
-
 export type AttemptOwner<T> = {
   current: Attempt<T> | undefined | null;
 };

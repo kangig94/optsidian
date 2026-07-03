@@ -1,10 +1,10 @@
-import type { SearchTokenChannel } from '../../analysis/index.js';
+import type { SearchTokenChannel } from '../../analysis/channels.js';
 import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1, SEARCH_TOKEN_CHANNEL_WEIGHT } from '../../constants.js';
 import { SEARCH_FIELD_CHANNEL_BOOST } from '../../schema.js';
 import type { SearchField } from '../../../types.js';
 import { POSITIONAL_FIELD_BY_ID, POSITIONAL_FIELD_ID, type PositionalDocId, type PositionalFieldId } from './types.js';
 
-export type Bm25DocumentFieldInput = {
+type Bm25DocumentFieldInput = {
   fieldId?: PositionalFieldId;
   field?: SearchField;
   tokens: readonly string[];
@@ -15,7 +15,7 @@ export type Bm25DocumentInput = {
   fields: readonly Bm25DocumentFieldInput[];
 };
 
-export type Bm25FieldStats = {
+type Bm25FieldStats = {
   fieldId: PositionalFieldId;
   field?: SearchField;
   documentCount: number;
@@ -116,54 +116,12 @@ export function bm25TermScore(
   return (idf * (d + tf * (k1 + 1))) / (tf + k1 * (1 - b + (b * fieldLength) / field.averageFieldLength));
 }
 
-export function bm25FieldScore(
-  stats: Bm25Stats,
-  terms: readonly string[],
-  docId: PositionalDocId,
-  fieldId: PositionalFieldId,
-  options: {
-    k1?: number;
-    b?: number;
-    d?: number;
-  } = {},
-): number {
-  return terms.reduce((sum, term) => sum + bm25TermScore(stats, term, docId, fieldId, options), 0);
-}
-
-export function boostedBm25FieldScore(
-  stats: Bm25Stats,
-  terms: readonly string[],
-  docId: PositionalDocId,
-  field: SearchField,
-  channel: SearchTokenChannel,
-): number {
-  const fieldId = POSITIONAL_FIELD_ID[field];
-  return bm25FieldScore(stats, terms, docId, fieldId) * fieldChannelBm25Boost(channel, field);
-}
-
 export function fieldChannelBm25Boost(channel: SearchTokenChannel, field: SearchField): number {
   return SEARCH_FIELD_CHANNEL_BOOST[channel][field];
 }
 
 export function tokenChannelFusionWeight(channel: SearchTokenChannel): number {
   return SEARCH_TOKEN_CHANNEL_WEIGHT[channel];
-}
-
-export function bm25TermStats(
-  stats: Bm25Stats,
-  term: string,
-  fieldId: PositionalFieldId,
-): {
-  documentFrequency: number;
-  documentCount: number;
-  averageFieldLength: number;
-} {
-  const field = stats.fields.get(fieldId);
-  return {
-    documentFrequency: field?.documentFrequency.get(term.normalize('NFC').trim()) ?? 0,
-    documentCount: field?.documentCount ?? 0,
-    averageFieldLength: field?.averageFieldLength ?? 0,
-  };
 }
 
 function fieldIdForInput(input: Bm25DocumentFieldInput): PositionalFieldId {

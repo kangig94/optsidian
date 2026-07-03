@@ -1,5 +1,5 @@
 import type { EmbeddingSetId } from '../../core/search/contracts.js';
-import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/index.js';
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/embedding-set.js';
 
 export type VectorStoreKey = {
   vaultStateHash: string;

@@ -19,7 +19,7 @@ type GithubRepo = {
   apiProtocol: 'http' | 'https';
 };
 
-export function githubApiBase(env: NodeJS.ProcessEnv, repo: Pick<GithubRepo, 'host' | 'apiProtocol'>): string {
+function githubApiBase(env: NodeJS.ProcessEnv, repo: Pick<GithubRepo, 'host' | 'apiProtocol'>): string {
   const override = env.OPTSIDIAN_GITHUB_API_BASE;
   if (override) return override.replace(/\/+$/, '');
   if (isGithubDotCom(repo.host)) return DEFAULT_GITHUB_API_BASE;

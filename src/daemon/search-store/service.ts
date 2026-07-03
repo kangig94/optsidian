@@ -4,13 +4,10 @@ import { UsageError } from '../../errors.js';
 import { matchesPathFilter, matchesTagFilter, normalizeSearchParams } from '../../core/search/params.js';
 import { DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS, type SearchScoringLambdas } from '../../core/search/constants.js';
 import { createInlineQueryAnalyzer, type SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
-import {
-  analyzeSearchQuery,
-  emptySearchTokenChannels,
-  SEARCH_TOKEN_CHANNELS,
-  type SearchTextAnalysis,
-} from '../../core/search/analysis/index.js';
-import { denseAgreementFromCosine } from '../../core/search/dense/index.js';
+import { emptySearchTokenChannels, SEARCH_TOKEN_CHANNELS } from '../../core/search/analysis/channels.js';
+import type { SearchTextAnalysis } from '../../core/search/analysis/channels.js';
+import { analyzeSearchQuery } from '../../core/search/analysis/query.js';
+import { denseAgreementFromCosine } from '../../core/search/dense/provider.js';
 import {
   indexAffectingSearchSettingsHash,
   normalizeIndexAffectingSearchSettings,

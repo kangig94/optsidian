@@ -6,10 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { contributionsFromSegment, foldSegment, reduceBuildSegment } from '../src/daemon/search-store/builder.ts';
-import { canonicalValueBytes, decodeCanonicalSegment } from '../src/core/search/segments/index.ts';
+import { canonicalValueBytes, decodeCanonicalSegment } from '../src/core/search/segments/canonical.ts';
 import { SEARCH_PROPERTIES } from '../src/core/search/schema.ts';
-import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/index.ts';
-import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/index.ts';
+import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/channels.ts';
+import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/types.ts';
 
 const textEncoder = new TextEncoder();
 

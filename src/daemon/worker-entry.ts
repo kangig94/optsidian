@@ -1,8 +1,12 @@
 import { isMainThread, parentPort, workerData, type TransferListItem } from 'node:worker_threads';
-import { analyzeSearchQuery, type SearchTextAnalysisOptions } from '../core/search/analysis/index.js';
+import { analyzeSearchQuery } from '../core/search/analysis/query.js';
+import type { SearchTextAnalysisOptions } from '../core/search/analysis/query.js';
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from '../core/search/analyzer.js';
-import { DeterministicHashProvider, LocalOnnxProvider, type EmbeddingProvider } from '../core/search/dense/index.js';
-import { ModelSessionLifecycle, type ModelDevice, type ModelSession } from './model-session/index.js';
+import { LocalOnnxProvider } from '../core/search/dense/local-onnx.js';
+import { DeterministicHashProvider } from '../core/search/dense/provider.js';
+import type { EmbeddingProvider } from '../core/search/dense/provider.js';
+import { ModelSessionLifecycle } from './model-session/lifecycle.js';
+import type { ModelDevice, ModelSession } from './model-session/lifecycle.js';
 import type { IndexAffectingSearchSettings } from '../core/search/index-settings.js';
 import { readOptsidianSettings } from '../core/settings.js';
 import type {

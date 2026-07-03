@@ -6,12 +6,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  DeterministicHashProvider,
   buildEmbeddingSetFromVectors,
   embeddingRecipeFreshnessId,
   embeddingSpaceIdForRecipe,
   vectorGenerationIdForManifest,
-} from '../src/core/search/dense/index.ts';
+} from '../src/core/search/dense/embedding-set.ts';
+import { DeterministicHashProvider } from '../src/core/search/dense/provider.ts';
 import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder.ts';
 import {
   effectiveSearchRuntimeProfile,
@@ -21,7 +21,8 @@ import { DaemonSnapshotStore, createWorkerEmbeddingSetBuilder } from '../src/dae
 import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts';
 import { EmbedScheduler, VectorGenerationManager } from '../src/daemon/embed-scheduler.ts';
 import { ProfileManager } from '../src/daemon/profile-manager.ts';
-import { VectorGenerationPool, vectorStoreCachePaths } from '../src/daemon/vector-store/index.ts';
+import { vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
+import { VectorGenerationPool } from '../src/daemon/vector-store/pool.ts';
 import { docIdForVaultPath } from '../src/daemon/vector-store/watcher.ts';
 import { createMemoryCoralNeedleInstanceFactory } from './helpers/memory-coral-needle.mjs';
 import { activeRetrievalFromEdition, generationDirForEnvelope } from './helpers/edition-ledger.mjs';

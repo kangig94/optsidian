@@ -1,12 +1,10 @@
-import crypto from 'node:crypto';
 import { UsageError } from '../../errors.js';
 import { ANALYZER_VERSION } from './constants.js';
 import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from '../kiwi/artifact.js';
 import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from '../kiwi/manager.js';
 import type { OptsidianSettings } from '../settings.js';
-import type { SearchAnalyzerRuntimeStatus } from '../types.js';
 
-export type SearchEmbeddingModelIdentity = {
+type SearchEmbeddingModelIdentity = {
   id: string;
   sha256: string;
   opset: string;
@@ -57,7 +55,7 @@ export type SearchAnalyzerDegradedEvent = {
 
 export type SearchDeclaredAnalyzer = KiwiDeclaredAnalyzer;
 
-export const SEARCH_EXTRA_LANGS_ENV = 'OPTSIDIAN_SEARCH_EXTRA_LANGS';
+const SEARCH_EXTRA_LANGS_ENV = 'OPTSIDIAN_SEARCH_EXTRA_LANGS';
 
 const ANALYZER_MODE_ENV = 'OPTSIDIAN_SEARCH_ANALYZER';
 const REGISTERED_ANALYZERS = ['ko'] as const satisfies readonly SearchDeclaredAnalyzer[];
@@ -72,7 +70,7 @@ const COMBINING_MARKS_PATTERN = /\p{Mark}/gu;
 const ASCII_ALPHA_PATTERN = /^[a-z]+$/;
 const HANGUL_SCRIPT_PATTERN = /\p{Script=Hangul}/u;
 
-export class SearchAnalyzerTerminalLoadError extends Error {
+class SearchAnalyzerTerminalLoadError extends Error {
   readonly cause: unknown;
 
   constructor(message: string, cause?: unknown) {
@@ -83,7 +81,7 @@ export class SearchAnalyzerTerminalLoadError extends Error {
   }
 }
 
-export function isSearchAnalyzerTerminalLoadError(error: unknown): error is SearchAnalyzerTerminalLoadError {
+function isSearchAnalyzerTerminalLoadError(error: unknown): error is SearchAnalyzerTerminalLoadError {
   return error instanceof SearchAnalyzerTerminalLoadError;
 }
 
@@ -120,20 +118,8 @@ function searchExtraLangsValue(env: NodeJS.ProcessEnv, settings: OptsidianSettin
   return settings.search?.extraLangs?.join(',');
 }
 
-export function analyzerCacheKey(identity: SearchAnalyzerIdentity): string {
-  const name = identity.name.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'analyzer';
-  const activeAnalyzers = normalizeAnalyzerNames(identity.activeAnalyzers ?? []);
-  if ((name === 'intl' || name === 'router') && activeAnalyzers.length === 0) return 'intl';
-  const tier = activeAnalyzers.includes('ko') ? 'kiwi' : name;
-  return `${tier}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
-}
-
 export function analyzerIdentityKey(identity: SearchAnalyzerIdentity): string {
   return stableStringify(identity);
-}
-
-export function tokensToSearchText(tokens: readonly string[]): string {
-  return unique(tokens).join(' ');
 }
 
 export function parseDeclaredSearchAnalyzers(raw: string | undefined): SearchDeclaredAnalyzer[] {
@@ -156,7 +142,7 @@ function normalizeDeclaredSearchAnalyzers(values: readonly SearchDeclaredAnalyze
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
-export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): SearchAnalyzer | undefined {
+function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): SearchAnalyzer | undefined {
   const name = identity.name.trim().toLowerCase();
   if (name !== 'router' && name !== 'intl') return undefined;
   if ((identity.activeAnalyzers ?? []).length > 0) return undefined;
@@ -187,7 +173,7 @@ export function searchTextNeedsBlockingAnalyzer(text: string, identity: SearchAn
   return searchTextContainsHangul(text);
 }
 
-export function searchTextContainsHangul(text: string): boolean {
+function searchTextContainsHangul(text: string): boolean {
   return HANGUL_SCRIPT_PATTERN.test(text);
 }
 
@@ -630,32 +616,6 @@ function kiwiRouterIdentity(
   };
 }
 
-export function searchAnalyzerRuntimeStatus(
-  analyzer: SearchAnalyzer,
-  env: NodeJS.ProcessEnv,
-): SearchAnalyzerRuntimeStatus {
-  const declaredAnalyzers = normalizeAnalyzerNames(analyzer.identity.declaredAnalyzers ?? []);
-  const activeAnalyzers = normalizeAnalyzerNames(analyzer.identity.activeAnalyzers ?? []);
-  const targetTier = activeAnalyzers.includes('ko') ? 'kiwi' : 'intl';
-  if (targetTier !== 'kiwi') {
-    return { targetTier, declaredAnalyzers, activeAnalyzers };
-  }
-
-  const managerStatus = getKiwiAnalyzerManager().status(env);
-  return {
-    targetTier,
-    declaredAnalyzers,
-    activeAnalyzers,
-    kiwi: {
-      modelState: managerStatus.model.installed ? 'installed' : 'missing',
-      modelPath: managerStatus.model.targetDir,
-      missingFiles: managerStatus.model.missingFiles,
-      analyzerState: managerStatus.state,
-      leaseCount: managerStatus.leaseCount,
-    },
-  };
-}
-
 function normalizeAnalyzerInput(text: string): string {
   return text
     .toLocaleLowerCase()
@@ -687,10 +647,6 @@ function routerIdentity(
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-function stableHash(input: string): string {
-  return crypto.createHash('sha256').update(input).digest('hex');
 }
 
 function stableStringify(value: unknown): string {

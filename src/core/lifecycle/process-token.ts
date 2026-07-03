@@ -18,7 +18,7 @@ export type IsAliveOptions = {
 // works for the original holder, but reclaim logic must NOT treat such a token as proof of liveness
 // (see `processStartIdIsAuthoritative` / `reclaimExclusiveClaim`) — it falls through to the TTL
 // backstop instead, so a dead-but-pid-reused holder can never permanently deadlock a claim.
-export const UNVERIFIED_START_ID_PREFIX = 'unverified:';
+const UNVERIFIED_START_ID_PREFIX = 'unverified:';
 
 export function processStartIdIsAuthoritative(startId: string): boolean {
   return !startId.startsWith(UNVERIFIED_START_ID_PREFIX);
@@ -43,14 +43,6 @@ export function createProcessToken(
   const startId = startIdentityProvider.readStartId(pid);
   if (!startId) throw new Error(`Cannot read process start identity for pid ${pid}.`);
   return { pid, startId };
-}
-
-export function readProcessStartId(
-  pid: number,
-  startIdentityProvider: ProcessStartIdentityProvider = defaultProcessStartIdentityProvider,
-): string | undefined {
-  assertValidPid(pid);
-  return startIdentityProvider.readStartId(pid);
 }
 
 export function isAlive(token: ProcessToken, options: IsAliveOptions = {}): boolean {

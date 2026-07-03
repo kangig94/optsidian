@@ -4,8 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-const repoRoot = process.cwd();
-
 function testAnalyzer() {
   const tokenize = (text) =>
     [
@@ -33,10 +31,6 @@ function writeVaultFile(vault, rel, content) {
 
 function tempRoot(prefix = 'optsidian-search-long-doc-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function futureImport(relativePath) {
-  return import(path.join(repoRoot, relativePath));
 }
 
 function sharedHandle(bytes) {
@@ -90,9 +84,9 @@ function evenSampledLineNumbers(length, maxCount) {
 }
 
 test('snapshot build samples oversize body and snippet analysis before tokenization', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
   const { BODY_FULL_ANALYSIS_MAX_CHARS, BODY_LEXICAL_SAMPLE_MAX_CHARS, SNIPPET_DOC_ANALYZED_LINES_MAX } =
-    await futureImport('src/core/search/analysis/budget.ts');
+    await import('../src/core/search/analysis/budget.ts');
   const vault = tempRoot();
   const lines = Array.from(
     { length: SNIPPET_DOC_ANALYZED_LINES_MAX + 200 },
@@ -134,9 +128,9 @@ test('snapshot build samples oversize body and snippet analysis before tokenizat
 });
 
 test('long document snippets exclude frontmatter even when snippet lines are sampled', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const marker = 'frontmatteronlymarker';
   const vault = tempRoot();
   const bodyLines = Array.from({ length: 10000 }, (_, index) =>
@@ -180,10 +174,10 @@ test('long document snippets exclude frontmatter even when snippet lines are sam
 });
 
 test('long document snippets fall back to a deep unsampled heading when only frontmatter metadata matches', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
-  const { SNIPPET_DOC_ANALYZED_LINES_MAX } = await futureImport('src/core/search/analysis/budget.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { SNIPPET_DOC_ANALYZED_LINES_MAX } = await import('../src/core/search/analysis/budget.ts');
   const marker = 'deepfallbackaliasmarker';
   const deepHeading = '# Deep Visible Heading';
   const deepHeadingLine = 4007;
@@ -240,10 +234,10 @@ test('long document snippets fall back to a deep unsampled heading when only fro
 });
 
 test('long document snippets use full frontmatter boundary when closing delimiter is unsampled', async () => {
-  const { buildCanonicalSearchSnapshot } = await futureImport('src/daemon/search-store/builder.ts');
-  const { executeSearchJob } = await futureImport('src/daemon/search-execution.ts');
-  const { normalizeSearchParams } = await futureImport('src/core/search/params.ts');
-  const { SNIPPET_DOC_ANALYZED_LINES_MAX } = await futureImport('src/core/search/analysis/budget.ts');
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { SNIPPET_DOC_ANALYZED_LINES_MAX } = await import('../src/core/search/analysis/budget.ts');
   const marker = 'boundaryaliasmarker';
   const closingLine = 4007;
   const aliasLine = 5;

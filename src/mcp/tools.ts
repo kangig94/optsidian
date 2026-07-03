@@ -3,8 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { type McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as z from 'zod/v4';
-import { applyVaultPatch, editVaultFile, writeVaultFile } from '../core/index.js';
-import type { EditParams, EditSelector, LineRange } from '../core/index.js';
+import { applyVaultPatch } from '../core/apply-patch.js';
+import { editVaultFile } from '../core/edit.js';
+import { writeVaultFile } from '../core/write.js';
+import type { EditParams, EditSelector, LineRange } from '../core/types.js';
 import { usagePayload } from '../cli/help.js';
 import { UsageError } from '../errors.js';
 import { runAsyncTool, runTool, type ToolPayload } from './result.js';
@@ -54,13 +56,13 @@ const commandRunArgsSchema = z.object({
     ),
 });
 
-export type UsageToolArgs = z.infer<typeof usageArgsSchema>;
-export type WriteToolArgs = z.infer<typeof writeArgsSchema>;
-export type EditToolArgs = z.infer<typeof editArgsSchema>;
-export type PatchToolArgs = z.infer<typeof patchArgsSchema>;
-export type CommandRunToolArgs = z.infer<typeof commandRunArgsSchema>;
+type UsageToolArgs = z.infer<typeof usageArgsSchema>;
+type WriteToolArgs = z.infer<typeof writeArgsSchema>;
+type EditToolArgs = z.infer<typeof editArgsSchema>;
+type PatchToolArgs = z.infer<typeof patchArgsSchema>;
+type CommandRunToolArgs = z.infer<typeof commandRunArgsSchema>;
 
-export type OptsidianToolHandlers = {
+type OptsidianToolHandlers = {
   command_map(args: UsageToolArgs): CallToolResult;
   command_run(args: CommandRunToolArgs): CallToolResult;
   write(args: WriteToolArgs): CallToolResult;

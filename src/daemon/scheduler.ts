@@ -7,20 +7,20 @@ export type SchedulerSearchRequest = {
   cancelBeforeRun?: boolean;
 };
 
-export type SchedulerSearchSuccess = {
+type SchedulerSearchSuccess = {
   ok: true;
   snapshotId: string;
   matches: Array<{ path: string; score?: number }>;
 };
 
-export type SchedulerSearchFailure = {
+type SchedulerSearchFailure = {
   ok: false;
   snapshotId: string;
   error: SearchDaemonRpcError;
   partialResults?: never;
 };
 
-export type SchedulerSearchResult = SchedulerSearchSuccess | SchedulerSearchFailure;
+type SchedulerSearchResult = SchedulerSearchSuccess | SchedulerSearchFailure;
 
 export type RequestScheduler = {
   cancel(cancellationId: string): void;

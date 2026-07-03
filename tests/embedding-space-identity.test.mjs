@@ -8,14 +8,11 @@ import {
   buildEmbeddingSetFromVectors,
   embeddingRecipeFreshnessId,
   embeddingSpaceIdForRecipe,
-} from '../src/core/search/dense/index.ts';
+} from '../src/core/search/dense/embedding-set.ts';
 import { SNAPSHOT_PERSISTENCE_SCHEMA } from '../src/daemon/search-store/types.ts';
 import { computeRetrievalSnapshotId } from '../src/daemon/search-store/snapshot-store.ts';
-import {
-  loadVectorGenerationMetadata,
-  vectorGenerationDir,
-  vectorStoreCachePaths,
-} from '../src/daemon/vector-store/index.ts';
+import { vectorGenerationDir, vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
+import { loadVectorGenerationMetadata } from '../src/daemon/vector-store/pool.ts';
 
 function tempRoot(prefix = 'optsidian-embedding-space-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));

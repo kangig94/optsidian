@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { buildCanonicalSearchSnapshot, parseBuildDocumentBatch } from '../src/daemon/search-store/builder.ts';
-import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/index.ts';
+import { SEARCH_TOKEN_CHANNELS } from '../src/core/search/analysis/channels.ts';
 import { parseNoteLinks } from '../src/core/search/analysis/links.ts';
 
 function testAnalyzer() {

@@ -1,4 +1,4 @@
-import type { SearchTokenChannel } from './analysis/index.js';
+import type { SearchTokenChannel } from './analysis/channels.js';
 import { SEARCH_BOOST, SEARCH_FIELD_CHANNEL_BOOST } from './schema.js';
 
 // Single tokenizer-identity lever. Bump on any change to script routing, the Intl
@@ -10,7 +10,7 @@ export const ANALYZER_VERSION = 'router-intl-kiwi-link-render-v2';
 
 export const CANDIDATE_LIMIT_MIN = 50;
 export const CANDIDATE_LIMIT_MULTIPLIER = 10;
-export const RANK_FINAL_SORT_POLICY = 'unified-score-path-v1';
+const RANK_FINAL_SORT_POLICY = 'unified-score-path-v1';
 export type SearchScoringLambdas = {
   phrase: number;
   exact: number;
@@ -35,7 +35,7 @@ export const SEARCH_TOKEN_CHANNEL_WEIGHT: Record<SearchTokenChannel, number> = {
   surface: 0.65,
   ngram: 0.3,
 };
-export const SEARCH_FUZZY_WEIGHT_MULTIPLIER = 0.2;
+const SEARCH_FUZZY_WEIGHT_MULTIPLIER = 0.2;
 export const RANK_BUCKET = {
   exact: 0,
   phrase: 1,

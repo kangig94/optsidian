@@ -13,11 +13,11 @@ import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from './query-analysis-cache-def
 import { defaultSearchExecutionWorkerCount } from './worker-pool.js';
 import { DEFAULT_PARTITION_BITS, INDEX_BUILD_VERSION } from './search-store/builder.js';
 
-export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
+const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
-export type SearchEmbeddingProviderKind = 'local-onnx' | 'deterministic-hash';
+type SearchEmbeddingProviderKind = 'local-onnx' | 'deterministic-hash';
 
-export type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
+type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
   partitionBits: number;
 };
 

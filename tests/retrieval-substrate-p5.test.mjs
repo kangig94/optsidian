@@ -22,7 +22,7 @@ import { createSearchDaemonClient } from '../src/daemon/client.ts';
 import { SEARCH_DAEMON_PROTOCOL_VERSION } from '../src/daemon/protocol.ts';
 import { createQueryServer } from '../src/daemon/server.ts';
 import { connectRpc, createRpcServer } from '../src/daemon/transport.ts';
-import { ModelSessionLifecycle } from '../src/daemon/model-session/index.ts';
+import { ModelSessionLifecycle } from '../src/daemon/model-session/lifecycle.ts';
 import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts';
 import { DaemonSnapshotStore, computeRetrievalSnapshotId } from '../src/daemon/search-store/snapshot-store.ts';
 import { DaemonSearchStoreService } from '../src/daemon/search-store/service.ts';
@@ -31,7 +31,8 @@ import {
   snapshotIdentityTupleForAnalyzerIdentity,
 } from '../src/daemon/search-store/builder.ts';
 import { executeSearchShardJob } from '../src/daemon/search-execution.ts';
-import { VectorGenerationPool, vectorStoreCachePaths } from '../src/daemon/vector-store/index.ts';
+import { vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
+import { VectorGenerationPool } from '../src/daemon/vector-store/pool.ts';
 import {
   createOwnerRecord,
   createOwnerRegistry,

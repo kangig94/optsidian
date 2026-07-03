@@ -1,13 +1,13 @@
-import type { SearchTextAnalysis, SearchTokenChannel } from './analysis/index.js';
-import type { EmbeddingVector } from './dense/index.js';
+import type { SearchTextAnalysis, SearchTokenChannel } from './analysis/channels.js';
+import type { EmbeddingVector } from './dense/provider.js';
 import type { SearchField } from '../types.js';
 
 export const SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION = 1;
 
-export type SnapshotId = string;
-export type SegmentId = string;
+type SnapshotId = string;
+type SegmentId = string;
 export type DocumentId = string;
-export type CandidateId = string;
+type CandidateId = string;
 
 export type ShardDocRef = {
   segmentId: SegmentId;
@@ -26,7 +26,6 @@ export type CorpusSnapshotId = string;
 export type LinkGraphId = string;
 export type EmbeddingSetId = string;
 export type RetrieverPlanIdentity = string;
-export type RankingFeatureVersion = string;
 export type RetrievalSnapshotId = string;
 
 export type LinkGraphEdge = {
@@ -170,7 +169,7 @@ export type CandidateBm25Feature = {
   score: number;
 };
 
-export type CandidateRarityFeature = {
+type CandidateRarityFeature = {
   matchedWeightedTerms: number;
   totalWeightedTerms: number;
   score: number;
@@ -187,7 +186,7 @@ export type CandidateCoverageFeature = {
   }[];
 };
 
-export type CandidateIdentityFeature = {
+type CandidateIdentityFeature = {
   exactPriority: number | null;
   phrasePriority: number | null;
 };
@@ -246,7 +245,7 @@ export interface SnapshotStore {
   release(pin: PinnedSnapshot): void | Promise<void>;
 }
 
-export type RankingConfigTrace = {
+type RankingConfigTrace = {
   constants: unknown;
   [key: string]: unknown;
 };

@@ -1,4 +1,4 @@
-export type ParsedNoteLinkKind = 'wikilink' | 'markdown';
+type ParsedNoteLinkKind = 'wikilink' | 'markdown';
 
 export type UnresolvedNoteLink = {
   kind: ParsedNoteLinkKind;
@@ -42,7 +42,7 @@ export function parseNoteLinks(body: string): ParsedNoteLinks {
   return { renderedText, unresolvedLinks };
 }
 
-export function noteLinkTargetPath(rawTarget: string): string {
+function noteLinkTargetPath(rawTarget: string): string {
   const strippedAnchor = splitTargetAnchor(rawTarget).path;
   return stripBlockId(stripQuery(strippedAnchor)).trim();
 }

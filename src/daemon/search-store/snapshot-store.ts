@@ -8,7 +8,8 @@ import {
   type SearchAnalyzer,
   type SearchAnalyzerIdentity,
 } from '../../core/search/analyzer.js';
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../../core/search/analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../../core/search/analysis/channels.js';
+import type { SearchTokenChannel } from '../../core/search/analysis/channels.js';
 import {
   canonicalBm25GlobalStatsHash,
   corpusSnapshotIdFromManifest,
@@ -17,10 +18,9 @@ import {
   partitionIdForDocument,
   reduceCanonicalBm25GlobalStats,
   snapshotIdFromManifest,
-  type CanonicalBm25FieldStats,
-  type CanonicalDocumentRecord,
-} from '../../core/search/segments/index.js';
-import type { PositionalBm25GlobalStats } from '../../core/search/retrieval/positional/index.js';
+} from '../../core/search/segments/canonical.js';
+import type { CanonicalBm25FieldStats, CanonicalDocumentRecord } from '../../core/search/segments/canonical.js';
+import type { PositionalBm25GlobalStats } from '../../core/search/retrieval/positional/snapshot.js';
 import type {
   EmbeddingSetId,
   LinkGraphId,
@@ -34,23 +34,27 @@ import type {
 } from '../../core/search/contracts.js';
 import {
   buildEmbeddingSetFromVectors,
-  DeterministicHashProvider,
-  createLocalOnnxProviderFromConfig,
   deterministicHashEmbeddingRecipeIdentity,
   embeddingRecipeFreshnessId as computeEmbeddingRecipeFreshnessId,
   embeddingRecipeIdentityForProvider,
   embeddingSpaceIdForRecipe,
   vectorGenerationIdForManifest,
-  type EmbeddingProviderIdentity,
-  type BuiltEmbeddingSet,
-  type EmbeddingProvider,
-  type EmbeddingRecipeFreshnessId,
-  type EmbeddingRecipeIdentity,
-  type EmbeddingSetDocumentInput,
-  type EmbeddingSetRecord,
-  type EmbeddingSpaceId,
-  type EmbeddingVector,
-} from '../../core/search/dense/index.js';
+} from '../../core/search/dense/embedding-set.js';
+import type {
+  BuiltEmbeddingSet,
+  EmbeddingRecipeFreshnessId,
+  EmbeddingRecipeIdentity,
+  EmbeddingSetDocumentInput,
+  EmbeddingSetRecord,
+  EmbeddingSpaceId,
+} from '../../core/search/dense/embedding-set.js';
+import { createLocalOnnxProviderFromConfig } from '../../core/search/dense/local-onnx.js';
+import { DeterministicHashProvider } from '../../core/search/dense/provider.js';
+import type {
+  EmbeddingProviderIdentity,
+  EmbeddingProvider,
+  EmbeddingVector,
+} from '../../core/search/dense/provider.js';
 import { DENSE_RETRIEVER_VERSION } from '../../core/search/dense/retriever.js';
 import {
   computeRetrieverPlanIdentity,
@@ -123,20 +127,16 @@ import {
   loadLinkGraphView,
   storeLinkGraphSidecar,
 } from './link-graph.js';
+import { VectorCacheCatalog, vectorStoreId } from '../vector-store/cache-catalog.js';
+import { vectorGenerationDbPath, vectorStoreCachePaths } from '../vector-store/cache-paths.js';
+import type { VectorStoreCachePaths } from '../vector-store/cache-paths.js';
 import {
-  VectorCacheCatalog,
   loadVectorGenerationMetadata,
   storeVectorGenerationMetadata,
-  vectorGenerationDbPath,
-  type VectorGenerationPool,
   vectorGenerationManifestHash,
-  vectorStoreCachePaths,
-  vectorStoreId,
-  type CoralEmbeddingSpec,
-  type ReadableVectorGenerationLease,
-  type VectorStoreCachePaths,
-  type VectorGenerationMetadata,
-} from '../vector-store/index.js';
+} from '../vector-store/pool.js';
+import type { VectorGenerationPool, ReadableVectorGenerationLease } from '../vector-store/pool.js';
+import type { CoralEmbeddingSpec, VectorGenerationMetadata } from '../vector-store/types.js';
 import type { CoralChunkRecord, VectorStoreKey } from '../vector-store/types.js';
 import {
   SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
@@ -224,7 +224,7 @@ type PublishFreshSnapshotOptions = {
 
 type ReusableBaseCandidate = { ok: true; base: BuildSnapshotBase } | { ok: false; reason: string };
 
-export type RetrievalEmbeddingSetBuilderInput = {
+type RetrievalEmbeddingSetBuilderInput = {
   vaultRoot: string;
   documents: readonly EmbeddingSetDocumentInput[];
   deadline?: number;
@@ -233,9 +233,9 @@ export type RetrievalEmbeddingSetBuilderInput = {
   embeddingLane?: EmbedSchedulerLane;
 };
 
-export type RetrievalEmbeddingBuildLane = Exclude<EmbedSchedulerLane, 'query'>;
+type RetrievalEmbeddingBuildLane = Exclude<EmbedSchedulerLane, 'query'>;
 
-export type RetrievalEmbeddingBuildFoldResult = {
+type RetrievalEmbeddingBuildFoldResult = {
   target: 'current' | 'next';
   lane: RetrievalEmbeddingBuildLane;
   reason: 'queued' | 'in-flight' | 'embedded' | 'not-active';
@@ -332,7 +332,7 @@ export type PinnedRetrievalSnapshot = PinnedSnapshot & {
   vectorKey: VectorStoreKey;
 };
 
-export type RetrievalPinNotReadyReason =
+type RetrievalPinNotReadyReason =
   | 'no-active-retrieval-snapshot'
   | 'retrieval-envelope-missing'
   | 'retrieval-state-dirty'
@@ -349,17 +349,15 @@ export type RetrievalPinNotReadyReason =
 export type RetrievalPinResult =
   { status: 'ready'; pin: PinnedRetrievalSnapshot } | { status: 'index-not-ready'; reason: RetrievalPinNotReadyReason };
 
-export type DenseSignalState = 'fresh' | 'stale' | 'rebuilding' | 'cold';
-
 export type DenseSignal = RetrieveDenseSignal;
 
-export type DenseUsability = {
+type DenseUsability = {
   spaceMatch: boolean;
   usableDocumentIds: ReadonlySet<string>;
   pendingDocumentIds: ReadonlySet<string>;
 };
 
-export type PinnedLexicalReadPin = PinnedSnapshot & {
+type PinnedLexicalReadPin = PinnedSnapshot & {
   corpusSnapshotId: string;
   linkGraphId: LinkGraphId;
 };
@@ -2668,14 +2666,14 @@ class DocIdKeyedEmbeddingWorkSet {
   }
 }
 
-export function createLocalOnnxEmbeddingSetBuilder(
+function createLocalOnnxEmbeddingSetBuilder(
   settings: OptsidianSettings = {},
   env: NodeJS.ProcessEnv = process.env,
 ): RetrievalEmbeddingSetBuilder {
   return createProviderEmbeddingSetBuilder(createLocalOnnxProviderFromConfig(settings, env));
 }
 
-export function createConfiguredEmbeddingSetBuilder(
+function createConfiguredEmbeddingSetBuilder(
   settings: OptsidianSettings = {},
   env: NodeJS.ProcessEnv = process.env,
 ): RetrievalEmbeddingSetBuilder {

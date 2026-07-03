@@ -6,14 +6,14 @@ import test from 'node:test';
 
 import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder.ts';
 import { decodeCanonicalSegment, encodeCanonicalSegment } from '../src/core/search/segments/canonical.ts';
+import { createPositionalRetriever } from '../src/core/search/retrieval/positional/retriever.ts';
 import {
   bm25DocumentFrequency,
   bm25TermScoreFromGlobalStats,
   bm25TermScoreFromStatsLookup,
   createPositionalBm25StatsLookup,
-  createPositionalRetriever,
   createSearchFieldLengthLookup,
-} from '../src/core/search/retrieval/positional/index.ts';
+} from '../src/core/search/retrieval/positional/snapshot.ts';
 import { ProjectionReader } from '../src/core/search/retrieval/positional/segment-projection-reader.ts';
 import { POSITIONAL_FIELD_ID } from '../src/core/search/retrieval/positional/types.ts';
 

@@ -1,5 +1,5 @@
-import type { SearchTextAnalysis } from '../../core/search/analysis/index.js';
-import type { ExactDominanceBound } from '../../core/search/ranking/index.js';
+import type { SearchTextAnalysis } from '../../core/search/analysis/channels.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/score.js';
 import type { SearchShardExecutionResult } from '../search-execution.js';
 import { sortedSearchShardFinalists } from './finalist-order.js';
 import type { SearchShardFinalist } from './result-shaping.js';

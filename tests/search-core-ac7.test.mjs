@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-const repoRoot = process.cwd();
 const textEncoder = new TextEncoder();
 
 function testAnalyzer(identity = { name: 'test-analyzer', version: '1', node: 'test' }) {
@@ -89,8 +88,8 @@ function queryAnalysis(raw) {
 }
 
 test('AC7 dense lambda contributes only when dense agreement is present', async () => {
-  const { rerankScore } = await import(path.join(repoRoot, 'src/core/search/ranking/score.ts'));
-  const { SEARCH_SCORING_LAMBDAS } = await import(path.join(repoRoot, 'src/core/search/constants.ts'));
+  const { rerankScore } = await import('../src/core/search/ranking/score.ts');
+  const { SEARCH_SCORING_LAMBDAS } = await import('../src/core/search/constants.ts');
   assert.ok(SEARCH_SCORING_LAMBDAS.dense > 0);
 
   const base = {
@@ -112,14 +111,12 @@ test('AC7 dense lambda contributes only when dense agreement is present', async 
 });
 
 test('AC7 lexical identity stays stable across dense model identity changes', async () => {
-  const { buildCanonicalSearchSnapshot, snapshotIdentityTupleForAnalyzerIdentity } = await import(
-    path.join(repoRoot, 'src/daemon/search-store/builder.ts')
-  );
-  const { CANONICAL_SEGMENT_SECTION, decodeCanonicalSegment } = await import(
-    path.join(repoRoot, 'src/core/search/segments/canonical.ts')
-  );
-  const { executeSearchJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+  const { buildCanonicalSearchSnapshot, snapshotIdentityTupleForAnalyzerIdentity } =
+    await import('../src/daemon/search-store/builder.ts');
+  const { CANONICAL_SEGMENT_SECTION, decodeCanonicalSegment } =
+    await import('../src/core/search/segments/canonical.ts');
+  const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
 
   const vault = tempRoot();
   writeVaultFile(vault, 'Alpha Project.md', '# Alpha Project\n\nalpha project target\n');

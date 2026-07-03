@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import path from 'node:path';
 import test from 'node:test';
-
-const repoRoot = process.cwd();
 
 function searchDocument(overrides = {}) {
   const relPath = overrides.path ?? 'note.md';
@@ -32,7 +29,7 @@ function rankSignal(overrides = {}) {
 }
 
 test('AC4 score is bitwise-identical regardless of candidate set size or ordering', async () => {
-  const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, 'src/core/search/ranking/score.ts'));
+  const { rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const queryChannels = { morph: ['needle'], surface: ['needle'], ngram: [] };
   const target = searchDocument({ path: 'Target.md', title: 'Target' });
   const decoyA = searchDocument({ path: 'Decoy-A.md', title: 'Decoy A' });
@@ -76,15 +73,12 @@ test('AC4 score is bitwise-identical regardless of candidate set size or orderin
 });
 
 test('AC4 BM25Plus field score matches hand-computed vector and feeds unified lexical score', async () => {
-  const { bm25TermScoreFromGlobalStats } = await import(
-    path.join(repoRoot, 'src/core/search/retrieval/positional/snapshot.ts')
-  );
-  const { POSITIONAL_FIELD_ID } = await import(path.join(repoRoot, 'src/core/search/retrieval/positional/types.ts'));
-  const { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1, SEARCH_TOKEN_CHANNEL_WEIGHT } = await import(
-    path.join(repoRoot, 'src/core/search/constants.ts')
-  );
-  const { SEARCH_FIELD_CHANNEL_BOOST } = await import(path.join(repoRoot, 'src/core/search/schema.ts'));
-  const { rerankCandidatesWithSignals } = await import(path.join(repoRoot, 'src/core/search/ranking/score.ts'));
+  const { bm25TermScoreFromGlobalStats } = await import('../src/core/search/retrieval/positional/snapshot.ts');
+  const { POSITIONAL_FIELD_ID } = await import('../src/core/search/retrieval/positional/types.ts');
+  const { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1, SEARCH_TOKEN_CHANNEL_WEIGHT } =
+    await import('../src/core/search/constants.ts');
+  const { SEARCH_FIELD_CHANNEL_BOOST } = await import('../src/core/search/schema.ts');
+  const { rerankCandidatesWithSignals } = await import('../src/core/search/ranking/score.ts');
   const fieldId = POSITIONAL_FIELD_ID.title;
   const stats = {
     schemaId: 1,
@@ -121,14 +115,12 @@ test('AC4 BM25Plus field score matches hand-computed vector and feeds unified le
 });
 
 test('AC4 exact-priority lambda dominates max-term multi-channel body stuffing', async () => {
-  const { MAX_SEARCH_QUERY_TERMS_PER_CHANNEL, SEARCH_SCORING_LAMBDAS } = await import(
-    path.join(repoRoot, 'src/core/search/constants.ts')
-  );
-  const { SEARCH_TOKEN_CHANNELS } = await import(path.join(repoRoot, 'src/core/search/analysis/index.ts'));
-  const { SEARCH_PROPERTIES } = await import(path.join(repoRoot, 'src/core/search/schema.ts'));
-  const { bm25BoundKey, exactDominanceLambda, rerankCandidatesWithSignals } = await import(
-    path.join(repoRoot, 'src/core/search/ranking/score.ts')
-  );
+  const { MAX_SEARCH_QUERY_TERMS_PER_CHANNEL, SEARCH_SCORING_LAMBDAS } =
+    await import('../src/core/search/constants.ts');
+  const { SEARCH_TOKEN_CHANNELS } = await import('../src/core/search/analysis/channels.ts');
+  const { SEARCH_PROPERTIES } = await import('../src/core/search/schema.ts');
+  const { bm25BoundKey, exactDominanceLambda, rerankCandidatesWithSignals } =
+    await import('../src/core/search/ranking/score.ts');
   const bounds = new Map();
   for (const channel of SEARCH_TOKEN_CHANNELS) {
     for (const field of SEARCH_PROPERTIES) bounds.set(bm25BoundKey(channel, field), 1);

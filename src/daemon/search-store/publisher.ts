@@ -48,7 +48,7 @@ export type EditionCandidate = {
   coverage: FrontierCoverageCandidate;
 };
 
-export type EditionCommitValue = {
+type EditionCommitValue = {
   record: EditionRecord;
   ackedJournalSeqs: number[];
 };
@@ -690,7 +690,7 @@ export function liveEditionHeadsUnder(rootDir: string): EditionRecord[] {
 // ledger's head has advanced to a dense-`unavailable`/`building` edition (post lexical-only edit),
 // so a reader can attach the last fresh dense generation and per-doc mask. GC roots both these and
 // the heads; the reader's dense attach path uses the same lookback.
-export function latestFreshEditionsUnder(rootDir: string): EditionRecord[] {
+function latestFreshEditionsUnder(rootDir: string): EditionRecord[] {
   const editions: EditionRecord[] = [];
   for (const publicationsDir of findPublicationsDirs(rootDir)) {
     const latestFresh = [...readLedgerRecordsFromDir(publicationsDir)]

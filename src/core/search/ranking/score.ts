@@ -10,7 +10,8 @@ import {
 } from '../constants.js';
 import type { RankedCandidate } from '../internal-types.js';
 import { SEARCH_FIELD_CHANNEL_BOOST } from '../schema.js';
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../analysis/channels.js';
+import type { SearchTokenChannel } from '../analysis/channels.js';
 export { identityScoreFromExactPriority } from './identity.js';
 
 export type RankDocument = {
@@ -140,10 +141,6 @@ function requiredRankSignals(
 
 function isRankPriority(value: unknown): value is number {
   return typeof value === 'number' && (Number.isFinite(value) || value === Number.POSITIVE_INFINITY);
-}
-
-export function isRankedCandidate(match: { path: string }): match is RankedCandidate {
-  return 'baseRank' in match && 'bucket' in match;
 }
 
 export function rankBucketName(bucket: number): NonNullable<SearchMatch['debug']>['bucket'] {

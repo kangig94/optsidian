@@ -16,7 +16,7 @@
     "lint:fix": "eslint src/ tests/ scripts/ eslint.config.mjs --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.mjs' 'scripts/**/*.mjs' 'eslint.config.mjs' '*.json' '*.md' 'docs/**/*.md' '.prettierrc'",
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.mjs' 'scripts/**/*.mjs' 'eslint.config.mjs' '*.json' '*.md' 'docs/**/*.md' '.prettierrc'",
-    "dead-code": "knip --include files,dependencies,unlisted,duplicates",
+    "dead-code": "knip --include files,dependencies,unlisted,unresolved,exports,types,catalog,nsExports,nsTypes,enumMembers,namespaceMembers,duplicates --treat-config-hints-as-errors",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-bundle.mjs",
     "search:eval:ir-vault": "node scripts/generate-search-eval-ir-dataset.mjs",

@@ -5,8 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-const repoRoot = process.cwd();
-
 const BATCH_ORDER_VARIANTS = [
   { name: 'plan-order', order: (tasks) => [...tasks] },
   { name: 'reverse-pending', order: (tasks) => [...tasks].reverse() },
@@ -109,7 +107,7 @@ function snapshotHandle(built, pinToken = 'pin-ac6') {
 }
 
 async function buildSyntheticSnapshot(documentCount, partitionBits = 4) {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
   const vault = tempRoot();
   for (let index = 0; index < documentCount; index += 1) {
     const group = `group-${index % 4}`;
@@ -250,7 +248,7 @@ class ControlledLeasePool {
 }
 
 async function createExecutionPools(workers) {
-  const { createDaemonPools } = await import(path.join(repoRoot, 'src/daemon/pools.ts'));
+  const { createDaemonPools } = await import('../src/daemon/pools.ts');
   const pools = await createDaemonPools(
     {
       ...process.env,
@@ -267,8 +265,8 @@ async function createExecutionPools(workers) {
 }
 
 async function executeScheduledSearch(input, ordering) {
-  const { SearchQueryPlanner } = await import(path.join(repoRoot, 'src/daemon/search-store/query-planner.ts'));
-  const { SearchQueryScheduler } = await import(path.join(repoRoot, 'src/daemon/search-store/query-scheduler.ts'));
+  const { SearchQueryPlanner } = await import('../src/daemon/search-store/query-planner.ts');
+  const { SearchQueryScheduler } = await import('../src/daemon/search-store/query-scheduler.ts');
   const { pool: searchExecutionPool, ...schedulerInput } = input;
   const planner = new SearchQueryPlanner();
   const plan = planner.plan(schedulerInput);
@@ -340,7 +338,7 @@ function finalist({ id, documentId, pathName, segmentId, localDocId, score }) {
 }
 
 test('AC6 shard finalist equal-score tie-break follows path, segment, then local doc id', async () => {
-  const { sortedSearchShardFinalists } = await import(path.join(repoRoot, 'src/daemon/search-store/finalist-order.ts'));
+  const { sortedSearchShardFinalists } = await import('../src/daemon/search-store/finalist-order.ts');
   const sorted = sortedSearchShardFinalists([
     finalist({
       id: 'candidate-b',
@@ -391,11 +389,11 @@ test('AC6 shard finalist equal-score tie-break follows path, segment, then local
 });
 
 test('AC6 sharded fanout preserves link adjacency candidates', async () => {
-  const { buildCanonicalSearchSnapshot } = await import(path.join(repoRoot, 'src/daemon/search-store/builder.ts'));
-  const { executeSearchShardJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
-  const { SearchQueryPlanner } = await import(path.join(repoRoot, 'src/daemon/search-store/query-planner.ts'));
-  const { SearchQueryScheduler } = await import(path.join(repoRoot, 'src/daemon/search-store/query-scheduler.ts'));
+  const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
+  const { executeSearchShardJob } = await import('../src/daemon/search-execution.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
+  const { SearchQueryPlanner } = await import('../src/daemon/search-store/query-planner.ts');
+  const { SearchQueryScheduler } = await import('../src/daemon/search-store/query-scheduler.ts');
   const vault = tempRoot();
   writeVaultFile(vault, 'Source.md', '# Source\n\nsourceonly [[Target]]\n');
   writeVaultFile(vault, 'Target.md', '# Target\n\nlinked-only content without the query term\n');
@@ -446,8 +444,8 @@ test(
   'AC6 scheduler grouping invariance matches the monolithic oracle for non-identity queries',
   { timeout: 240_000 },
   async () => {
-    const { executeSearchJob } = await import(path.join(repoRoot, 'src/daemon/search-execution.ts'));
-    const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+    const { executeSearchJob } = await import('../src/daemon/search-execution.ts');
+    const { normalizeSearchParams } = await import('../src/core/search/params.ts');
     const { analyzer, built, vault } = await buildSyntheticSnapshot(48, 4);
     const queryCases = [
       { query: 'needle common', limit: 10 },
@@ -501,7 +499,7 @@ test(
 );
 
 test('AC6 scheduler shard failure cancels active leases and releases the search pin', { timeout: 60_000 }, async () => {
-  const { DaemonSearchStoreService } = await import(path.join(repoRoot, 'src/daemon/search-store/service.ts'));
+  const { DaemonSearchStoreService } = await import('../src/daemon/search-store/service.ts');
   const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
   const snapshot = snapshotHandle(built, 'pin-life');
   const pin = { snapshotId: snapshot.snapshotId, pinToken: 'pin-life' };
@@ -556,9 +554,9 @@ test('AC6 scheduler shard failure cancels active leases and releases the search 
 });
 
 test('AC6 scheduler skips zero-work plans without leasing search workers', async () => {
-  const { SearchQueryPlanner } = await import(path.join(repoRoot, 'src/daemon/search-store/query-planner.ts'));
-  const { SearchQueryScheduler } = await import(path.join(repoRoot, 'src/daemon/search-store/query-scheduler.ts'));
-  const { normalizeSearchParams } = await import(path.join(repoRoot, 'src/core/search/params.ts'));
+  const { SearchQueryPlanner } = await import('../src/daemon/search-store/query-planner.ts');
+  const { SearchQueryScheduler } = await import('../src/daemon/search-store/query-scheduler.ts');
+  const { normalizeSearchParams } = await import('../src/core/search/params.ts');
   const { analyzer, built, vault } = await buildSyntheticSnapshot(32, 3);
   const search = normalizeSearchParams({ query: 'definitelyabsentterm', limit: 5 });
   const input = {

@@ -184,7 +184,7 @@ test('mcp command_map and write handlers preserve routing, preference guidance, 
   const previousVault = process.env.FAKE_VAULT;
   process.env.OPTSIDIAN_OBSIDIAN_BIN = fake;
   process.env.FAKE_VAULT = vault;
-  const { createToolHandlers } = await import(path.resolve('src/mcp/tools.ts'));
+  const { createToolHandlers } = await import('../src/mcp/tools.ts');
   try {
     const tools = createToolHandlers(() => vault);
     const commandMap = tools.command_map({});
@@ -240,7 +240,7 @@ test('mcp command_map and write handlers preserve routing, preference guidance, 
 
 test('mcp command_map annotation is open-world and read-only', async () => {
   const registrations = [];
-  const { registerOptsidianTools } = await import(path.resolve('src/mcp/tools.ts'));
+  const { registerOptsidianTools } = await import('../src/mcp/tools.ts');
   registerOptsidianTools(
     {
       registerTool(name, config, handler) {
@@ -260,7 +260,7 @@ test('mcp command_map annotation is open-world and read-only', async () => {
 
 test('mcp edit uses flat fields and validates selector count', async () => {
   const vault = tempVault();
-  const { createToolHandlers } = await import(path.resolve('src/mcp/tools.ts'));
+  const { createToolHandlers } = await import('../src/mcp/tools.ts');
   const tools = createToolHandlers(() => vault);
   tools.write({ path: 'note.md', content: 'alpha\nbeta\n' });
 
@@ -276,7 +276,7 @@ test('mcp edit uses flat fields and validates selector count', async () => {
 
 test('mcp apply_patch returns structured results', async () => {
   const vault = tempVault();
-  const { createToolHandlers } = await import(path.resolve('src/mcp/tools.ts'));
+  const { createToolHandlers } = await import('../src/mcp/tools.ts');
   const tools = createToolHandlers(() => vault);
 
   const result = tools.apply_patch({
@@ -289,7 +289,7 @@ test('mcp apply_patch returns structured results', async () => {
 test('mcp warm hook runs after vault mutations', async () => {
   const vault = tempVault();
   const events = [];
-  const { createToolHandlers } = await import(path.resolve('src/mcp/tools.ts'));
+  const { createToolHandlers } = await import('../src/mcp/tools.ts');
   const tools = createToolHandlers(
     () => {
       events.push('resolve');
@@ -313,10 +313,8 @@ test('mcp config and native vault resolution use fake obsidian', async () => {
   const log = path.join(dir, 'obsidian.log');
   const fake = makeFakeObsidian(dir);
   const env = { ...process.env, OPTSIDIAN_OBSIDIAN_BIN: fake, FAKE_VAULT: vault, FAKE_OBSIDIAN_LOG: log };
-  const { parseMcpArgs } = await import(path.resolve('src/mcp/config.ts'));
-  const { resolveObsidianVaultRoot, resolveObsidianVaultRootWithFallback } = await import(
-    path.resolve('src/native/obsidian.ts')
-  );
+  const { parseMcpArgs } = await import('../src/mcp/config.ts');
+  const { resolveObsidianVaultRoot, resolveObsidianVaultRootWithFallback } = await import('../src/native/obsidian.ts');
 
   assert.deepEqual(parseMcpArgs([], { ...env, OPTSIDIAN_VAULT: 'EnvVault' }), {
     help: false,
@@ -345,7 +343,7 @@ test('mcp fixed vault path is used when native resolve fails', async () => {
   fs.mkdirSync(vault, { recursive: true });
   const fake = makeFailingObsidian(dir);
   const env = { ...process.env, OPTSIDIAN_OBSIDIAN_BIN: fake };
-  const { resolveObsidianVaultRootWithFallback } = await import(path.resolve('src/native/obsidian.ts'));
+  const { resolveObsidianVaultRootWithFallback } = await import('../src/native/obsidian.ts');
 
   assert.equal(resolveObsidianVaultRootWithFallback({ fallbackPath: vault, env }), fs.realpathSync(vault));
   assert.throws(

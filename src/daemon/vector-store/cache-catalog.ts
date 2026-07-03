@@ -8,7 +8,7 @@ import {
 } from '../../core/private-path.js';
 import type { VectorStoreCachePaths } from './cache-paths.js';
 
-export const VECTOR_CACHE_CATALOG_SCHEMA_VERSION = 1;
+const VECTOR_CACHE_CATALOG_SCHEMA_VERSION = 1;
 
 export type VectorCacheRecord = {
   schemaVersion: typeof VECTOR_CACHE_CATALOG_SCHEMA_VERSION;

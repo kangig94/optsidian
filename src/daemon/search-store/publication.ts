@@ -11,7 +11,7 @@ import type {
   RetrieverPlanIdentity,
   RetrievalSnapshotId,
 } from '../../core/search/contracts.js';
-import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/index.js';
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/embedding-set.js';
 
 export type DurableRename = (from: string, to: string) => void | Promise<void>;
 
@@ -33,21 +33,21 @@ export type DenseEditionFresh = {
   metadataSha256: string;
 };
 
-export type DenseEditionBuilding = {
+type DenseEditionBuilding = {
   state: 'building';
   buildId: string;
   embeddingSetId?: EmbeddingSetId;
   startedAt: string;
 };
 
-export type DenseEditionFailed = {
+type DenseEditionFailed = {
   state: 'failed';
   buildId: string;
   cause: string;
   diagnosticId: string;
 };
 
-export type DenseEditionUnavailable = {
+type DenseEditionUnavailable = {
   state: 'unavailable';
   reason: string;
 };
@@ -86,7 +86,7 @@ export type EditionRecord = {
   committedAt: string;
 };
 
-export type EditionRecordEnvelope = {
+type EditionRecordEnvelope = {
   schemaVersion: 1;
   checksumSha256: string;
   record: EditionRecord;
@@ -107,7 +107,7 @@ export function retrievalIdentityKey(identity: RetrievalIdentity): string {
   ].join(':');
 }
 
-export function editionRecordEnvelope(record: EditionRecord): EditionRecordEnvelope {
+function editionRecordEnvelope(record: EditionRecord): EditionRecordEnvelope {
   return {
     schemaVersion: 1,
     checksumSha256: editionRecordChecksum(record),
@@ -131,7 +131,7 @@ export function decodeEditionRecord(text: string): EditionRecord | undefined {
   return parsed.record;
 }
 
-export function editionRecordChecksum(record: EditionRecord): string {
+function editionRecordChecksum(record: EditionRecord): string {
   return sha256(Buffer.from(canonicalPublicationJson(record)));
 }
 

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDirSync, writePrivateFileSync } from '../../core/private-path.js';
-import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/index.js';
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/embedding-set.js';
 import { durableRename, fsyncDirSync, fsyncFileSync } from '../search-store/publication.js';
 import {
   vectorGenerationDbPath,
@@ -600,7 +600,7 @@ export function loadVectorGenerationMetadata(
   return undefined;
 }
 
-export function loadVectorGenerationMetadataByManifest(
+function loadVectorGenerationMetadataByManifest(
   paths: VectorStoreCachePaths,
   manifestHash: string,
 ): VectorGenerationMetadata | undefined {

@@ -7,7 +7,6 @@ import test from 'node:test';
 import { createDeterministicEmbeddingSetBuilder } from './helpers/deterministic-embedding.mjs';
 import { activeSnapshotFromEdition } from './helpers/edition-ledger.mjs';
 
-const repoRoot = process.cwd();
 const PRE_CHANGE_SCHEMA_DIGEST = '298ed77e0d89ac164671c8104225d1f292e955d75ed27423de49d169e185afac';
 const SEARCH_SETTINGS = { ngram: false };
 
@@ -45,18 +44,15 @@ function persistJson(file, value) {
 }
 
 test('AC5 schema digest identity changes from the pre-change baseline and stale identity auto-rebuilds', async () => {
-  const { SEARCH_DB_SCHEMA, SEARCH_SCHEMA_DIGEST } = await import(path.join(repoRoot, 'src/core/search/schema.ts'));
-  const { buildCanonicalSearchSnapshot, snapshotIdentityTupleForAnalyzerIdentity } = await import(
-    path.join(repoRoot, 'src/daemon/search-store/builder.ts')
-  );
-  const { createDaemonSnapshotStore } = await import(path.join(repoRoot, 'src/daemon/search-store/snapshot-store.ts'));
-  const { searchStoreCachePaths } = await import(path.join(repoRoot, 'src/daemon/search-store/cache-paths.ts'));
-  const { canonicalValueBytes, canonicalSnapshotManifestBytes, snapshotIdFromManifest } = await import(
-    path.join(repoRoot, 'src/core/search/segments/canonical.ts')
-  );
-  const { SNAPSHOT_PERSISTENCE_SCHEMA, SNAPSHOT_PERSISTENCE_SCHEMA_HASH } = await import(
-    path.join(repoRoot, 'src/daemon/search-store/types.ts')
-  );
+  const { SEARCH_DB_SCHEMA, SEARCH_SCHEMA_DIGEST } = await import('../src/core/search/schema.ts');
+  const { buildCanonicalSearchSnapshot, snapshotIdentityTupleForAnalyzerIdentity } =
+    await import('../src/daemon/search-store/builder.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { canonicalValueBytes, canonicalSnapshotManifestBytes, snapshotIdFromManifest } =
+    await import('../src/core/search/segments/canonical.ts');
+  const { SNAPSHOT_PERSISTENCE_SCHEMA, SNAPSHOT_PERSISTENCE_SCHEMA_HASH } =
+    await import('../src/daemon/search-store/types.ts');
 
   assert.equal(SEARCH_SCHEMA_DIGEST, sha256(JSON.stringify(SEARCH_DB_SCHEMA)));
   assert.equal(SNAPSHOT_PERSISTENCE_SCHEMA_HASH, sha256(canonicalValueBytes(SNAPSHOT_PERSISTENCE_SCHEMA)));
@@ -149,10 +145,10 @@ test('AC5 schema digest identity changes from the pre-change baseline and stale 
 });
 
 test('AC5 snapshot envelope validator rejects old diagnostics.documents shape at the read boundary', async () => {
-  const { SEARCH_SCHEMA_DIGEST } = await import(path.join(repoRoot, 'src/core/search/schema.ts'));
-  const { createDaemonSnapshotStore } = await import(path.join(repoRoot, 'src/daemon/search-store/snapshot-store.ts'));
-  const { searchStoreCachePaths } = await import(path.join(repoRoot, 'src/daemon/search-store/cache-paths.ts'));
-  const { SNAPSHOT_PERSISTENCE_SCHEMA_HASH } = await import(path.join(repoRoot, 'src/daemon/search-store/types.ts'));
+  const { SEARCH_SCHEMA_DIGEST } = await import('../src/core/search/schema.ts');
+  const { createDaemonSnapshotStore } = await import('../src/daemon/search-store/snapshot-store.ts');
+  const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
+  const { SNAPSHOT_PERSISTENCE_SCHEMA_HASH } = await import('../src/daemon/search-store/types.ts');
 
   const cacheRoot = tempRoot();
   const vault = tempRoot();

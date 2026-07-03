@@ -1,20 +1,21 @@
-import {
-  SEARCH_TOKEN_CHANNELS,
-  type SearchTextAnalysis,
-  type SearchTokenChannel,
-  type SearchTokenChannelTerms,
-} from '../../core/search/analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS } from '../../core/search/analysis/channels.js';
+import type {
+  SearchTextAnalysis,
+  SearchTokenChannel,
+  SearchTokenChannelTerms,
+} from '../../core/search/analysis/channels.js';
 import type { NormalizedSearchParams } from '../../core/search/internal-types.js';
-import { bm25BoundKey, exactDominanceLambda, type ExactDominanceBound } from '../../core/search/ranking/index.js';
+import { bm25BoundKey, exactDominanceLambda } from '../../core/search/ranking/score.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/score.js';
 import { createLinkGraphView } from '../../core/search/retrieval/link.js';
+import type { SearchSnapshot } from '../../core/search/retrieval/positional/engine.js';
 import {
   bm25TermScoreFromStatsLookup,
   buildSearchSnapshotFromSegments,
   createPositionalBm25StatsLookup,
   createSearchFieldLengthLookup,
-  POSITIONAL_FIELD_BY_ID,
-  type SearchSnapshot,
-} from '../../core/search/retrieval/positional/index.js';
+} from '../../core/search/retrieval/positional/snapshot.js';
+import { POSITIONAL_FIELD_BY_ID } from '../../core/search/retrieval/positional/types.js';
 import { SEARCH_PROPERTIES } from '../../core/search/schema.js';
 import { sharedBytes, type SearchExecutionSnapshotHandle } from './result-shaping.js';
 
@@ -78,7 +79,7 @@ export function cachedSearchExecutionStateFromHandle(handle: SearchExecutionSnap
   return { state, cacheHit: false };
 }
 
-export function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
+function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHandle): SearchExecutionState {
   const snapshot = buildSearchSnapshotFromSegments({
     snapshotId: handle.snapshotId,
     segments: handle.segments.map((segment) => ({

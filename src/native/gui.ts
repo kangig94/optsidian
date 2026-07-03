@@ -52,7 +52,7 @@ export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Pro
   return result;
 }
 
-export function obsidianOpenUrl(vaultPath?: string): string {
+function obsidianOpenUrl(vaultPath?: string): string {
   if (!vaultPath) {
     return 'obsidian://open';
   }

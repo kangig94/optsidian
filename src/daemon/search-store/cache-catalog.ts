@@ -9,9 +9,9 @@ import {
 import type { SearchIndexPruneResult, SearchIndexPruneSkippedStore, SearchIndexPrunedStore } from '../../core/types.js';
 import type { SearchStoreCachePaths } from './cache-paths.js';
 
-export const SEARCH_CACHE_CATALOG_SCHEMA_VERSION = 1;
-export const DEFAULT_SEARCH_CACHE_UNUSED_DAYS = 30;
-export const SEARCH_CACHE_TOUCH_THROTTLE_MS = 24 * 60 * 60 * 1000;
+const SEARCH_CACHE_CATALOG_SCHEMA_VERSION = 1;
+const DEFAULT_SEARCH_CACHE_UNUSED_DAYS = 30;
+const SEARCH_CACHE_TOUCH_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
 type SearchCacheState = 'active' | 'cold' | 'pruning' | 'corrupt';
 

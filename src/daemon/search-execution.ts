@@ -1,10 +1,9 @@
-import {
-  SEARCH_TOKEN_CHANNELS,
-  emptySearchTokenChannels,
-  type SearchTextAnalysis,
-  type SearchTokenChannel,
-  type SearchTokenChannelTerms,
-} from '../core/search/analysis/index.js';
+import { SEARCH_TOKEN_CHANNELS, emptySearchTokenChannels } from '../core/search/analysis/channels.js';
+import type {
+  SearchTextAnalysis,
+  SearchTokenChannel,
+  SearchTokenChannelTerms,
+} from '../core/search/analysis/channels.js';
 import { uniqueSearchTerms } from '../core/search/analysis/channels.js';
 import type {
   CandidateCoverageFeature,
@@ -27,21 +26,21 @@ import {
   type SearchScoringLambdas,
 } from '../core/search/constants.js';
 import type { SearchAnalyzerIdentity } from '../core/search/analyzer.js';
+import { createSearchEngine } from '../core/search/retrieval/positional/engine.js';
+import type { SearchSnapshot, SearchSnapshotSegment } from '../core/search/retrieval/positional/engine.js';
+import { createQueryPostingsLookup, createPositionalRetriever } from '../core/search/retrieval/positional/retriever.js';
+import type { QueryPostingsLookup } from '../core/search/retrieval/positional/retriever.js';
 import {
   bm25TermScoreFromStatsLookup,
   createPositionalBm25StatsLookup,
-  createQueryPostingsLookup,
   createSearchFieldLengthLookup,
-  createSearchEngine,
-  createPositionalRetriever,
-  POSITIONAL_FIELD_ID,
-  type PositionalBm25StatsLookup,
-  type QueryPostingsLookup,
-  type SearchFieldLengthLookup,
-  type SearchSnapshot,
-  type SearchSnapshotSegment,
-} from '../core/search/retrieval/positional/index.js';
-import { denseAgreementFromCosine } from '../core/search/dense/index.js';
+} from '../core/search/retrieval/positional/snapshot.js';
+import type {
+  PositionalBm25StatsLookup,
+  SearchFieldLengthLookup,
+} from '../core/search/retrieval/positional/snapshot.js';
+import { POSITIONAL_FIELD_ID } from '../core/search/retrieval/positional/types.js';
+import { denseAgreementFromCosine } from '../core/search/dense/provider.js';
 import { createLinkAdjacencyRetriever } from '../core/search/retrieval/link.js';
 import { fuseCandidateSets } from '../core/search/retrieval/fusion.js';
 import { identityPhraseCandidates } from '../core/search/ranking/identity.js';
@@ -51,10 +50,8 @@ import {
   identityScoreFromExactPriority,
   nullableRankPriority,
   rerankCandidatesWithSignals,
-  type CandidateRankSignals,
-  type ExactDominanceBound,
-  type RankDocument,
-} from '../core/search/ranking/index.js';
+} from '../core/search/ranking/score.js';
+import type { CandidateRankSignals, ExactDominanceBound, RankDocument } from '../core/search/ranking/score.js';
 import { matchesPathFilter, matchesTagFilter } from '../core/search/params.js';
 import { SEARCH_FIELD_CHANNEL_BOOST } from '../core/search/schema.js';
 import { SEARCH_PROPERTIES } from '../core/search/schema.js';
@@ -87,8 +84,6 @@ import type { PersistedDocumentRecord, RetrievalEmbeddingSetEnvelope } from './s
 export type {
   SearchExecutionResult,
   SearchExecutionSnapshotHandle,
-  SearchHitEvidence,
-  SearchShardFinalist,
   SharedBytesHandle,
 } from './search-store/result-shaping.js';
 export {
@@ -97,7 +92,6 @@ export {
   searchExecutionCacheStats,
   type SearchExecutionCacheStats,
   type SearchExecutionPreloadResult,
-  type SearchExecutionWarmResult,
   warmSearchExecutionSnapshot,
 } from './search-store/search-execution-state.js';
 
