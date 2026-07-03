@@ -57,6 +57,33 @@ function fakeWatchFactory() {
   };
 }
 
+function fakeIntervalFactory() {
+  const created = [];
+  const cleared = [];
+  let unrefCount = 0;
+  return {
+    created,
+    cleared,
+    get unrefCount() {
+      return unrefCount;
+    },
+    setInterval(callback, ms) {
+      const timer = {
+        callback,
+        ms,
+        unref() {
+          unrefCount += 1;
+        }
+      };
+      created.push(timer);
+      return timer;
+    },
+    clearInterval(timer) {
+      cleared.push(timer);
+    }
+  };
+}
+
 test("AC4 delete and recreate of a watched directory reopens the handle and converges", async () => {
   const vault = tempVault();
   writeVaultFile(vault, "Dir/A.md", "before\n");
@@ -98,6 +125,84 @@ test("AC4 delete and recreate of a watched directory reopens the handle and conv
     const rewatchedMark = markFor(vault, "Dir/A.md");
     assert.deepEqual(marks, [rewatchedMark]);
     assert.deepEqual(emitted, [recreatedMark, rewatchedMark]);
+  } finally {
+    producer.close();
+  }
+});
+
+test("AC4 reconcile prunes only missing watchers in the reconciled subtree", async () => {
+  const vault = tempVault();
+  writeVaultFile(vault, "A/Dead/Child/Nested.md", "nested\n");
+  writeVaultFile(vault, "B/Dead/Child/Unrelated.md", "unrelated\n");
+  const fake = fakeWatchFactory();
+  const producer = new VaultChangeProducer({
+    vaultRoot: vault,
+    debounceMs: 1000,
+    watchDirectory: fake.watchDirectory,
+    onDirtyMarks() {}
+  });
+
+  try {
+    const root = fs.realpathSync(vault);
+    const rootListener = fake.listeners.get(root);
+    const aDead = path.join(root, "A", "Dead");
+    const aChild = path.join(aDead, "Child");
+    const bDead = path.join(root, "B", "Dead");
+    const bChild = path.join(bDead, "Child");
+    assert.equal(typeof rootListener, "function");
+    assert.equal(typeof fake.listeners.get(aDead), "function");
+    assert.equal(typeof fake.listeners.get(aChild), "function");
+    assert.equal(typeof fake.listeners.get(bDead), "function");
+    assert.equal(typeof fake.listeners.get(bChild), "function");
+
+    fs.rmSync(aDead, { recursive: true, force: true });
+    fs.rmSync(bDead, { recursive: true, force: true });
+    rootListener("rename", "A");
+
+    assert.ok(fake.closed.includes(aDead), "dead watched directory under reconciled subtree was closed");
+    assert.ok(fake.closed.includes(aChild), "dead watched descendant under reconciled subtree was closed");
+    assert.equal(fake.closed.includes(bDead), false, "missing watched directory outside reconciled subtree stayed open");
+    assert.equal(fake.closed.includes(bChild), false, "missing watched descendant outside reconciled subtree stayed open");
+  } finally {
+    producer.close();
+  }
+});
+
+test("AC4 periodic backstop closes a missing watched directory without a reconcile event", async () => {
+  const vault = tempVault();
+  writeVaultFile(vault, "Missed/Note.md", "body\n");
+  const fake = fakeWatchFactory();
+  const interval = fakeIntervalFactory();
+  const emitted = [];
+  const producer = new VaultChangeProducer({
+    vaultRoot: vault,
+    debounceMs: 1000,
+    fallbackPollMs: 1234,
+    watchDirectory: fake.watchDirectory,
+    setInterval: interval.setInterval,
+    clearInterval: interval.clearInterval,
+    onDirtyMarks(marks) {
+      emitted.push(...marks);
+    }
+  });
+
+  try {
+    const root = fs.realpathSync(vault);
+    const missed = path.join(root, "Missed");
+    assert.equal(typeof fake.listeners.get(missed), "function");
+    assert.equal(interval.created.length, 1);
+    assert.equal(interval.created[0].ms, 1234);
+    assert.equal(interval.unrefCount, 1);
+
+    fs.rmSync(missed, { recursive: true, force: true });
+    interval.created[0].callback();
+
+    assert.ok(fake.closed.includes(missed), "periodic backstop closed the leaked watcher");
+    assert.deepEqual(await producer.flushNow(), []);
+    assert.deepEqual(emitted, []);
+
+    producer.close();
+    assert.deepEqual(interval.cleared, [interval.created[0]]);
   } finally {
     producer.close();
   }

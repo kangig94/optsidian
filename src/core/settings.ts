@@ -8,6 +8,7 @@ export type SearchSettings = {
   analyzer?: "intl" | "kiwi";
   extraLangs?: string[];
   ngram?: boolean;
+  partitionBits?: number;
   queryWorkers?: number;
   indexWorkers?: number;
   executionWorkers?: number;
@@ -176,6 +177,9 @@ function normalizeSettings(value: unknown): OptsidianSettings {
     if (value.search.analyzer !== undefined) settings.search.analyzer = normalizeAnalyzer(value.search.analyzer);
     if (value.search.extraLangs !== undefined) settings.search.extraLangs = normalizeStringList(value.search.extraLangs, "search.extraLangs");
     if (value.search.ngram !== undefined) settings.search.ngram = normalizeBoolean(value.search.ngram, "search.ngram");
+    if (value.search.partitionBits !== undefined) {
+      settings.search.partitionBits = normalizePositiveInteger(value.search.partitionBits, "search.partitionBits");
+    }
     if (value.search.queryWorkers !== undefined) {
       settings.search.queryWorkers = normalizePositiveInteger(value.search.queryWorkers, "search.queryWorkers");
     }
@@ -224,6 +228,8 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
       return settings.search?.extraLangs ?? [];
     case "search.ngram":
       return settings.search?.ngram;
+    case "search.partitionBits":
+      return settings.search?.partitionBits;
     case "search.queryWorkers":
       return settings.search?.queryWorkers;
     case "search.indexWorkers":
@@ -264,6 +270,9 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
       return;
     case "search.ngram":
       settings.search.ngram = normalizeBoolean(value, key);
+      return;
+    case "search.partitionBits":
+      settings.search.partitionBits = normalizePositiveInteger(value, key);
       return;
     case "search.queryWorkers":
       settings.search.queryWorkers = normalizePositiveInteger(value, key);
@@ -316,6 +325,9 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
       return;
     case "search.ngram":
       if (settings.search) delete settings.search.ngram;
+      return;
+    case "search.partitionBits":
+      if (settings.search) delete settings.search.partitionBits;
       return;
     case "search.queryWorkers":
       if (settings.search) delete settings.search.queryWorkers;
@@ -433,8 +445,29 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
   if (settings.search && Object.keys(settings.search).length === 0) delete settings.search;
 }
 
+// Canonical list of settable config keys — the single source for both the core get/set/unset
+// validation and the CLI's own key allowlist/help, so the two cannot drift.
+export const KNOWN_SETTING_KEYS = [
+  "search.analyzer",
+  "search.extraLangs",
+  "search.ngram",
+  "search.partitionBits",
+  "search.queryWorkers",
+  "search.indexWorkers",
+  "search.executionWorkers",
+  "search.snapshotRetentionCount",
+  "search.queryCacheSize",
+  "search.memoryBudgetCount",
+  "search.memoryBudgetBytes",
+  "search.daemonIdleMs",
+  "search.embeddingModel",
+  "search.denseLambda",
+  "search.linkLambda",
+  "search.rrfK"
+] as const;
+
 function knownSettingMessage(): string {
-  return "setting key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.executionWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs, search.embeddingModel, search.denseLambda, search.linkLambda, search.rrfK";
+  return `setting key must be one of: ${KNOWN_SETTING_KEYS.join(", ")}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

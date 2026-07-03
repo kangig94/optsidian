@@ -3031,6 +3031,29 @@ test("runtime profile tracks ngram as an index-affecting setting", async () => {
   assert.notEqual(searchRuntimeProfileHash(disabled), searchRuntimeProfileHash(enabled));
 });
 
+test("runtime profile folds partitionBits into the lexical store identity from one source", async () => {
+  const {
+    effectiveSearchRuntimeProfile,
+    lexicalIdentityHashForSearchRuntimeProfile
+  } = await futureImport("src/daemon/runtime-profile.ts");
+  const baseEnv = {
+    ...process.env,
+    XDG_CONFIG_HOME: tempRoot("optsidian-profile-partitionbits-config-")
+  };
+  const fourBits = effectiveSearchRuntimeProfile(repoRoot, baseEnv);
+  const eightBits = effectiveSearchRuntimeProfile(repoRoot, { ...baseEnv, OPTSIDIAN_SEARCH_PARTITION_BITS: "8" });
+
+  // Production default is unchanged (4), so identity is preserved from the value's standpoint.
+  assert.equal(fourBits.index.partitionBits, 4);
+  assert.equal(eightBits.index.partitionBits, 8);
+  // partitionBits must flow into the store-dir identity hash — a change reroutes the lexical store.
+  // This fails if a future edit reintroduces a hardcoded DEFAULT_PARTITION_BITS in the hash.
+  assert.notEqual(
+    lexicalIdentityHashForSearchRuntimeProfile(fourBits),
+    lexicalIdentityHashForSearchRuntimeProfile(eightBits)
+  );
+});
+
 test("daemon readiness handshake publishes protocol-v4 tenancy status over RPC integration", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const runtimeDir = tempRoot();

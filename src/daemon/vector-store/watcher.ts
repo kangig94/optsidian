@@ -55,10 +55,11 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   private knownContentHashes = new Map<string, string>();
   private contentHashBaselineReady = false;
   private debounceTimer: NodeJS.Timeout | undefined;
-  private fallbackTimer: NodeJS.Timeout | undefined;
+  private periodicTimer: NodeJS.Timeout | undefined;
   private flushPromise: Promise<readonly VaultDirtyMark[]> | undefined;
   private started = false;
   private closed = false;
+  private fallbackScanActive = false;
 
   constructor(options: VaultChangeProducerOptions) {
     this.vaultRoot = fs.realpathSync(options.vaultRoot);
@@ -86,6 +87,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.ensureContentHashBaseline();
     try {
       this.reconcile(this.vaultRoot);
+      this.ensurePeriodicScan();
     } catch (error) {
       this.startFallbackScan(error);
     }
@@ -104,7 +106,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   }
 
   usingFallbackScan(): boolean {
-    return this.fallbackTimer !== undefined;
+    return this.fallbackScanActive;
   }
 
   close(): void {
@@ -114,16 +116,17 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
       this.clearTimer(this.debounceTimer);
       this.debounceTimer = undefined;
     }
-    if (this.fallbackTimer) {
-      this.clearIntervalFn(this.fallbackTimer);
-      this.fallbackTimer = undefined;
+    if (this.periodicTimer) {
+      this.clearIntervalFn(this.periodicTimer);
+      this.periodicTimer = undefined;
     }
+    this.fallbackScanActive = false;
     this.closeWatchers();
     this.pending.clear();
   }
 
   private handleWatchEvent(dir: string, eventType: fs.WatchEventType, filename: string | Buffer | null): void {
-    if (this.closed || this.fallbackTimer || !filename) return;
+    if (this.closed || this.fallbackScanActive || !filename) return;
     if (eventType !== "change" && eventType !== "rename") return;
     const safe = this.resolveChangedPath(path.join(dir, filename.toString()));
     if (!safe) return;
@@ -202,7 +205,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     const safe = this.resolveChangedPath(subtree);
     if (!safe) return;
     const stat = lstatIfExists(safe.abs);
-    this.dropMissingWatchers();
+    this.dropMissingWatchers(safe.abs);
 
     if (!stat) {
       this.reconcileMissing(safe);
@@ -284,7 +287,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   }
 
   private reopenWatchDir(dir: string): void {
-    if (this.closed || this.fallbackTimer) return;
+    if (this.closed || this.fallbackScanActive) return;
     this.closeWatchedDir(dir);
     const watcher = this.watchDirectory(dir, (eventType, filename) => {
       this.handleWatchEvent(dir, eventType, filename);
@@ -294,13 +297,20 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   }
 
   private startFallbackScan(_reason: unknown): void {
-    if (this.closed || this.fallbackTimer) return;
+    if (this.closed || this.fallbackScanActive) return;
+    this.fallbackScanActive = true;
     this.closeWatchers();
     this.ensureContentHashBaseline();
-    this.fallbackTimer = this.setIntervalFn(() => {
-      this.reconcile(this.vaultRoot);
+    this.ensurePeriodicScan();
+  }
+
+  private ensurePeriodicScan(): void {
+    if (this.closed || this.periodicTimer) return;
+    this.periodicTimer = this.setIntervalFn(() => {
+      if (this.fallbackScanActive) this.reconcile(this.vaultRoot);
+      else this.dropMissingWatchers();
     }, this.fallbackPollMs);
-    this.fallbackTimer.unref?.();
+    this.periodicTimer.unref?.();
   }
 
   private scanMarkdownContentHashes(start: string = this.vaultRoot): Map<string, string> {
@@ -346,8 +356,9 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.watched.delete(dir);
   }
 
-  private dropMissingWatchers(): void {
+  private dropMissingWatchers(subtree?: string): void {
     for (const dir of [...this.watched.keys()]) {
+      if (subtree && !isPathWithinOrEqual(dir, subtree)) continue;
       const stat = lstatIfExists(dir);
       if (!stat?.isDirectory()) this.closeWatchedDir(dir);
     }

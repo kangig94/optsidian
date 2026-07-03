@@ -1657,6 +1657,18 @@ test("config command writes global settings and reads project-local overrides", 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).config.search.ngram, true);
 
+  result = run(["config", "set", "search.partitionBits=8", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.partitionBits, 8);
+
+  // Keys whose CLI allowlist is now sourced from core (previously unreachable via `config set`).
+  result = run(["config", "set", "search.rrfK=42", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).config.search.rrfK, 42);
+
+  result = run(["config", "unset", "search.partitionBits", "format=json"], { cwd: project, env });
+  assert.equal(result.status, 0, result.stderr);
+
   const localSettings = path.join(project, ".optsidian", "settings.json");
   fs.mkdirSync(path.dirname(localSettings), { recursive: true });
   fs.writeFileSync(localSettings, '{\n  "search": {\n    "analyzer": "kiwi",\n    "extraLangs": ["ko"]\n  }\n}\n');

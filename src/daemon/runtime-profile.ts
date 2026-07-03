@@ -12,6 +12,10 @@ export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
 export type SearchEmbeddingProviderKind = "local-onnx" | "deterministic-hash";
 
+export type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
+  partitionBits: number;
+};
+
 export type SearchRuntimeProfile = {
   schemaVersion: typeof SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION;
   analyzer: {
@@ -23,7 +27,7 @@ export type SearchRuntimeProfile = {
       modelType: string;
     };
   };
-  index: IndexAffectingSearchSettings;
+  index: SearchRuntimeProfileIndexSettings;
   embedding: {
     provider: SearchEmbeddingProviderKind;
     model: "bge-m3" | "multilingual-e5-small";
@@ -77,7 +81,8 @@ export function effectiveSearchRuntimeProfile(
       }
     },
     index: {
-      ngram: searchNgramEnabled(env, settings)
+      ngram: searchNgramEnabled(env, settings),
+      partitionBits: positiveIntEnv(env, "OPTSIDIAN_SEARCH_PARTITION_BITS") ?? settings.search?.partitionBits ?? DEFAULT_PARTITION_BITS
     },
     embedding: {
       provider: embeddingProvider(env),
@@ -142,7 +147,8 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
       }
     },
     index: {
-      ngram: booleanValue(index.ngram ?? false, "search runtime ngram")
+      ngram: booleanValue(index.ngram ?? false, "search runtime ngram"),
+      partitionBits: positiveInt(index.partitionBits ?? DEFAULT_PARTITION_BITS, "search runtime partition bits")
     },
     embedding: {
       provider: normalizeEmbeddingProvider(embedding.provider ?? "local-onnx", "search runtime embedding provider"),
@@ -184,15 +190,12 @@ export function searchRuntimeProfileHash(profile: SearchRuntimeProfile): string 
 
 export function lexicalIdentityHashForSearchRuntimeProfile(profile: SearchRuntimeProfile): string {
   const normalized = normalizeSearchRuntimeProfile(profile);
-  // partitionBits folds the constant DEFAULT_PARTITION_BITS, matching every production build (the
-  // partition scheme is not runtime-configurable). If it ever becomes per-profile, thread the profile's
-  // value here — otherwise the store-dir identity would diverge from the built snapshot's identity tuple.
   return sha256(canonicalJson({
     buildVersion: INDEX_BUILD_VERSION,
     analyzerVersion: ANALYZER_VERSION,
     fieldSetVersion: SEARCH_SCHEMA_DIGEST,
-    partitionBits: DEFAULT_PARTITION_BITS,
     analyzer: normalized.analyzer,
+    // index carries ngram + partitionBits — the index-affecting settings that scope the lexical store.
     index: normalized.index
   }));
 }
@@ -204,6 +207,7 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     OPTSIDIAN_SEARCH_ANALYZER: normalized.analyzer.mode,
     OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(","),
     OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
+    OPTSIDIAN_SEARCH_PARTITION_BITS: String(normalized.index.partitionBits),
     OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: normalized.embedding.provider,
     OPTSIDIAN_SEARCH_EMBEDDING_MODEL: normalized.embedding.model,
     OPTSIDIAN_SEARCH_DENSE_LAMBDA: String(normalized.ranking.denseLambda),
@@ -236,6 +240,7 @@ export function settingsForSearchRuntimeProfile(profile: SearchRuntimeProfile): 
     analyzer: normalized.analyzer.mode,
     extraLangs: normalized.analyzer.extraLangs,
     ngram: normalized.index.ngram,
+    partitionBits: normalized.index.partitionBits,
     queryWorkers: normalized.workers.query,
     indexWorkers: normalized.workers.index,
     executionWorkers: normalized.workers.searchExecution,

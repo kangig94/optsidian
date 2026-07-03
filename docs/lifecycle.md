@@ -352,7 +352,8 @@ did bump `SNAPSHOT_PERSISTENCE_SCHEMA_HASH`, so persisted retrieval envelopes se
 
 `searchStoreCachePaths` scopes a lexical store by `(vaultStateHash, lexicalIdentityHash)`, where
 `lexicalIdentityHashForSearchRuntimeProfile` folds `INDEX_BUILD_VERSION`, `ANALYZER_VERSION`,
-`SEARCH_SCHEMA_DIGEST`, `DEFAULT_PARTITION_BITS`, analyzer config, and index-affecting settings.
+`SEARCH_SCHEMA_DIGEST`, analyzer config, and the index-affecting settings (ngram + the effective
+`partitionBits`, default `DEFAULT_PARTITION_BITS`), all from the one normalized profile.
 Within that lexical store, `searchStoreLedgerRootDir` scopes ledgers by embedding space:
 `ledgers/<embeddingSpaceId>/{publications,frontier,diagnostics,reservations,claims}`. A committed
 edition is one checksum-protected file at `publications/<editionSeq>`.

@@ -6,25 +6,14 @@ import {
   listConfig,
   setConfigValue,
   unsetConfigValue,
+  KNOWN_SETTING_KEYS,
   type ConfigMutationResult,
   type ConfigReadResult
 } from "../../core/settings.js";
 import { parseDeclaredSearchAnalyzers } from "../../core/search/analyzer.js";
 import { UsageError } from "../../errors.js";
 
-const SETTING_KEYS = new Set([
-  "search.analyzer",
-  "search.extraLangs",
-  "search.ngram",
-  "search.queryWorkers",
-  "search.indexWorkers",
-  "search.executionWorkers",
-  "search.snapshotRetentionCount",
-  "search.queryCacheSize",
-  "search.memoryBudgetCount",
-  "search.memoryBudgetBytes",
-  "search.daemonIdleMs"
-]);
+const SETTING_KEYS = new Set<string>(KNOWN_SETTING_KEYS);
 
 export function runConfig(args: ParsedArgs): void {
   const action = args.positionals[0] ?? "list";
@@ -86,9 +75,7 @@ function parseSettingValue(key: string, value: string): unknown {
 
 function assertKnownSettingKey(key: string): void {
   if (!SETTING_KEYS.has(key)) {
-    throw new UsageError(
-      "config key must be one of: search.analyzer, search.extraLangs, search.ngram, search.queryWorkers, search.indexWorkers, search.executionWorkers, search.snapshotRetentionCount, search.queryCacheSize, search.memoryBudgetCount, search.memoryBudgetBytes, search.daemonIdleMs"
-    );
+    throw new UsageError(`config key must be one of: ${KNOWN_SETTING_KEYS.join(", ")}`);
   }
 }
 

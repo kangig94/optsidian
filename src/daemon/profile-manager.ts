@@ -161,6 +161,7 @@ export class ProfileRuntime {
       profileHash,
       lexicalIdentityHash: lexicalIdentityHashForSearchRuntimeProfile(normalized),
       searchSettings: normalized.index,
+      partitionBits: normalized.index.partitionBits,
       vectorPool,
       publisherRegistry,
       reclamationAuthority,

@@ -134,6 +134,7 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.analyzer=intl|kiwi", description: "Select the analyzer policy used by daemon workers" },
       { name: "search.extraLangs=ko", description: "Enable the Kiwi Korean target tier with Intl fallback" },
       { name: "search.ngram=true|false", description: "Enable Korean 2/3-gram indexing and query expansion; default false" },
+      { name: "search.partitionBits=<n>", description: "Index partition-scheme bits; default 4. Changing it rebuilds the index" },
       { name: "search.queryWorkers=<n>", description: "Latency analyzer worker count" },
       { name: "search.indexWorkers=<n>", description: "Throughput analyzer worker count" },
       { name: "search.executionWorkers=<n>", description: "Search execution worker count" },
@@ -142,6 +143,10 @@ const COMMAND_HELP: Record<ImplementedCommand, CommandHelp> = {
       { name: "search.memoryBudgetCount=<n>", description: "Loaded snapshot count cap" },
       { name: "search.memoryBudgetBytes=<n>", description: "Loaded snapshot byte cap" },
       { name: "search.daemonIdleMs=<ms>", description: "Daemon idle shutdown timeout; defaults to 6 hours, while model sessions keep their own idle lifecycle" },
+      { name: "search.embeddingModel=bge-m3|multilingual-e5-small", description: "Dense embedding model for hybrid/vector retrieval" },
+      { name: "search.denseLambda=<n>", description: "Dense (vector) fusion weight in hybrid ranking" },
+      { name: "search.linkLambda=<n>", description: "Link-adjacency fusion weight in hybrid ranking" },
+      { name: "search.rrfK=<n>", description: "Reciprocal-rank-fusion K constant" },
       { name: "format=text|json", description: "Output format (default: text)" }
     ],
     notes: [
