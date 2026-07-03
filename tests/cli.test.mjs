@@ -1655,7 +1655,7 @@ test('index warm prepares discovered Obsidian registry vaults', async (t) => {
   );
 
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-cli-cache-'));
-  let result = run(['index', 'warm', 'format=json'], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
+  const result = run(['index', 'warm', 'format=json'], { env: { ...env, ...coralEnv, XDG_CACHE_HOME: cache } });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.action, 'warm');

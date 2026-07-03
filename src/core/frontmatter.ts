@@ -209,7 +209,7 @@ function documentToYaml(doc: Document, eol: string): string {
 }
 
 function documentToRecord(doc: Document): Record<string, FrontmatterValue> {
-  const value = doc.toJSON();
+  const value: unknown = doc.toJSON();
   if (value === null || value === undefined) return {};
   const normalized = normalizeFrontmatterValue(value, 'frontmatter');
   if (!isPlainObject(normalized)) {
@@ -226,7 +226,7 @@ function requireFrontmatterValue(params: FrontmatterMutationParams): Frontmatter
 }
 
 function nodeToValue(node: unknown): FrontmatterValue {
-  const value = isNode(node) ? JSON.parse(JSON.stringify(node)) : node;
+  const value: unknown = isNode(node) ? JSON.parse(JSON.stringify(node)) : node;
   return normalizeFrontmatterValue(value, 'value');
 }
 
@@ -249,7 +249,7 @@ function normalizeFrontmatterValue(value: unknown, label: string): FrontmatterVa
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
+  const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 

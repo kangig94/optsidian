@@ -227,7 +227,7 @@ test('mcp command_map and write handlers preserve routing, preference guidance, 
       /keeps routing consistent and avoids shell expansion and quoting bugs/i,
     );
 
-    let result = tools.write({ path: 'raw.md', content: raw });
+    const result = tools.write({ path: 'raw.md', content: raw });
     assert.equal(payload(result).ok, true);
     assert.equal(fs.readFileSync(path.join(vault, 'raw.md'), 'utf8'), raw);
   } finally {
@@ -279,7 +279,7 @@ test('mcp apply_patch returns structured results', async () => {
   const { createToolHandlers } = await import(path.resolve('src/mcp/tools.ts'));
   const tools = createToolHandlers(() => vault);
 
-  let result = tools.apply_patch({
+  const result = tools.apply_patch({
     patch: '*** Begin Patch\n*** Add File: patch.md\n+$HOME\n+`pwd`\n*** End Patch\n',
   });
   assert.equal(payload(result).command, 'apply_patch');

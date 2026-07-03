@@ -1648,9 +1648,8 @@ test('AC9 retrieval envelope protects sidecar roots through compact', async () =
 });
 
 test('AC9 vector GC protects in-flight generations during publish', async () => {
-  let harness;
   let sweepRan = false;
-  harness = createHarness({
+  const harness = createHarness({
     vectorFactoryOptions: {
       async onBuildIndex(call) {
         if (call.role !== 'staging' || sweepRan) return;

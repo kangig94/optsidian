@@ -302,7 +302,9 @@ function executionProviderForDevice(device: ModelDevice) {
 }
 
 function stableProviderKey(payload: ModelProviderPayload): string {
-  return JSON.stringify(payload, (_key, value) => (value instanceof Map ? [...value.entries()] : value));
+  return JSON.stringify(payload, (_key: string, value: unknown): unknown =>
+    value instanceof Map ? Array.from((value as ReadonlyMap<unknown, unknown>).entries()) : value,
+  );
 }
 
 function modelRequiredVramBytes(): number {

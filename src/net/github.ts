@@ -114,7 +114,7 @@ async function requestBufferDirect(
         (res) => {
           let settled = false;
           let totalBytes = 0;
-          const chunks: Buffer[] = [];
+          const chunks: Uint8Array[] = [];
           const contentLength = parseContentLength(res.headers);
           if (contentLength !== undefined && contentLength > maxBytes) {
             const error = responseTooLargeError(url, maxBytes, contentLength);
@@ -124,9 +124,9 @@ async function requestBufferDirect(
             reject(error);
             return;
           }
-          res.on('data', (chunk) => {
+          res.on('data', (chunk: Buffer) => {
             if (settled) return;
-            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const buffer = Buffer.from(chunk);
             totalBytes += buffer.length;
             if (totalBytes > maxBytes) {
               const error = responseTooLargeError(url, maxBytes, totalBytes);
@@ -497,7 +497,7 @@ function readDownloadedBody(bodyPath: string, url: string, maxBytes: number): Bu
 
 function parseContentLength(headers: http.IncomingHttpHeaders): number | undefined {
   const raw = headers['content-length'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
+  const value: string | undefined = Array.isArray(raw) ? (raw as readonly string[])[0] : raw;
   if (typeof value !== 'string' || value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;

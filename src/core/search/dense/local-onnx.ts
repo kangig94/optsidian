@@ -445,23 +445,29 @@ async function defaultLoadTokenizer(
   env: NodeJS.ProcessEnv,
 ): Promise<LocalOnnxTokenizer> {
   const moduleName = '@huggingface/' + 'tokenizers';
-  const imported = await import(moduleName);
+  const imported: unknown = await import(moduleName);
   const Tokenizer = (imported as { Tokenizer?: new (tokenizer: object, config: object) => LocalOnnxTokenizer })
     .Tokenizer;
   if (!Tokenizer) throw new RuntimeError('@huggingface/tokenizers did not export Tokenizer');
-  const tokenizerJson = JSON.parse(fs.readFileSync(localOnnxTokenizerJsonPath(descriptor.key, env), 'utf8')) as object;
-  const tokenizerConfig = JSON.parse(
-    fs.readFileSync(localOnnxTokenizerConfigPath(descriptor.key, env), 'utf8'),
-  ) as object;
+  const tokenizerJson = parseJsonObject(fs.readFileSync(localOnnxTokenizerJsonPath(descriptor.key, env), 'utf8'));
+  const tokenizerConfig = parseJsonObject(fs.readFileSync(localOnnxTokenizerConfigPath(descriptor.key, env), 'utf8'));
   return new Tokenizer(tokenizerJson, tokenizerConfig);
 }
 
 async function importOnnxRuntime(): Promise<LocalOnnxRuntime> {
   const moduleName = 'onnxruntime' + '-node';
-  const imported = await import(moduleName);
+  const imported: unknown = await import(moduleName);
   const runtime = (imported as { default?: unknown }).default ?? imported;
   if (!isOnnxRuntime(runtime)) throw new RuntimeError('onnxruntime-node did not export an ONNX runtime API');
   return runtime;
+}
+
+function parseJsonObject(source: string): object {
+  const value: unknown = JSON.parse(source);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RuntimeError('local ONNX artifact JSON must be an object');
+  }
+  return value;
 }
 
 function isOnnxRuntime(value: unknown): value is LocalOnnxRuntime {

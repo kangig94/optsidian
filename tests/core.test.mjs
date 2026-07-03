@@ -1636,7 +1636,7 @@ test('core frontmatter reads and mutates structured YAML while preserving body',
 
   const set = setFrontmatter(vault, { path: 'note.md', key: 'priority', value: 3 });
   assert.equal(set.command, 'frontmatter');
-  let content = fs.readFileSync(path.join(vault, 'note.md'), 'utf8');
+  const content = fs.readFileSync(path.join(vault, 'note.md'), 'utf8');
   assert.ok(content.startsWith('\uFEFF---\r\n'));
   assert.match(content, /priority: 3\r\n/);
   assert.ok(content.endsWith('# Title\r\nBody\r\n'));

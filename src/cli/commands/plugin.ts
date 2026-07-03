@@ -389,10 +389,14 @@ function readCommunityPlugins(file: string): string[] {
     const message = error instanceof Error ? error.message : String(error);
     throw new RuntimeError(`Invalid community-plugins.json: ${message}`);
   }
-  if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== 'string')) {
+  if (!isStringArray(parsed)) {
     throw new RuntimeError('community-plugins.json must contain an array of plugin ids');
   }
   return parsed;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 function refreshResult(vaultPath: string, pluginId: string): PluginInstallResult['refresh'] {

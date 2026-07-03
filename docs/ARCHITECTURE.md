@@ -26,11 +26,11 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
                                          update/installer (uses net + native)
 ```
 
-| Layer | Modules | Role |
-|-------|---------|------|
-| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, retrieval, indexing, worker pools, the process-scoped embed scheduler/vector manager, the single RPC socket, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
-| L2 — core | `src/core/*` including `search/*` and `kiwi/*` | Shell-independent command layer shared by both adapters: raw-string in, structured out. Editing, frontmatter, search/indexing, Korean analysis. |
-| L1 — platform | `src/native/*`, `src/net/github.ts`, `src/errors.ts`, `src/version.ts` | OS- and service-facing primitives: native Obsidian invocation + GUI launch, GitHub HTTP, error/exit-code types, version. `src/update/installer.ts` composes net + native for self-update. |
+| Layer                  | Modules                                                                | Role                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*`   | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, retrieval, indexing, worker pools, the process-scoped embed scheduler/vector manager, the single RPC socket, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
+| L2 — core              | `src/core/*` including `search/*` and `kiwi/*`                         | Shell-independent command layer shared by both adapters: raw-string in, structured out. Editing, frontmatter, search/indexing, Korean analysis.                                                                                                                                                                                        |
+| L1 — platform          | `src/native/*`, `src/net/github.ts`, `src/errors.ts`, `src/version.ts` | OS- and service-facing primitives: native Obsidian invocation + GUI launch, GitHub HTTP, error/exit-code types, version. `src/update/installer.ts` composes net + native for self-update.                                                                                                                                              |
 
 ## Dependency Rules
 
@@ -48,16 +48,16 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 
 ## Modification Policy
 
-| Directory | Modification rule |
-|-----------|-------------------|
-| `src/core/*` | Pure and shared. No `process.*` I/O, no native delegation. New logic lives here so both adapters get it; adapters stay thin. |
-| `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects snapshot contents requires bumping the relevant search identity/schema version (see [Search](#search)). Snapshot indexing, query analysis, positional retrieval, and ranking must stay consistent. |
-| `src/core/kiwi/*` | Standalone. Must not import `search/*`. |
-| `src/core/lifecycle/*` | L2 lifecycle primitive substrate (`ProcessToken`, `ExclusiveClaim`, `ConditionalCommit`/`Attempt`, `LevelReconciler`, `FrontierJournal`, `installArtifact`). Pure and shared; must NOT import `src/daemon/*`, `src/cli/*`, or `src/mcp/*` (enforced by `tests/import-boundaries.test.mjs`). |
-| `src/daemon/*` | L3 search-daemon adapter. Owns socket transport, snapshot-store MVCC/GC, worker pools, vault registry, request scheduler, and `EmbedScheduler`. Bump the RPC protocol version on breaking wire changes. No upward dependency on `src/cli/*` or `src/mcp/*`. |
-| `src/cli/policy.ts` | The native-first policy table. Classify every new command (delegate / optimize / extend) and keep the table, its regression test, and the docs in sync. |
-| `src/mcp/tools.ts` | MCP tool registration. zod input schemas and the `destructiveHint` / `openWorldHint` annotations must match real behavior. |
-| `src/native/*`, `src/net/*`, `src/update/*` | Platform layer. No upward dependency on the adapters; no core dependency on these beyond the documented composition in `update/installer.ts`. |
+| Directory                                   | Modification rule                                                                                                                                                                                                                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/core/*`                                | Pure and shared. No `process.*` I/O, no native delegation. New logic lives here so both adapters get it; adapters stay thin.                                                                                                                                                                |
+| `src/core/search/*`                         | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects snapshot contents requires bumping the relevant search identity/schema version (see [Search](#search)). Snapshot indexing, query analysis, positional retrieval, and ranking must stay consistent.  |
+| `src/core/kiwi/*`                           | Standalone. Must not import `search/*`.                                                                                                                                                                                                                                                     |
+| `src/core/lifecycle/*`                      | L2 lifecycle primitive substrate (`ProcessToken`, `ExclusiveClaim`, `ConditionalCommit`/`Attempt`, `LevelReconciler`, `FrontierJournal`, `installArtifact`). Pure and shared; must NOT import `src/daemon/*`, `src/cli/*`, or `src/mcp/*` (enforced by `tests/import-boundaries.test.mjs`). |
+| `src/daemon/*`                              | L3 search-daemon adapter. Owns socket transport, snapshot-store MVCC/GC, worker pools, vault registry, request scheduler, and `EmbedScheduler`. Bump the RPC protocol version on breaking wire changes. No upward dependency on `src/cli/*` or `src/mcp/*`.                                 |
+| `src/cli/policy.ts`                         | The native-first policy table. Classify every new command (delegate / optimize / extend) and keep the table, its regression test, and the docs in sync.                                                                                                                                     |
+| `src/mcp/tools.ts`                          | MCP tool registration. zod input schemas and the `destructiveHint` / `openWorldHint` annotations must match real behavior.                                                                                                                                                                  |
+| `src/native/*`, `src/net/*`, `src/update/*` | Platform layer. No upward dependency on the adapters; no core dependency on these beyond the documented composition in `update/installer.ts`.                                                                                                                                               |
 
 ## Extension-Point Catalog
 
@@ -66,11 +66,11 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 The native-first policy (`src/cli/policy.ts`) sorts every command into one of three classes.
 `src/cli/policy.ts` is the source of truth — cite the symbols, not a re-typed list.
 
-| Class | Symbol | Meaning |
-|-------|--------|---------|
-| delegate | `NATIVE_SUFFICIENT_COMMANDS` | Native Obsidian CLI behavior is sufficient; `optsidian` passes the command straight through. |
-| optimize | `read` | The native name is kept but the behavior is replaced with an LLM-friendlier one (line ranges, bounded output). |
-| extend | `EXTENDED_COMMANDS` (14) | No native equivalent: `search, similarity, index, config, grep, frontmatter, edit, apply_patch, write, copy, mkdir, open-gui, update, plugin:install`. |
+| Class    | Symbol                       | Meaning                                                                                                                                                |
+| -------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| delegate | `NATIVE_SUFFICIENT_COMMANDS` | Native Obsidian CLI behavior is sufficient; `optsidian` passes the command straight through.                                                           |
+| optimize | `read`                       | The native name is kept but the behavior is replaced with an LLM-friendlier one (line ranges, bounded output).                                         |
+| extend   | `EXTENDED_COMMANDS` (14)     | No native equivalent: `search, similarity, index, config, grep, frontmatter, edit, apply_patch, write, copy, mkdir, open-gui, update, plugin:install`. |
 
 A regression test enforces that no command is both implemented and native-sufficient
 (`native-first-policy.md` guardrail).
@@ -79,13 +79,13 @@ A regression test enforces that no command is both implemented and native-suffic
 
 Registered in `src/mcp/tools.ts`; the canonical list is `MCP_TOOL_NAMES` in `src/cli/help.ts`.
 
-| Tool | Notes |
-|------|-------|
-| `command_map` | Routing helper — reports the available tools and command map at runtime. |
+| Tool          | Notes                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command_map` | Routing helper — reports the available tools and command map at runtime.                                                                    |
 | `command_run` | ⚠ `destructiveHint: true, openWorldHint: true`. Runs any Optsidian command, including native-delegated ones, reaching the running Obsidian. |
-| `write` | → `writeVaultFile` (atomic). |
-| `edit` | → `editVaultFile`. |
-| `apply_patch` | → `applyVaultPatch`. |
+| `write`       | → `writeVaultFile` (atomic).                                                                                                                |
+| `edit`        | → `editVaultFile`.                                                                                                                          |
+| `apply_patch` | → `applyVaultPatch`.                                                                                                                        |
 
 `command_run` is part of the V1 MCP contract because it is the MCP-to-CLI bridge for CLI-only and
 native-delegated Optsidian commands. Keep this list synchronized with `MCP_TOOL_NAMES`.
@@ -107,8 +107,8 @@ scheduler, model, and vector owners.
 For the full runtime lifecycle — daemon birth/death, model session load/unload, per-mode request
 flow, and cache/index build/publish/GC — see [`lifecycle.md`](lifecycle.md).
 
-| Process | Hidden verb | Module | Transport & lifecycle |
-|---------|-------------|--------|-----------------------|
+| Process       | Hidden verb       | Module                 | Transport & lifecycle                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------- | ----------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; one Unix domain socket under the runtime search-daemon directory. The dispatcher exposes method-layer query capabilities (`Status`, `WaitReady`, `Search`, `Retrieve`) and control capabilities (`Status`, `WaitReady`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, `Shutdown`). CLI `search` uses `Search` for default lexical search and switches to `Retrieve` for vector/hybrid retrieval, while `explain` uses `Retrieve`. Mutating/work methods carry the current `incarnation`; stale incarnations are retryable lifecycle errors. The daemon owns snapshot MVCC, retrieval generations, worker pools, the process embed scheduler/vector manager, query caches, and loaded vault state. |
 
 **Install / update lifecycle.** `scripts/install.sh` installs a release and writes the manifest
@@ -169,14 +169,14 @@ The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
 
 ## Host-API Dependency Map
 
-| Host API | Used for |
-|----------|----------|
-| Native Obsidian CLI (`obsidian`) | Delegated commands and vault discovery. |
-| `obsidian://` URI (`src/native/gui.ts`) | Launching / focusing the Obsidian GUI. |
-| Kiwi (`kiwi-nlp`) | Korean morphological analysis (WASM). |
-| ONNX Runtime | Local embedding model sessions in embedding workers. |
-| `coral-needle` | Native vector index instances for built dense generations; tests inject a fake instance when the native `.node` binding is absent. |
-| GitHub releases API (`src/net/github.ts`) | Fetching the Kiwi model artifact and self-update releases. |
+| Host API                                  | Used for                                                                                                                           |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Native Obsidian CLI (`obsidian`)          | Delegated commands and vault discovery.                                                                                            |
+| `obsidian://` URI (`src/native/gui.ts`)   | Launching / focusing the Obsidian GUI.                                                                                             |
+| Kiwi (`kiwi-nlp`)                         | Korean morphological analysis (WASM).                                                                                              |
+| ONNX Runtime                              | Local embedding model sessions in embedding workers.                                                                               |
+| `coral-needle`                            | Native vector index instances for built dense generations; tests inject a fake instance when the native `.node` binding is absent. |
+| GitHub releases API (`src/net/github.ts`) | Fetching the Kiwi model artifact and self-update releases.                                                                         |
 
 **Security invariant to preserve.** `src/net/github.ts` strips the `Authorization` header on
 cross-origin redirects and resolves tokens via `GITHUB_TOKEN` / `gh` / git-credential, in that order.

@@ -9,8 +9,8 @@ names; exact line numbers are included only where they are useful orientation, n
 maintained citation set.
 
 Iron law (unchanged): results are a pure function of `(snapshot id, query, filters, limit, ranking
-version, ranking tuning hash, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
-and *lifecycle* half — the resident daemon, the load/unload of the model, and the build/publish/GC of
+version, ranking tuning hash, analyzer identity)`; latency may vary, results may not. This document is about the _latency_
+and _lifecycle_ half — the resident daemon, the load/unload of the model, and the build/publish/GC of
 caches — none of which may change a served result.
 
 ---
@@ -92,7 +92,7 @@ slow teardown of profile runtimes (`profiles.close()`) and the embed scheduler (
 The RPC server then waits for admitted handlers to drain or observe cancellation, preventing
 use-after-close and un-journaled save loss.
 
-The socket path and owner slot must be fully relinquished *before* slow teardown (the 2fe1f70 ordering):
+The socket path and owner slot must be fully relinquished _before_ slow teardown (the 2fe1f70 ordering):
 otherwise a client arriving mid-shutdown can auto-boot a successor daemon that binds the same socket path,
 and this daemon's later teardown would delete the successor's live socket.
 
@@ -120,15 +120,15 @@ and this daemon's later teardown would delete the successor's live socket.
 
 ### Key constants & env vars
 
-| Name | Value | Source |
-|------|-------|--------|
-| `SEARCH_DAEMON_PROTOCOL_VERSION` | `4` | `protocol.ts` |
-| Ready wait timeout | `15000` ms | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts` |
-| Daemon idle timeout | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.drain` |
-| Incarnation id | random per daemon bind winner | `randomIncarnationId`, `owner-registry.ts` |
-| Epoch | previous owner record epoch + 1 | `nextOwnerEpoch`, `owner-registry.ts` |
-| Runtime dir override | `OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR` | `owner-registry.ts:85-91` |
-| Idle-ms override | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` | `daemonIdleMs` |
+| Name                             | Value                                                      | Source                                                                                        |
+| -------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `SEARCH_DAEMON_PROTOCOL_VERSION` | `4`                                                        | `protocol.ts`                                                                                 |
+| Ready wait timeout               | `15000` ms                                                 | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts`                                       |
+| Daemon idle timeout              | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.drain` |
+| Incarnation id                   | random per daemon bind winner                              | `randomIncarnationId`, `owner-registry.ts`                                                    |
+| Epoch                            | previous owner record epoch + 1                            | `nextOwnerEpoch`, `owner-registry.ts`                                                         |
+| Runtime dir override             | `OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR`                      | `owner-registry.ts:85-91`                                                                     |
+| Idle-ms override                 | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS`                          | `daemonIdleMs`                                                                                |
 
 ---
 
@@ -160,7 +160,7 @@ The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` -> `e
   (`service.ts:699-716`).
 - **Document embed** during retrieval generation build — `createWorkerEmbeddingSetBuilder` batches
   document dense text through the scheduler in 32-document slices (`snapshot-store.ts:334,
-  1883-1991`). Load/rebuild/refresh use their corresponding lanes, and save-on-write uses the `save`
+1883-1991`). Load/rebuild/refresh use their corresponding lanes, and save-on-write uses the `save`
   lane through `publishSaveSnapshot` (`snapshot-store.ts:456-461`).
 
 **`origin=note`, `origin=pair`, and `origin=global` do NOT load the model.** They resolve source text
@@ -197,7 +197,7 @@ After every encode, `armIdleUnload()` (`lifecycle.ts:86, 336-346`) schedules
 (`ModelSessionLifecycle` default `lifecycle.ts:62`; supplied by `worker-entry.ts:289-293` from
 `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, default 5 min). If `idleMs <= 0` the session unloads **immediately**
 after each encode (`lifecycle.ts:338-341`). `unload()` clears the timer and closes the session
-(`lifecycle.ts:91-96`). This is why "zero footprint at rest" applies to the *model*, not the daemon.
+(`lifecycle.ts:91-96`). This is why "zero footprint at rest" applies to the _model_, not the daemon.
 
 ### CPU → GPU promotion
 
@@ -221,13 +221,13 @@ active (`embed-scheduler.ts:116-137, 312-315`).
   `DEADLINE_EXCEEDED` / `CANCELLED`. A superseded load is closed and rejected `CANCELLED`
   (`lifecycle.ts:157-161`).
 
-| Name | Value | Source |
-|------|-------|--------|
-| Model idle unload | `5 min` (`0` ⇒ unload immediately) | `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, `worker-entry.ts:289-293` |
-| Encode deadline | `60_000` ms | `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts:295-299` |
-| VRAM headroom multiplier | `1.5×` | `lifecycle.ts:200` |
-| Required / free VRAM | `0` MB default (⇒ CPU) | `worker-entry.ts:285, 301-305` |
-| EP order | CUDA→CPU (linux) / CoreML→CPU (darwin) | `local-onnx.ts:313-321` |
+| Name                     | Value                                  | Source                                                                 |
+| ------------------------ | -------------------------------------- | ---------------------------------------------------------------------- |
+| Model idle unload        | `5 min` (`0` ⇒ unload immediately)     | `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, `worker-entry.ts:289-293`            |
+| Encode deadline          | `60_000` ms                            | `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts:295-299` |
+| VRAM headroom multiplier | `1.5×`                                 | `lifecycle.ts:200`                                                     |
+| Required / free VRAM     | `0` MB default (⇒ CPU)                 | `worker-entry.ts:285, 301-305`                                         |
+| EP order                 | CUDA→CPU (linux) / CoreML→CPU (darwin) | `local-onnx.ts:313-321`                                                |
 
 ---
 
@@ -333,12 +333,12 @@ persisted dense-freshness state.
 
 ### The four artifacts and their identities
 
-| Artifact | Identity | Built by | On disk |
-|----------|----------|----------|---------|
-| **Lexical corpus snapshot** (segments + manifest) | `corpusSnapshotId` = hash of segment content-hashes + identity tuple | `buildCanonicalSearchSnapshot` (analyzer throughput pool) | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/{segments,snapshots}` |
-| **Link-graph sidecar** | `linkGraphId` = `buildLinkGraphSidecar({corpusSnapshotId, edges})` | published with the corpus (`publishBuiltSnapshot`) | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/link-graphs` |
-| **coral-needle vector generation** | `generationId = vectorGenerationIdForManifest(embeddingSpaceId, embeddingRecipeFreshnessId, corpusRevision, docIds/content hashes/projection hashes)`; `embeddingSetId` remains the content hash over recipe + projected vectors (`computeEmbeddingSetId`) | `vectorManager.buildStagingGeneration` -> `promoteBuiltGeneration` | `vectors/stores/<vaultStateHash>/<embeddingSetId>/generations` |
-| **Composite retrieval snapshot** (envelope) | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`computeRetrievalSnapshotId`) | `buildRetrievalSnapshotPublication` | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/retrievals` |
+| Artifact                                          | Identity                                                                                                                                                                                                                                                   | Built by                                                           | On disk                                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| **Lexical corpus snapshot** (segments + manifest) | `corpusSnapshotId` = hash of segment content-hashes + identity tuple                                                                                                                                                                                       | `buildCanonicalSearchSnapshot` (analyzer throughput pool)          | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/{segments,snapshots}` |
+| **Link-graph sidecar**                            | `linkGraphId` = `buildLinkGraphSidecar({corpusSnapshotId, edges})`                                                                                                                                                                                         | published with the corpus (`publishBuiltSnapshot`)                 | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/link-graphs`          |
+| **coral-needle vector generation**                | `generationId = vectorGenerationIdForManifest(embeddingSpaceId, embeddingRecipeFreshnessId, corpusRevision, docIds/content hashes/projection hashes)`; `embeddingSetId` remains the content hash over recipe + projected vectors (`computeEmbeddingSetId`) | `vectorManager.buildStagingGeneration` -> `promoteBuiltGeneration` | `vectors/stores/<vaultStateHash>/<embeddingSetId>/generations`              |
+| **Composite retrieval snapshot** (envelope)       | `retrievalSnapshotId` = `sha256(corpusSnapshotId, linkGraphId, embeddingSetId, retrieverPlanIdentity, rankingFeatureVersion)` (`computeRetrievalSnapshotId`)                                                                                               | `buildRetrievalSnapshotPublication`                                | `search/stores/<vaultStateHash>/<lexicalIdentityHash>/retrievals`           |
 
 `retrieverPlanIdentity` folds the positional + dense + link-adjacency retrievers and the RRF fusion
 parameters (`retrievalPlanIdentityFor`). `embeddingSpaceId` and
@@ -554,7 +554,7 @@ lexical-only because their dense records are absent or `contentHash`-mismatched.
    lease for the committed generation (`snapshot-store.ts:614-739`, `pool.ts:240-280`).
 2. A `Rebuild`, `Refresh`, or save-lane build promotes a new generation. The manager keeps handles
    separate by vector key and generation id, and old handles drain by refcount (`pool.ts:88-99,
-   240-280`).
+240-280`).
 3. Query A's `searchVector` on the old lease completes; `releaseReadContext` drops the vector lease/GC
    pin and lexical pin (`snapshot-store.ts:741-750`). Query B can attach the new generation. No query
    ever reads a half-closed index.

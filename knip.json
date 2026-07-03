@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": [
+    "src/cli.ts",
+    "src/mcp.ts",
+    "src/daemon/vector-store/process-entry.ts",
+    "scripts/*.mjs",
+    "tests/*.test.mjs",
+    "tests/*.slow.mjs"
+  ],
+  "project": ["src/**/*.ts", "scripts/**/*.mjs", "tests/**/*.mjs"],
+  "ignoreDependencies": ["@huggingface/tokenizers", "onnxruntime-node"]
+}

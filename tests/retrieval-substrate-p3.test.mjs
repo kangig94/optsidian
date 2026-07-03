@@ -310,8 +310,7 @@ test('AC2 P3 link graph GC roots protect active in-flight loaded retained and co
   const paths = searchStoreCachePaths(vault, env);
   let buildIndex = 0;
   let inFlightSweepRan = false;
-  let store;
-  store = createDaemonSnapshotStore({
+  const store = createDaemonSnapshotStore({
     env,
     analyzer,
     partitionBits: 1,

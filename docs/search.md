@@ -147,15 +147,15 @@ many unjudged documents may be relevant.
 
 Dataset probe from 2026-06-27:
 
-| Dataset id | Lang | Docs | Queries | Qrels | Judgment shape | Decision |
-| --- | --- | ---: | ---: | ---: | --- | --- |
-| `miracl/ko/dev` | ko | 1,486,752 | 213 | 3,057 | 0/1 labels, about 14 judged docs/query | Primary Korean retrieval target. Good enough for Korean Precision@k, MAP, and nDCG@k. |
-| `mr-tydi/ko/dev` | ko | 1,496,126 | 303 | 307 | sparse positive-only, about 1 positive/query | Korean auxiliary QA/recall target. Do not use as the main precision target. |
-| `beir/nfcorpus/test` | en | 3,633 | 323 | 12,334 | graded 1/2 labels, about 38 judged docs/query | Primary small English precision/MAP/nDCG target. |
-| `beir/trec-covid` | en | 171,332 | 50 | 66,336 | graded -1/0/1/2 labels, about 1327 judged docs/query | English precision/nDCG stress target. Topic count is small, so do not use alone. |
-| `beir/fiqa/test` | en | 57,638 | 648 | 1,706 | sparse positive-only, about 3 positives/query | English auxiliary practical QA target. |
-| `beir/scifact/test` | en | 5,183 | 300 | 339 | sparse positive-only, about 1 positive/query | Continuity target for the current SciFact-derived fixture. |
-| `miracl/en/dev` | en | 32,893,221 | 799 | 8,350 | 0/1 labels, about 10 judged docs/query | Not a local default target because the corpus is too large for routine regression. |
+| Dataset id           | Lang |       Docs | Queries |  Qrels | Judgment shape                                       | Decision                                                                              |
+| -------------------- | ---- | ---------: | ------: | -----: | ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `miracl/ko/dev`      | ko   |  1,486,752 |     213 |  3,057 | 0/1 labels, about 14 judged docs/query               | Primary Korean retrieval target. Good enough for Korean Precision@k, MAP, and nDCG@k. |
+| `mr-tydi/ko/dev`     | ko   |  1,496,126 |     303 |    307 | sparse positive-only, about 1 positive/query         | Korean auxiliary QA/recall target. Do not use as the main precision target.           |
+| `beir/nfcorpus/test` | en   |      3,633 |     323 | 12,334 | graded 1/2 labels, about 38 judged docs/query        | Primary small English precision/MAP/nDCG target.                                      |
+| `beir/trec-covid`    | en   |    171,332 |      50 | 66,336 | graded -1/0/1/2 labels, about 1327 judged docs/query | English precision/nDCG stress target. Topic count is small, so do not use alone.      |
+| `beir/fiqa/test`     | en   |     57,638 |     648 |  1,706 | sparse positive-only, about 3 positives/query        | English auxiliary practical QA target.                                                |
+| `beir/scifact/test`  | en   |      5,183 |     300 |    339 | sparse positive-only, about 1 positive/query         | Continuity target for the current SciFact-derived fixture.                            |
+| `miracl/en/dev`      | en   | 32,893,221 |     799 |  8,350 | 0/1 labels, about 10 judged docs/query               | Not a local default target because the corpus is too large for routine regression.    |
 
 The default replacement direction is:
 
@@ -297,11 +297,11 @@ preload all search-execution workers for the active snapshot.
 
 Cold-start reference measurements from the 2026-06-24 lazy-startup run:
 
-| Scenario | Latency | RSS After Ready |
-| --- | ---: | ---: |
-| `index status` from no daemon | 0.22s | 189MB |
-| first metadata-only `search tag=...` from no daemon | 0.73s | 324MB |
-| first query `search <text>` from no daemon | 2.59s | 1.45GB |
+| Scenario                                            | Latency | RSS After Ready |
+| --------------------------------------------------- | ------: | --------------: |
+| `index status` from no daemon                       |   0.22s |           189MB |
+| first metadata-only `search tag=...` from no daemon |   0.73s |           324MB |
+| first query `search <text>` from no daemon          |   2.59s |          1.45GB |
 
 The deterministic quality baseline is the qrels score above once recorded. Explicit
 `--measure-speed` runs are for queueing, cancellation, deadline handling, and tail latency, not

@@ -279,7 +279,10 @@ function applyState(
 function committedHashForSubject(lookup: FrontierCommittedHashBySubject, subject: FrontierSubject): string | undefined {
   if (typeof lookup === 'function') return lookup(subject);
   const key = frontierSubjectKey(subject);
-  if (lookup instanceof Map) return lookup.get(key);
+  if (lookup instanceof Map) {
+    const map = lookup as ReadonlyMap<string, string>;
+    return map.get(key);
+  }
   const record = lookup as Readonly<Record<string, string | undefined>>;
   return record[key];
 }
@@ -290,9 +293,13 @@ function tombstoneProofCovers(
 ): boolean {
   if (typeof proof === 'function') return proof(operation, operation);
   const key = frontierSubjectKey(operation);
-  if (proof instanceof Set) return proof.has(key);
+  if (proof instanceof Set) {
+    const set = proof as ReadonlySet<string>;
+    return set.has(key);
+  }
   if (proof instanceof Map) {
-    const value = proof.get(key);
+    const map = proof as ReadonlyMap<string, boolean | string | number | undefined>;
+    const value = map.get(key);
     return value === true || value === operation.tombstoneSeq;
   }
   const record = proof as Readonly<Record<string, boolean | string | number | undefined>>;

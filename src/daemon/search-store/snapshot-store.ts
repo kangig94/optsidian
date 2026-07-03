@@ -2397,7 +2397,7 @@ export function createProviderEmbeddingSetBuilder(provider: EmbeddingProvider): 
       const interval = progressReportInterval(total);
       let completed = 0;
       input.progress?.({ phase: 'embedding', total, completed: 0 });
-      const vectors: EmbeddingVector[] = new Array(total);
+      const vectors = new Array<EmbeddingVector>(total);
       await Promise.all(
         input.documents.map(async (document, index) => {
           vectors[index] = await provider.embed(document.text, { inputKind: 'document' });
