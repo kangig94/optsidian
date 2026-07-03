@@ -272,7 +272,7 @@ class SearchDaemon {
       );
     } catch (error) {
       failed = true;
-      throw error;
+      throw reclassifyVaultResolutionError(error);
     } finally {
       this.activeCancellationIds.delete(request.requestId);
       this.metrics.finishRequest(failed);
@@ -851,4 +851,20 @@ function incarnationOptionalMethod(method: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// A bad request vault path escapes as a raw filesystem error from vaultRealpath/resolveVaultPath.
+// Recode it to the semantic BAD_REQUEST class so the client fails fast: bare ENOENT is otherwise in
+// the client's retryable-lifecycle set (it must be, for the "daemon socket vanished, respawn" path),
+// which would retry an invalid vault for the whole deadline instead of surfacing it immediately. The
+// daemon never assigns these filesystem codes itself, so this only reclassifies path-resolution
+// failures, not daemon-internal lifecycle errors.
+function reclassifyVaultResolutionError(error: unknown): unknown {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") {
+    return Object.assign(error instanceof Error ? error : new Error(String(error)), { code: "BAD_REQUEST" });
+  }
+  return error;
 }

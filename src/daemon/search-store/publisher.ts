@@ -430,27 +430,40 @@ export type VaultPublisherLease = {
 };
 
 export class VaultPublisherRegistry {
-  private readonly publishers = new Map<string, { publisher: VaultPublisher; refs: number }>();
+  private readonly publishers = new Map<string, { publisher: VaultPublisher; refs: number; closing?: Promise<void> }>();
 
   acquire(options: VaultPublisherOptions): VaultPublisherLease {
     const key = retrievalIdentityKey(options.retrievalIdentity);
     let entry = this.publishers.get(key);
-    if (!entry) {
+    // Reuse a live entry; but never hand back one that is already draining toward teardown (its
+    // reconciler is being stopped). A closing entry keeps its own slot until its stop() resolves,
+    // and a fresh publisher takes the key. Any momentary overlap between the draining publisher and
+    // the fresh one is safe: the on-disk frontier journal is the shared source of truth and the
+    // edition-ledger CAS (exclusive-create per editionSeq) serializes every commit, so two objects
+    // can never commit conflicting or duplicate visible state. The previous code deleted the slot
+    // BEFORE awaiting stop(), so a concurrent acquire fell into the empty slot and could reuse — or
+    // race — a torn-down publisher; keeping the slot until stop() resolves closes that window.
+    if (!entry || entry.closing) {
       entry = { publisher: new VaultPublisher(options), refs: 0 };
       this.publishers.set(key, entry);
     }
     entry.refs += 1;
+    const acquired = entry;
     let released = false;
     return {
-      publisher: entry.publisher,
+      publisher: acquired.publisher,
       release: async () => {
         if (released) return;
         released = true;
-        entry.refs = Math.max(0, entry.refs - 1);
-        if (entry.refs > 0) return;
-        if (this.publishers.get(key) !== entry) return;
-        this.publishers.delete(key);
-        await entry.publisher.stop({ drain: true });
+        acquired.refs = Math.max(0, acquired.refs - 1);
+        if (acquired.refs > 0) return;
+        const stopping = acquired.publisher.stop({ drain: true });
+        acquired.closing = stopping;
+        try {
+          await stopping;
+        } finally {
+          if (this.publishers.get(key) === acquired) this.publishers.delete(key);
+        }
       }
     };
   }
