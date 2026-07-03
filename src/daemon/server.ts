@@ -238,15 +238,16 @@ class SearchDaemon {
   }
 
   initialize(): void {
+    // Sweep orphan staging/tmp BEFORE unblocking clients, so a client that boots a build the moment
+    // the daemon is ready cannot have its fresh staging deleted by this best-effort recovery sweep.
+    try {
+      recoverRetrievalStartupState({ env: this.env });
+    } catch (error) {
+      logSearchDaemonProcessError("retrieval startup recovery failed", error);
+    }
     this.phase = "ready";
     this.wakeReadyWaiters();
     this.armIdleTimer();
-    const recovery = setTimeout(() => {
-      void recoverRetrievalStartupState({ env: this.env }).catch((error: unknown) => {
-        logSearchDaemonProcessError("retrieval startup recovery failed", error);
-      });
-    }, 0);
-    recovery.unref();
   }
 
   private async handleRpcRequest(request: RpcRequestLike): Promise<unknown> {

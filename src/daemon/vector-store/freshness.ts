@@ -4,21 +4,23 @@ import { optsidianCacheRoot } from "../../core/cache-root.js";
 import type { VectorStoreCachePaths } from "./cache-paths.js";
 import { sweepVectorStaging } from "./pool.js";
 
-export async function recoverRetrievalStaging(input: {
+// Orphan staging/tmp cleanup after a crash. The sweep is synchronous fs so the daemon can run it
+// to completion BEFORE it accepts requests — a client that boots a build must never race a sweep that
+// then deletes its staging.
+export function recoverRetrievalStaging(input: {
   vectorPaths: VectorStoreCachePaths;
   lexicalTmpDir?: string;
   linkGraphTmpDir?: string;
-}): Promise<void> {
+}): void {
   sweepVectorStaging(input.vectorPaths);
   sweepTmpDir(input.vectorPaths.tmpDir);
   sweepTmpDir(input.lexicalTmpDir);
   sweepTmpDir(input.linkGraphTmpDir);
 }
 
-export async function recoverRetrievalStartupState(input: {
+export function recoverRetrievalStartupState(input: {
   env?: NodeJS.ProcessEnv;
-  now?: () => number;
-} = {}): Promise<void> {
+} = {}): void {
   const env = input.env ?? process.env;
   const cacheRoot = optsidianCacheRoot(env);
   const vectorStoresRoot = path.join(cacheRoot, "vectors", "stores");
@@ -33,7 +35,7 @@ export async function recoverRetrievalStartupState(input: {
         vaultStateHash,
         embeddingSetId
       });
-      await recoverRetrievalStaging({ vectorPaths });
+      recoverRetrievalStaging({ vectorPaths });
     }
   }
   sweepSearchStoreTmpDirs(searchStoresRoot);
