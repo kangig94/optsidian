@@ -6,6 +6,7 @@ import {
   createDaemonSnapshotStore,
   createWorkerEmbeddingSetBuilder,
   DaemonSearchStoreService,
+  SharedReclamationAuthority,
   VaultPublisherRegistry,
   type DaemonSnapshotStore,
   type SnapshotDirtyMark
@@ -130,6 +131,7 @@ export class ProfileRuntime {
     baseEnv: NodeJS.ProcessEnv,
     embedScheduler: EmbedScheduler,
     publisherRegistry: VaultPublisherRegistry,
+    reclamationAuthority: SharedReclamationAuthority,
     options: ProfileManagerOptions = {}
   ): Promise<ProfileRuntime> {
     const normalized = normalizeSearchRuntimeProfile(profile);
@@ -161,6 +163,7 @@ export class ProfileRuntime {
       searchSettings: normalized.index,
       vectorPool,
       publisherRegistry,
+      reclamationAuthority,
       tenancyFence: options.tenancyFence,
       embeddingSetBuilder: createWorkerEmbeddingSetBuilder({
         provider: embeddingProvider,
@@ -338,6 +341,7 @@ export class ProfileManager {
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly embedScheduler: EmbedScheduler;
   private readonly publisherRegistry = new VaultPublisherRegistry();
+  private readonly reclamationAuthority = new SharedReclamationAuthority();
   private readonly ownsEmbedScheduler: boolean;
   private readonly options: ProfileManagerOptions;
   private closed = false;
@@ -390,7 +394,7 @@ export class ProfileManager {
     if (current) return current;
     const pending = this.pending.get(profileHash);
     if (pending) return pending;
-    const created = ProfileRuntime.create(profile, this.baseEnv, this.embedScheduler, this.publisherRegistry, this.options)
+    const created = ProfileRuntime.create(profile, this.baseEnv, this.embedScheduler, this.publisherRegistry, this.reclamationAuthority, this.options)
       .then(async (runtime) => {
         if (this.closed) {
           await runtime.close();

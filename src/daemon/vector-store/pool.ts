@@ -315,6 +315,22 @@ export class VectorGenerationPool {
     }
   }
 
+  // Manifest hashes of generations currently held open by a live in-memory handle (a pinned reader
+  // or the active slot). The shared reclamation sweeper consults this so it never deletes a
+  // generation dir still mapped by this daemon's pool, even when no committed edition names it yet
+  // (e.g. a just-promoted generation awaiting its reader) — complementing the on-disk live-edition
+  // union and the build reservation. Generation dirs are named by manifest hash, so we derive it
+  // from each open handle's dbPath (`.../generations/<manifestHash>/vectors.duckdb`).
+  pinnedManifestHashes(): Set<string> {
+    const pinned = new Set<string>();
+    const consider = (handle: GenerationHandle) => {
+      if (handle.refCount > 0) pinned.add(path.basename(path.dirname(handle.dbPath)));
+    };
+    for (const handle of this.generations.values()) consider(handle);
+    for (const handle of this.activeByKey.values()) consider(handle);
+    return pinned;
+  }
+
   statsForTests(): {
     active: Record<string, string>;
     refCounts: Record<string, number>;

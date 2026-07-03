@@ -94,8 +94,10 @@ import {
   createLocalTenancyFenceProvider,
   editionCoverageFromCorpus,
   liveEditionHeadsUnder,
+  SharedReclamationAuthority,
   VaultPublisher,
   VaultPublisherRegistry,
+  type BuildReservation,
   type EditionCandidate,
   type VaultPublisherLease
 } from "./publisher.js";
@@ -157,6 +159,7 @@ export type DaemonSnapshotStoreOptions = {
   embeddingSetBuilder?: RetrievalEmbeddingSetBuilder;
   lexicalIdentityHash?: string;
   publisherRegistry?: VaultPublisherRegistry;
+  reclamationAuthority?: SharedReclamationAuthority;
   tenancyFence?: TenancyFenceProvider & { writerToken?: CurrentWriterToken };
 };
 
@@ -248,6 +251,10 @@ type RetrievalSnapshotPublication = {
   active: RetrievalActivePointer;
   vectorPaths: VectorStoreCachePaths;
   dense: Extract<DenseEdition, { state: "fresh" }>;
+  // Held from before the generation dir becomes sweeper-visible until the naming edition commits, so
+  // a concurrent cross-ledger sweep cannot reclaim a built-but-uncommitted generation. The consumer
+  // that commits the edition releases it (on success or failure).
+  reservation?: BuildReservation;
 };
 
 type DenseUnavailableResult = {
@@ -413,6 +420,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly vectorPool: VectorGenerationPool | undefined;
   private readonly embeddingSetBuilder: RetrievalEmbeddingSetBuilder;
   private readonly publisherRegistry: VaultPublisherRegistry;
+  private readonly reclamationAuthority: SharedReclamationAuthority;
   private readonly tenancyFence: TenancyFenceProvider & { writerToken?: CurrentWriterToken };
   private readonly loaded = new Map<string, LoadedSnapshot>();
   private readonly activeByVault = new Map<string, string>();
@@ -467,6 +475,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.embeddingSetBuilder = options.embeddingSetBuilder ??
       createConfiguredEmbeddingSetBuilder(settings, this.env);
     this.publisherRegistry = options.publisherRegistry ?? new VaultPublisherRegistry();
+    this.reclamationAuthority = options.reclamationAuthority ?? new SharedReclamationAuthority();
     this.tenancyFence = options.tenancyFence ?? createLocalTenancyFenceProvider();
   }
 
@@ -1267,10 +1276,18 @@ export class DaemonSnapshotStore implements SnapshotStore {
         if (!commit.ok) throw new Error(`edition commit rejected: ${commit.reason}${commit.message ? `: ${commit.message}` : ""}`);
       } finally {
         if (retrievalPublication) this.inFlightRetrievalSnapshots.delete(retrievalPublication.envelope.retrievalSnapshotId);
+        retrievalPublication?.reservation?.release();
       }
       this.activeByVault.set(paths.storeId, built.snapshotId);
     } catch (error) {
-      if (retrievalPublicationPromise && !retrievalPublished) void retrievalPublicationPromise.then(() => undefined, () => undefined);
+      // If the corpus publish failed before the (concurrent) retrieval publication was consumed, its
+      // build reservation would leak — release it when it eventually resolves to a publication.
+      if (retrievalPublicationPromise && !retrievalPublished) {
+        void retrievalPublicationPromise.then(
+          (result) => { if (result && !("error" in result)) result.reservation?.release(); },
+          () => undefined
+        );
+      }
       throw error;
     }
     context.progress?.({
@@ -1388,6 +1405,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (!commit.ok) throw new Error(`dense edition commit rejected: ${commit.reason}${commit.message ? `: ${commit.message}` : ""}`);
     } finally {
       this.inFlightRetrievalSnapshots.delete(publication.envelope.retrievalSnapshotId);
+      publication.reservation?.release();
     }
   }
 
@@ -1455,6 +1473,16 @@ export class DaemonSnapshotStore implements SnapshotStore {
       embeddingRecipeFreshnessId: recipeFreshnessId,
       manifestHash
     };
+    // Reserve the generation (by manifest hash) BEFORE the staging build makes its dir visible, and
+    // hold it until the naming edition commits — otherwise a concurrent sibling-ledger sweep could
+    // reclaim this generation in the build→commit window (the deleted inFlightVectorGenerations root
+    // replacement). The committing consumer releases it via `publication.reservation`.
+    const reservation = this.vectorPool
+      ? await this.reclamationAuthority.acquireBuildReservation({
+          reservationsDir: vectorPaths.reservationsDir,
+          manifestHash
+        })
+      : undefined;
     try {
       if (this.vectorPool) {
         const builtGeneration = await this.vectorPool.buildStagingGeneration({
@@ -1543,6 +1571,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         envelope: retrievalEnvelope,
         active,
         vectorPaths,
+        reservation,
         dense: {
           state: "fresh",
           generationId,
@@ -1556,6 +1585,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         }
       };
     } catch (error) {
+      reservation?.release();
       throw error;
     }
   }
@@ -1887,6 +1917,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
       env: this.env
     });
     const removedStoreIds: string[] = [];
+    // The vector store directory is shared across every ledger (profile / lexical variant) with the
+    // same (vaultStateHash, embeddingSetId) — the redesign dropped the profileHash partition. So
+    // reclamation MUST NOT use this runtime's per-lexicalIdentityHash GC roots (they would delete a
+    // generation another ledger still names fresh, or an in-flight build). Route each embedding
+    // set through the daemon-wide SharedReclamationAuthority: it computes the live-manifest set from
+    // the ON-DISK edition heads of ALL ledgers sharing the store, honors build reservations and this
+    // pool's in-memory pins, and serializes the sweep per shared-artifact key under an ExclusiveClaim.
+    const pinnedManifests = this.vectorPool?.pinnedManifestHashes() ?? new Set<string>();
     for (const embeddingSetDir of await safeReadDirAsync(probe.vaultDir)) {
       const storeRoot = path.join(probe.vaultDir, embeddingSetDir);
       if (!(await isDirectoryPathAsync(storeRoot))) continue;
@@ -1896,17 +1934,24 @@ export class DaemonSnapshotStore implements SnapshotStore {
         embeddingSetId: embeddingSetDir,
         env: this.env
       });
-      for (const generationDir of await safeReadDirAsync(vectorPaths.generationsDir)) {
-        const generationPath = path.join(vectorPaths.generationsDir, generationDir);
-        if (!(await isDirectoryPathAsync(generationPath))) continue;
-        const key = vectorGenerationGcKey({
-          vaultStateHash: paths.vaultStateHash,
-          embeddingSetId: embeddingSetDir,
-          generationId: generationDir
-        });
-        if (await this.vectorGenerationIsProtected(paths, key)) continue;
-        await rmBestEffort(generationPath, { recursive: true, force: true });
-      }
+      await this.reclamationAuthority.sweepVectorGenerations({
+        sharedKey: `${paths.vaultStateHash}:vector:${embeddingSetDir}`,
+        searchStoresDir: paths.storesDir,
+        generationsDir: vectorPaths.generationsDir,
+        reservationsDir: vectorPaths.reservationsDir,
+        claimDir: path.join(vectorPaths.rootDir, "gc.claim"),
+        vaultStateHash: paths.vaultStateHash,
+        embeddingSetId: embeddingSetDir,
+        // A generation is also protected by this runtime's in-memory retrieval GC pins
+        // (`pinnedVectorGenerations`, keyed by manifest hash) — this covers a generation held by an
+        // in-flight retrieve whose lazy-open has not yet produced a pool handle, and by a reader
+        // pinning a non-head generation the on-disk edition union no longer names.
+        refCountForManifest: (manifestHash) => {
+          if (pinnedManifests.has(manifestHash)) return 1;
+          const pinKey = vectorGenerationGcKeyForVectorKey(vectorPaths.key, manifestHash);
+          return (this.pinnedVectorGenerations.get(pinKey) ?? 0) > 0 ? 1 : 0;
+        }
+      });
       let hasGenerations = false;
       for (const entry of await safeReadDirAsync(vectorPaths.generationsDir)) {
         if (await isDirectoryPathAsync(path.join(vectorPaths.generationsDir, entry))) {
@@ -1914,7 +1959,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
           break;
         }
       }
-      if (!hasGenerations && !await this.vectorStoreHasProtectedGeneration(paths, embeddingSetDir)) {
+      // The store root is only removable when the authority left zero generation dirs AND no ledger
+      // (across the whole vault) still names this embedding set fresh — otherwise a sibling ledger's
+      // live store would be dropped from disk and the catalog.
+      const liveManifests = this.reclamationAuthority.liveVectorManifestHashes({
+        searchStoresDir: paths.storesDir,
+        vaultStateHash: paths.vaultStateHash,
+        embeddingSetId: embeddingSetDir
+      });
+      if (!hasGenerations && liveManifests.size === 0) {
         // Only record the store as removed if the directory actually went away; otherwise the
         // catalog would drop a store whose files still exist on disk.
         try {
