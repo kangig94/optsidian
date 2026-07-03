@@ -1,8 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
-import { optsidianCacheRoot } from "../../core/cache-root.js";
-import type { VectorStoreCachePaths } from "./cache-paths.js";
-import { sweepVectorStaging } from "./pool.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { optsidianCacheRoot } from '../../core/cache-root.js';
+import type { VectorStoreCachePaths } from './cache-paths.js';
+import { sweepVectorStaging } from './pool.js';
 
 // Orphan staging/tmp cleanup after a crash. The sweep is synchronous fs so the daemon can run it
 // to completion BEFORE it accepts requests — a client that boots a build must never race a sweep that
@@ -12,13 +12,15 @@ export function recoverRetrievalStaging(input: { vectorPaths: VectorStoreCachePa
   sweepTmpDir(input.vectorPaths.tmpDir);
 }
 
-export function recoverRetrievalStartupState(input: {
-  env?: NodeJS.ProcessEnv;
-} = {}): void {
+export function recoverRetrievalStartupState(
+  input: {
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): void {
   const env = input.env ?? process.env;
   const cacheRoot = optsidianCacheRoot(env);
-  const vectorStoresRoot = path.join(cacheRoot, "vectors", "stores");
-  const searchStoresRoot = path.join(cacheRoot, "search", "stores");
+  const vectorStoresRoot = path.join(cacheRoot, 'vectors', 'stores');
+  const searchStoresRoot = path.join(cacheRoot, 'search', 'stores');
   for (const vaultStateHash of safeReadDir(vectorStoresRoot)) {
     const vaultDir = path.join(vectorStoresRoot, vaultStateHash);
     if (!isDirectory(vaultDir)) continue;
@@ -27,7 +29,7 @@ export function recoverRetrievalStartupState(input: {
       const vectorPaths = vectorPathsFromCacheParts({
         cacheRoot,
         vaultStateHash,
-        embeddingSetId
+        embeddingSetId,
       });
       recoverRetrievalStaging({ vectorPaths });
     }
@@ -58,7 +60,7 @@ function sweepSearchStoreTmpDirs(storesDir: string): void {
     for (const lexicalIdentityHash of safeReadDir(vaultDir)) {
       const searchStoreDir = path.join(vaultDir, lexicalIdentityHash);
       if (!isDirectory(searchStoreDir)) continue;
-      sweepTmpDir(path.join(searchStoreDir, "tmp"));
+      sweepTmpDir(path.join(searchStoreDir, 'tmp'));
     }
   }
 }
@@ -68,26 +70,26 @@ function vectorPathsFromCacheParts(input: {
   vaultStateHash: string;
   embeddingSetId: string;
 }): VectorStoreCachePaths {
-  const vectorsRootDir = path.join(input.cacheRoot, "vectors");
-  const storesDir = path.join(vectorsRootDir, "stores");
+  const vectorsRootDir = path.join(input.cacheRoot, 'vectors');
+  const storesDir = path.join(vectorsRootDir, 'stores');
   const vaultDir = path.join(storesDir, input.vaultStateHash);
   const rootDir = path.join(vaultDir, input.embeddingSetId);
   return {
-    vaultRoot: "",
+    vaultRoot: '',
     key: {
       vaultStateHash: input.vaultStateHash,
-      embeddingSetId: input.embeddingSetId
+      embeddingSetId: input.embeddingSetId,
     },
     cacheRootDir: input.cacheRoot,
     vectorsRootDir,
     storesDir,
     vaultDir,
     rootDir,
-    storeStatePath: path.join(rootDir, "store.json"),
-    generationsDir: path.join(rootDir, "generations"),
-    stagingDir: path.join(rootDir, "staging"),
-    reservationsDir: path.join(rootDir, "reservations"),
-    tmpDir: path.join(rootDir, "tmp")
+    storeStatePath: path.join(rootDir, 'store.json'),
+    generationsDir: path.join(rootDir, 'generations'),
+    stagingDir: path.join(rootDir, 'staging'),
+    reservationsDir: path.join(rootDir, 'reservations'),
+    tmpDir: path.join(rootDir, 'tmp'),
   };
 }
 

@@ -1,4 +1,4 @@
-import { UsageError } from "../errors.js";
+import { UsageError } from '../errors.js';
 import type {
   FrontmatterReadResult,
   GrepResult,
@@ -10,40 +10,40 @@ import type {
   SearchIndexWarmResult,
   RetrieveDenseSignal,
   SearchResult,
-  SimilarityResult
-} from "../core/types.js";
-import type { RefreshResult, StatusResult } from "../daemon/protocol.js";
+  SimilarityResult,
+} from '../core/types.js';
+import type { RefreshResult, StatusResult } from '../daemon/protocol.js';
 
-export type OutputFormat = "text" | "json";
+export type OutputFormat = 'text' | 'json';
 
 export function parseFormat(value: string | undefined): OutputFormat {
-  const format = value ?? "text";
-  if (format !== "text" && format !== "json") {
-    throw new UsageError("format must be text or json");
+  const format = value ?? 'text';
+  if (format !== 'text' && format !== 'json') {
+    throw new UsageError('format must be text or json');
   }
   return format;
 }
 
 export function renderRead(result: ReadResult, format: OutputFormat): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify({
       ok: result.ok,
       command: result.command,
       path: result.path,
       range: result.range,
       truncated: result.truncated,
-      numberedText: result.numberedText
+      numberedText: result.numberedText,
     })}\n`;
   }
   return `path: ${result.path}\nlines: ${result.range.start}-${result.range.end}/${result.range.total}\ntruncated: ${result.truncated}\n\n${result.numberedText}\n`;
 }
 
 export function renderGrep(result: GrepResult, format: OutputFormat): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
   if (result.matches.length === 0) {
-    return "No matches found.\n";
+    return 'No matches found.\n';
   }
   const out: string[] = [`matches: ${result.matches.length}`];
   for (const match of result.matches) {
@@ -51,224 +51,250 @@ export function renderGrep(result: GrepResult, format: OutputFormat): string {
     out.push(`${match.path}:${match.line}: | ${match.text}`);
     for (const after of match.contextAfter) out.push(`${match.path}:${after.line}+ | ${after.text}`);
   }
-  return `${out.join("\n")}\n`;
+  return `${out.join('\n')}\n`;
 }
 
 export function renderSearch(result: SearchResult, format: OutputFormat): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
   const dense = result.dense ? [formatDenseSignal(result.dense)] : [];
-  if (result.status === "index-not-ready") {
-    return `${["Search index not ready.", ...dense].join("\n")}\n`;
+  if (result.status === 'index-not-ready') {
+    return `${['Search index not ready.', ...dense].join('\n')}\n`;
   }
   const warnings = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
   if (result.matches.length === 0) {
     const prefix = [...dense, ...warnings];
-    return `${prefix.length > 0 ? `${prefix.join("\n")}\n` : ""}No matches found.\n`;
+    return `${prefix.length > 0 ? `${prefix.join('\n')}\n` : ''}No matches found.\n`;
   }
   const out: string[] = [...dense, ...warnings];
-  if (out.length > 0) out.push("");
+  if (out.length > 0) out.push('');
   result.matches.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`title: ${match.title}`);
-    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
+    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(', ')}`);
     if (match.snippets.length > 0) {
-      out.push("snippets:");
+      out.push('snippets:');
       for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
     }
-    out.push("");
+    out.push('');
   });
-  return `${out.join("\n")}`;
+  return `${out.join('\n')}`;
 }
 
 export function renderSimilarity(result: SimilarityResult, format: OutputFormat): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
   const dense = result.dense ? [formatDenseSignal(result.dense)] : [];
-  if (result.status === "index-not-ready") {
-    return `${[`Similarity index not ready${result.reason ? `: ${result.reason}` : ""}.`, ...dense].join("\n")}\n`;
+  if (result.status === 'index-not-ready') {
+    return `${[`Similarity index not ready${result.reason ? `: ${result.reason}` : ''}.`, ...dense].join('\n')}\n`;
   }
   if (result.results.length === 0) {
-    return `${dense.length > 0 ? `${dense.join("\n")}\n` : ""}No similar notes found.\n`;
+    return `${dense.length > 0 ? `${dense.join('\n')}\n` : ''}No similar notes found.\n`;
   }
   const out: string[] = [...dense];
-  if (out.length > 0) out.push("");
+  if (out.length > 0) out.push('');
   result.results.forEach((match, index) => {
     out.push(`${index + 1}. ${match.path}`);
     out.push(`score: ${formatScore(match.score)}`);
     out.push(`title: ${match.title}`);
-    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(", ")}`);
+    if (match.tags.length > 0) out.push(`tags: ${match.tags.join(', ')}`);
     if (match.snippets.length > 0) {
-      out.push("snippets:");
+      out.push('snippets:');
       for (const snippet of match.snippets) out.push(`  ${snippet.line} | ${snippet.text}`);
     }
-    out.push("");
+    out.push('');
   });
-  return out.join("\n");
+  return out.join('\n');
 }
 
 export function renderFrontmatterRead(result: FrontmatterReadResult, format: OutputFormat): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
   return [
     `path: ${result.path}`,
-    `frontmatter: ${result.hasFrontmatter ? "present" : "missing"}`,
-    "",
-    JSON.stringify(result.frontmatter, null, 2)
-  ].join("\n").concat("\n");
+    `frontmatter: ${result.hasFrontmatter ? 'present' : 'missing'}`,
+    '',
+    JSON.stringify(result.frontmatter, null, 2),
+  ]
+    .join('\n')
+    .concat('\n');
 }
 
 export function renderIndexResult(
-  result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult | RefreshResult,
-  format: OutputFormat = "text"
+  result:
+    | StatusResult
+    | SearchIndexStatusResult
+    | SearchIndexMutationResult
+    | SearchIndexWarmResult
+    | SearchIndexPruneResult
+    | RefreshResult,
+  format: OutputFormat = 'text',
 ): string {
-  if (format === "json") {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
   if (isDaemonStatusResult(result)) {
-    const lines = [result.ready ? "Search daemon ready." : "Search daemon not ready."];
+    const lines = [result.ready ? 'Search daemon ready.' : 'Search daemon not ready.'];
     lines.push(`Phase: ${result.phase}.`);
-    lines.push(`Requests: ${result.metrics.requests}, failures: ${result.metrics.failures}, active: ${result.metrics.activeRequests}.`);
+    lines.push(
+      `Requests: ${result.metrics.requests}, failures: ${result.metrics.failures}, active: ${result.metrics.activeRequests}.`,
+    );
     if (result.vaults.length === 0) {
-      lines.push("Vaults: none.");
-      return `${lines.join("\n")}\n`;
+      lines.push('Vaults: none.');
+      return `${lines.join('\n')}\n`;
     }
-    lines.push("Vaults:");
+    lines.push('Vaults:');
     for (const vault of result.vaults) {
       const details = [
-        vault.snapshotId ? `snapshot: ${vault.snapshotId}` : "",
-        vault.updatedAt ? `updated: ${vault.updatedAt}` : "",
-        vault.progress ? `progress: ${renderIndexProgress(vault.progress)}` : "",
-        vault.error ? `error: ${vault.error}` : ""
+        vault.snapshotId ? `snapshot: ${vault.snapshotId}` : '',
+        vault.updatedAt ? `updated: ${vault.updatedAt}` : '',
+        vault.progress ? `progress: ${renderIndexProgress(vault.progress)}` : '',
+        vault.error ? `error: ${vault.error}` : '',
       ].filter(Boolean);
-      lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(", ")})` : ""}`);
+      lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(', ')})` : ''}`);
     }
-    return `${lines.join("\n")}\n`;
+    return `${lines.join('\n')}\n`;
   }
-  if (result.action === "status") {
-    const lines = [result.ready ? (result.staleTier ? "Index ready (stale analyzer tier)." : "Index ready.") : "Index missing."];
+  if (result.action === 'status') {
+    const lines = [
+      result.ready ? (result.staleTier ? 'Index ready (stale analyzer tier).' : 'Index ready.') : 'Index missing.',
+    ];
     if (result.projections.length > 0) {
-      lines.push("Projections:");
+      lines.push('Projections:');
       for (const projection of result.projections) {
-        lines.push(`- ${projection.key}${projection.roles.length > 0 ? ` [${projection.roles.join(", ")}]` : ""}: ${renderProjectionState(projection)}`);
+        lines.push(
+          `- ${projection.key}${projection.roles.length > 0 ? ` [${projection.roles.join(', ')}]` : ''}: ${renderProjectionState(projection)}`,
+        );
       }
     }
     lines.push(renderAnalyzerStatus(result.analyzer));
     lines.push(renderWarmAccess(result.warmAccess));
     lines.push(renderWarmSchedule(result.warmSchedule));
-    return `${lines.join("\n")}\n`;
+    return `${lines.join('\n')}\n`;
   }
-  if (result.action === "rebuild") {
-    return "Index rebuilt.\n";
+  if (result.action === 'rebuild') {
+    return 'Index rebuilt.\n';
   }
-  if (result.action === "refresh") {
-    return result.rebuilt ? "Index refreshed.\n" : "Index already fresh.\n";
+  if (result.action === 'refresh') {
+    return result.rebuilt ? 'Index refreshed.\n' : 'Index already fresh.\n';
   }
-  if (result.action === "warm") {
+  if (result.action === 'warm') {
     const lines = (result.warnings ?? []).map((warning) => `warning: ${warning}`);
     if (result.vaults.length === 0) {
-      lines.push("No vaults found to warm.");
-      return `${lines.join("\n")}\n`;
+      lines.push('No vaults found to warm.');
+      return `${lines.join('\n')}\n`;
     }
-    const ready = result.vaults.filter((vault) => vault.status === "ready").length;
+    const ready = result.vaults.filter((vault) => vault.status === 'ready').length;
     const failed = result.vaults.length - ready;
-    lines.push(`Warmed ${ready} vault${ready === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}.`);
+    lines.push(`Warmed ${ready} vault${ready === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}.`);
     for (const vault of result.vaults) {
-      lines.push(`${vault.status === "ready" ? "ready" : "failed"}: ${vault.vaultRoot}${vault.error ? ` (${vault.error})` : ""}`);
+      lines.push(
+        `${vault.status === 'ready' ? 'ready' : 'failed'}: ${vault.vaultRoot}${vault.error ? ` (${vault.error})` : ''}`,
+      );
     }
-    return `${lines.join("\n")}\n`;
+    return `${lines.join('\n')}\n`;
   }
-  if (result.action === "prune") {
+  if (result.action === 'prune') {
     const count = result.removedStores.length;
-    const storeLabel = count === 1 ? "store" : "stores";
-    const skipped = result.skippedStores.length > 0 ? ` Skipped ${result.skippedStores.length}.` : "";
+    const storeLabel = count === 1 ? 'store' : 'stores';
+    const skipped = result.skippedStores.length > 0 ? ` Skipped ${result.skippedStores.length}.` : '';
     if (result.dryRun) {
       return `Dry run. Would prune ${count} search cache ${storeLabel}, freeing ${formatBytes(result.removedBytes)}.${skipped}\n`;
     }
     return `Pruned ${count} search cache ${storeLabel}, freed ${formatBytes(result.removedBytes)}.${skipped}\n`;
   }
-  return "Index cleared.\n";
+  return 'Index cleared.\n';
 }
 
-function isDaemonStatusResult(result: StatusResult | SearchIndexStatusResult | SearchIndexMutationResult | SearchIndexWarmResult | SearchIndexPruneResult | RefreshResult): result is StatusResult {
-  return "phase" in result && "metrics" in result && "vaults" in result;
+function isDaemonStatusResult(
+  result:
+    | StatusResult
+    | SearchIndexStatusResult
+    | SearchIndexMutationResult
+    | SearchIndexWarmResult
+    | SearchIndexPruneResult
+    | RefreshResult,
+): result is StatusResult {
+  return 'phase' in result && 'metrics' in result && 'vaults' in result;
 }
 
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let value = bytes;
   let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
     value /= 1024;
     unit += 1;
   }
-  const rounded = unit === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 1 : 2).replace(/\.0+$|(\.\d*[1-9])0+$/, "$1");
+  const rounded =
+    unit === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 1 : 2).replace(/\.0+$|(\.\d*[1-9])0+$/, '$1');
   return `${rounded} ${units[unit]}`;
 }
 
 function formatScore(score: number): string {
-  if (!Number.isFinite(score)) return "0";
-  return score.toFixed(6).replace(/\.?0+$/u, "");
+  if (!Number.isFinite(score)) return '0';
+  return score.toFixed(6).replace(/\.?0+$/u, '');
 }
 
 function formatDenseSignal(dense: RetrieveDenseSignal): string {
-  const age = dense.generationAgeMs === null ? "null" : `${dense.generationAgeMs}ms`;
+  const age = dense.generationAgeMs === null ? 'null' : `${dense.generationAgeMs}ms`;
   return `dense: state=${dense.state} pending=${dense.pendingCount} generationAge=${age}`;
 }
 
-function renderIndexProgress(progress: NonNullable<StatusResult["vaults"][number]["progress"]>): string {
-  const counts = progress.total === undefined ? String(progress.completed ?? 0) : `${progress.completed ?? 0}/${progress.total}`;
-  return `${progress.phase} ${counts}${progress.current ? ` ${progress.current}` : ""}`;
+function renderIndexProgress(progress: NonNullable<StatusResult['vaults'][number]['progress']>): string {
+  const counts =
+    progress.total === undefined ? String(progress.completed ?? 0) : `${progress.completed ?? 0}/${progress.total}`;
+  return `${progress.phase} ${counts}${progress.current ? ` ${progress.current}` : ''}`;
 }
 
-function renderAnalyzerStatus(analyzer: SearchIndexStatusResult["analyzer"]): string {
+function renderAnalyzerStatus(analyzer: SearchIndexStatusResult['analyzer']): string {
   const details = [
     `target: ${analyzer.targetTier}`,
-    analyzer.declaredAnalyzers.length > 0 ? `declared: ${analyzer.declaredAnalyzers.join(",")}` : "declared: none",
-    analyzer.activeAnalyzers.length > 0 ? `active: ${analyzer.activeAnalyzers.join(",")}` : "active: none"
+    analyzer.declaredAnalyzers.length > 0 ? `declared: ${analyzer.declaredAnalyzers.join(',')}` : 'declared: none',
+    analyzer.activeAnalyzers.length > 0 ? `active: ${analyzer.activeAnalyzers.join(',')}` : 'active: none',
   ];
   if (analyzer.kiwi) {
     details.push(`kiwi model: ${analyzer.kiwi.modelState}`);
     details.push(`kiwi analyzer: ${analyzer.kiwi.analyzerState}`);
     if (analyzer.kiwi.reason) details.push(`reason: ${analyzer.kiwi.reason}`);
   }
-  return `Analyzer: ${details.join(", ")}.`;
+  return `Analyzer: ${details.join(', ')}.`;
 }
 
-function renderWarmAccess(access: SearchIndexStatusResult["warmAccess"]): string {
+function renderWarmAccess(access: SearchIndexStatusResult['warmAccess']): string {
   const details = [
     `max age: ${access.maxAgeDays}d`,
-    access.lastAccessAt ? `last access: ${access.lastAccessAt}` : "last access: none",
-    access.expiresAt ? `expires: ${access.expiresAt}` : ""
+    access.lastAccessAt ? `last access: ${access.lastAccessAt}` : 'last access: none',
+    access.expiresAt ? `expires: ${access.expiresAt}` : '',
   ].filter(Boolean);
-  return `Background warm target: ${access.recent ? "yes" : "no"} (${details.join(", ")}).`;
+  return `Background warm target: ${access.recent ? 'yes' : 'no'} (${details.join(', ')}).`;
 }
 
-function renderWarmSchedule(schedule: SearchIndexStatusResult["warmSchedule"]): string {
+function renderWarmSchedule(schedule: SearchIndexStatusResult['warmSchedule']): string {
   const details = [
     `interval: ${schedule.intervalMinutes}m`,
-    schedule.lastAttemptAt ? `last attempt: ${schedule.lastAttemptAt}` : "last attempt: none",
-    schedule.nextAttemptAt ? `next eligible: ${schedule.nextAttemptAt}` : ""
+    schedule.lastAttemptAt ? `last attempt: ${schedule.lastAttemptAt}` : 'last attempt: none',
+    schedule.nextAttemptAt ? `next eligible: ${schedule.nextAttemptAt}` : '',
   ].filter(Boolean);
-  return `MCP warm throttle: ${schedule.throttled ? "active" : "inactive"} (${details.join(", ")}).`;
+  return `MCP warm throttle: ${schedule.throttled ? 'active' : 'inactive'} (${details.join(', ')}).`;
 }
 
-function renderProjectionState(projection: SearchIndexStatusResult["projections"][number]): string {
+function renderProjectionState(projection: SearchIndexStatusResult['projections'][number]): string {
   const details = [
     projection.state,
-    projection.compatible ? (projection.staleTier ? "stale-tier" : "compatible") : "",
-    projection.documents !== undefined ? `documents: ${projection.documents}` : "",
-    projection.files !== undefined ? `files: ${projection.files}` : ""
+    projection.compatible ? (projection.staleTier ? 'stale-tier' : 'compatible') : '',
+    projection.documents !== undefined ? `documents: ${projection.documents}` : '',
+    projection.files !== undefined ? `files: ${projection.files}` : '',
   ].filter(Boolean);
-  return details.join(", ");
+  return details.join(', ');
 }
 
-export function renderMutation(result: MutationResult, format: OutputFormat = "text"): string {
-  if (format === "json") {
+export function renderMutation(result: MutationResult, format: OutputFormat = 'text'): string {
+  if (format === 'json') {
     return `${JSON.stringify(result)}\n`;
   }
 
@@ -277,35 +303,41 @@ export function renderMutation(result: MutationResult, format: OutputFormat = "t
   }
 
   if (result.dryRun) {
-    if (result.command === "copy") {
+    if (result.command === 'copy') {
       const change = result.changes[0];
-      const source = change?.from ? `${change.from} to ` : "";
-      return `Dry run. Would copy ${source}${change?.path ?? ""}\n`;
+      const source = change?.from ? `${change.from} to ` : '';
+      return `Dry run. Would copy ${source}${change?.path ?? ''}\n`;
     }
-    if (result.command === "mkdir") {
-      const target = result.changes[0]?.path ?? "";
+    if (result.command === 'mkdir') {
+      const target = result.changes[0]?.path ?? '';
       return `Dry run. Would create directory ${target}\n`;
     }
-    if (result.command === "apply_patch") {
+    if (result.command === 'apply_patch') {
       return renderDryRunPatch(result);
     }
     const change = result.changes[0];
-    const verb = result.command === "write" && change?.code === "A" ? "create" : "update";
-    const diff = result.changes.map((item) => item.diff).filter(Boolean).join("\n");
-    return `Dry run. Would ${verb} ${change?.path ?? ""}\n${diff}\n`;
+    const verb = result.command === 'write' && change?.code === 'A' ? 'create' : 'update';
+    const diff = result.changes
+      .map((item) => item.diff)
+      .filter(Boolean)
+      .join('\n');
+    return `Dry run. Would ${verb} ${change?.path ?? ''}\n${diff}\n`;
   }
 
-  if (result.command === "mkdir") {
-    return `Success. Created directory:\n${result.changes.map((change) => `${change.code} ${change.path}`).join("\n")}\n`;
+  if (result.command === 'mkdir') {
+    return `Success. Created directory:\n${result.changes.map((change) => `${change.code} ${change.path}`).join('\n')}\n`;
   }
 
-  return `Success. Updated the following files:\n${result.changes.map((change) => `${change.code} ${change.path}`).join("\n")}\n`;
+  return `Success. Updated the following files:\n${result.changes.map((change) => `${change.code} ${change.path}`).join('\n')}\n`;
 }
 
 function renderDryRunPatch(result: MutationResult): string {
-  const out = ["Dry run. Would update the following files:", ...result.changes.map((change) => `${change.code} ${change.path}`)];
+  const out = [
+    'Dry run. Would update the following files:',
+    ...result.changes.map((change) => `${change.code} ${change.path}`),
+  ];
   for (const change of result.changes) {
     if (change.diff) out.push(change.diff);
   }
-  return `${out.join("\n")}\n`;
+  return `${out.join('\n')}\n`;
 }

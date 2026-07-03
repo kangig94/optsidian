@@ -1,7 +1,7 @@
-import path from "node:path";
-import { surfaceSearchTerms } from "../analysis/channels.js";
-import { EXACT_PRIORITY, PHRASE_PRIORITY } from "../constants.js";
-import type { QueryContext } from "../internal-types.js";
+import path from 'node:path';
+import { surfaceSearchTerms } from '../analysis/channels.js';
+import { EXACT_PRIORITY, PHRASE_PRIORITY } from '../constants.js';
+import type { QueryContext } from '../internal-types.js';
 
 export type IdentityDocument = {
   path: string;
@@ -13,11 +13,12 @@ export type IdentityDocument = {
 
 export function bestExactPriority(doc: IdentityDocument, context: QueryContext): number {
   const priorities: number[] = [];
-  if (context.allowed.has("title") && hasExactIdentityPhrase(doc.title, context.phrases)) priorities.push(EXACT_PRIORITY.title);
-  if (context.allowed.has("aliases") && doc.aliases.some((alias) => hasExactIdentityPhrase(alias, context.phrases))) {
+  if (context.allowed.has('title') && hasExactIdentityPhrase(doc.title, context.phrases))
+    priorities.push(EXACT_PRIORITY.title);
+  if (context.allowed.has('aliases') && doc.aliases.some((alias) => hasExactIdentityPhrase(alias, context.phrases))) {
     priorities.push(EXACT_PRIORITY.alias);
   }
-  if (context.allowed.has("path") && hasExactIdentityPhrase(filenameStem(doc.path), context.phrases)) {
+  if (context.allowed.has('path') && hasExactIdentityPhrase(filenameStem(doc.path), context.phrases)) {
     priorities.push(EXACT_PRIORITY.filenameStem);
   }
   return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
@@ -33,37 +34,47 @@ export function identityScoreFromExactPriority(priority: number | null | undefin
 export function bestPhrasePriority(doc: IdentityDocument, context: QueryContext): number {
   if (context.phrases.length === 0) return Number.POSITIVE_INFINITY;
   const priorities: number[] = [];
-  if (context.allowed.has("title") && containsAnyIdentityPhrase(doc.title, context.phrases)) priorities.push(PHRASE_PRIORITY.title);
-  if (context.allowed.has("aliases") && doc.aliases.some((alias) => containsAnyIdentityPhrase(alias, context.phrases))) {
+  if (context.allowed.has('title') && containsAnyIdentityPhrase(doc.title, context.phrases))
+    priorities.push(PHRASE_PRIORITY.title);
+  if (
+    context.allowed.has('aliases') &&
+    doc.aliases.some((alias) => containsAnyIdentityPhrase(alias, context.phrases))
+  ) {
     priorities.push(PHRASE_PRIORITY.alias);
   }
-  if (context.allowed.has("path") && containsAnyIdentityPhrase(filenameStem(doc.path), context.phrases)) {
+  if (context.allowed.has('path') && containsAnyIdentityPhrase(filenameStem(doc.path), context.phrases)) {
     priorities.push(PHRASE_PRIORITY.filenameStem);
   }
-  if (context.allowed.has("path") && pathSegments(doc.path).some((segment) => containsAnyIdentityPhrase(segment, context.phrases))) {
+  if (
+    context.allowed.has('path') &&
+    pathSegments(doc.path).some((segment) => containsAnyIdentityPhrase(segment, context.phrases))
+  ) {
     priorities.push(PHRASE_PRIORITY.pathSegment);
   }
-  if (context.allowed.has("headings") && doc.headings.some((heading) => containsAnyIdentityPhrase(heading, context.phrases))) {
+  if (
+    context.allowed.has('headings') &&
+    doc.headings.some((heading) => containsAnyIdentityPhrase(heading, context.phrases))
+  ) {
     priorities.push(PHRASE_PRIORITY.heading);
   }
-  if (context.allowed.has("body") && containsAnyTokenPhrase(doc.bodySurfaceTokens, context.phrases)) {
+  if (context.allowed.has('body') && containsAnyTokenPhrase(doc.bodySurfaceTokens, context.phrases)) {
     priorities.push(PHRASE_PRIORITY.body);
   }
   return priorities.length > 0 ? Math.min(...priorities) : Number.POSITIVE_INFINITY;
 }
 
 export function normalizeIdentityText(value: string): string {
-  return identityPhraseCandidates(value)[0] ?? "";
+  return identityPhraseCandidates(value)[0] ?? '';
 }
 
 export function identityPhraseCandidates(value: string): string[] {
-  const cleaned = value.replace(/["']/g, "").replace(/#/g, " ").normalize("NFKC");
+  const cleaned = value.replace(/["']/g, '').replace(/#/g, ' ').normalize('NFKC');
   const terms = surfaceSearchTerms(cleaned);
   if (terms.length === 0) return [];
   if (!hasExplicitTermBoundary(cleaned) && terms.length > 1) {
-    return uniqueIdentityPhrases([terms[0], terms.slice(1).join(" ")]);
+    return uniqueIdentityPhrases([terms[0], terms.slice(1).join(' ')]);
   }
-  return uniqueIdentityPhrases([terms.join(" ")]);
+  return uniqueIdentityPhrases([terms.join(' ')]);
 }
 
 function hasExactIdentityPhrase(value: string, phrases: readonly string[]): boolean {
@@ -79,7 +90,7 @@ function containsAnyIdentityPhrase(value: string, phrases: readonly string[]): b
     return phrases.some(
       (phrase) =>
         isPhraseContainmentCandidate(phrase) &&
-        (candidate.includes(phrase) || compactCandidate.includes(compactIdentityPhrase(phrase)))
+        (candidate.includes(phrase) || compactCandidate.includes(compactIdentityPhrase(phrase))),
     );
   });
 }
@@ -91,7 +102,7 @@ function containsAnyTokenPhrase(tokenText: string, phrases: readonly string[]): 
 }
 
 function compactIdentityPhrase(value: string): string {
-  return value.replace(/\s+/gu, "");
+  return value.replace(/\s+/gu, '');
 }
 
 function isPhraseContainmentCandidate(phrase: string): boolean {
@@ -112,6 +123,6 @@ function filenameStem(relPath: string): string {
 
 function pathSegments(relPath: string): string[] {
   const dirname = path.dirname(relPath);
-  if (!dirname || dirname === ".") return [];
+  if (!dirname || dirname === '.') return [];
   return dirname.split(/[\\/]+/).filter(Boolean);
 }

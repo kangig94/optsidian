@@ -1,14 +1,14 @@
-import fs from "node:fs";
-import path from "node:path";
-import { createRequire } from "node:module";
-import { coralNeedleManagedBindingPath } from "./artifact.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { coralNeedleManagedBindingPath } from './artifact.js';
 import type {
   CoralChunkRecord,
   CoralEmbeddingSpec,
   CoralNeedleBinding,
   CoralSearchResult,
-  CoralStoreStats
-} from "./types.js";
+  CoralStoreStats,
+} from './types.js';
 
 type NativeCoralNeedleBinding = {
   initStore(dbPath: string): void;
@@ -21,8 +21,7 @@ type NativeCoralNeedleBinding = {
 };
 
 export type CoralNeedleBindingLoadStatus =
-  | { loaded: true; path: string }
-  | { loaded: false; attempted: readonly string[]; error: string };
+  { loaded: true; path: string } | { loaded: false; attempted: readonly string[]; error: string };
 
 let cachedBinding: CoralNeedleBinding | undefined;
 let cachedStatus: CoralNeedleBindingLoadStatus | undefined;
@@ -44,15 +43,16 @@ export function loadCoralNeedleBinding(): CoralNeedleBinding {
       lastError = error;
     }
   }
-  const message = lastError instanceof Error
-    ? lastError.message
-    : lastError === undefined
-      ? "coral-needle binary was not found"
-      : "coral-needle binary failed to load";
+  const message =
+    lastError instanceof Error
+      ? lastError.message
+      : lastError === undefined
+        ? 'coral-needle binary was not found'
+        : 'coral-needle binary failed to load';
   cachedStatus = { loaded: false, attempted, error: message };
   throw Object.assign(new Error(`coral-needle native binding is not available: ${message}`), {
-    code: "CORAL_NEEDLE_UNAVAILABLE",
-    attempted
+    code: 'CORAL_NEEDLE_UNAVAILABLE',
+    attempted,
   });
 }
 
@@ -63,35 +63,47 @@ export function coralNeedleBindingLoadStatus(): CoralNeedleBindingLoadStatus {
   } catch {
     // Status reports the cached load error below.
   }
-  return cachedStatus ?? {
-    loaded: false,
-    attempted: coralNeedleCandidates(),
-    error: "coral-needle binary was not found"
-  };
+  return (
+    cachedStatus ?? {
+      loaded: false,
+      attempted: coralNeedleCandidates(),
+      error: 'coral-needle binary was not found',
+    }
+  );
 }
 
 function adaptNativeBinding(native: NativeCoralNeedleBinding): CoralNeedleBinding {
   return {
-    initStore: (dbPath) => native.initStore(dbPath),
-    setActiveSpec: (spec) => native.setActiveSpec(spec),
-    upsertChunks: (chunks) => native.upsertChunks(chunks),
-    buildIndex: (engineName = "auto") => native.buildIndex(engineName),
+    initStore: (dbPath) => {
+      native.initStore(dbPath);
+    },
+    setActiveSpec: (spec) => {
+      native.setActiveSpec(spec);
+    },
+    upsertChunks: (chunks) => {
+      native.upsertChunks(chunks);
+    },
+    buildIndex: (engineName = 'auto') => {
+      native.buildIndex(engineName);
+    },
     searchVector: (queryVector, candidateK) => native.searchVector(queryVector, candidateK),
-    close: () => native.closeStore(),
-    ...(native.getStats ? { getStats: () => native.getStats?.() as CoralStoreStats } : {})
+    close: () => {
+      native.closeStore();
+    },
+    ...(native.getStats ? { getStats: () => native.getStats?.() as CoralStoreStats } : {}),
   };
 }
 
 function coralNeedleCandidates(): string[] {
-  const root = path.resolve(process.cwd(), "..", "coral-needle");
+  const root = path.resolve(process.cwd(), '..', 'coral-needle');
   const candidates = [
     process.env.OPTSIDIAN_CORAL_NEEDLE_BINDING?.trim(),
     managedBindingCandidate(),
-    path.join(root, "build", "coral-needle.node"),
-    path.join(root, "build", "Release", "coral-needle.node"),
-    path.join(root, "dist", "coral-needle.node")
+    path.join(root, 'build', 'coral-needle.node'),
+    path.join(root, 'build', 'Release', 'coral-needle.node'),
+    path.join(root, 'dist', 'coral-needle.node'),
   ];
-  return candidates.filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  return candidates.filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
 }
 
 function managedBindingCandidate(): string | undefined {

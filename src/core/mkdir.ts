@@ -1,7 +1,7 @@
-import fs from "node:fs";
-import { UsageError } from "../errors.js";
-import { resolveVaultPath } from "./path.js";
-import type { MkdirParams, MutationResult } from "./types.js";
+import fs from 'node:fs';
+import { UsageError } from '../errors.js';
+import { resolveVaultPath } from './path.js';
+import type { MkdirParams, MutationResult } from './types.js';
 
 export function mkdirVaultPath(vaultRoot: string, params: MkdirParams): MutationResult {
   const target = resolveVaultPath(vaultRoot, params.path);
@@ -9,10 +9,10 @@ export function mkdirVaultPath(vaultRoot: string, params: MkdirParams): Mutation
     if (fs.statSync(target.abs).isDirectory()) {
       return {
         ok: true,
-        command: "mkdir",
+        command: 'mkdir',
         dryRun: Boolean(params.dryRun),
         message: `Directory already exists: ${target.rel}`,
-        changes: []
+        changes: [],
       };
     }
     throw new UsageError(`Path exists and is not a directory: ${target.rel}`);
@@ -22,8 +22,8 @@ export function mkdirVaultPath(vaultRoot: string, params: MkdirParams): Mutation
   }
   return {
     ok: true,
-    command: "mkdir",
+    command: 'mkdir',
     dryRun: Boolean(params.dryRun),
-    changes: [{ code: "A", path: target.rel }]
+    changes: [{ code: 'A', path: target.rel }],
   };
 }

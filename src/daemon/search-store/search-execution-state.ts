@@ -1,17 +1,22 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis, type SearchTokenChannel, type SearchTokenChannelTerms } from "../../core/search/analysis/index.js";
-import type { NormalizedSearchParams } from "../../core/search/internal-types.js";
-import { bm25BoundKey, exactDominanceLambda, type ExactDominanceBound } from "../../core/search/ranking/index.js";
-import { createLinkGraphView } from "../../core/search/retrieval/link.js";
+import {
+  SEARCH_TOKEN_CHANNELS,
+  type SearchTextAnalysis,
+  type SearchTokenChannel,
+  type SearchTokenChannelTerms,
+} from '../../core/search/analysis/index.js';
+import type { NormalizedSearchParams } from '../../core/search/internal-types.js';
+import { bm25BoundKey, exactDominanceLambda, type ExactDominanceBound } from '../../core/search/ranking/index.js';
+import { createLinkGraphView } from '../../core/search/retrieval/link.js';
 import {
   bm25TermScoreFromStatsLookup,
   buildSearchSnapshotFromSegments,
   createPositionalBm25StatsLookup,
   createSearchFieldLengthLookup,
   POSITIONAL_FIELD_BY_ID,
-  type SearchSnapshot
-} from "../../core/search/retrieval/positional/index.js";
-import { SEARCH_PROPERTIES } from "../../core/search/schema.js";
-import { sharedBytes, type SearchExecutionSnapshotHandle } from "./result-shaping.js";
+  type SearchSnapshot,
+} from '../../core/search/retrieval/positional/index.js';
+import { SEARCH_PROPERTIES } from '../../core/search/schema.js';
+import { sharedBytes, type SearchExecutionSnapshotHandle } from './result-shaping.js';
 
 export type SearchExecutionCacheStats = {
   entries: number;
@@ -38,19 +43,21 @@ export type SearchExecutionState = {
   snapshot: SearchSnapshot;
 };
 
-const SEARCH_EXECUTION_STATE_CACHE_LIMIT = envPositiveInt(process.env, "OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2;
+const SEARCH_EXECUTION_STATE_CACHE_LIMIT =
+  envPositiveInt(process.env, 'OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS') ?? 2;
 const searchExecutionStateCache = new Map<string, SearchExecutionState>();
 const bm25SingleTermBoundCache = new Map<string, ReadonlyMap<string, number>>();
 const searchExecutionStateCacheCounters = {
   hits: 0,
   misses: 0,
   evictions: 0,
-  preloads: 0
+  preloads: 0,
 };
 
-export function cachedSearchExecutionStateFromHandle(
-  handle: SearchExecutionSnapshotHandle
-): { state: SearchExecutionState; cacheHit: boolean } {
+export function cachedSearchExecutionStateFromHandle(handle: SearchExecutionSnapshotHandle): {
+  state: SearchExecutionState;
+  cacheHit: boolean;
+} {
   const cacheKey = searchExecutionStateCacheKey(handle);
   const cached = searchExecutionStateCache.get(cacheKey);
   if (cached) {
@@ -77,11 +84,11 @@ export function searchExecutionStateFromHandle(handle: SearchExecutionSnapshotHa
     segments: handle.segments.map((segment) => ({
       segmentId: segment.segmentId,
       partitionId: segment.partitionId,
-      bytes: sharedBytes(segment.bytes)
+      bytes: sharedBytes(segment.bytes),
     })),
     bm25Stats: handle.bm25Stats,
     ...(handle.linkGraph ? { linkGraph: createLinkGraphView(handle.linkGraph) } : {}),
-    validateProjection: false
+    validateProjection: false,
   });
   return { snapshot };
 }
@@ -104,8 +111,8 @@ export function searchExecutionStateFromShardHandle(handle: SearchExecutionSnaps
       documentCount: segments.reduce((sum, segment) => sum + segment.projection.documentCount(), 0),
       segments,
       bm25Stats: cached.snapshot.bm25Stats,
-      ...(cached.snapshot.linkGraph ? { linkGraph: cached.snapshot.linkGraph } : {})
-    }
+      ...(cached.snapshot.linkGraph ? { linkGraph: cached.snapshot.linkGraph } : {}),
+    },
   };
 }
 
@@ -114,7 +121,7 @@ export function warmSearchExecutionSnapshot(handle: SearchExecutionSnapshotHandl
   snapshotBm25SingleTermBounds(result.state.snapshot);
   return {
     snapshotId: result.state.snapshot.snapshotId,
-    cacheHit: result.cacheHit
+    cacheHit: result.cacheHit,
   };
 }
 
@@ -124,7 +131,7 @@ export function preloadSearchExecutionSnapshot(handle: SearchExecutionSnapshotHa
   return {
     snapshotId: result.snapshotId,
     cacheHit: result.cacheHit,
-    cache: searchExecutionCacheStats()
+    cache: searchExecutionCacheStats(),
   };
 }
 
@@ -136,7 +143,7 @@ export function searchExecutionCacheStats(): SearchExecutionCacheStats {
     misses: searchExecutionStateCacheCounters.misses,
     evictions: searchExecutionStateCacheCounters.evictions,
     preloads: searchExecutionStateCacheCounters.preloads,
-    snapshotIds: [...searchExecutionStateCache.values()].map((state) => state.snapshot.snapshotId)
+    snapshotIds: [...searchExecutionStateCache.values()].map((state) => state.snapshot.snapshotId),
   };
 }
 
@@ -149,19 +156,19 @@ export function exactDominanceBoundForSearchHandle(input: {
   return exactDominanceBoundForSearchSnapshot({
     snapshot,
     analysis: input.analysis,
-    search: input.search
+    search: input.search,
   });
 }
 
 export function exactDominanceBoundForSearchSnapshot(input: {
   snapshot: SearchSnapshot;
   analysis: SearchTextAnalysis;
-  search: Pick<NormalizedSearchParams, "fields">;
+  search: Pick<NormalizedSearchParams, 'fields'>;
 }): ExactDominanceBound {
   return exactDominanceLambda({
     channelTermCounts: queryChannelTermCounts(input.analysis.channels),
     fields: input.search.fields ?? [...SEARCH_PROPERTIES],
-    bm25SingleTermBounds: snapshotBm25SingleTermBounds(input.snapshot)
+    bm25SingleTermBounds: snapshotBm25SingleTermBounds(input.snapshot),
   });
 }
 
@@ -195,7 +202,7 @@ function snapshotBm25SingleTermBounds(snapshot: SearchSnapshot): ReadonlyMap<str
           row.term,
           row.fieldId,
           posting.positions.length,
-          fieldLength
+          fieldLength,
         );
         if (!Number.isFinite(score) || score < 0) {
           throw new Error(`invalid BM25 bound observation for ${row.channel}/${field}/${row.term}`);
@@ -238,7 +245,7 @@ function queryChannelTermCounts(channels: SearchTokenChannelTerms): Partial<Reco
 }
 
 function canonicalPostingTerm(channel: SearchTokenChannel, term: string): string {
-  return `${channel}\u0000${term.normalize("NFC").trim()}`;
+  return `${channel}\u0000${term.normalize('NFC').trim()}`;
 }
 
 function envPositiveInt(env: NodeJS.ProcessEnv, key: string): number | undefined {

@@ -1,4 +1,4 @@
-import { rpcError, type SearchDaemonRpcError } from "./protocol.js";
+import { rpcError, type SearchDaemonRpcError } from './protocol.js';
 
 export type SchedulerSearchRequest = {
   query: string;
@@ -24,14 +24,17 @@ export type SchedulerSearchResult = SchedulerSearchSuccess | SchedulerSearchFail
 
 export type RequestScheduler = {
   cancel(cancellationId: string): void;
-  run<T>(request: {
-    deadline: number;
-    cancellationId?: string;
-    snapshotId?: string;
-  }, task: () => Promise<T>): Promise<T>;
+  run<T>(
+    request: {
+      deadline: number;
+      cancellationId?: string;
+      snapshotId?: string;
+    },
+    task: () => Promise<T>,
+  ): Promise<T>;
   applyBackpressure(input: {
     backgroundQueueDepth: number;
-    queues?: Array<{ name: string; kind: "query" | "throughput"; depth: number }>;
+    queues?: Array<{ name: string; kind: 'query' | 'throughput'; depth: number }>;
   }): { shedQueues: string[]; queryWorkShed: boolean; backgroundQueueDepth: number };
 };
 
@@ -51,25 +54,27 @@ export function createRequestScheduler(): RequestScheduler {
     },
     applyBackpressure(input) {
       const queues = input.queues ?? [
-        { name: "throughput-rebuild", kind: "throughput", depth: input.backgroundQueueDepth },
-        { name: "throughput-refresh", kind: "throughput", depth: input.backgroundQueueDepth },
-        { name: "throughput-compact", kind: "throughput", depth: input.backgroundQueueDepth }
+        { name: 'throughput-rebuild', kind: 'throughput', depth: input.backgroundQueueDepth },
+        { name: 'throughput-refresh', kind: 'throughput', depth: input.backgroundQueueDepth },
+        { name: 'throughput-compact', kind: 'throughput', depth: input.backgroundQueueDepth },
       ];
-      const priority = ["throughput-rebuild", "throughput-refresh", "throughput-compact"];
+      const priority = ['throughput-rebuild', 'throughput-refresh', 'throughput-compact'];
       return {
         shedQueues: queues
-          .filter((queue) => queue.kind === "throughput" && queue.depth > 0)
+          .filter((queue) => queue.kind === 'throughput' && queue.depth > 0)
           .sort((left, right) => {
             const leftPriority = priority.indexOf(left.name);
             const rightPriority = priority.indexOf(right.name);
-            return (leftPriority === -1 ? priority.length : leftPriority) - (rightPriority === -1 ? priority.length : rightPriority) ||
-              compareCodePoint(left.name, right.name);
+            return (
+              (leftPriority === -1 ? priority.length : leftPriority) -
+                (rightPriority === -1 ? priority.length : rightPriority) || compareCodePoint(left.name, right.name)
+            );
           })
           .map((queue) => queue.name),
         queryWorkShed: false,
-        backgroundQueueDepth: input.backgroundQueueDepth
+        backgroundQueueDepth: input.backgroundQueueDepth,
       };
-    }
+    },
   };
 }
 
@@ -110,20 +115,20 @@ export function createDeterministicSearchSchedulerForTests(options: {
         return {
           ok: false,
           snapshotId,
-          error: rpcError("DEADLINE_EXCEEDED", "search request deadline expired before execution")
+          error: rpcError('DEADLINE_EXCEEDED', 'search request deadline expired before execution'),
         };
       }
       if (request.cancellationId && cancelled.has(request.cancellationId)) {
         return {
           ok: false,
           snapshotId,
-          error: rpcError("CANCELLED", "search request was cancelled before execution")
+          error: rpcError('CANCELLED', 'search request was cancelled before execution'),
         };
       }
       return {
         ok: true,
         snapshotId,
-        matches: [...options.queryResults]
+        matches: [...options.queryResults],
       };
     },
     async publishNextSnapshot() {
@@ -131,23 +136,23 @@ export function createDeterministicSearchSchedulerForTests(options: {
     },
     async applyBackpressure() {
       return {
-        shedQueues: ["throughput-rebuild", "throughput-refresh", "throughput-compact"],
+        shedQueues: ['throughput-rebuild', 'throughput-refresh', 'throughput-compact'],
         queryWorkShed: false,
-        backgroundQueueDepth: options.backgroundQueueDepth
+        backgroundQueueDepth: options.backgroundQueueDepth,
       };
-    }
+    },
   };
 }
 
 function assertRunnable(deadline: number, cancellationId: string | undefined, cancelled: Set<string>): void {
   if (Date.now() >= deadline) {
-    throw Object.assign(new Error("request deadline expired before completion"), {
-      code: "DEADLINE_EXCEEDED"
+    throw Object.assign(new Error('request deadline expired before completion'), {
+      code: 'DEADLINE_EXCEEDED',
     });
   }
   if (cancellationId && cancelled.has(cancellationId)) {
-    throw Object.assign(new Error("request was cancelled"), {
-      code: "CANCELLED"
+    throw Object.assign(new Error('request was cancelled'), {
+      code: 'CANCELLED',
     });
   }
 }

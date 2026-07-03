@@ -75,7 +75,7 @@ export class LevelReconciler<TWorld, TFolded, TActionResult = void, TIntent = vo
     if (!this.drainOnStop) {
       this.dirty = false;
       this.intents.length = 0;
-      this.abortController.abort(new Error("LevelReconciler stopped without drain."));
+      this.abortController.abort(new Error('LevelReconciler stopped without drain.'));
     }
     this.wake();
     if (!this.started) {
@@ -108,7 +108,7 @@ export class LevelReconciler<TWorld, TFolded, TActionResult = void, TIntent = vo
         const batch: LevelReconcilerBatch<TIntent> = {
           dirty: this.dirty,
           intents: this.intents.splice(0),
-          signal: this.abortController.signal
+          signal: this.abortController.signal,
         };
         this.dirty = false;
         this.running = true;

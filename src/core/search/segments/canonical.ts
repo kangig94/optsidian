@@ -1,12 +1,12 @@
-import crypto from "node:crypto";
-import path from "node:path";
-import type { SearchAnalyzerIdentity } from "../analyzer.js";
-import type { SearchTokenChannel } from "../analysis/index.js";
-import type { RetrieverIdentity } from "../contracts.js";
-import { identityPhraseCandidates } from "../ranking/identity.js";
-import { SEARCH_PROPERTIES } from "../schema.js";
-import type { SearchField } from "../../types.js";
-import { decodeUnsignedLeb128, encodeUnsignedLeb128, encodeZigZagLeb128, assertSafeUnsignedInteger } from "./leb128.js";
+import crypto from 'node:crypto';
+import path from 'node:path';
+import type { SearchAnalyzerIdentity } from '../analyzer.js';
+import type { SearchTokenChannel } from '../analysis/index.js';
+import type { RetrieverIdentity } from '../contracts.js';
+import { identityPhraseCandidates } from '../ranking/identity.js';
+import { SEARCH_PROPERTIES } from '../schema.js';
+import type { SearchField } from '../../types.js';
+import { decodeUnsignedLeb128, encodeUnsignedLeb128, encodeZigZagLeb128, assertSafeUnsignedInteger } from './leb128.js';
 
 export const CANONICAL_SEGMENT_MAGIC = Uint8Array.from([0x4f, 0x53, 0x53, 0x47]);
 export const CANONICAL_SEGMENT_VERSION = 1;
@@ -17,7 +17,7 @@ export const CANONICAL_SEGMENT_SECTION = {
   fieldTexts: 3,
   bm25: 4,
   docProjection: 5,
-  termDictionary: 6
+  termDictionary: 6,
 } as const;
 
 export const CANONICAL_BM25_STATS_SCHEMA_ID = 1;
@@ -75,7 +75,12 @@ export type CanonicalBm25CorpusStats = {
   totalFieldLength: number;
 };
 
-export type CanonicalBm25GlobalStatsRow = readonly [channel: string, fieldId: number, term: string, documentFrequency: number];
+export type CanonicalBm25GlobalStatsRow = readonly [
+  channel: string,
+  fieldId: number,
+  term: string,
+  documentFrequency: number,
+];
 
 export type CanonicalBm25GlobalStats = {
   bm25StatsSchemaId: typeof CANONICAL_BM25_STATS_SCHEMA_ID;
@@ -140,7 +145,7 @@ export type SearchSnapshotAnalyzerIdentity = {
 };
 
 export type SearchSegmentSchemaIdentity = {
-  format: "canonical-segment";
+  format: 'canonical-segment';
   version: typeof CANONICAL_SEGMENT_VERSION;
   sections: readonly {
     name: keyof typeof CANONICAL_SEGMENT_SECTION;
@@ -150,7 +155,7 @@ export type SearchSegmentSchemaIdentity = {
 };
 
 export type SearchCorpusStatsSchemaIdentity = {
-  id: "bm25-global-stats";
+  id: 'bm25-global-stats';
   schemaId: typeof CANONICAL_BM25_STATS_SCHEMA_ID;
 };
 
@@ -260,7 +265,14 @@ type SectionEntry = {
   length: number;
 };
 
-type CanonicalValue = null | boolean | number | string | Uint8Array | readonly CanonicalValue[] | { readonly [key: string]: CanonicalValue | undefined };
+type CanonicalValue =
+  | null
+  | boolean
+  | number
+  | string
+  | Uint8Array
+  | readonly CanonicalValue[]
+  | { readonly [key: string]: CanonicalValue | undefined };
 
 export function encodeCanonicalSegment(segment: CanonicalSegment): Uint8Array {
   const normalized = normalizeCanonicalSegment(segment);
@@ -293,17 +305,17 @@ export function decodeCanonicalSegment(bytes: Uint8Array): CanonicalSegment {
   let docProjectionPayload: Uint8Array | undefined;
   let termDictionaryPayload: Uint8Array | undefined;
   for (const entry of entries) {
-    if (entry.offset !== expectedPayloadOffset) throw new Error("canonical segment sections must be contiguous and sorted");
+    if (entry.offset !== expectedPayloadOffset)
+      throw new Error('canonical segment sections must be contiguous and sorted');
     expectedPayloadOffset += entry.length;
     const start = payloadStart + entry.offset;
     const end = start + entry.length;
-    if (start < payloadStart || end > bytes.length) throw new Error("canonical segment section bounds are invalid");
+    if (start < payloadStart || end > bytes.length) throw new Error('canonical segment section bounds are invalid');
     const payload = bytes.subarray(start, end);
     if (entry.id === CANONICAL_SEGMENT_SECTION.postings) {
       postingsPayload = payload;
       segment.postings = decodePostingsSection(payload);
-    }
-    else if (entry.id === CANONICAL_SEGMENT_SECTION.documents) segment.documents = decodeDocumentsSection(payload);
+    } else if (entry.id === CANONICAL_SEGMENT_SECTION.documents) segment.documents = decodeDocumentsSection(payload);
     else if (entry.id === CANONICAL_SEGMENT_SECTION.fieldTexts) segment.fieldTexts = decodeFieldTextsSection(payload);
     else if (entry.id === CANONICAL_SEGMENT_SECTION.bm25) segment.bm25 = decodeBm25Section(payload);
     else if (entry.id === CANONICAL_SEGMENT_SECTION.docProjection) docProjectionPayload = payload;
@@ -311,12 +323,17 @@ export function decodeCanonicalSegment(bytes: Uint8Array): CanonicalSegment {
     else throw new Error(`unknown canonical segment section ${entry.id}`);
   }
   if (payloadStart + expectedPayloadOffset !== bytes.length) {
-    throw new Error("canonical segment contains trailing bytes");
+    throw new Error('canonical segment contains trailing bytes');
   }
-  if (!postingsPayload) throw new Error("canonical segment missing postings section");
-  if (!docProjectionPayload) throw new Error("canonical segment missing docProjection section");
-  if (!termDictionaryPayload) throw new Error("canonical segment missing term dictionary section");
-  validateDocProjectionSection(docProjectionPayload, segment.documents ?? [], segment.fieldTexts ?? [], segment.bm25 ?? []);
+  if (!postingsPayload) throw new Error('canonical segment missing postings section');
+  if (!docProjectionPayload) throw new Error('canonical segment missing docProjection section');
+  if (!termDictionaryPayload) throw new Error('canonical segment missing term dictionary section');
+  validateDocProjectionSection(
+    docProjectionPayload,
+    segment.documents ?? [],
+    segment.fieldTexts ?? [],
+    segment.bm25 ?? [],
+  );
   validateTermDictionaryAgainstPostings(termDictionaryPayload, postingsPayload);
   return normalizeCanonicalSegment(segment);
 }
@@ -326,15 +343,16 @@ export function canonicalSegmentSectionBytes(bytes: Uint8Array, sectionId: numbe
   let expectedPayloadOffset = 0;
   let found: Uint8Array | undefined;
   for (const entry of entries) {
-    if (entry.offset !== expectedPayloadOffset) throw new Error("canonical segment sections must be contiguous and sorted");
+    if (entry.offset !== expectedPayloadOffset)
+      throw new Error('canonical segment sections must be contiguous and sorted');
     expectedPayloadOffset += entry.length;
     const start = payloadStart + entry.offset;
     const end = start + entry.length;
-    if (start < payloadStart || end > bytes.length) throw new Error("canonical segment section bounds are invalid");
+    if (start < payloadStart || end > bytes.length) throw new Error('canonical segment section bounds are invalid');
     if (entry.id === sectionId) found = bytes.subarray(start, end);
   }
   if (payloadStart + expectedPayloadOffset !== bytes.length) {
-    throw new Error("canonical segment contains trailing bytes");
+    throw new Error('canonical segment contains trailing bytes');
   }
   return found;
 }
@@ -354,7 +372,7 @@ export function canonicalSnapshotManifestBytes(manifest: CanonicalSnapshotManife
       channel: field.channel,
       fieldId: field.fieldId,
       documentCount: field.documentCount,
-      totalFieldLength: field.totalFieldLength
+      totalFieldLength: field.totalFieldLength,
     })),
     bm25GlobalStatsRows: manifest.bm25GlobalStatsRows.map((row) => [row[0], row[1], row[2], row[3]]),
     bm25GlobalStatsHash: manifest.bm25GlobalStatsHash,
@@ -364,8 +382,8 @@ export function canonicalSnapshotManifestBytes(manifest: CanonicalSnapshotManife
       documentIdEnd: partition.documentIdEnd,
       segmentHash: partition.segmentHash,
       documentCount: partition.documentCount,
-      byteLength: partition.byteLength
-    }))
+      byteLength: partition.byteLength,
+    })),
   });
 }
 
@@ -390,7 +408,7 @@ export function lexicalCorpusIdentityFromManifest(manifest: CanonicalSnapshotMan
       channel: field.channel,
       fieldId: field.fieldId,
       documentCount: field.documentCount,
-      totalFieldLength: field.totalFieldLength
+      totalFieldLength: field.totalFieldLength,
     })),
     bm25GlobalStatsRows: manifest.bm25GlobalStatsRows.map((row) => [row[0], row[1], row[2], row[3]]),
     bm25GlobalStatsHash: manifest.bm25GlobalStatsHash,
@@ -400,8 +418,8 @@ export function lexicalCorpusIdentityFromManifest(manifest: CanonicalSnapshotMan
       documentIdEnd: partition.documentIdEnd,
       segmentHash: partition.segmentHash,
       documentCount: partition.documentCount,
-      byteLength: partition.byteLength
-    }))
+      byteLength: partition.byteLength,
+    })),
   };
 }
 
@@ -418,8 +436,8 @@ function lexicalAnalyzerIdentity(identity: SearchSnapshotAnalyzerIdentity): Sear
       enabled: identity.ngram.enabled,
       min: identity.ngram.min,
       max: identity.ngram.max,
-      bodyBudget: identity.ngram.bodyBudget
-    }
+      bodyBudget: identity.ngram.bodyBudget,
+    },
   };
 }
 
@@ -429,26 +447,28 @@ export function canonicalValueBytes(value: unknown): Uint8Array {
   return writer.bytes();
 }
 
-export function canonicalBm25GlobalStatsBytes(stats: Omit<CanonicalBm25GlobalStats, "bm25GlobalStatsHash">): Uint8Array {
+export function canonicalBm25GlobalStatsBytes(
+  stats: Omit<CanonicalBm25GlobalStats, 'bm25GlobalStatsHash'>,
+): Uint8Array {
   return canonicalValueBytes({
     schemaId: stats.bm25StatsSchemaId,
     corpusStats: stats.corpusStats.map((field) => ({
       channel: field.channel,
       fieldId: field.fieldId,
       documentCount: field.documentCount,
-      totalFieldLength: field.totalFieldLength
+      totalFieldLength: field.totalFieldLength,
     })),
-    rows: stats.bm25GlobalStatsRows.map((row) => [row[0], row[1], row[2], row[3]])
+    rows: stats.bm25GlobalStatsRows.map((row) => [row[0], row[1], row[2], row[3]]),
   });
 }
 
-export function canonicalBm25GlobalStatsHash(stats: Omit<CanonicalBm25GlobalStats, "bm25GlobalStatsHash">): string {
+export function canonicalBm25GlobalStatsHash(stats: Omit<CanonicalBm25GlobalStats, 'bm25GlobalStatsHash'>): string {
   return sha256(canonicalBm25GlobalStatsBytes(stats));
 }
 
 export function reduceCanonicalBm25GlobalStats(
   segmentStats: readonly (readonly CanonicalBm25FieldStats[])[],
-  channelOrder: readonly string[]
+  channelOrder: readonly string[],
 ): CanonicalBm25GlobalStats {
   const corpus = new Map<string, CanonicalBm25CorpusStats>();
   const frequencies = new Map<string, { channel: string; fieldId: number; term: string; documentFrequency: number }>();
@@ -459,12 +479,12 @@ export function reduceCanonicalBm25GlobalStats(
         channel: field.channel,
         fieldId: field.fieldId,
         documentCount: 0,
-        totalFieldLength: 0
+        totalFieldLength: 0,
       };
       corpusEntry.documentCount += field.documentCount;
       corpusEntry.totalFieldLength += field.totalFieldLength;
-      assertSafeUnsignedInteger(corpusEntry.documentCount, "BM25 global documentCount");
-      assertSafeUnsignedInteger(corpusEntry.totalFieldLength, "BM25 global totalFieldLength");
+      assertSafeUnsignedInteger(corpusEntry.documentCount, 'BM25 global documentCount');
+      assertSafeUnsignedInteger(corpusEntry.totalFieldLength, 'BM25 global totalFieldLength');
       corpus.set(corpusKey, corpusEntry);
 
       for (const entry of field.documentFrequencies) {
@@ -473,17 +493,19 @@ export function reduceCanonicalBm25GlobalStats(
           channel: field.channel,
           fieldId: field.fieldId,
           term: entry.term,
-          documentFrequency: 0
+          documentFrequency: 0,
         };
         current.documentFrequency += entry.frequency;
-        assertSafeUnsignedInteger(current.documentFrequency, "BM25 global documentFrequency");
+        assertSafeUnsignedInteger(current.documentFrequency, 'BM25 global documentFrequency');
         frequencies.set(frequencyKey, current);
       }
     }
   }
 
   const compare = bm25GlobalOrder(channelOrder);
-  const corpusStats = [...corpus.values()].sort((left, right) => compare(left.channel, left.fieldId, "", right.channel, right.fieldId, ""));
+  const corpusStats = [...corpus.values()].sort((left, right) =>
+    compare(left.channel, left.fieldId, '', right.channel, right.fieldId, ''),
+  );
   const bm25GlobalStatsRows = [...frequencies.values()]
     .filter((entry) => entry.documentFrequency > 0)
     .sort((left, right) => compare(left.channel, left.fieldId, left.term, right.channel, right.fieldId, right.term))
@@ -492,16 +514,16 @@ export function reduceCanonicalBm25GlobalStats(
   const withoutHash = {
     bm25StatsSchemaId: CANONICAL_BM25_STATS_SCHEMA_ID,
     corpusStats,
-    bm25GlobalStatsRows
+    bm25GlobalStatsRows,
   } as const;
   return {
     ...withoutHash,
-    bm25GlobalStatsHash: canonicalBm25GlobalStatsHash(withoutHash)
+    bm25GlobalStatsHash: canonicalBm25GlobalStatsHash(withoutHash),
   };
 }
 
 export function encodeFloat64Canonical(value: number): Uint8Array {
-  if (!Number.isFinite(value)) throw new Error("canonical float must be finite");
+  if (!Number.isFinite(value)) throw new Error('canonical float must be finite');
   const normalized = Object.is(value, -0) ? 0 : value;
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setFloat64(0, normalized, true);
@@ -510,20 +532,22 @@ export function encodeFloat64Canonical(value: number): Uint8Array {
 
 export function buildCanonicalSnapshotForTests(input: CanonicalSnapshotBuildForTestsInput): CanonicalSnapshotForTests {
   void input.history;
-  const records = input.documents.map((document) => {
-    const path = normalizeVaultRelativePath(document.path);
-    return {
-      documentId: sha256(utf8(path)),
-      path,
-      contentHash: sha256(utf8(document.content)),
-      parsedFieldHashes: {
-        body: sha256(utf8(document.content))
-      },
-      snippetLineSpanHash: sha256(utf8(lineSpanSource(document.content))),
-      deleted: false,
-      content: document.content
-    };
-  }).sort((left, right) => compareByteStrings(left.documentId, right.documentId));
+  const records = input.documents
+    .map((document) => {
+      const path = normalizeVaultRelativePath(document.path);
+      return {
+        documentId: sha256(utf8(path)),
+        path,
+        contentHash: sha256(utf8(document.content)),
+        parsedFieldHashes: {
+          body: sha256(utf8(document.content)),
+        },
+        snippetLineSpanHash: sha256(utf8(lineSpanSource(document.content))),
+        deleted: false,
+        content: document.content,
+      };
+    })
+    .sort((left, right) => compareByteStrings(left.documentId, right.documentId));
 
   const partitions = new Map<number, typeof records>();
   for (const record of records) {
@@ -533,31 +557,40 @@ export function buildCanonicalSnapshotForTests(input: CanonicalSnapshotBuildForT
     partitions.set(partitionId, partition);
   }
 
-  const segments = [...partitions.entries()].sort((left, right) => left[0] - right[0]).map(([partitionId, partitionRecords]) => {
-    const segment = segmentForTestRecords(partitionRecords);
-    const bytes = encodeCanonicalSegment(segment);
-    return {
-      partitionId,
-      hash: canonicalSegmentHash(bytes),
-      bytes,
-      bm25: segment.bm25 ?? [],
-      documentIdStart: partitionRecords[0]?.documentId ?? "",
-      documentIdEnd: partitionRecords[partitionRecords.length - 1]?.documentId ?? "",
-      documentCount: partitionRecords.length
-    };
-  });
-  const bm25GlobalStats = reduceCanonicalBm25GlobalStats(segments.map((segment) => segment.bm25), ["morph", "surface", "ngram"]);
+  const segments = [...partitions.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([partitionId, partitionRecords]) => {
+      const segment = segmentForTestRecords(partitionRecords);
+      const bytes = encodeCanonicalSegment(segment);
+      return {
+        partitionId,
+        hash: canonicalSegmentHash(bytes),
+        bytes,
+        bm25: segment.bm25 ?? [],
+        documentIdStart: partitionRecords[0]?.documentId ?? '',
+        documentIdEnd: partitionRecords[partitionRecords.length - 1]?.documentId ?? '',
+        documentCount: partitionRecords.length,
+      };
+    });
+  const bm25GlobalStats = reduceCanonicalBm25GlobalStats(
+    segments.map((segment) => segment.bm25),
+    ['morph', 'surface', 'ngram'],
+  );
 
   const manifest: CanonicalSnapshotManifest = {
     identityTuple: input.identityTuple,
-    liveDocumentManifestHash: sha256(canonicalValueBytes(records.map((record) => ({
-      documentId: record.documentId,
-      path: record.path,
-      contentHash: record.contentHash,
-      parsedFieldHashes: record.parsedFieldHashes,
-      snippetLineSpanHash: record.snippetLineSpanHash,
-      deleted: false
-    })))),
+    liveDocumentManifestHash: sha256(
+      canonicalValueBytes(
+        records.map((record) => ({
+          documentId: record.documentId,
+          path: record.path,
+          contentHash: record.contentHash,
+          parsedFieldHashes: record.parsedFieldHashes,
+          snippetLineSpanHash: record.snippetLineSpanHash,
+          deleted: false,
+        })),
+      ),
+    ),
     tombstoneHash: sha256(canonicalValueBytes([])),
     bm25StatsSchemaId: bm25GlobalStats.bm25StatsSchemaId,
     corpusStats: bm25GlobalStats.corpusStats,
@@ -569,8 +602,8 @@ export function buildCanonicalSnapshotForTests(input: CanonicalSnapshotBuildForT
       documentIdEnd: segment.documentIdEnd,
       segmentHash: segment.hash,
       documentCount: segment.documentCount,
-      byteLength: segment.bytes.length
-    }))
+      byteLength: segment.bytes.length,
+    })),
   };
   const canonicalManifestBytes = canonicalSnapshotManifestBytes(manifest);
   return {
@@ -580,8 +613,8 @@ export function buildCanonicalSnapshotForTests(input: CanonicalSnapshotBuildForT
     segments: segments.map((segment) => ({
       partitionId: segment.partitionId,
       hash: segment.hash,
-      bytes: segment.bytes
-    }))
+      bytes: segment.bytes,
+    })),
   };
 }
 
@@ -590,7 +623,7 @@ function normalizeCanonicalSegment(segment: CanonicalSegment): CanonicalSegment 
     postings: normalizePostings(segment.postings),
     documents: normalizeDocuments(segment.documents ?? []),
     fieldTexts: normalizeFieldTexts(segment.fieldTexts ?? []),
-    bm25: normalizeBm25Stats(segment.bm25 ?? [])
+    bm25: normalizeBm25Stats(segment.bm25 ?? []),
   };
 }
 
@@ -605,10 +638,10 @@ function canonicalSections(segment: CanonicalSegment): Section[] {
         documents: segment.documents ?? [],
         fieldTexts: segment.fieldTexts ?? [],
         fieldTextOffsets: fieldTexts.offsets,
-        bm25: segment.bm25 ?? []
-      })
+        bm25: segment.bm25 ?? [],
+      }),
     },
-    { id: CANONICAL_SEGMENT_SECTION.termDictionary, bytes: encodeTermDictionarySection(postings.termDictionary) }
+    { id: CANONICAL_SEGMENT_SECTION.termDictionary, bytes: encodeTermDictionarySection(postings.termDictionary) },
   ];
   if ((segment.documents?.length ?? 0) > 0) {
     sections.push({ id: CANONICAL_SEGMENT_SECTION.documents, bytes: encodeDocumentsSection(segment.documents ?? []) });
@@ -625,14 +658,19 @@ function canonicalSections(segment: CanonicalSegment): Section[] {
 function normalizePostings(postings: readonly CanonicalPosting[]): CanonicalPosting[] {
   const merged = new Map<string, { term: string; fieldId: number; docId: number; positions: Set<number> }>();
   for (const posting of postings) {
-    const term = normalizeCanonicalString(posting.term, "NFC");
+    const term = normalizeCanonicalString(posting.term, 'NFC');
     if (!term) continue;
-    assertSafeUnsignedInteger(posting.fieldId, "posting fieldId");
-    assertSafeUnsignedInteger(posting.docId, "posting docId");
+    assertSafeUnsignedInteger(posting.fieldId, 'posting fieldId');
+    assertSafeUnsignedInteger(posting.docId, 'posting docId');
     const key = `${term}\u0000${posting.fieldId}\u0000${posting.docId}`;
-    const entry = merged.get(key) ?? { term, fieldId: posting.fieldId, docId: posting.docId, positions: new Set<number>() };
+    const entry = merged.get(key) ?? {
+      term,
+      fieldId: posting.fieldId,
+      docId: posting.docId,
+      positions: new Set<number>(),
+    };
     for (const position of posting.positions) {
-      assertSafeUnsignedInteger(position, "posting position");
+      assertSafeUnsignedInteger(position, 'posting position');
       entry.positions.add(position);
     }
     merged.set(key, entry);
@@ -642,7 +680,7 @@ function normalizePostings(postings: readonly CanonicalPosting[]): CanonicalPost
       term: entry.term,
       fieldId: entry.fieldId,
       docId: entry.docId,
-      positions: [...entry.positions].sort((left, right) => left - right)
+      positions: [...entry.positions].sort((left, right) => left - right),
     }))
     .filter((posting) => posting.positions.length > 0)
     .sort(comparePostings);
@@ -656,66 +694,85 @@ function comparePostings(left: CanonicalPosting, right: CanonicalPosting): numbe
 }
 
 function normalizeDocuments(documents: readonly CanonicalDocumentRecord[]): CanonicalDocumentRecord[] {
-  return documents.map((document) => ({
-    documentId: normalizeHash(document.documentId, "documentId"),
-    path: normalizeVaultRelativePath(document.path),
-    contentHash: normalizeHash(document.contentHash, "contentHash"),
-    parsedFieldHashes: normalizeHashRecord(document.parsedFieldHashes),
-    snippetLineSpanHash: document.snippetLineSpanHash ? normalizeHash(document.snippetLineSpanHash, "snippetLineSpanHash") : undefined,
-    deleted: document.deleted === true
-  })).sort((left, right) => compareByteStrings(left.documentId, right.documentId));
+  return documents
+    .map((document) => ({
+      documentId: normalizeHash(document.documentId, 'documentId'),
+      path: normalizeVaultRelativePath(document.path),
+      contentHash: normalizeHash(document.contentHash, 'contentHash'),
+      parsedFieldHashes: normalizeHashRecord(document.parsedFieldHashes),
+      snippetLineSpanHash: document.snippetLineSpanHash
+        ? normalizeHash(document.snippetLineSpanHash, 'snippetLineSpanHash')
+        : undefined,
+      deleted: document.deleted === true,
+    }))
+    .sort((left, right) => compareByteStrings(left.documentId, right.documentId));
 }
 
 function normalizeFieldTexts(fieldTexts: readonly CanonicalFieldText[]): CanonicalFieldText[] {
-  return fieldTexts.map((fieldText) => {
-    assertSafeUnsignedInteger(fieldText.docId, "field text docId");
-    assertSafeUnsignedInteger(fieldText.fieldId, "field text fieldId");
-    assertFieldTextIsEncodable(fieldText.fieldId);
-    return {
-      docId: fieldText.docId,
-      fieldId: fieldText.fieldId,
-      text: normalizeCanonicalString(fieldText.text, "NFKC")
-    };
-  }).sort((left, right) => {
-    if (left.docId !== right.docId) return left.docId - right.docId;
-    return left.fieldId - right.fieldId;
-  });
+  return fieldTexts
+    .map((fieldText) => {
+      assertSafeUnsignedInteger(fieldText.docId, 'field text docId');
+      assertSafeUnsignedInteger(fieldText.fieldId, 'field text fieldId');
+      assertFieldTextIsEncodable(fieldText.fieldId);
+      return {
+        docId: fieldText.docId,
+        fieldId: fieldText.fieldId,
+        text: normalizeCanonicalString(fieldText.text, 'NFKC'),
+      };
+    })
+    .sort((left, right) => {
+      if (left.docId !== right.docId) return left.docId - right.docId;
+      return left.fieldId - right.fieldId;
+    });
 }
 
 function assertFieldTextIsEncodable(fieldId: number): void {
-  if (fieldId === fieldIdForSearchField("body")) {
-    throw new Error("canonical fieldTexts cannot encode body field text");
+  if (fieldId === fieldIdForSearchField('body')) {
+    throw new Error('canonical fieldTexts cannot encode body field text');
   }
 }
 
 function normalizeBm25Stats(stats: readonly CanonicalBm25FieldStats[]): CanonicalBm25FieldStats[] {
-  const normalized = stats.map((field) => {
-    const channel = normalizeCanonicalString(field.channel, "NFC");
-    if (!channel) throw new Error("BM25 channel must not be empty");
-    assertSafeUnsignedInteger(field.fieldId, "BM25 fieldId");
-    assertSafeUnsignedInteger(field.documentCount, "BM25 documentCount");
-    assertSafeUnsignedInteger(field.totalFieldLength, "BM25 totalFieldLength");
-    const documentLengths = field.documentLengths.map((entry) => {
-      assertSafeUnsignedInteger(entry.docId, "BM25 document length docId");
-      assertSafeUnsignedInteger(entry.length, "BM25 document length");
-      return { docId: entry.docId, length: entry.length };
-    }).sort((left, right) => left.docId - right.docId);
-    assertNoDuplicateNumbers(documentLengths.map((entry) => entry.docId), "BM25 document length docId");
-    const documentFrequencies = mergeBm25DocumentFrequencies(field.documentFrequencies);
-    return {
-      channel,
-      fieldId: field.fieldId,
-      documentCount: field.documentCount,
-      totalFieldLength: field.totalFieldLength,
-      documentLengths,
-      documentFrequencies
-    };
-  }).sort(compareBm25FieldStats);
-  assertNoDuplicateStrings(normalized.map((field) => bm25FieldKey(field.channel, field.fieldId)), "BM25 channel+field row");
+  const normalized = stats
+    .map((field) => {
+      const channel = normalizeCanonicalString(field.channel, 'NFC');
+      if (!channel) throw new Error('BM25 channel must not be empty');
+      assertSafeUnsignedInteger(field.fieldId, 'BM25 fieldId');
+      assertSafeUnsignedInteger(field.documentCount, 'BM25 documentCount');
+      assertSafeUnsignedInteger(field.totalFieldLength, 'BM25 totalFieldLength');
+      const documentLengths = field.documentLengths
+        .map((entry) => {
+          assertSafeUnsignedInteger(entry.docId, 'BM25 document length docId');
+          assertSafeUnsignedInteger(entry.length, 'BM25 document length');
+          return { docId: entry.docId, length: entry.length };
+        })
+        .sort((left, right) => left.docId - right.docId);
+      assertNoDuplicateNumbers(
+        documentLengths.map((entry) => entry.docId),
+        'BM25 document length docId',
+      );
+      const documentFrequencies = mergeBm25DocumentFrequencies(field.documentFrequencies);
+      return {
+        channel,
+        fieldId: field.fieldId,
+        documentCount: field.documentCount,
+        totalFieldLength: field.totalFieldLength,
+        documentLengths,
+        documentFrequencies,
+      };
+    })
+    .sort(compareBm25FieldStats);
+  assertNoDuplicateStrings(
+    normalized.map((field) => bm25FieldKey(field.channel, field.fieldId)),
+    'BM25 channel+field row',
+  );
   return normalized;
 }
 
-function encodePostingsSectionWithDictionary(postings: readonly CanonicalPosting[]): { bytes: Uint8Array; termDictionary: CanonicalTermDictionaryEntry[] } {
+function encodePostingsSectionWithDictionary(postings: readonly CanonicalPosting[]): {
+  bytes: Uint8Array;
+  termDictionary: CanonicalTermDictionaryEntry[];
+} {
   const writer = new ByteWriter();
   const termDictionary: CanonicalTermDictionaryEntry[] = [];
   writer.writeUnsigned(postings.length);
@@ -728,7 +785,7 @@ function encodePostingsSectionWithDictionary(postings: readonly CanonicalPosting
           term: current.term,
           postingsOffset: current.offset,
           postingsByteLength: rowOffset - current.offset,
-          postingCount: current.count
+          postingCount: current.count,
         });
       }
       current = { term: posting.term, offset: rowOffset, count: 0 };
@@ -741,7 +798,7 @@ function encodePostingsSectionWithDictionary(postings: readonly CanonicalPosting
       term: current.term,
       postingsOffset: current.offset,
       postingsByteLength: writer.byteLength() - current.offset,
-      postingCount: current.count
+      postingCount: current.count,
     });
   }
   return { bytes: writer.bytes(), termDictionary };
@@ -767,7 +824,7 @@ export function readCanonicalPostingRow(reader: ByteReader): CanonicalPosting {
   let previous = -1;
   for (let positionIndex = 0; positionIndex < positionCount; positionIndex += 1) {
     const position = reader.readUnsigned();
-    if (position <= previous) throw new Error("posting positions must be strictly increasing");
+    if (position <= previous) throw new Error('posting positions must be strictly increasing');
     positions.push(position);
     previous = position;
   }
@@ -781,7 +838,7 @@ function writePostingRow(writer: ByteWriter, posting: CanonicalPosting): void {
   writer.writeUnsigned(posting.positions.length);
   let previous = -1;
   for (const position of posting.positions) {
-    if (position <= previous) throw new Error("posting positions must be strictly increasing");
+    if (position <= previous) throw new Error('posting positions must be strictly increasing');
     writer.writeUnsigned(position);
     previous = position;
   }
@@ -794,13 +851,15 @@ function encodeDocumentsSection(documents: readonly CanonicalDocumentRecord[]): 
     writer.writeString(document.documentId);
     writer.writeString(document.path);
     writer.writeString(document.contentHash);
-    const fieldHashes = Object.entries(document.parsedFieldHashes ?? {}).sort(([left], [right]) => compareByteStrings(left, right));
+    const fieldHashes = Object.entries(document.parsedFieldHashes ?? {}).sort(([left], [right]) =>
+      compareByteStrings(left, right),
+    );
     writer.writeUnsigned(fieldHashes.length);
     for (const [field, hash] of fieldHashes) {
       writer.writeString(field);
       writer.writeString(hash);
     }
-    writer.writeString(document.snippetLineSpanHash ?? "");
+    writer.writeString(document.snippetLineSpanHash ?? '');
     writer.writeUnsigned(document.deleted ? 1 : 0);
   }
   return writer.bytes();
@@ -827,7 +886,7 @@ function decodeDocumentsSection(bytes: Uint8Array): CanonicalDocumentRecord[] {
       contentHash,
       parsedFieldHashes,
       snippetLineSpanHash: snippetLineSpanHash || undefined,
-      deleted
+      deleted,
     });
   }
   reader.assertDone();
@@ -849,7 +908,7 @@ function encodeFieldTextsSectionWithOffsets(fieldTexts: readonly CanonicalFieldT
     writer.writeString(fieldText.text);
     offsets.set(docFieldKey(fieldText.docId, fieldText.fieldId), {
       offset,
-      byteLength: writer.byteLength() - offset
+      byteLength: writer.byteLength() - offset,
     });
   }
   return { bytes: writer.bytes(), offsets };
@@ -863,7 +922,7 @@ function decodeFieldTextsSection(bytes: Uint8Array): CanonicalFieldText[] {
     fieldTexts.push({
       docId: reader.readUnsigned(),
       fieldId: reader.readUnsigned(),
-      text: reader.readString()
+      text: reader.readString(),
     });
   }
   reader.assertDone();
@@ -972,24 +1031,41 @@ function encodeDocProjectionSection(input: DocProjectionBuildInput): Uint8Array 
   const rowWords: number[][] = [];
 
   for (const row of rows) {
-    const titleSpan = pushNumericSpan(identityRefs, row.titleKeys.map((key) => requiredStringRef(stringRefs, key)));
-    const aliasSpan = pushNumericSpan(identityRefs, row.aliasKeys.map((key) => requiredStringRef(stringRefs, key)));
-    const headingSpan = pushNumericSpan(identityRefs, row.headingKeys.map((key) => requiredStringRef(stringRefs, key)));
-    const pathSegmentSpan = pushNumericSpan(identityRefs, row.pathSegmentKeys.map((key) => requiredStringRef(stringRefs, key)));
-    const tagSpan = pushNumericSpan(tagIds, row.tags.map((tag) => requiredTagId(tagIdsByTag, tag)));
-    const fieldLengthSpan = pushRowSpan(fieldLengths, row.fieldLengths.map((entry) => [
-      requiredStringRef(stringRefs, entry.channel),
-      entry.fieldId,
-      entry.length
-    ]));
-    const offsetSpan = pushRowSpan(offsetRows, row.offsets.map((entry) => [
-      requiredStringRef(stringRefs, entry.channel),
-      entry.fieldId,
-      entry.fieldTextOffset,
-      entry.fieldTextByteLength,
-      entry.postingsOffset,
-      entry.postingsByteLength
-    ]));
+    const titleSpan = pushNumericSpan(
+      identityRefs,
+      row.titleKeys.map((key) => requiredStringRef(stringRefs, key)),
+    );
+    const aliasSpan = pushNumericSpan(
+      identityRefs,
+      row.aliasKeys.map((key) => requiredStringRef(stringRefs, key)),
+    );
+    const headingSpan = pushNumericSpan(
+      identityRefs,
+      row.headingKeys.map((key) => requiredStringRef(stringRefs, key)),
+    );
+    const pathSegmentSpan = pushNumericSpan(
+      identityRefs,
+      row.pathSegmentKeys.map((key) => requiredStringRef(stringRefs, key)),
+    );
+    const tagSpan = pushNumericSpan(
+      tagIds,
+      row.tags.map((tag) => requiredTagId(tagIdsByTag, tag)),
+    );
+    const fieldLengthSpan = pushRowSpan(
+      fieldLengths,
+      row.fieldLengths.map((entry) => [requiredStringRef(stringRefs, entry.channel), entry.fieldId, entry.length]),
+    );
+    const offsetSpan = pushRowSpan(
+      offsetRows,
+      row.offsets.map((entry) => [
+        requiredStringRef(stringRefs, entry.channel),
+        entry.fieldId,
+        entry.fieldTextOffset,
+        entry.fieldTextByteLength,
+        entry.postingsOffset,
+        entry.postingsByteLength,
+      ]),
+    );
     rowWords.push([
       row.localDocId,
       requiredStringRef(stringRefs, row.documentId),
@@ -1009,7 +1085,7 @@ function encodeDocProjectionSection(input: DocProjectionBuildInput): Uint8Array 
       fieldLengthSpan.offset,
       fieldLengthSpan.count,
       offsetSpan.offset,
-      offsetSpan.count
+      offsetSpan.count,
     ]);
   }
 
@@ -1027,18 +1103,31 @@ function encodeDocProjectionSection(input: DocProjectionBuildInput): Uint8Array 
     identityRefTableLength: identityRefTable.length,
     tagIdTableLength: tagIdTable.length,
     fieldLengthTableLength: fieldLengthTable.length,
-    offsetTableLength: offsetTable.length
+    offsetTableLength: offsetTable.length,
   });
-  return concatBytes([header, stringTable, tagDictionary, rowTable, identityRefTable, tagIdTable, fieldLengthTable, offsetTable]);
+  return concatBytes([
+    header,
+    stringTable,
+    tagDictionary,
+    rowTable,
+    identityRefTable,
+    tagIdTable,
+    fieldLengthTable,
+    offsetTable,
+  ]);
 }
 
 function buildDocProjectionRows(input: DocProjectionBuildInput): DocProjectionRowInput[] {
-  const textByDocField = new Map(input.fieldTexts.map((fieldText) => [docFieldKey(fieldText.docId, fieldText.fieldId), fieldText.text]));
+  const textByDocField = new Map(
+    input.fieldTexts.map((fieldText) => [docFieldKey(fieldText.docId, fieldText.fieldId), fieldText.text]),
+  );
   const lengthsByDoc = docProjectionFieldLengthsByDoc(input.bm25);
   return input.documents.map((document, index) => {
     const localDocId = index + 1;
     const pathStem = filenameStem(document.path);
-    const tags = normalizedDocProjectionTags(textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField("tags"))) ?? "");
+    const tags = normalizedDocProjectionTags(
+      textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField('tags'))) ?? '',
+    );
     const fieldLengths = lengthsByDoc.get(localDocId) ?? [];
     return {
       localDocId,
@@ -1046,19 +1135,23 @@ function buildDocProjectionRows(input: DocProjectionBuildInput): DocProjectionRo
       path: document.path,
       pathIdentityKey: firstIdentityKey(document.path),
       filenameStemKey: firstIdentityKey(pathStem),
-      titleKeys: identityKeysForText(textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField("title"))) ?? ""),
-      aliasKeys: identityKeysForLines(textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField("aliases"))) ?? ""),
-      headingKeys: identityKeysForLines(textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField("headings"))) ?? ""),
+      titleKeys: identityKeysForText(textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField('title'))) ?? ''),
+      aliasKeys: identityKeysForLines(
+        textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField('aliases'))) ?? '',
+      ),
+      headingKeys: identityKeysForLines(
+        textByDocField.get(docFieldKey(localDocId, fieldIdForSearchField('headings'))) ?? '',
+      ),
       pathSegmentKeys: identityKeysForValues(pathSegments(document.path)),
       tags,
       fieldLengths,
-      offsets: docProjectionOffsets(localDocId, fieldLengths, input.fieldTextOffsets)
+      offsets: docProjectionOffsets(localDocId, fieldLengths, input.fieldTextOffsets),
     };
   });
 }
 
 function docProjectionFieldLengthsByDoc(
-  bm25: readonly CanonicalBm25FieldStats[]
+  bm25: readonly CanonicalBm25FieldStats[],
 ): ReadonlyMap<number, readonly CanonicalDocProjectionFieldLength[]> {
   const byDoc = new Map<number, CanonicalDocProjectionFieldLength[]>();
   for (const field of bm25) {
@@ -1067,7 +1160,7 @@ function docProjectionFieldLengthsByDoc(
       entries.push({
         channel: field.channel,
         fieldId: field.fieldId,
-        length: length.length
+        length: length.length,
       });
       byDoc.set(length.docId, entries);
     }
@@ -1081,19 +1174,21 @@ function docProjectionFieldLengthsByDoc(
 function docProjectionOffsets(
   localDocId: number,
   fieldLengths: readonly CanonicalDocProjectionFieldLength[],
-  fieldTextOffsets: ReadonlyMap<string, { offset: number; byteLength: number }>
+  fieldTextOffsets: ReadonlyMap<string, { offset: number; byteLength: number }>,
 ): CanonicalDocProjectionOffsets[] {
-  return fieldLengths.map((entry) => {
-    const fieldText = fieldTextOffsets.get(docFieldKey(localDocId, entry.fieldId));
-    return {
-      channel: entry.channel,
-      fieldId: entry.fieldId,
-      fieldTextOffset: fieldText?.offset ?? 0,
-      fieldTextByteLength: fieldText?.byteLength ?? 0,
-      postingsOffset: 0,
-      postingsByteLength: 0
-    };
-  }).sort(compareProjectionOffsets);
+  return fieldLengths
+    .map((entry) => {
+      const fieldText = fieldTextOffsets.get(docFieldKey(localDocId, entry.fieldId));
+      return {
+        channel: entry.channel,
+        fieldId: entry.fieldId,
+        fieldTextOffset: fieldText?.offset ?? 0,
+        fieldTextByteLength: fieldText?.byteLength ?? 0,
+        postingsOffset: 0,
+        postingsByteLength: 0,
+      };
+    })
+    .sort(compareProjectionOffsets);
 }
 
 function encodeDocProjectionHeader(
@@ -1106,7 +1201,7 @@ function encodeDocProjectionHeader(
     tagIdTableLength: number;
     fieldLengthTableLength: number;
     offsetTableLength: number;
-  }
+  },
 ): Uint8Array {
   const headerLength = docProjectionHeaderLength(documentCount);
   let offset = headerLength;
@@ -1136,7 +1231,7 @@ function encodeDocProjectionHeader(
     tagIdsOffset,
     fieldLengthsOffset,
     offsetsOffset,
-    offset
+    offset,
   ]) {
     writer.writeFixedUnsigned64(value);
   }
@@ -1233,7 +1328,7 @@ function requiredTagId(refs: ReadonlyMap<string, number>, value: string): number
 }
 
 function firstIdentityKey(value: string): string {
-  return identityPhraseCandidates(value)[0] ?? "";
+  return identityPhraseCandidates(value)[0] ?? '';
 }
 
 function identityKeysForText(value: string): string[] {
@@ -1245,7 +1340,9 @@ function identityKeysForLines(value: string): string[] {
 }
 
 function identityKeysForValues(values: readonly string[]): string[] {
-  return [...new Set(values.flatMap((value) => identityPhraseCandidates(value)).filter(Boolean))].sort(compareByteStrings);
+  return [...new Set(values.flatMap((value) => identityPhraseCandidates(value)).filter(Boolean))].sort(
+    compareByteStrings,
+  );
 }
 
 function normalizedDocProjectionTags(value: string): string[] {
@@ -1253,7 +1350,7 @@ function normalizedDocProjectionTags(value: string): string[] {
 }
 
 function normalizeTagKey(value: string): string {
-  return value.replace(/^#+/u, "").trim().toLowerCase().normalize("NFC");
+  return value.replace(/^#+/u, '').trim().toLowerCase().normalize('NFC');
 }
 
 function filenameStem(relPath: string): string {
@@ -1262,7 +1359,7 @@ function filenameStem(relPath: string): string {
 
 function pathSegments(relPath: string): string[] {
   const dirname = path.posix.dirname(relPath);
-  return !dirname || dirname === "." ? [] : dirname.split("/").filter(Boolean);
+  return !dirname || dirname === '.' ? [] : dirname.split('/').filter(Boolean);
 }
 
 function fieldIdForSearchField(field: SearchField): number {
@@ -1271,7 +1368,10 @@ function fieldIdForSearchField(field: SearchField): number {
   return index;
 }
 
-function compareProjectionFieldLength(left: CanonicalDocProjectionFieldLength, right: CanonicalDocProjectionFieldLength): number {
+function compareProjectionFieldLength(
+  left: CanonicalDocProjectionFieldLength,
+  right: CanonicalDocProjectionFieldLength,
+): number {
   const channelOrder = compareByteStrings(left.channel, right.channel);
   if (channelOrder !== 0) return channelOrder;
   return left.fieldId - right.fieldId;
@@ -1295,15 +1395,24 @@ export class ProjectionReader {
     const projectionBytes = options.sectionOnly
       ? segmentBytes
       : canonicalSegmentSectionBytes(segmentBytes, CANONICAL_SEGMENT_SECTION.docProjection);
-    if (!projectionBytes) throw new Error("canonical segment missing docProjection section");
+    if (!projectionBytes) throw new Error('canonical segment missing docProjection section');
     const fieldTextsBytes = options.sectionOnly
       ? undefined
       : canonicalSegmentSectionBytes(segmentBytes, CANONICAL_SEGMENT_SECTION.fieldTexts);
     this.bytes = projectionBytes;
     this.fieldTextsByteLength = fieldTextsBytes?.byteLength;
     this.header = readDocProjectionHeader(this.bytes);
-    this.stringTable = readDocProjectionStringTable(this.bytes, this.header.stringTableOffset, this.header.tagDictionaryOffset, validate);
-    this.tagStringRefs = readDocProjectionSingleColumnTable(this.bytes, this.header.tagDictionaryOffset, this.header.rowsOffset);
+    this.stringTable = readDocProjectionStringTable(
+      this.bytes,
+      this.header.stringTableOffset,
+      this.header.tagDictionaryOffset,
+      validate,
+    );
+    this.tagStringRefs = readDocProjectionSingleColumnTable(
+      this.bytes,
+      this.header.tagDictionaryOffset,
+      this.header.rowsOffset,
+    );
     if (validate) validateProjectionReader(this);
   }
 
@@ -1320,7 +1429,7 @@ export class ProjectionReader {
     return {
       localDocId: row[0],
       documentId: this.stringAt(row[1]),
-      path: this.stringAt(row[2])
+      path: this.stringAt(row[2]),
     };
   }
 
@@ -1332,7 +1441,7 @@ export class ProjectionReader {
       title: this.stringSpan(this.header.identityRefsOffset, this.header.tagIdsOffset, row[5], row[6]),
       aliases: this.stringSpan(this.header.identityRefsOffset, this.header.tagIdsOffset, row[7], row[8]),
       headings: this.stringSpan(this.header.identityRefsOffset, this.header.tagIdsOffset, row[9], row[10]),
-      pathSegments: this.stringSpan(this.header.identityRefsOffset, this.header.tagIdsOffset, row[11], row[12])
+      pathSegments: this.stringSpan(this.header.identityRefsOffset, this.header.tagIdsOffset, row[11], row[12]),
     };
   }
 
@@ -1342,8 +1451,8 @@ export class ProjectionReader {
   }
 
   tagForId(tagId: number): string {
-    assertSafeUnsignedInteger(tagId, "docProjection tagId");
-    if (tagId >= this.tagStringRefs.length) throw new Error("docProjection tagId is invalid");
+    assertSafeUnsignedInteger(tagId, 'docProjection tagId');
+    if (tagId >= this.tagStringRefs.length) throw new Error('docProjection tagId is invalid');
     return this.stringAt(this.tagStringRefs[tagId]);
   }
 
@@ -1367,7 +1476,9 @@ export class ProjectionReader {
   }
 
   fieldLength(localDocId: number, channel: string, fieldId: number): number {
-    return this.fieldLengths(localDocId).find((entry) => entry.channel === channel && entry.fieldId === fieldId)?.length ?? 0;
+    return (
+      this.fieldLengths(localDocId).find((entry) => entry.channel === channel && entry.fieldId === fieldId)?.length ?? 0
+    );
   }
 
   offsets(localDocId: number, channel: string, fieldId: number): readonly CanonicalDocProjectionOffsets[] {
@@ -1380,24 +1491,26 @@ export class ProjectionReader {
   }
 
   private row(localDocId: number): readonly number[] {
-    assertSafeUnsignedInteger(localDocId, "docProjection localDocId");
-    if (localDocId <= 0 || localDocId > this.header.documentCount) throw new Error("docProjection localDocId is out of range");
+    assertSafeUnsignedInteger(localDocId, 'docProjection localDocId');
+    if (localDocId <= 0 || localDocId > this.header.documentCount)
+      throw new Error('docProjection localDocId is out of range');
     const rowCount = readProjectionTableCount(this.bytes, this.header.rowsOffset, this.header.identityRefsOffset);
-    if (rowCount !== this.header.documentCount) throw new Error("docProjection row count must match documentCount");
+    if (rowCount !== this.header.documentCount) throw new Error('docProjection row count must match documentCount');
     const rowsStart = projectionFixedTableRowsStart(this.bytes, this.header.rowsOffset);
     const offset = rowsStart + (localDocId - 1) * DOC_PROJECTION_ROW_WORDS * 8;
     const row = readFixedRow(this.bytes, offset, DOC_PROJECTION_ROW_WORDS);
-    if (row[0] !== localDocId) throw new Error("docProjection rows must be sorted by localDocId");
+    if (row[0] !== localDocId) throw new Error('docProjection rows must be sorted by localDocId');
     return row;
   }
 
   private stringAt(index: number): string {
-    assertSafeUnsignedInteger(index, "docProjection string ref");
-    if (index >= this.stringTable.count) throw new Error("docProjection string ref is invalid");
+    assertSafeUnsignedInteger(index, 'docProjection string ref');
+    if (index >= this.stringTable.count) throw new Error('docProjection string ref is invalid');
     const start = this.stringTable.entriesStart + this.stringTable.offsets[index];
-    const end = index + 1 < this.stringTable.count
-      ? this.stringTable.entriesStart + this.stringTable.offsets[index + 1]
-      : this.stringTable.end;
+    const end =
+      index + 1 < this.stringTable.count
+        ? this.stringTable.entriesStart + this.stringTable.offsets[index + 1]
+        : this.stringTable.end;
     const reader = new ByteReader(this.bytes.subarray(start, end));
     const value = reader.readString();
     reader.assertDone();
@@ -1405,12 +1518,12 @@ export class ProjectionReader {
   }
 
   private optionalString(refPlusOneValue: number): string {
-    return refPlusOneValue > 0 ? this.stringAt(refPlusOneValue - 1) : "";
+    return refPlusOneValue > 0 ? this.stringAt(refPlusOneValue - 1) : '';
   }
 
   private numberSpan(tableOffset: number, tableEnd: number, offset: number, count: number): number[] {
     const tableCount = readProjectionTableCount(this.bytes, tableOffset, tableEnd);
-    if (offset + count > tableCount) throw new Error("docProjection numeric span is out of range");
+    if (offset + count > tableCount) throw new Error('docProjection numeric span is out of range');
     const start = projectionFixedTableRowsStart(this.bytes, tableOffset) + offset * 8;
     const output: number[] = [];
     for (let index = 0; index < count; index += 1) output.push(readFixedUnsigned64(this.bytes, start + index * 8));
@@ -1423,15 +1536,21 @@ export class ProjectionReader {
 
   private fieldLengthSpan(offset: number, count: number): CanonicalDocProjectionFieldLength[] {
     const tableCount = readProjectionTableCount(this.bytes, this.header.fieldLengthsOffset, this.header.offsetsOffset);
-    if (offset + count > tableCount) throw new Error("docProjection field length span is out of range");
-    const start = projectionFixedTableRowsStart(this.bytes, this.header.fieldLengthsOffset) + offset * DOC_PROJECTION_FIELD_LENGTH_WORDS * 8;
+    if (offset + count > tableCount) throw new Error('docProjection field length span is out of range');
+    const start =
+      projectionFixedTableRowsStart(this.bytes, this.header.fieldLengthsOffset) +
+      offset * DOC_PROJECTION_FIELD_LENGTH_WORDS * 8;
     const output: CanonicalDocProjectionFieldLength[] = [];
     for (let index = 0; index < count; index += 1) {
-      const row = readFixedRow(this.bytes, start + index * DOC_PROJECTION_FIELD_LENGTH_WORDS * 8, DOC_PROJECTION_FIELD_LENGTH_WORDS);
+      const row = readFixedRow(
+        this.bytes,
+        start + index * DOC_PROJECTION_FIELD_LENGTH_WORDS * 8,
+        DOC_PROJECTION_FIELD_LENGTH_WORDS,
+      );
       output.push({
         channel: this.stringAt(row[0]),
         fieldId: row[1],
-        length: row[2]
+        length: row[2],
       });
     }
     return output;
@@ -1439,18 +1558,23 @@ export class ProjectionReader {
 
   private offsetSpan(offset: number, count: number): CanonicalDocProjectionOffsets[] {
     const tableCount = readProjectionTableCount(this.bytes, this.header.offsetsOffset, this.header.endOffset);
-    if (offset + count > tableCount) throw new Error("docProjection offset span is out of range");
-    const start = projectionFixedTableRowsStart(this.bytes, this.header.offsetsOffset) + offset * DOC_PROJECTION_OFFSET_WORDS * 8;
+    if (offset + count > tableCount) throw new Error('docProjection offset span is out of range');
+    const start =
+      projectionFixedTableRowsStart(this.bytes, this.header.offsetsOffset) + offset * DOC_PROJECTION_OFFSET_WORDS * 8;
     const output: CanonicalDocProjectionOffsets[] = [];
     for (let index = 0; index < count; index += 1) {
-      const row = readFixedRow(this.bytes, start + index * DOC_PROJECTION_OFFSET_WORDS * 8, DOC_PROJECTION_OFFSET_WORDS);
+      const row = readFixedRow(
+        this.bytes,
+        start + index * DOC_PROJECTION_OFFSET_WORDS * 8,
+        DOC_PROJECTION_OFFSET_WORDS,
+      );
       output.push({
         channel: this.stringAt(row[0]),
         fieldId: row[1],
         fieldTextOffset: row[2],
         fieldTextByteLength: row[3],
         postingsOffset: row[4],
-        postingsByteLength: row[5]
+        postingsByteLength: row[5],
       });
     }
     return output;
@@ -1477,7 +1601,7 @@ function readDocProjectionHeader(bytes: Uint8Array): DocProjectionHeader {
     tagIdsOffset: values[4],
     fieldLengthsOffset: values[5],
     offsetsOffset: values[6],
-    endOffset: values[7]
+    endOffset: values[7],
   };
   validateProjectionOffsets(header, offset, bytes.length);
   return header;
@@ -1492,33 +1616,33 @@ function validateProjectionOffsets(header: DocProjectionHeader, minimumOffset: n
     header.tagIdsOffset,
     header.fieldLengthsOffset,
     header.offsetsOffset,
-    header.endOffset
+    header.endOffset,
   ];
   let previous = minimumOffset - 1;
   for (const offset of offsets) {
-    if (offset <= previous || offset > byteLength) throw new Error("docProjection table offsets are invalid");
+    if (offset <= previous || offset > byteLength) throw new Error('docProjection table offsets are invalid');
     previous = offset;
   }
-  if (header.endOffset !== byteLength) throw new Error("docProjection section contains trailing bytes");
+  if (header.endOffset !== byteLength) throw new Error('docProjection section contains trailing bytes');
 }
 
 function readDocProjectionStringTable(
   bytes: Uint8Array,
   tableOffset: number,
   tableEnd: number,
-  validate: boolean
+  validate: boolean,
 ): { count: number; offsets: readonly number[]; entriesStart: number; end: number } {
   const reader = new ByteReader(bytes.subarray(tableOffset, tableEnd));
   const count = reader.readUnsigned();
   const offsetTableStart = tableOffset + reader.position();
   const entriesStart = offsetTableStart + count * 8;
-  if (entriesStart > tableEnd) throw new Error("docProjection string table is truncated");
+  if (entriesStart > tableEnd) throw new Error('docProjection string table is truncated');
   const offsets: number[] = [];
   let previous = -1;
   for (let index = 0; index < count; index += 1) {
     const offset = readFixedUnsigned64(bytes, offsetTableStart + index * 8);
-    if (offset <= previous && index > 0) throw new Error("docProjection string offsets must be strictly increasing");
-    if (entriesStart + offset >= tableEnd && count > 0) throw new Error("docProjection string offset is invalid");
+    if (offset <= previous && index > 0) throw new Error('docProjection string offsets must be strictly increasing');
+    if (entriesStart + offset >= tableEnd && count > 0) throw new Error('docProjection string offset is invalid');
     offsets.push(offset);
     previous = offset;
   }
@@ -1531,7 +1655,7 @@ function readDocProjectionStringTable(
       const value = stringReader.readString();
       stringReader.assertDone();
       if (previousString !== undefined && compareByteStrings(previousString, value) >= 0) {
-        throw new Error("docProjection string table must be sorted by UTF-8 bytes");
+        throw new Error('docProjection string table must be sorted by UTF-8 bytes');
       }
       previousString = value;
     }
@@ -1542,7 +1666,7 @@ function readDocProjectionStringTable(
 function readDocProjectionSingleColumnTable(bytes: Uint8Array, tableOffset: number, tableEnd: number): number[] {
   const count = readProjectionTableCount(bytes, tableOffset, tableEnd);
   const rowsStart = projectionFixedTableRowsStart(bytes, tableOffset);
-  if (rowsStart + count * 8 !== tableEnd) throw new Error("docProjection single-column table length is invalid");
+  if (rowsStart + count * 8 !== tableEnd) throw new Error('docProjection single-column table length is invalid');
   const output: number[] = [];
   for (let index = 0; index < count; index += 1) output.push(readFixedUnsigned64(bytes, rowsStart + index * 8));
   return output;
@@ -1550,7 +1674,7 @@ function readDocProjectionSingleColumnTable(bytes: Uint8Array, tableOffset: numb
 
 function readProjectionTableCount(bytes: Uint8Array, tableOffset: number, tableEnd: number): number {
   const read = decodeUnsignedLeb128(bytes, tableOffset);
-  if (read.offset > tableEnd) throw new Error("docProjection fixed table is truncated");
+  if (read.offset > tableEnd) throw new Error('docProjection fixed table is truncated');
   return read.value;
 }
 
@@ -1567,8 +1691,8 @@ function readFixedRow(bytes: Uint8Array, offset: number, words: number): number[
 function validateProjectionReader(reader: ProjectionReader): void {
   for (let localDocId = 1; localDocId <= reader.documentCount(); localDocId += 1) {
     const doc = reader.doc(localDocId);
-    if (doc.localDocId !== localDocId) throw new Error("docProjection row localDocId mismatch");
-    assertSortedUniqueNumbers(reader.tagIds(localDocId), "docProjection tag ids");
+    if (doc.localDocId !== localDocId) throw new Error('docProjection row localDocId mismatch');
+    assertSortedUniqueNumbers(reader.tagIds(localDocId), 'docProjection tag ids');
     assertSortedUniqueProjectionFieldLengths(reader.fieldLengths(localDocId));
     const offsets = reader.allOffsets(localDocId);
     assertSortedUniqueProjectionOffsets(offsets);
@@ -1578,7 +1702,7 @@ function validateProjectionReader(reader: ProjectionReader): void {
         offset.fieldTextByteLength > 0 &&
         offset.fieldTextOffset + offset.fieldTextByteLength > reader.fieldTextsByteLength
       ) {
-        throw new Error("docProjection fieldText offset is out of range");
+        throw new Error('docProjection fieldText offset is out of range');
       }
     }
   }
@@ -1588,17 +1712,18 @@ function validateDocProjectionSection(
   bytes: Uint8Array,
   documents: readonly CanonicalDocumentRecord[],
   fieldTexts: readonly CanonicalFieldText[],
-  bm25: readonly CanonicalBm25FieldStats[]
+  bm25: readonly CanonicalBm25FieldStats[],
 ): void {
   void fieldTexts;
   void bm25;
   const reader = ProjectionReader.fromSectionBytes(bytes);
-  if (reader.documentCount() !== documents.length) throw new Error("docProjection documentCount does not match documents section");
+  if (reader.documentCount() !== documents.length)
+    throw new Error('docProjection documentCount does not match documents section');
   for (let index = 0; index < documents.length; index += 1) {
     const projected = reader.doc(index + 1);
     const document = documents[index];
     if (!document || projected.documentId !== document.documentId || projected.path !== document.path) {
-      throw new Error("docProjection document row does not match documents section");
+      throw new Error('docProjection document row does not match documents section');
     }
   }
 }
@@ -1608,7 +1733,7 @@ function assertSortedUniqueProjectionFieldLengths(values: readonly CanonicalDocP
   for (const value of values) {
     const key = `${value.channel}\u0000${value.fieldId}`;
     if (previous !== undefined && compareByteStrings(previous, key) >= 0) {
-      throw new Error("docProjection field lengths must be sorted and unique");
+      throw new Error('docProjection field lengths must be sorted and unique');
     }
     previous = key;
   }
@@ -1619,7 +1744,7 @@ function assertSortedUniqueProjectionOffsets(values: readonly CanonicalDocProjec
   for (const value of values) {
     const key = `${value.channel}\u0000${value.fieldId}`;
     if (previous !== undefined && compareByteStrings(previous, key) >= 0) {
-      throw new Error("docProjection offsets must be sorted and unique");
+      throw new Error('docProjection offsets must be sorted and unique');
     }
     previous = key;
   }
@@ -1671,16 +1796,16 @@ export function decodeCanonicalTermDictionarySection(bytes: Uint8Array): Canonic
       term: reader.readString(),
       postingsOffset: reader.readUnsigned(),
       postingsByteLength: reader.readUnsigned(),
-      postingCount: reader.readUnsigned()
+      postingCount: reader.readUnsigned(),
     };
     reader.assertDone();
-    assertSafeUnsignedInteger(entry.postingsOffset, "term dictionary postingsOffset");
-    assertSafeUnsignedInteger(entry.postingsByteLength, "term dictionary postingsByteLength");
-    assertSafeUnsignedInteger(entry.postingCount, "term dictionary postingCount");
-    if (entry.postingCount <= 0) throw new Error("term dictionary postingCount must be positive");
-    if (entry.postingsByteLength <= 0) throw new Error("term dictionary postingsByteLength must be positive");
+    assertSafeUnsignedInteger(entry.postingsOffset, 'term dictionary postingsOffset');
+    assertSafeUnsignedInteger(entry.postingsByteLength, 'term dictionary postingsByteLength');
+    assertSafeUnsignedInteger(entry.postingCount, 'term dictionary postingCount');
+    if (entry.postingCount <= 0) throw new Error('term dictionary postingCount must be positive');
+    if (entry.postingsByteLength <= 0) throw new Error('term dictionary postingsByteLength must be positive');
     if (previousTerm !== undefined && compareBytes(utf8(previousTerm), utf8(entry.term)) >= 0) {
-      throw new Error("term dictionary entries must be sorted by term bytes");
+      throw new Error('term dictionary entries must be sorted by term bytes');
     }
     previousTerm = entry.term;
     entries.push(entry);
@@ -1688,8 +1813,11 @@ export function decodeCanonicalTermDictionarySection(bytes: Uint8Array): Canonic
   return entries;
 }
 
-export function lookupCanonicalTermDictionaryEntry(bytes: Uint8Array, term: string): CanonicalTermDictionaryEntry | undefined {
-  const normalizedTerm = term.normalize("NFC");
+export function lookupCanonicalTermDictionaryEntry(
+  bytes: Uint8Array,
+  term: string,
+): CanonicalTermDictionaryEntry | undefined {
+  const normalizedTerm = term.normalize('NFC');
   const needle = utf8(normalizedTerm);
   const view = termDictionaryView(bytes);
   let low = 0;
@@ -1699,12 +1827,12 @@ export function lookupCanonicalTermDictionaryEntry(bytes: Uint8Array, term: stri
     const entryOffset = readFixedUnsigned64(bytes, view.offsetTableStart + mid * 8);
     const absoluteOffset = view.entriesStart + entryOffset;
     if (absoluteOffset < view.entriesStart || absoluteOffset >= bytes.length) {
-      throw new Error("term dictionary entry offset is invalid");
+      throw new Error('term dictionary entry offset is invalid');
     }
     const length = decodeUnsignedLeb128(bytes, absoluteOffset);
     const termStart = length.offset;
     const termEnd = termStart + length.value;
-    if (termEnd > bytes.length) throw new Error("truncated term dictionary entry term");
+    if (termEnd > bytes.length) throw new Error('truncated term dictionary entry term');
     const order = compareBytes(needle, bytes.subarray(termStart, termEnd));
     if (order === 0) {
       const postingsOffset = decodeUnsignedLeb128(bytes, termEnd);
@@ -1714,7 +1842,7 @@ export function lookupCanonicalTermDictionaryEntry(bytes: Uint8Array, term: stri
         term: normalizedTerm,
         postingsOffset: postingsOffset.value,
         postingsByteLength: postingsByteLength.value,
-        postingCount: postingCount.value
+        postingCount: postingCount.value,
       };
     }
     if (order < 0) high = mid - 1;
@@ -1725,35 +1853,35 @@ export function lookupCanonicalTermDictionaryEntry(bytes: Uint8Array, term: stri
 
 function writeCanonicalValue(writer: ByteWriter, value: unknown): void {
   if (value === null) {
-    writer.writeAscii("n");
+    writer.writeAscii('n');
     return;
   }
-  if (typeof value === "boolean") {
-    writer.writeAscii(value ? "t" : "f");
+  if (typeof value === 'boolean') {
+    writer.writeAscii(value ? 't' : 'f');
     return;
   }
-  if (typeof value === "number") {
+  if (typeof value === 'number') {
     if (Number.isSafeInteger(value)) {
-      writer.writeAscii("i");
+      writer.writeAscii('i');
       writer.writeBytes(encodeZigZagLeb128(value));
       return;
     }
-    writer.writeAscii("d");
+    writer.writeAscii('d');
     writer.writeBytes(encodeFloat64Canonical(value));
     return;
   }
-  if (typeof value === "string") {
-    writer.writeAscii("s");
+  if (typeof value === 'string') {
+    writer.writeAscii('s');
     writer.writeString(value);
     return;
   }
   if (value instanceof Uint8Array) {
-    writer.writeAscii("b");
+    writer.writeAscii('b');
     writer.writeBytesWithLength(value);
     return;
   }
   if (Array.isArray(value)) {
-    writer.writeAscii("a");
+    writer.writeAscii('a');
     writer.writeUnsigned(value.length);
     for (const item of value) writeCanonicalValue(writer, item);
     return;
@@ -1761,11 +1889,11 @@ function writeCanonicalValue(writer: ByteWriter, value: unknown): void {
   if (isRecord(value)) {
     const entries = Object.entries(value)
       .filter((entry): entry is [string, unknown] => entry[1] !== undefined)
-      .sort(([left], [right]) => compareBytes(utf8(left.normalize("NFC")), utf8(right.normalize("NFC"))));
-    writer.writeAscii("o");
+      .sort(([left], [right]) => compareBytes(utf8(left.normalize('NFC')), utf8(right.normalize('NFC'))));
+    writer.writeAscii('o');
     writer.writeUnsigned(entries.length);
     for (const [key, entryValue] of entries) {
-      writer.writeString(key.normalize("NFC"));
+      writer.writeString(key.normalize('NFC'));
       writeCanonicalValue(writer, entryValue);
     }
     return;
@@ -1774,10 +1902,12 @@ function writeCanonicalValue(writer: ByteWriter, value: unknown): void {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === 'object' && value !== null;
 }
 
-function segmentForTestRecords(records: ReadonlyArray<CanonicalDocumentRecord & { content: string }>): CanonicalSegment {
+function segmentForTestRecords(
+  records: ReadonlyArray<CanonicalDocumentRecord & { content: string }>,
+): CanonicalSegment {
   const postings: CanonicalPosting[] = [];
   const documents: CanonicalDocumentRecord[] = [];
   const fieldTexts: CanonicalFieldText[] = [];
@@ -1801,36 +1931,41 @@ function segmentForTestRecords(records: ReadonlyArray<CanonicalDocumentRecord & 
       contentHash: record.contentHash,
       parsedFieldHashes: record.parsedFieldHashes,
       snippetLineSpanHash: record.snippetLineSpanHash,
-      deleted: false
+      deleted: false,
     });
   });
   return {
     postings,
     documents,
     fieldTexts,
-    bm25: [{
-      channel: "morph",
-      fieldId: 5,
-      documentCount: records.length,
-      totalFieldLength: documentLengths.reduce((sum, entry) => sum + entry.length, 0),
-      documentLengths,
-      documentFrequencies: [...documentFrequencies.entries()].map(([term, frequency]) => ({ term, frequency }))
-    }]
+    bm25: [
+      {
+        channel: 'morph',
+        fieldId: 5,
+        documentCount: records.length,
+        totalFieldLength: documentLengths.reduce((sum, entry) => sum + entry.length, 0),
+        documentLengths,
+        documentFrequencies: [...documentFrequencies.entries()].map(([term, frequency]) => ({ term, frequency })),
+      },
+    ],
   };
 }
 
 function tokenizeForTest(content: string): string[] {
   const terms: string[] = [];
-  for (const match of content.normalize("NFKC").toLowerCase().matchAll(/[\p{Letter}\p{Mark}\p{Number}]+/gu)) {
+  for (const match of content
+    .normalize('NFKC')
+    .toLowerCase()
+    .matchAll(/[\p{Letter}\p{Mark}\p{Number}]+/gu)) {
     terms.push(match[0]);
   }
   return terms;
 }
 
 export function partitionIdForDocument(documentId: string, partitionBits: number): number {
-  assertSafeUnsignedInteger(partitionBits, "partitionBits");
+  assertSafeUnsignedInteger(partitionBits, 'partitionBits');
   if (partitionBits === 0) return 0;
-  if (partitionBits > 48) throw new Error("partitionBits above 48 are not supported by the test snapshot builder");
+  if (partitionBits > 48) throw new Error('partitionBits above 48 are not supported by the test snapshot builder');
   const nibbleCount = Math.ceil(partitionBits / 4);
   const raw = Number.parseInt(documentId.slice(0, nibbleCount), 16);
   return Math.floor(raw / 2 ** (nibbleCount * 4 - partitionBits));
@@ -1845,36 +1980,37 @@ function normalizeHash(value: string, label: string): string {
 function normalizeHashRecord(record: Record<string, string> | undefined): Record<string, string> {
   const output: Record<string, string> = {};
   for (const [key, value] of Object.entries(record ?? {}).sort(([left], [right]) => compareByteStrings(left, right))) {
-    output[normalizeCanonicalString(key, "NFC")] = normalizeHash(value, key);
+    output[normalizeCanonicalString(key, 'NFC')] = normalizeHash(value, key);
   }
   return output;
 }
 
 function normalizeVaultRelativePath(value: string): string {
   const parts: string[] = [];
-  for (const part of value.replace(/\\/g, "/").split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
+  for (const part of value.replace(/\\/g, '/').split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
       parts.pop();
       continue;
     }
-    parts.push(part.normalize("NFC"));
+    parts.push(part.normalize('NFC'));
   }
-  return parts.join("/");
+  return parts.join('/');
 }
 
-function normalizeCanonicalString(value: string, form: "NFC" | "NFKC"): string {
+function normalizeCanonicalString(value: string, form: 'NFC' | 'NFKC'): string {
   return value.normalize(form);
 }
 
 function parseCanonicalSegmentHeader(bytes: Uint8Array): { entries: SectionEntry[]; payloadStart: number } {
   let offset = 0;
   for (const magicByte of CANONICAL_SEGMENT_MAGIC) {
-    if (bytes[offset] !== magicByte) throw new Error("invalid canonical segment magic");
+    if (bytes[offset] !== magicByte) throw new Error('invalid canonical segment magic');
     offset += 1;
   }
   const version = decodeUnsignedLeb128(bytes, offset);
-  if (version.value !== CANONICAL_SEGMENT_VERSION) throw new Error(`unsupported canonical segment version ${version.value}`);
+  if (version.value !== CANONICAL_SEGMENT_VERSION)
+    throw new Error(`unsupported canonical segment version ${version.value}`);
   offset = version.offset;
   const sectionCount = decodeUnsignedLeb128(bytes, offset);
   offset = sectionCount.offset;
@@ -1885,7 +2021,7 @@ function parseCanonicalSegmentHeader(bytes: Uint8Array): { entries: SectionEntry
     const id = decodeUnsignedLeb128(bytes, offset);
     const sectionOffset = decodeUnsignedLeb128(bytes, id.offset);
     const length = decodeUnsignedLeb128(bytes, sectionOffset.offset);
-    if (id.value <= previousId) throw new Error("canonical segment section table must be sorted by section id");
+    if (id.value <= previousId) throw new Error('canonical segment section table must be sorted by section id');
     entries.push({ id: id.value, offset: sectionOffset.value, length: length.value });
     previousId = id.value;
     offset = length.offset;
@@ -1896,7 +2032,7 @@ function parseCanonicalSegmentHeader(bytes: Uint8Array): { entries: SectionEntry
 function validateTermDictionaryAgainstPostings(dictionaryBytes: Uint8Array, postingsBytes: Uint8Array): void {
   const expected = termDictionaryEntriesFromPostings(postingsBytes);
   const actual = decodeCanonicalTermDictionarySection(dictionaryBytes);
-  if (actual.length !== expected.length) throw new Error("term dictionary entry count does not match postings");
+  if (actual.length !== expected.length) throw new Error('term dictionary entry count does not match postings');
   for (let index = 0; index < expected.length; index += 1) {
     const left = actual[index];
     const right = expected[index];
@@ -1906,7 +2042,7 @@ function validateTermDictionaryAgainstPostings(dictionaryBytes: Uint8Array, post
       left?.postingsByteLength !== right?.postingsByteLength ||
       left?.postingCount !== right?.postingCount
     ) {
-      throw new Error("term dictionary does not match postings bytes");
+      throw new Error('term dictionary does not match postings bytes');
     }
   }
 }
@@ -1925,7 +2061,7 @@ function termDictionaryEntriesFromPostings(postingsBytes: Uint8Array): Canonical
           term: current.term,
           postingsOffset: current.offset,
           postingsByteLength: rowOffset - current.offset,
-          postingCount: current.count
+          postingCount: current.count,
         });
       }
       current = { term: posting.term, offset: rowOffset, count: 0 };
@@ -1937,7 +2073,7 @@ function termDictionaryEntriesFromPostings(postingsBytes: Uint8Array): Canonical
       term: current.term,
       postingsOffset: current.offset,
       postingsByteLength: reader.position() - current.offset,
-      postingCount: current.count
+      postingCount: current.count,
     });
   }
   reader.assertDone();
@@ -1953,17 +2089,20 @@ function termDictionaryView(bytes: Uint8Array): { count: number; offsetTableStar
   const count = reader.readUnsigned();
   const offsetTableStart = reader.position();
   const entriesStart = offsetTableStart + count * 8;
-  if (entriesStart > bytes.length) throw new Error("truncated term dictionary offset table");
+  if (entriesStart > bytes.length) throw new Error('truncated term dictionary offset table');
   return { count, offsetTableStart, entriesStart };
 }
 
-function termDictionaryEntryOffsets(bytes: Uint8Array, view: { count: number; offsetTableStart: number; entriesStart: number }): number[] {
+function termDictionaryEntryOffsets(
+  bytes: Uint8Array,
+  view: { count: number; offsetTableStart: number; entriesStart: number },
+): number[] {
   const offsets: number[] = [];
   let previous = -1;
   for (let index = 0; index < view.count; index += 1) {
     const offset = readFixedUnsigned64(bytes, view.offsetTableStart + index * 8);
-    if (offset <= previous) throw new Error("term dictionary entry offsets must be strictly increasing");
-    if (view.entriesStart + offset >= bytes.length) throw new Error("term dictionary entry offset is invalid");
+    if (offset <= previous) throw new Error('term dictionary entry offsets must be strictly increasing');
+    if (view.entriesStart + offset >= bytes.length) throw new Error('term dictionary entry offset is invalid');
     offsets.push(offset);
     previous = offset;
   }
@@ -1972,7 +2111,14 @@ function termDictionaryEntryOffsets(bytes: Uint8Array, view: { count: number; of
 
 function bm25GlobalOrder(channelOrder: readonly string[]) {
   const channelRank = new Map(channelOrder.map((channel, index) => [channel, index]));
-  return (leftChannel: string, leftFieldId: number, leftTerm: string, rightChannel: string, rightFieldId: number, rightTerm: string): number => {
+  return (
+    leftChannel: string,
+    leftFieldId: number,
+    leftTerm: string,
+    rightChannel: string,
+    rightFieldId: number,
+    rightTerm: string,
+  ): number => {
     const leftRank = channelRank.get(leftChannel) ?? Number.MAX_SAFE_INTEGER;
     const rightRank = channelRank.get(rightChannel) ?? Number.MAX_SAFE_INTEGER;
     if (leftRank !== rightRank) return leftRank - rightRank;
@@ -1990,18 +2136,18 @@ function compareBm25FieldStats(left: CanonicalBm25FieldStats, right: CanonicalBm
 }
 
 function mergeBm25DocumentFrequencies(
-  input: readonly { term: string; frequency: number }[]
+  input: readonly { term: string; frequency: number }[],
 ): Array<{ term: string; frequency: number }> {
   const frequencies = new Map<string, number>();
   for (const entry of input) {
-    assertSafeUnsignedInteger(entry.frequency, "BM25 document frequency");
-    const term = normalizeCanonicalString(entry.term, "NFC");
+    assertSafeUnsignedInteger(entry.frequency, 'BM25 document frequency');
+    const term = normalizeCanonicalString(entry.term, 'NFC');
     if (!term || entry.frequency === 0) continue;
     frequencies.set(term, (frequencies.get(term) ?? 0) + entry.frequency);
   }
   return [...frequencies.entries()]
     .map(([term, frequency]) => {
-      assertSafeUnsignedInteger(frequency, "BM25 document frequency");
+      assertSafeUnsignedInteger(frequency, 'BM25 document frequency');
       return { term, frequency };
     })
     .sort((left, right) => compareBytes(utf8(left.term), utf8(right.term)));
@@ -2027,7 +2173,7 @@ function assertNoDuplicateBm25Rows(rows: readonly CanonicalBm25GlobalStatsRow[])
   let previous: string | undefined;
   for (const row of rows) {
     const key = bm25TermKey(row[0], row[1], row[2]);
-    if (key === previous) throw new Error("duplicate BM25 global stats row after sort");
+    if (key === previous) throw new Error('duplicate BM25 global stats row after sort');
     previous = key;
   }
 }
@@ -2045,18 +2191,21 @@ function docFieldKey(docId: number, fieldId: number): string {
 }
 
 function readFixedUnsigned64(bytes: Uint8Array, offset: number): number {
-  if (offset < 0 || offset + 8 > bytes.length) throw new Error("truncated fixed unsigned integer");
+  if (offset < 0 || offset + 8 > bytes.length) throw new Error('truncated fixed unsigned integer');
   const value = new DataView(bytes.buffer, bytes.byteOffset + offset, 8).getBigUint64(0, true);
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("fixed unsigned integer exceeds safe integer range");
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('fixed unsigned integer exceeds safe integer range');
   return Number(value);
 }
 
 function lineSpanSource(content: string): string {
-  return content.split(/\r?\n/u).map((line, index) => `${index + 1}:${utf8(line).length}`).join("\n");
+  return content
+    .split(/\r?\n/u)
+    .map((line, index) => `${index + 1}:${utf8(line).length}`)
+    .join('\n');
 }
 
 function sha256(bytes: Uint8Array): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+  return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
 function utf8(value: string): Uint8Array {
@@ -2068,7 +2217,7 @@ function utf8Decode(bytes: Uint8Array): string {
 }
 
 function compareByteStrings(left: string, right: string): number {
-  return compareBytes(utf8(left.normalize("NFC")), utf8(right.normalize("NFC")));
+  return compareBytes(utf8(left.normalize('NFC')), utf8(right.normalize('NFC')));
 }
 
 function compareBytes(left: Uint8Array, right: Uint8Array): number {
@@ -2099,14 +2248,14 @@ class ByteWriter {
   }
 
   writeFixedUnsigned64(value: number): void {
-    assertSafeUnsignedInteger(value, "fixed unsigned integer");
+    assertSafeUnsignedInteger(value, 'fixed unsigned integer');
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
     this.writeBytes(bytes);
   }
 
   writeString(value: string): void {
-    this.writeBytesWithLength(utf8(value.normalize("NFC")));
+    this.writeBytesWithLength(utf8(value.normalize('NFC')));
   }
 
   writeBytesWithLength(bytes: Uint8Array): void {
@@ -2120,7 +2269,11 @@ class ByteWriter {
   }
 
   writeAscii(value: string): void {
-    this.writeBytes(Uint8Array.from([...value].map((char) => char.charCodeAt(0))));
+    const bytes = new Uint8Array(value.length);
+    for (let index = 0; index < value.length; index += 1) {
+      bytes[index] = value.charCodeAt(index);
+    }
+    this.writeBytes(bytes);
   }
 
   byteLength(): number {
@@ -2149,8 +2302,8 @@ export class ByteReader {
   readString(): string {
     const length = this.readUnsigned();
     const end = this.offset + length;
-    if (end > this.bytes.length) throw new Error("truncated canonical byte string");
-    const value = utf8Decode(this.bytes.subarray(this.offset, end)).normalize("NFC");
+    if (end > this.bytes.length) throw new Error('truncated canonical byte string');
+    const value = utf8Decode(this.bytes.subarray(this.offset, end)).normalize('NFC');
     this.offset = end;
     return value;
   }
@@ -2160,6 +2313,6 @@ export class ByteReader {
   }
 
   assertDone(): void {
-    if (this.offset !== this.bytes.length) throw new Error("canonical section contains trailing bytes");
+    if (this.offset !== this.bytes.length) throw new Error('canonical section contains trailing bytes');
   }
 }

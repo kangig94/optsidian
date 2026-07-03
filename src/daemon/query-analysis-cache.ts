@@ -1,9 +1,9 @@
-import crypto from "node:crypto";
-import type { SearchTextAnalysis } from "../core/search/analysis/index.js";
-import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
-import type { SearchField } from "../core/types.js";
-import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
-import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from "./search-store/builder.js";
+import crypto from 'node:crypto';
+import type { SearchTextAnalysis } from '../core/search/analysis/index.js';
+import type { SearchAnalyzerIdentity } from '../core/search/analyzer.js';
+import type { SearchField } from '../core/types.js';
+import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from './query-analysis-cache-defaults.js';
+import { INDEX_AFFECTING_SEARCH_SETTINGS_HASH } from './search-store/builder.js';
 
 export type QueryAnalysisCacheKeyInput = {
   analyzerIdentity: SearchAnalyzerIdentity;
@@ -59,7 +59,7 @@ export class QueryAnalysisCache {
       maxEntries: this.maxEntries,
       hits: this.hits,
       misses: this.misses,
-      evictions: this.evictions
+      evictions: this.evictions,
     };
   }
 
@@ -74,12 +74,14 @@ export class QueryAnalysisCache {
 }
 
 export function queryAnalysisCacheKey(input: QueryAnalysisCacheKeyInput): string {
-  return sha256(stableStringify({
-    analyzerIdentity: input.analyzerIdentity,
-    rawQuery: input.rawQuery,
-    fields: [...(input.fields ?? [])].sort((left, right) => left.localeCompare(right)),
-    searchSettingsHash: input.searchSettingsHash ?? INDEX_AFFECTING_SEARCH_SETTINGS_HASH
-  }));
+  return sha256(
+    stableStringify({
+      analyzerIdentity: input.analyzerIdentity,
+      rawQuery: input.rawQuery,
+      fields: [...(input.fields ?? [])].sort((left, right) => left.localeCompare(right)),
+      searchSettingsHash: input.searchSettingsHash ?? INDEX_AFFECTING_SEARCH_SETTINGS_HASH,
+    }),
+  );
 }
 
 function cloneAnalysis(analysis: SearchTextAnalysis): SearchTextAnalysis {
@@ -90,20 +92,23 @@ function cloneAnalysis(analysis: SearchTextAnalysis): SearchTextAnalysis {
     channels: {
       morph: [...analysis.channels.morph],
       surface: [...analysis.channels.surface],
-      ngram: [...analysis.channels.ngram]
-    }
+      ngram: [...analysis.channels.ngram],
+    },
   };
 }
 
 function sha256(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex");
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (value && typeof value === "object") {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 }

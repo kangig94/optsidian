@@ -3,8 +3,8 @@ import type {
   PositionalDocumentInput,
   PositionalFieldId,
   PositionalPosting,
-  PositionalPostings
-} from "./types.js";
+  PositionalPostings,
+} from './types.js';
 
 export type PositionalPhraseMatch = {
   docId: PositionalDocId;
@@ -20,16 +20,24 @@ type PostingKey = {
 const textEncoder = new TextEncoder();
 
 export function buildPositionalPostings(documents: readonly PositionalDocumentInput[]): PositionalPostings {
-  const byTermAndPosting = new Map<string, { term: string; docId: PositionalDocId; fieldId: PositionalFieldId; positions: number[] }>();
+  const byTermAndPosting = new Map<
+    string,
+    { term: string; docId: PositionalDocId; fieldId: PositionalFieldId; positions: number[] }
+  >();
   for (const document of documents) {
-    assertNonNegativeInteger(document.docId, "docId");
+    assertNonNegativeInteger(document.docId, 'docId');
     for (const field of document.fields) {
-      assertNonNegativeInteger(field.fieldId, "fieldId");
+      assertNonNegativeInteger(field.fieldId, 'fieldId');
       field.tokens.forEach((rawTerm, position) => {
         const term = normalizeTerm(rawTerm);
         if (!term) return;
         const key = postingKey(term, document.docId, field.fieldId);
-        const posting = byTermAndPosting.get(key) ?? { term, docId: document.docId, fieldId: field.fieldId, positions: [] };
+        const posting = byTermAndPosting.get(key) ?? {
+          term,
+          docId: document.docId,
+          fieldId: field.fieldId,
+          positions: [],
+        };
         posting.positions.push(position);
         byTermAndPosting.set(key, posting);
       });
@@ -41,9 +49,12 @@ export function buildPositionalPostings(documents: readonly PositionalDocumentIn
       term: posting.term,
       docId: posting.docId,
       fieldId: posting.fieldId,
-      positions: uniqueSorted(posting.positions)
+      positions: uniqueSorted(posting.positions),
     }))
-    .sort((left, right) => comparePostingTerms(left.term, right.term) || left.fieldId - right.fieldId || left.docId - right.docId);
+    .sort(
+      (left, right) =>
+        comparePostingTerms(left.term, right.term) || left.fieldId - right.fieldId || left.docId - right.docId,
+    );
 
   const postings = new Map<string, PositionalPosting[]>();
   for (const posting of sortedPostings) {
@@ -58,7 +69,7 @@ export function positionsForTerm(
   postings: PositionalPostings,
   term: string,
   docId: PositionalDocId,
-  fieldId: PositionalFieldId
+  fieldId: PositionalFieldId,
 ): readonly number[] {
   const normalized = normalizeTerm(term);
   const posting = postings.get(normalized)?.find((entry) => entry.docId === docId && entry.fieldId === fieldId);
@@ -88,7 +99,7 @@ export function findPhraseMatches(
   options: {
     docIds?: readonly PositionalDocId[];
     fieldIds?: readonly PositionalFieldId[];
-  } = {}
+  } = {},
 ): PositionalPhraseMatch[] {
   const normalizedTerms = terms.map(normalizeTerm).filter(Boolean);
   if (normalizedTerms.length === 0) return [];
@@ -100,7 +111,9 @@ export function findPhraseMatches(
   for (const firstPosting of firstPostings) {
     if (allowedDocs && !allowedDocs.has(firstPosting.docId)) continue;
     if (allowedFields && !allowedFields.has(firstPosting.fieldId)) continue;
-    const positionLists = normalizedTerms.map((term) => positionsForTerm(postings, term, firstPosting.docId, firstPosting.fieldId));
+    const positionLists = normalizedTerms.map((term) =>
+      positionsForTerm(postings, term, firstPosting.docId, firstPosting.fieldId),
+    );
     const starts = phraseStartPositions(positionLists);
     if (starts.length > 0) {
       matches.push({ docId: firstPosting.docId, fieldId: firstPosting.fieldId, starts });
@@ -124,7 +137,7 @@ export function postingKeysForTerms(postings: PositionalPostings, terms: readonl
 }
 
 export function normalizeTerm(term: string): string {
-  return term.normalize("NFC").trim();
+  return term.normalize('NFC').trim();
 }
 
 function postingKey(term: string, docId: PositionalDocId, fieldId: PositionalFieldId): string {
@@ -132,7 +145,7 @@ function postingKey(term: string, docId: PositionalDocId, fieldId: PositionalFie
 }
 
 function uniqueSorted(values: readonly number[]): number[] {
-  for (const value of values) assertNonNegativeInteger(value, "position");
+  for (const value of values) assertNonNegativeInteger(value, 'position');
   return [...new Set(values)].sort((left, right) => left - right);
 }
 

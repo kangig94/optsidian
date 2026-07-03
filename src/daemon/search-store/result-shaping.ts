@@ -1,21 +1,31 @@
-import crypto from "node:crypto";
-import { SEARCH_TOKEN_CHANNELS, emptySearchTokenChannels, type SearchTextAnalysis, type SearchTokenChannel, type SearchTokenChannelTerms } from "../../core/search/analysis/index.js";
+import crypto from 'node:crypto';
+import {
+  SEARCH_TOKEN_CHANNELS,
+  emptySearchTokenChannels,
+  type SearchTextAnalysis,
+  type SearchTokenChannel,
+  type SearchTokenChannelTerms,
+} from '../../core/search/analysis/index.js';
 import type {
   CandidateFeaturePayload,
   CandidateRef,
   CandidateSet,
   ExplainTrace,
   LinkGraphData,
-  RetrievalCandidate
-} from "../../core/search/contracts.js";
-import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from "../../core/search/contracts.js";
-import { RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../../core/search/constants.js";
-import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import { nullableRankPriority, rankBucketName, type ExactDominanceBound } from "../../core/search/ranking/index.js";
-import type { PositionalBm25GlobalStats } from "../../core/search/retrieval/positional/index.js";
-import { SEARCH_WARNING_BOUNDED, type NormalizedSearchParams, type RankedCandidate } from "../../core/search/internal-types.js";
-import type { SearchMatch, SearchResult } from "../../core/types.js";
-import type { PersistedDocumentRecord, SnapshotSnippetLine } from "./types.js";
+  RetrievalCandidate,
+} from '../../core/search/contracts.js';
+import { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from '../../core/search/contracts.js';
+import { RANKING_CONSTANTS, SEARCH_TOKEN_CHANNEL_WEIGHT } from '../../core/search/constants.js';
+import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
+import { nullableRankPriority, rankBucketName, type ExactDominanceBound } from '../../core/search/ranking/index.js';
+import type { PositionalBm25GlobalStats } from '../../core/search/retrieval/positional/index.js';
+import {
+  SEARCH_WARNING_BOUNDED,
+  type NormalizedSearchParams,
+  type RankedCandidate,
+} from '../../core/search/internal-types.js';
+import type { SearchMatch, SearchResult } from '../../core/types.js';
+import type { PersistedDocumentRecord, SnapshotSnippetLine } from './types.js';
 
 export type SharedBytesHandle = {
   buffer: SharedArrayBuffer;
@@ -41,14 +51,14 @@ export type SearchExecutionResult = SearchResult & { snapshotId: string; explain
 export type SearchHitEvidence = {
   documentId: string;
   path: string;
-  shardDocRef: CandidateRef["shardDocRef"];
+  shardDocRef: CandidateRef['shardDocRef'];
   score: number;
   queryTerms: string[];
   queryChannels: SearchTokenChannelTerms;
   matchedChannels: SearchTokenChannel[];
   channelScores: Partial<Record<SearchTokenChannel, number>>;
   candidate: RetrievalCandidate;
-  source: "persisted";
+  source: 'persisted';
 };
 
 export type SearchShardFinalist = SearchHitEvidence & {
@@ -72,7 +82,9 @@ export function sharedBytes(handle: SharedBytesHandle): Uint8Array {
   return new Uint8Array(handle.buffer, handle.byteOffset, handle.byteLength);
 }
 
-export function documentsByPath(documents: ReadonlyMap<string, PersistedDocumentRecord>): Map<string, PersistedDocumentRecord> {
+export function documentsByPath(
+  documents: ReadonlyMap<string, PersistedDocumentRecord>,
+): Map<string, PersistedDocumentRecord> {
   return new Map([...documents.values()].map((record) => [record.path, record]));
 }
 
@@ -88,7 +100,7 @@ export function snippetsForDocument(record: PersistedDocumentRecord, queryChanne
   }
   const scored = topScoredSnippetLines(scoredByLine.values(), 3);
   if (scored.length > 0) return scored.map((entry) => entry.line);
-  if (corpus.fallback.kind === "line") {
+  if (corpus.fallback.kind === 'line') {
     const fallbackSnippetId = corpus.fallback.snippetId;
     const fallback = corpus.lines.find((line) => line.snippetId === fallbackSnippetId);
     if (fallback) return [fallback];
@@ -102,11 +114,11 @@ export function searchResult(
   analyzer: SearchAnalyzerIdentity,
   search: NormalizedSearchParams,
   candidates: number,
-  channels: SearchTokenChannelTerms = emptySearchTokenChannels()
+  channels: SearchTokenChannelTerms = emptySearchTokenChannels(),
 ): SearchResult & { snapshotId: string } {
   return {
     ok: true,
-    command: "search",
+    command: 'search',
     matches,
     snapshotId,
     ...(search.debug
@@ -117,24 +129,25 @@ export function searchResult(
                   query: {
                     raw: search.query,
                     terms: channels.morph.length > 0 ? channels.morph : channels.surface,
-                    primaryChannel: channels.morph.length > 0 ? "morph" : channels.surface.length > 0 ? "surface" : "ngram",
-                    channels: Object.fromEntries(Object.entries(channels).filter(([, terms]) => terms.length > 0))
-                  }
+                    primaryChannel:
+                      channels.morph.length > 0 ? 'morph' : channels.surface.length > 0 ? 'surface' : 'ngram',
+                    channels: Object.fromEntries(Object.entries(channels).filter(([, terms]) => terms.length > 0)),
+                  },
                 }
               : {}),
             projection: {
-              source: matches.length > 0 ? "persisted" : "none",
-              tokenizerTier: (analyzer.activeAnalyzers ?? []).includes("ko") ? "kiwi" : "intl",
+              source: matches.length > 0 ? 'persisted' : 'none',
+              tokenizerTier: (analyzer.activeAnalyzers ?? []).includes('ko') ? 'kiwi' : 'intl',
               documents: candidates,
-              files: candidates
+              files: candidates,
             },
             analyzer: analyzerDebugInfo(analyzer),
             candidates,
             snapshotId,
-            ...(search.query ? { reranker: "unified-scalar-ac4-v1" as const } : {})
-          }
+            ...(search.query ? { reranker: 'unified-scalar-ac4-v1' as const } : {}),
+          },
         }
-      : {})
+      : {}),
   };
 }
 
@@ -152,7 +165,7 @@ export function applySearchWarnings(result: SearchExecutionResult, warnings: rea
 
 export function matchDebug(input: {
   hit: {
-    source: "persisted";
+    source: 'persisted';
     queryTerms: string[];
     queryChannels: SearchTokenChannelTerms;
     matchedChannels: SearchTokenChannel[];
@@ -163,13 +176,15 @@ export function matchDebug(input: {
   rank: RankedCandidate;
   snapshotId: string;
   analyzer: SearchAnalyzerIdentity;
-}): NonNullable<SearchMatch["debug"]> {
+}): NonNullable<SearchMatch['debug']> {
   return {
     source: input.hit.source,
     queryTerms: input.hit.queryTerms,
     queryChannels: Object.fromEntries(Object.entries(input.hit.queryChannels).filter(([, terms]) => terms.length > 0)),
     matchedChannels: input.hit.matchedChannels,
-    channelScores: Object.fromEntries(Object.entries(input.hit.channelScores).filter(([, score]) => score !== undefined)),
+    channelScores: Object.fromEntries(
+      Object.entries(input.hit.channelScores).filter(([, score]) => score !== undefined),
+    ),
     analyzer: analyzerDebugInfo(input.analyzer),
     candidateScore: input.hit.score,
     retrievalScore: input.hit.candidate.retrievalScore,
@@ -189,7 +204,7 @@ export function matchDebug(input: {
     rarityScore: input.rank.rarityScore,
     proximityScore: input.rank.proximityScore,
     bodyScore: input.rank.bodyScore,
-    snapshotId: input.snapshotId
+    snapshotId: input.snapshotId,
   };
 }
 
@@ -204,16 +219,16 @@ export function explainTrace(input: {
   const rankedOutput = rankedOutputFromRanked(normalizeTraceBaseRanks(input.ranked, input.candidateSet));
   return {
     schemaVersion: SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION,
-    rankingAlgorithmId: "unified-scalar-ac4-v1",
-    frozenReplayFormulaVersion: "unified-scalar-ac4-v1/offline-1",
+    rankingAlgorithmId: 'unified-scalar-ac4-v1',
+    frozenReplayFormulaVersion: 'unified-scalar-ac4-v1/offline-1',
     rankingConfig,
     inputs: {
       candidateSet: input.candidateSet,
       featurePayloads: input.featurePayloads,
       queryAnalysis: input.queryAnalysis,
-      rankingConfig
+      rankingConfig,
     },
-    expectedOutputHash: hashRankedOutput(rankedOutput)
+    expectedOutputHash: hashRankedOutput(rankedOutput),
   };
 }
 
@@ -256,7 +271,7 @@ function analyzerDebugInfo(identity: SearchAnalyzerIdentity) {
     ...(identity.runtime ? { runtime: identity.runtime } : {}),
     ...(identity.model ? { model: identity.model } : {}),
     ...(identity.declaredAnalyzers ? { declaredAnalyzers: [...identity.declaredAnalyzers] } : {}),
-    ...(identity.activeAnalyzers ? { activeAnalyzers: [...identity.activeAnalyzers] } : {})
+    ...(identity.activeAnalyzers ? { activeAnalyzers: [...identity.activeAnalyzers] } : {}),
   };
 }
 
@@ -291,26 +306,29 @@ function rankedOutputFromRanked(ranked: readonly RankedCandidate[]) {
     rrfScore: candidate.rrfScore,
     rarityScore: candidate.rarityScore,
     proximityScore: candidate.proximityScore,
-    bodyScore: candidate.bodyScore
+    bodyScore: candidate.bodyScore,
   }));
 }
 
 function rankingConfigTrace(exactBound: ExactDominanceBound) {
   return {
     exactDominanceBound: exactBound,
-    constants: RANKING_CONSTANTS
+    constants: RANKING_CONSTANTS,
   };
 }
 
 function hashRankedOutput(rankedOutput: unknown): string {
-  return crypto.createHash("sha256").update(canonicalJson(rankedOutput)).digest("hex");
+  return crypto.createHash('sha256').update(canonicalJson(rankedOutput)).digest('hex');
 }
 
 function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 }

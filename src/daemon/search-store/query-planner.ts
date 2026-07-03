@@ -1,23 +1,27 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTextAnalysis, type SearchTokenChannel } from "../../core/search/analysis/index.js";
-import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import type { SearchScoringLambdas } from "../../core/search/constants.js";
-import { matchesPathFilter } from "../../core/search/params.js";
-import type { ExactDominanceBound } from "../../core/search/ranking/index.js";
-import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/index.js";
-import { SEARCH_PROPERTIES } from "../../core/search/schema.js";
+import {
+  SEARCH_TOKEN_CHANNELS,
+  type SearchTextAnalysis,
+  type SearchTokenChannel,
+} from '../../core/search/analysis/index.js';
+import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
+import type { SearchScoringLambdas } from '../../core/search/constants.js';
+import { matchesPathFilter } from '../../core/search/params.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/index.js';
+import { POSITIONAL_FIELD_ID } from '../../core/search/retrieval/positional/index.js';
+import { SEARCH_PROPERTIES } from '../../core/search/schema.js';
 import {
   CANONICAL_SEGMENT_SECTION,
   canonicalSegmentSectionBytes,
   lookupCanonicalTermDictionaryEntry,
-  ProjectionReader
-} from "../../core/search/segments/index.js";
-import type { NormalizedSearchParams, PathFilter } from "../../core/search/internal-types.js";
-import type { SearchField } from "../../core/types.js";
-import { compareByteStrings } from "./finalist-order.js";
-import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from "./result-shaping.js";
-import type { DenseVectorSearchHit } from "../search-execution.js";
-import { exactDominanceBoundForSearchHandle } from "./search-execution-state.js";
-import type { RetrievalEmbeddingSetEnvelope } from "./types.js";
+  ProjectionReader,
+} from '../../core/search/segments/index.js';
+import type { NormalizedSearchParams, PathFilter } from '../../core/search/internal-types.js';
+import type { SearchField } from '../../core/types.js';
+import { compareByteStrings } from './finalist-order.js';
+import type { SearchExecutionSnapshotHandle, SharedBytesHandle } from './result-shaping.js';
+import type { DenseVectorSearchHit } from '../search-execution.js';
+import { exactDominanceBoundForSearchHandle } from './search-execution-state.js';
+import type { RetrievalEmbeddingSetEnvelope } from './types.js';
 
 export type SearchQueryPlanInput = {
   vault: string;
@@ -74,34 +78,35 @@ export type SearchPlan = {
   mergeKey: string;
 };
 
-const EMPTY_DOCUMENTS_HANDLE = sharedBytesHandle(new TextEncoder().encode("[]"));
+const EMPTY_DOCUMENTS_HANDLE = sharedBytesHandle(new TextEncoder().encode('[]'));
 
 export class SearchQueryPlanner {
   plan(input: SearchQueryPlanInput): SearchPlan {
     const channels = fanoutSearchChannels(input.snapshot, input.analysis, input.search.fields);
     const tasks = partitionJobPlans(input, channels);
     const estimatedWork = tasks.reduce((sum, task) => sum + task.workEstimate, 0);
-    const exactBound = tasks.length > 0 || input.explain
-      ? exactDominanceBoundForSearchHandle({
-          search: input.search,
-          snapshot: input.snapshot,
-          analysis: input.analysis
-        })
-      : undefined;
+    const exactBound =
+      tasks.length > 0 || input.explain
+        ? exactDominanceBoundForSearchHandle({
+            search: input.search,
+            snapshot: input.snapshot,
+            analysis: input.analysis,
+          })
+        : undefined;
     return {
       snapshotId: input.snapshot.snapshotId,
       ...(exactBound ? { exactBound } : {}),
       tasks,
       requestedLimit: input.search.limit,
       estimatedWork,
-      mergeKey: searchPlanMergeKey(input.snapshot.snapshotId, channels, tasks)
+      mergeKey: searchPlanMergeKey(input.snapshot.snapshotId, channels, tasks),
     };
   }
 }
 
 export function partitionJobPlans(
   input: SearchQueryPlanInput,
-  channels: readonly SearchTokenChannel[]
+  channels: readonly SearchTokenChannel[],
 ): ShardTaskPlan[] {
   const needsDenseFanout = Boolean(input.queryVector && input.denseEmbeddingSet);
   const needsLinkFanout = Boolean(input.sourceDocumentId ? input.sourceDocumentId : input.sourcePath);
@@ -110,7 +115,7 @@ export function partitionJobPlans(
     .sort(compareSegments)
     .map((segment) => ({
       segment,
-      workEstimate: estimateSegmentWork(segment, input.analysis, input.search.fields, channels)
+      workEstimate: estimateSegmentWork(segment, input.analysis, input.search.fields, channels),
     }))
     .filter((entry) => entry.workEstimate > 0 || needsDenseFanout || needsLinkFanout)
     .map((entry): ShardTaskPlan => ({
@@ -125,7 +130,7 @@ export function partitionJobPlans(
         bm25Stats: input.snapshot.bm25Stats,
         documents: EMPTY_DOCUMENTS_HANDLE,
         linkGraph: input.snapshot.linkGraph,
-        segments: [entry.segment]
+        segments: [entry.segment],
       },
       denseEmbeddingSet: input.denseEmbeddingSet,
       queryVector: input.queryVector,
@@ -142,34 +147,37 @@ export function partitionJobPlans(
       deadline: input.deadline,
       cancellationId: input.cancellationId,
       explain: input.explain,
-      mergeKey: segmentMergeKey(entry.segment)
+      mergeKey: segmentMergeKey(entry.segment),
     }));
 }
 
 export function fanoutSearchChannels(
   snapshot: SearchExecutionSnapshotHandle,
   analysis: SearchTextAnalysis,
-  fields: readonly SearchField[] | undefined
+  fields: readonly SearchField[] | undefined,
 ): readonly SearchTokenChannel[] {
   if (analysis.channels.ngram.length > 0 && hangulTerms(analysis.channels.ngram)) {
-    const ngramWork = snapshot.segments.reduce((sum, segment) =>
-      sum + estimateSegmentWork(segment, analysis, fields, ["ngram"]), 0);
-    return ngramWork > 0 ? ["ngram"] : SEARCH_TOKEN_CHANNELS.filter((channel) => channel !== "ngram");
+    const ngramWork = snapshot.segments.reduce(
+      (sum, segment) => sum + estimateSegmentWork(segment, analysis, fields, ['ngram']),
+      0,
+    );
+    return ngramWork > 0 ? ['ngram'] : SEARCH_TOKEN_CHANNELS.filter((channel) => channel !== 'ngram');
   }
   return SEARCH_TOKEN_CHANNELS;
 }
 
 export function estimateSegmentWork(
-  segment: SearchExecutionSnapshotHandle["segments"][number],
+  segment: SearchExecutionSnapshotHandle['segments'][number],
   analysis: SearchTextAnalysis,
   fields: readonly SearchField[] | undefined,
-  channels: readonly SearchTokenChannel[]
+  channels: readonly SearchTokenChannel[],
 ): number {
   const allowedFieldIds = new Set((fields ?? SEARCH_PROPERTIES).map((field) => POSITIONAL_FIELD_ID[field]));
   const segmentBytes = sharedBytes(segment.bytes);
   const postingsBytes = canonicalSegmentSectionBytes(segmentBytes, CANONICAL_SEGMENT_SECTION.postings);
   const termDictionaryBytes = canonicalSegmentSectionBytes(segmentBytes, CANONICAL_SEGMENT_SECTION.termDictionary);
-  if (!postingsBytes || !termDictionaryBytes) throw new Error(`segment ${segment.segmentId} is missing postings dictionaries`);
+  if (!postingsBytes || !termDictionaryBytes)
+    throw new Error(`segment ${segment.segmentId} is missing postings dictionaries`);
   let estimate = 0;
   for (const channel of channels) {
     for (const term of new Set(analysis.channels[channel])) {
@@ -188,11 +196,11 @@ export function estimateSegmentWork(
 function fieldScopedPostingCount(
   postingsBytes: Uint8Array,
   entry: NonNullable<ReturnType<typeof lookupCanonicalTermDictionaryEntry>>,
-  allowedFieldIds: ReadonlySet<number>
+  allowedFieldIds: ReadonlySet<number>,
 ): number {
   const end = entry.postingsOffset + entry.postingsByteLength;
   if (entry.postingsOffset < 0 || end > postingsBytes.length) {
-    throw new Error("term dictionary postings range is outside the postings section");
+    throw new Error('term dictionary postings range is outside the postings section');
   }
   let count = 0;
   const slice = postingsBytes.subarray(entry.postingsOffset, end);
@@ -228,12 +236,12 @@ function readUnsignedLeb128(bytes: Uint8Array, offset: number): { value: number;
     if ((byte & 0x80) === 0) return { value, nextOffset: current };
     shift += 7;
   }
-  throw new Error("truncated unsigned LEB128 value");
+  throw new Error('truncated unsigned LEB128 value');
 }
 
 function segmentMatchesPathFilter(
-  segment: SearchExecutionSnapshotHandle["segments"][number],
-  pathFilter: PathFilter | undefined
+  segment: SearchExecutionSnapshotHandle['segments'][number],
+  pathFilter: PathFilter | undefined,
 ): boolean {
   if (!pathFilter) return true;
   const projection = new ProjectionReader(sharedBytes(segment.bytes), { validate: false });
@@ -244,8 +252,8 @@ function segmentMatchesPathFilter(
 }
 
 function compareSegments(
-  left: SearchExecutionSnapshotHandle["segments"][number],
-  right: SearchExecutionSnapshotHandle["segments"][number]
+  left: SearchExecutionSnapshotHandle['segments'][number],
+  right: SearchExecutionSnapshotHandle['segments'][number],
 ): number {
   return left.partitionId - right.partitionId || compareByteStrings(left.segmentId, right.segmentId);
 }
@@ -260,12 +268,12 @@ function sharedBytesHandle(bytes: Uint8Array): SharedBytesHandle {
   return {
     buffer,
     byteOffset: 0,
-    byteLength: bytes.byteLength
+    byteLength: bytes.byteLength,
   };
 }
 
 function canonicalPostingTerm(channel: SearchTokenChannel, term: string): string {
-  return `${channel}\u0000${term.normalize("NFC").trim()}`;
+  return `${channel}\u0000${term.normalize('NFC').trim()}`;
 }
 
 function hangulTerms(terms: readonly string[]): boolean {
@@ -275,18 +283,18 @@ function hangulTerms(terms: readonly string[]): boolean {
 function searchPlanMergeKey(
   snapshotId: string,
   channels: readonly SearchTokenChannel[],
-  tasks: readonly ShardTaskPlan[]
+  tasks: readonly ShardTaskPlan[],
 ): string {
   return [
-    "snapshot",
-    snapshotId.normalize("NFC"),
-    "channels",
-    channels.join(","),
-    "segments",
-    tasks.map((task) => task.mergeKey).join(",")
-  ].join("\u0000");
+    'snapshot',
+    snapshotId.normalize('NFC'),
+    'channels',
+    channels.join(','),
+    'segments',
+    tasks.map((task) => task.mergeKey).join(','),
+  ].join('\u0000');
 }
 
-function segmentMergeKey(segment: SearchExecutionSnapshotHandle["segments"][number]): string {
-  return ["segment", String(segment.partitionId), segment.segmentId.normalize("NFC")].join("\u0000");
+function segmentMergeKey(segment: SearchExecutionSnapshotHandle['segments'][number]): string {
+  return ['segment', String(segment.partitionId), segment.segmentId.normalize('NFC')].join('\u0000');
 }

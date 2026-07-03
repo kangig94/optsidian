@@ -1,6 +1,6 @@
-import type { SearchTextAnalysis, SearchTokenChannel } from "./analysis/index.js";
-import type { EmbeddingVector } from "./dense/index.js";
-import type { SearchField } from "../types.js";
+import type { SearchTextAnalysis, SearchTokenChannel } from './analysis/index.js';
+import type { EmbeddingVector } from './dense/index.js';
+import type { SearchField } from '../types.js';
 
 export const SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION = 1;
 
@@ -40,7 +40,7 @@ export type LinkGraphNeighbor = {
   documentId: DocumentId;
   path?: string;
   score: number;
-  directions: readonly ("outlink" | "inlink")[];
+  directions: readonly ('outlink' | 'inlink')[];
   edges: readonly LinkGraphEdge[];
 };
 
@@ -208,7 +208,10 @@ export type CandidateFeaturePayload = {
 };
 
 export interface FeatureStore {
-  featuresFor(query: RetrievalQuery, candidates: CandidateSet): readonly CandidateFeaturePayload[] | Promise<readonly CandidateFeaturePayload[]>;
+  featuresFor(
+    query: RetrievalQuery,
+    candidates: CandidateSet,
+  ): readonly CandidateFeaturePayload[] | Promise<readonly CandidateFeaturePayload[]>;
 }
 
 export type SnapshotManifestView = {

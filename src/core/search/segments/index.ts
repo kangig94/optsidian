@@ -25,8 +25,8 @@ export {
   ProjectionReader,
   readCanonicalPostingRow,
   reduceCanonicalBm25GlobalStats,
-  snapshotIdFromManifest
-} from "./canonical.js";
+  snapshotIdFromManifest,
+} from './canonical.js';
 
 export type {
   CanonicalBm25CorpusStats,
@@ -53,8 +53,8 @@ export type {
   SearchScoringModelIdentity,
   SearchSegmentSchemaIdentity,
   SearchSnapshotAnalyzerIdentity,
-  SnapshotIdentityTuple
-} from "./canonical.js";
+  SnapshotIdentityTuple,
+} from './canonical.js';
 
 export {
   assertSafeSignedInteger,
@@ -62,9 +62,7 @@ export {
   decodeUnsignedLeb128,
   decodeZigZagLeb128,
   encodeUnsignedLeb128,
-  encodeZigZagLeb128
-} from "./leb128.js";
+  encodeZigZagLeb128,
+} from './leb128.js';
 
-export type {
-  Leb128Read
-} from "./leb128.js";
+export type { Leb128Read } from './leb128.js';

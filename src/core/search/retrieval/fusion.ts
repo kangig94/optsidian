@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+import crypto from 'node:crypto';
 import type {
   CandidateRetrieverSignals,
   CandidateSet,
@@ -7,16 +7,16 @@ import type {
   RetrieverPlanIdentity,
   RetrieverSignal,
   RetrievalCandidate,
-  RetrievalQuery
-} from "../contracts.js";
-import { DEFAULT_RRF_K } from "../constants.js";
-import { canonicalValueBytes } from "../segments/index.js";
+  RetrievalQuery,
+} from '../contracts.js';
+import { DEFAULT_RRF_K } from '../constants.js';
+import { canonicalValueBytes } from '../segments/index.js';
 
 export { DEFAULT_RRF_K };
-export const FUSION_RETRIEVER_VERSION = "1";
+export const FUSION_RETRIEVER_VERSION = '1';
 
 export type FusionParameters = {
-  algorithm: "rrf";
+  algorithm: 'rrf';
   k: number;
   weights: readonly { retrieverId: string; weight: number }[];
 };
@@ -40,23 +40,26 @@ type CandidateAccumulator = {
 };
 
 export function createFusionRetriever(retrievers: readonly Retriever[], options: FusionOptions = {}): Retriever {
-  const parameters = fusionParameters(retrievers.map((retriever) => retriever.retrieverIdentity), options);
+  const parameters = fusionParameters(
+    retrievers.map((retriever) => retriever.retrieverIdentity),
+    options,
+  );
   const retrieverPlanIdentity = computeRetrieverPlanIdentity(
     retrievers.map((retriever) => retriever.retrieverIdentity),
-    parameters
+    parameters,
   );
   const retrieverIdentity: RetrieverIdentity = {
-    id: "fusion",
+    id: 'fusion',
     version: FUSION_RETRIEVER_VERSION,
     parameters: {
       retrieverPlanIdentity,
       fusion: parameters,
-      retrievers: retrievers.map((retriever) => retriever.retrieverIdentity)
-    }
+      retrievers: retrievers.map((retriever) => retriever.retrieverIdentity),
+    },
   };
   return {
     retrieverIdentity,
-    retrieve: async (query) => retrieveWithFusion(retrievers, query, options, retrieverIdentity, retrieverPlanIdentity)
+    retrieve: async (query) => retrieveWithFusion(retrievers, query, options, retrieverIdentity, retrieverPlanIdentity),
   };
 }
 
@@ -65,13 +68,13 @@ export async function retrieveWithFusion(
   query: RetrievalQuery,
   options: FusionOptions = {},
   retrieverIdentity?: RetrieverIdentity,
-  retrieverPlanIdentity?: RetrieverPlanIdentity
+  retrieverPlanIdentity?: RetrieverPlanIdentity,
 ): Promise<CandidateSet> {
   const sets: RetrieverSet[] = [];
   for (const retriever of retrievers) {
     sets.push({
       identity: retriever.retrieverIdentity,
-      set: await retriever.retrieve(query)
+      set: await retriever.retrieve(query),
     });
   }
   return fuseCandidateSets(sets, query, options, retrieverIdentity, retrieverPlanIdentity);
@@ -82,19 +85,19 @@ export function fuseCandidateSets(
   query: RetrievalQuery,
   options: FusionOptions = {},
   retrieverIdentity?: RetrieverIdentity,
-  retrieverPlanIdentity?: RetrieverPlanIdentity
+  retrieverPlanIdentity?: RetrieverPlanIdentity,
 ): CandidateSet {
   const identities = retrieverSets.map((entry) => entry.identity);
   const parameters = fusionParameters(identities, options);
   const planIdentity = retrieverPlanIdentity ?? computeRetrieverPlanIdentity(identities, parameters);
   const identity = retrieverIdentity ?? {
-    id: "fusion",
+    id: 'fusion',
     version: FUSION_RETRIEVER_VERSION,
     parameters: {
       retrieverPlanIdentity: planIdentity,
       fusion: parameters,
-      retrievers: identities
-    }
+      retrievers: identities,
+    },
   };
   const snapshotId = candidateSetSnapshotId(retrieverSets, query.snapshotId);
   const accumulators = new Map<string, CandidateAccumulator>();
@@ -111,13 +114,13 @@ export function fuseCandidateSets(
         rank,
         rawScore: finiteNumber(candidate.retrievalScore),
         normalizedScore: normalizedScores.get(candidate.candidateId) ?? 0,
-        contribution
+        contribution,
       };
       const current = accumulators.get(candidate.candidateId) ?? {
         candidate: cloneCandidate(candidate),
         rrfScore: 0,
         signals: [],
-        retrieverOrder: []
+        retrieverOrder: [],
       };
       current.rrfScore += contribution;
       current.signals.push(signal);
@@ -134,7 +137,7 @@ export function fuseCandidateSets(
     .slice(0, limit)
     .map((candidate, index): RetrievalCandidate => ({
       ...candidate,
-      rank: index + 1
+      rank: index + 1,
     }));
 
   return {
@@ -143,29 +146,34 @@ export function fuseCandidateSets(
     retrieverIdentity: identity,
     retrieverPlanIdentity: planIdentity,
     complete: retrieverSets.every((entry) => entry.set.complete),
-    candidates
+    candidates,
   };
 }
 
 export function computeRetrieverPlanIdentity(
   identities: readonly RetrieverIdentity[],
-  parameters: FusionParameters
+  parameters: FusionParameters,
 ): RetrieverPlanIdentity {
-  return crypto.createHash("sha256").update(canonicalValueBytes({
-    schemaVersion: 1,
-    retrievers: identities,
-    fusion: parameters
-  })).digest("hex");
+  return crypto
+    .createHash('sha256')
+    .update(
+      canonicalValueBytes({
+        schemaVersion: 1,
+        retrievers: identities,
+        fusion: parameters,
+      }),
+    )
+    .digest('hex');
 }
 
 function fusionParameters(identities: readonly RetrieverIdentity[], options: FusionOptions): FusionParameters {
   return {
-    algorithm: "rrf",
+    algorithm: 'rrf',
     k: options.k ?? DEFAULT_RRF_K,
     weights: identities.map((identity) => ({
       retrieverId: identity.id,
-      weight: retrieverWeight(identity, options.weights)
-    }))
+      weight: retrieverWeight(identity, options.weights),
+    })),
   };
 }
 
@@ -185,7 +193,12 @@ function normalizedScoreByCandidate(candidates: readonly RetrievalCandidate[]): 
 function finalizeCandidate(entry: CandidateAccumulator): RetrievalCandidate {
   const signals = entry.signals
     .map((signal, index) => ({ signal, order: entry.retrieverOrder[index] ?? Number.MAX_SAFE_INTEGER }))
-    .sort((left, right) => left.order - right.order || left.signal.rank - right.signal.rank || left.signal.retrieverId.localeCompare(right.signal.retrieverId))
+    .sort(
+      (left, right) =>
+        left.order - right.order ||
+        left.signal.rank - right.signal.rank ||
+        left.signal.retrieverId.localeCompare(right.signal.retrieverId),
+    )
     .map((entry) => entry.signal);
   const retrieverSignals = typedRetrieverSignals(signals);
   const denseAgreement = entry.candidate.denseAgreement ?? retrieverSignals.dense?.normalizedScore;
@@ -196,7 +209,7 @@ function finalizeCandidate(entry: CandidateAccumulator): RetrievalCandidate {
     rrfScore: entry.rrfScore,
     retrieverSignals,
     ...(denseAgreement === undefined ? {} : { denseAgreement }),
-    ...(linkAgreement === undefined ? {} : { linkAgreement })
+    ...(linkAgreement === undefined ? {} : { linkAgreement }),
   };
 }
 
@@ -209,23 +222,24 @@ function typedRetrieverSignals(signals: readonly RetrieverSignal[]): CandidateRe
   return output;
 }
 
-function retrieverSignalSlot(retrieverId: string): "lexical" | "dense" | "link" | undefined {
-  if (retrieverId === "dense") return "dense";
-  if (retrieverId === "link" || retrieverId === "link-adjacency") return "link";
-  if (retrieverId === "positional-lexical" || retrieverId.includes("lexical")) return "lexical";
+function retrieverSignalSlot(retrieverId: string): 'lexical' | 'dense' | 'link' | undefined {
+  if (retrieverId === 'dense') return 'dense';
+  if (retrieverId === 'link' || retrieverId === 'link-adjacency') return 'link';
+  if (retrieverId === 'positional-lexical' || retrieverId.includes('lexical')) return 'lexical';
   return undefined;
 }
 
 function mergeCandidate(left: RetrievalCandidate, right: RetrievalCandidate): RetrievalCandidate {
   const leftHasLexical = left.channels.length > 0 || left.phraseMatches.length > 0 || left.proximityMatches.length > 0;
-  const rightHasLexical = right.channels.length > 0 || right.phraseMatches.length > 0 || right.proximityMatches.length > 0;
+  const rightHasLexical =
+    right.channels.length > 0 || right.phraseMatches.length > 0 || right.proximityMatches.length > 0;
   const base = !leftHasLexical && rightHasLexical ? right : left;
   return {
     ...base,
     denseAgreement: maxOptional(left.denseAgreement, right.denseAgreement),
     linkAgreement: maxOptional(left.linkAgreement, right.linkAgreement),
     rrfScore: maxOptional(left.rrfScore, right.rrfScore),
-    retrieverSignals: left.retrieverSignals ?? right.retrieverSignals
+    retrieverSignals: left.retrieverSignals ?? right.retrieverSignals,
   };
 }
 
@@ -234,7 +248,7 @@ function cloneCandidate(candidate: RetrievalCandidate): RetrievalCandidate {
     ...candidate,
     channels: [...candidate.channels],
     phraseMatches: [...candidate.phraseMatches],
-    proximityMatches: [...candidate.proximityMatches]
+    proximityMatches: [...candidate.proximityMatches],
   };
 }
 
@@ -248,10 +262,15 @@ function candidateKey(candidate: RetrievalCandidate): string {
   return candidate.path ?? candidate.candidateId;
 }
 
-function candidateSetSnapshotId(retrieverSets: readonly RetrieverSet[], querySnapshotId: string | undefined): string | undefined {
-  const snapshotIds = new Set(retrieverSets.map((entry) => entry.set.snapshotId).filter((value): value is string => Boolean(value)));
+function candidateSetSnapshotId(
+  retrieverSets: readonly RetrieverSet[],
+  querySnapshotId: string | undefined,
+): string | undefined {
+  const snapshotIds = new Set(
+    retrieverSets.map((entry) => entry.set.snapshotId).filter((value): value is string => Boolean(value)),
+  );
   if (querySnapshotId) snapshotIds.add(querySnapshotId);
-  if (snapshotIds.size > 1) throw new Error("cannot fuse candidate sets from different snapshots");
+  if (snapshotIds.size > 1) throw new Error('cannot fuse candidate sets from different snapshots');
   return snapshotIds.values().next().value;
 }
 

@@ -4,7 +4,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/", "node_modules/", "**/*.cjs", "**/*.mjs"]
+    ignores: ["dist/", "node_modules/", "**/*.cjs"]
   },
 
   js.configs.recommended,
@@ -25,6 +25,7 @@ export default tseslint.config(
       eqeqeq: ["error", "always"],
       "prefer-const": "error",
       "no-var": "error",
+      "no-implicit-coercion": "error",
       "no-restricted-syntax": [
         "error",
         {
@@ -39,6 +40,7 @@ export default tseslint.config(
           fixStyle: "inline-type-imports"
         }
       ],
+      "@typescript-eslint/consistent-type-exports": "error",
       "@typescript-eslint/no-unused-vars": [
         "error",
         {
@@ -50,6 +52,10 @@ export default tseslint.config(
         }
       ],
       "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-confusing-void-expression": "error",
+      "@typescript-eslint/no-misused-spread": "error",
+      "@typescript-eslint/no-unnecessary-type-parameters": "error",
+      "@typescript-eslint/only-throw-error": "error",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-call": "off",
       "@typescript-eslint/no-unsafe-member-access": "off",
@@ -64,8 +70,32 @@ export default tseslint.config(
       "@typescript-eslint/no-non-null-assertion": "error",
       "@typescript-eslint/no-redundant-type-constituents": "off",
       "@typescript-eslint/restrict-template-expressions": "off",
+      "@typescript-eslint/switch-exhaustiveness-check": "error",
       "@typescript-eslint/unbound-method": "off",
       "@typescript-eslint/require-await": "off"
+    }
+  },
+
+  {
+    files: ["tests/**/*.mjs"],
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      sourceType: "module"
+    },
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      "no-undef": "off",
+      "@typescript-eslint/no-unused-vars": "off",
+      "no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          destructuredArrayIgnorePattern: "^_",
+          ignoreRestSiblings: true
+        }
+      ]
     }
   },
 

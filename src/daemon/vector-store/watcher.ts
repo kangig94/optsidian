@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { readVaultFileHardened, resolveVaultPath, shouldSkipDir, walkFiles, type SafePath } from "../../core/path.js";
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { readVaultFileHardened, resolveVaultPath, shouldSkipDir, walkFiles, type SafePath } from '../../core/path.js';
 
 export type VaultDirtyMark = {
   docId: string;
@@ -19,7 +19,7 @@ export type RetrievalSaveWatcher = {
 
 export type WatchDirectory = (
   dir: string,
-  listener: (eventType: fs.WatchEventType, filename: string | Buffer | null) => void
+  listener: (eventType: fs.WatchEventType, filename: string | Buffer | null) => void,
 ) => RetrievalSaveWatcher;
 
 export type VaultChangeProducerOptions = {
@@ -66,14 +66,18 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     this.onDirtyMarks = options.onDirtyMarks;
     this.debounceMs = options.debounceMs ?? 250;
     this.fallbackPollMs = options.fallbackPollMs ?? 5000;
-    this.watchDirectory = options.watchDirectory ?? ((dir, listener) => {
-      const watcher = fs.watch(dir, listener);
-      // An unhandled 'error' event on an fs.watch handle would throw as an uncaughtException and
-      // exit the daemon. Route it to the periodic-scan fallback instead, matching how synchronous
-      // watch-registration failures are already handled.
-      watcher.on("error", (error) => this.startFallbackScan(error));
-      return watcher;
-    });
+    this.watchDirectory =
+      options.watchDirectory ??
+      ((dir, listener) => {
+        const watcher = fs.watch(dir, listener);
+        // An unhandled 'error' event on an fs.watch handle would throw as an uncaughtException and
+        // exit the daemon. Route it to the periodic-scan fallback instead, matching how synchronous
+        // watch-registration failures are already handled.
+        watcher.on('error', (error) => {
+          this.startFallbackScan(error);
+        });
+        return watcher;
+      });
     this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
     this.clearTimer = options.clearTimer ?? clearTimeout;
     this.setIntervalFn = options.setInterval ?? ((callback, ms) => setInterval(callback, ms));
@@ -127,7 +131,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
 
   private handleWatchEvent(dir: string, eventType: fs.WatchEventType, filename: string | Buffer | null): void {
     if (this.closed || this.fallbackScanActive || !filename) return;
-    if (eventType !== "change" && eventType !== "rename") return;
+    if (eventType !== 'change' && eventType !== 'rename') return;
     const safe = this.resolveChangedPath(path.join(dir, filename.toString()));
     if (!safe) return;
     try {
@@ -138,7 +142,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   }
 
   private queueResolvedMarkdownPath(safe: SafePath): void {
-    if (!isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, "file")) return;
+    if (!isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, 'file')) return;
     const docId = docIdForVaultPath(safe.rel);
     this.pending.set(docId, { docId, path: safe.rel });
     this.armDebounce();
@@ -172,14 +176,14 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
 
   private dirtyMarkForPath(inputPath: string): VaultDirtyMark | undefined {
     const safe = this.resolveChangedPath(inputPath);
-    if (!safe || !isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, "file")) return undefined;
+    if (!safe || !isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, 'file')) return undefined;
     try {
       const read = readVaultFileHardened(this.vaultRoot, safe.rel);
       if (!read.stat.isFile()) return undefined;
       const mark = {
         docId: docIdForVaultPath(read.safe.rel),
         path: read.safe.rel,
-        contentHash: sha256(read.bytes)
+        contentHash: sha256(read.bytes),
       };
       this.knownContentHashes.set(mark.path, mark.contentHash);
       return mark;
@@ -187,7 +191,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
       this.knownContentHashes.delete(safe.rel);
       return {
         docId: docIdForVaultPath(safe.rel),
-        path: safe.rel
+        path: safe.rel,
       };
     }
   }
@@ -213,7 +217,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     }
     if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
-      if (pathContainsSkippedDirectory(safe.rel, "dir")) return;
+      if (pathContainsSkippedDirectory(safe.rel, 'dir')) return;
       this.reconcileExistingDirectory(safe.abs);
       return;
     }
@@ -224,7 +228,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     const watchDirs = new Set<string>();
     for (const watchDir of enumerateWatchDirs(this.vaultRoot, dir)) {
       const safe = resolveVaultPath(this.vaultRoot, watchDir, { mustExist: true });
-      if (pathContainsSkippedDirectory(safe.rel, "dir")) continue;
+      if (pathContainsSkippedDirectory(safe.rel, 'dir')) continue;
       watchDirs.add(safe.abs);
       this.reopenWatchDir(safe.abs);
     }
@@ -235,7 +239,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     const next = new Map(this.knownContentHashes);
     const hashes = this.scanMarkdownContentHashes(dir);
     const safe = resolveVaultPath(this.vaultRoot, dir, { mustExist: true });
-    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : "";
+    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : '';
     for (const relPath of this.knownContentHashes.keys()) {
       if (!pathIsInSubtree(relPath, safe.rel, prefix)) continue;
       if (hashes.has(relPath)) continue;
@@ -251,7 +255,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   }
 
   private reconcileExistingFile(safe: SafePath): void {
-    if (!isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, "file")) return;
+    if (!isMarkdownPath(safe.rel) || pathContainsSkippedDirectory(safe.rel, 'file')) return;
     const next = new Map(this.knownContentHashes);
     try {
       const read = readVaultFileHardened(this.vaultRoot, safe.rel);
@@ -270,7 +274,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
 
   private reconcileMissing(safe: SafePath): void {
     this.closeWatchedSubtree(safe.abs);
-    if (isMarkdownPath(safe.rel) && !pathContainsSkippedDirectory(safe.rel, "file")) {
+    if (isMarkdownPath(safe.rel) && !pathContainsSkippedDirectory(safe.rel, 'file')) {
       if (this.knownContentHashes.has(safe.rel)) {
         this.knownContentHashes.delete(safe.rel);
         this.queueResolvedMarkdownPath(safe);
@@ -278,7 +282,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
       return;
     }
 
-    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : "";
+    const prefix = safe.rel ? `${normalizeVaultRelativePath(safe.rel)}/` : '';
     for (const relPath of [...this.knownContentHashes.keys()]) {
       if (!pathIsInSubtree(relPath, safe.rel, prefix)) continue;
       this.knownContentHashes.delete(relPath);
@@ -323,7 +327,7 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
     }
     for (const file of files) {
       const safe = this.resolveChangedPath(file);
-      if (!safe || pathContainsSkippedDirectory(safe.rel, "file")) continue;
+      if (!safe || pathContainsSkippedDirectory(safe.rel, 'file')) continue;
       try {
         const read = readVaultFileHardened(this.vaultRoot, safe.rel);
         if (read.stat.isFile()) hashes.set(read.safe.rel, sha256(read.bytes));
@@ -372,7 +376,7 @@ export function startRetrievalSaveWatcher(options: VaultChangeProducerOptions): 
 }
 
 export function docIdForVaultPath(relPath: string): string {
-  return sha256(Buffer.from(normalizeVaultRelativePath(relPath), "utf8"));
+  return sha256(Buffer.from(normalizeVaultRelativePath(relPath), 'utf8'));
 }
 
 function enumerateWatchDirs(vaultRoot: string, start: string): string[] {
@@ -380,7 +384,9 @@ function enumerateWatchDirs(vaultRoot: string, start: string): string[] {
   const output: string[] = [];
   const visit = (dir: string) => {
     output.push(dir);
-    const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+    const entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       if (!entry.isDirectory() || shouldSkipDir(entry.name, false)) continue;
       visit(path.join(dir, entry.name));
@@ -390,9 +396,11 @@ function enumerateWatchDirs(vaultRoot: string, start: string): string[] {
   return output;
 }
 
-function pathContainsSkippedDirectory(relPath: string, kind: "file" | "dir"): boolean {
-  const parts = normalizeVaultRelativePath(relPath).split("/").filter((part) => part && part !== ".");
-  const dirs = kind === "file" ? parts.slice(0, -1) : parts;
+function pathContainsSkippedDirectory(relPath: string, kind: 'file' | 'dir'): boolean {
+  const parts = normalizeVaultRelativePath(relPath)
+    .split('/')
+    .filter((part) => part && part !== '.');
+  const dirs = kind === 'file' ? parts.slice(0, -1) : parts;
   return dirs.some((part) => shouldSkipDir(part, false));
 }
 
@@ -405,36 +413,38 @@ function pathIsInSubtree(relPath: string, subtreeRel: string, subtreePrefix: str
 
 function isPathWithinOrEqual(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 function lstatIfExists(filePath: string): fs.Stats | undefined {
   try {
     return fs.lstatSync(filePath);
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return undefined;
+    if (errorCode(error) === 'ENOENT') return undefined;
     throw error;
   }
 }
 
 function isMarkdownPath(relPath: string): boolean {
-  return path.posix.extname(normalizeVaultRelativePath(relPath)).toLowerCase() === ".md";
+  return path.posix.extname(normalizeVaultRelativePath(relPath)).toLowerCase() === '.md';
 }
 
 function normalizeVaultRelativePath(value: string): string {
   const parts: string[] = [];
-  for (const part of value.replace(/\\/g, "/").split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") parts.pop();
+  for (const part of value.replace(/\\/g, '/').split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') parts.pop();
     else parts.push(part);
   }
-  return parts.join("/");
+  return parts.join('/');
 }
 
 function sha256(bytes: Uint8Array): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+  return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
 }

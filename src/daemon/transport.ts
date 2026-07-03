@@ -1,12 +1,6 @@
-import fs from "node:fs/promises";
-import net from "node:net";
-import {
-  FrameDecoder,
-  encodeFrame,
-  rpcError,
-  type DaemonRequestBase,
-  type SearchDaemonRpcError
-} from "./protocol.js";
+import fs from 'node:fs/promises';
+import net from 'node:net';
+import { FrameDecoder, encodeFrame, rpcError, type DaemonRequestBase, type SearchDaemonRpcError } from './protocol.js';
 
 export type RpcRequestLike = DaemonRequestBase<string, unknown>;
 
@@ -33,7 +27,10 @@ export type RpcServer = {
   close(): Promise<void>;
 };
 
-export type RpcServerOptions<Request extends RpcRequestLike = RpcRequestLike, Response extends RpcResponseLike = RpcResponseLike> = {
+export type RpcServerOptions<
+  Request extends RpcRequestLike = RpcRequestLike,
+  Response extends RpcResponseLike = RpcResponseLike,
+> = {
   socketPath: string;
   capability?: string;
   isRequest?(message: unknown): message is Request;
@@ -51,15 +48,17 @@ type PendingRequest = {
 
 const RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000;
 
-export type SocketProbeResult = "listening" | "refused" | "missing" | "unavailable";
+export type SocketProbeResult = 'listening' | 'refused' | 'missing' | 'unavailable';
 
-export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike>(socketPath: string): Promise<RpcConnection<Request>> {
+export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike>(
+  socketPath: string,
+): Promise<RpcConnection<Request>> {
   const socket = await openSocket(socketPath);
   const decoder = new FrameDecoder();
   const pending = new Map<string, PendingRequest>();
   let closed = false;
 
-  socket.on("data", (chunk) => {
+  socket.on('data', (chunk) => {
     try {
       for (const message of decoder.push(bufferChunk(chunk))) {
         const response = message as RpcResponseLike;
@@ -77,14 +76,17 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
     }
   });
 
-  socket.on("error", (error) => {
+  socket.on('error', (error) => {
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
 
-  socket.on("close", () => {
+  socket.on('close', () => {
     closed = true;
-    const error = rpcResponseError("SEARCH_DAEMON_UNAVAILABLE", "search daemon socket closed before a response was received");
+    const error = rpcResponseError(
+      'SEARCH_DAEMON_UNAVAILABLE',
+      'search daemon socket closed before a response was received',
+    );
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
   });
@@ -92,7 +94,7 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
   return {
     request(request) {
       if (closed) {
-        return Promise.reject(rpcResponseError("SEARCH_DAEMON_UNAVAILABLE", "search daemon socket is closed"));
+        return Promise.reject(rpcResponseError('SEARCH_DAEMON_UNAVAILABLE', 'search daemon socket is closed'));
       }
       return new Promise((resolve, reject) => {
         pending.set(request.requestId, { resolve, reject });
@@ -109,15 +111,18 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
           resolve();
           return;
         }
-        socket.end(() => resolve());
+        socket.end(() => {
+          resolve();
+        });
       });
-    }
+    },
   };
 }
 
-export async function createRpcServer<Request extends RpcRequestLike = RpcRequestLike, Response extends RpcResponseLike = RpcResponseLike>(
-  options: RpcServerOptions<Request, Response>
-): Promise<RpcServer> {
+export async function createRpcServer<
+  Request extends RpcRequestLike = RpcRequestLike,
+  Response extends RpcResponseLike = RpcResponseLike,
+>(options: RpcServerOptions<Request, Response>): Promise<RpcServer> {
   const sockets = new Set<net.Socket>();
   const activeRequestsBySocket = new Map<net.Socket, Set<string>>();
   const activeRequestPromises = new Set<Promise<void>>();
@@ -132,14 +137,14 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
         if ((activeRequestsBySocket.get(socket)?.size ?? 0) === 0) socket.destroy();
         return;
       }
-      writeBadRequestAndDestroy(socket, "RPC frame timed out before completion");
+      writeBadRequestAndDestroy(socket, 'RPC frame timed out before completion');
     });
 
-    socket.on("error", () => {
+    socket.on('error', () => {
       socket.destroy();
     });
 
-    socket.on("data", (chunk) => {
+    socket.on('data', (chunk) => {
       const bufferedChunk = bufferChunk(chunk);
       let messages: unknown[];
       try {
@@ -152,7 +157,7 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
       for (const message of messages) {
         const isRequest = options.isRequest ?? isRpcRequestLike;
         if (!isRequest(message)) {
-          writeBadRequestAndDestroy(socket, "RPC request must be an object with string requestId and method");
+          writeBadRequestAndDestroy(socket, 'RPC request must be an object with string requestId and method');
           return;
         }
         const request = message as Request;
@@ -161,20 +166,28 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
           .then(() => options.handleRequest(request))
           .then((result) => {
             if (socket.destroyed) return;
-            writeResponse(socket, options.responseForResult?.(request, result) ?? {
-              requestId: request.requestId,
-              ok: true,
-              result
-            } satisfies RpcResponseLike);
+            writeResponse(
+              socket,
+              options.responseForResult?.(request, result) ??
+                ({
+                  requestId: request.requestId,
+                  ok: true,
+                  result,
+                } satisfies RpcResponseLike),
+            );
           })
           .catch((error) => {
             if (socket.destroyed) return;
             const responseError = errorToRpcError(error);
-            writeResponse(socket, options.responseForError?.(request.requestId, responseError) ?? {
-              requestId: request.requestId,
-              ok: false,
-              error: responseError
-            } satisfies RpcResponseLike);
+            writeResponse(
+              socket,
+              options.responseForError?.(request.requestId, responseError) ??
+                ({
+                  requestId: request.requestId,
+                  ok: false,
+                  error: responseError,
+                } satisfies RpcResponseLike),
+            );
           })
           .finally(() => {
             activeRequestsBySocket.get(socket)?.delete(request.requestId);
@@ -184,7 +197,7 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
       }
     });
 
-    socket.on("close", () => {
+    socket.on('close', () => {
       sockets.delete(socket);
       const active = activeRequestsBySocket.get(socket);
       activeRequestsBySocket.delete(socket);
@@ -202,7 +215,7 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
-        if (error && errorCode(error) !== "ERR_SERVER_NOT_RUNNING") reject(error);
+        if (error && errorCode(error) !== 'ERR_SERVER_NOT_RUNNING') reject(error);
         else resolve();
       });
     });
@@ -220,21 +233,23 @@ export async function createRpcServer<Request extends RpcRequestLike = RpcReques
     async close() {
       await relinquish();
       await drain();
-    }
+    },
   };
 }
 
 export async function probeSocketPath(socketPath: string): Promise<SocketProbeResult> {
   return new Promise((resolve) => {
     const socket = net.createConnection(socketPath);
-    socket.once("connect", () => {
-      socket.end(() => resolve("listening"));
+    socket.once('connect', () => {
+      socket.end(() => {
+        resolve('listening');
+      });
     });
-    socket.once("error", (error) => {
+    socket.once('error', (error) => {
       const code = errorCode(error);
-      if (code === "ECONNREFUSED") resolve("refused");
-      else if (code === "ENOENT") resolve("missing");
-      else resolve("unavailable");
+      if (code === 'ECONNREFUSED') resolve('refused');
+      else if (code === 'ENOENT') resolve('missing');
+      else resolve('unavailable');
     });
   });
 }
@@ -245,9 +260,9 @@ async function listenWithStaleSocketProbe(server: net.Server, socketPath: string
       await listen(server, socketPath);
       return;
     } catch (error) {
-      if (errorCode(error) !== "EADDRINUSE" || attempt > 0) throw error;
+      if (errorCode(error) !== 'EADDRINUSE' || attempt > 0) throw error;
       const probe = await probeSocketPath(socketPath);
-      if (probe !== "refused") throw error;
+      if (probe !== 'refused') throw error;
       await fsRmSocket(socketPath);
     }
   }
@@ -255,9 +270,9 @@ async function listenWithStaleSocketProbe(server: net.Server, socketPath: string
 
 function listen(server: net.Server, socketPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    server.once("error", reject);
+    server.once('error', reject);
     server.listen(socketPath, () => {
-      server.off("error", reject);
+      server.off('error', reject);
       resolve();
     });
   });
@@ -267,7 +282,7 @@ async function fsRmSocket(socketPath: string): Promise<void> {
   try {
     await fs.rm(socketPath, { force: true });
   } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
+    if (errorCode(error) !== 'ENOENT') throw error;
   }
 }
 
@@ -283,25 +298,33 @@ function writeResponse(socket: net.Socket, response: RpcResponseLike, onComplete
 }
 
 function writeBadRequestAndDestroy(socket: net.Socket, message: string): void {
-  writeResponse(socket, {
-    requestId: "invalid-frame",
-    ok: false,
-    error: rpcError("BAD_REQUEST", message)
-  } satisfies RpcResponseLike, () => socket.destroy());
+  writeResponse(
+    socket,
+    {
+      requestId: 'invalid-frame',
+      ok: false,
+      error: rpcError('BAD_REQUEST', message),
+    } satisfies RpcResponseLike,
+    () => socket.destroy(),
+  );
 }
 
 export function isRpcRequestLike(message: unknown): message is RpcRequestLike {
-  return message !== null &&
-    typeof message === "object" &&
-    typeof (message as { requestId?: unknown }).requestId === "string" &&
-    typeof (message as { method?: unknown }).method === "string";
+  return (
+    message !== null &&
+    typeof message === 'object' &&
+    typeof (message as { requestId?: unknown }).requestId === 'string' &&
+    typeof (message as { method?: unknown }).method === 'string'
+  );
 }
 
 function openSocket(socketPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
-    socket.once("connect", () => resolve(socket));
-    socket.once("error", reject);
+    socket.once('connect', () => {
+      resolve(socket);
+    });
+    socket.once('error', reject);
   });
 }
 
@@ -311,10 +334,10 @@ function errorToRpcError(error: unknown) {
     return rpcError(
       code as never,
       error instanceof Error ? error.message : String(error),
-      error && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined
+      error && typeof error === 'object' && 'details' in error ? (error as { details?: unknown }).details : undefined,
     );
   }
-  return rpcError("INTERNAL", error instanceof Error ? error.message : String(error));
+  return rpcError('INTERNAL', error instanceof Error ? error.message : String(error));
 }
 
 function rpcResponseError(code: string, message: string, details?: unknown): Error {
@@ -325,7 +348,7 @@ function rpcResponseError(code: string, message: string, details?: unknown): Err
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string"
+  return error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
     ? (error as { code: string }).code
     : undefined;
 }

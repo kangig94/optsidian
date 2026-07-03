@@ -1,5 +1,5 @@
-import type { SearchCoverageBudget, SearchCoverageMode, SearchField, SearchRetrievalMode } from "../types.js";
-import type { SearchTokenChannelTerms } from "./analysis/index.js";
+import type { SearchCoverageBudget, SearchCoverageMode, SearchField, SearchRetrievalMode } from '../types.js';
+import type { SearchTokenChannelTerms } from './analysis/index.js';
 
 export type PathFilter = {
   rel: string;
@@ -18,15 +18,12 @@ export type NormalizedSearchParams = {
   budget?: SearchCoverageBudget;
 };
 
-export const SEARCH_WARNING_BOUNDED = "bounded";
-export const SEARCH_WARNING_NON_REPRODUCIBLE = "non-reproducible";
+export const SEARCH_WARNING_BOUNDED = 'bounded';
+export const SEARCH_WARNING_NON_REPRODUCIBLE = 'non-reproducible';
 
-export function searchExecutionWarningLabels(search: Pick<NormalizedSearchParams, "coverage" | "budget">): string[] {
-  if (search.coverage !== "bounded") return [];
-  return [
-    SEARCH_WARNING_BOUNDED,
-    ...(search.budget?.timeMs !== undefined ? [SEARCH_WARNING_NON_REPRODUCIBLE] : [])
-  ];
+export function searchExecutionWarningLabels(search: Pick<NormalizedSearchParams, 'coverage' | 'budget'>): string[] {
+  if (search.coverage !== 'bounded') return [];
+  return [SEARCH_WARNING_BOUNDED, ...(search.budget?.timeMs !== undefined ? [SEARCH_WARNING_NON_REPRODUCIBLE] : [])];
 }
 
 export type RankedCandidate = {

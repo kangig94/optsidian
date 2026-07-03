@@ -1,5 +1,5 @@
-import { normalizeTerm, positionsForTerm, postingKeysForTerms } from "./postings.js";
-import type { PositionalDocId, PositionalFieldId, PositionalPostings } from "./types.js";
+import { normalizeTerm, positionsForTerm, postingKeysForTerms } from './postings.js';
+import type { PositionalDocId, PositionalFieldId, PositionalPostings } from './types.js';
 
 export type TermWindow = {
   lo: number;
@@ -69,7 +69,7 @@ export function findProximityMatches(
     maxWindow?: number;
     docIds?: readonly PositionalDocId[];
     fieldIds?: readonly PositionalFieldId[];
-  } = {}
+  } = {},
 ): PositionalProximityMatch[] {
   const normalizedTerms = uniqueTerms(terms.map(normalizeTerm).filter(Boolean));
   if (normalizedTerms.length === 0) return [];
@@ -88,7 +88,7 @@ export function findProximityMatches(
       docId: key.docId,
       fieldId: key.fieldId,
       score: normalizedTerms.length / window.width,
-      window
+      window,
     });
   }
   return matches.sort((left, right) => left.docId - right.docId || left.fieldId - right.fieldId);

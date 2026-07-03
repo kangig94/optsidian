@@ -12,8 +12,8 @@ export {
   embeddingSpaceIdForRecipe,
   VECTOR_GENERATION_MANIFEST_ID_VERSION,
   vectorGenerationIdForManifest,
-  vectorProjectionHash
-} from "./embedding-set.js";
+  vectorProjectionHash,
+} from './embedding-set.js';
 
 export type {
   BuiltEmbeddingSet,
@@ -21,8 +21,8 @@ export type {
   EmbeddingRecipeIdentity,
   EmbeddingSetDocumentInput,
   EmbeddingSetRecord,
-  EmbeddingSpaceId
-} from "./embedding-set.js";
+  EmbeddingSpaceId,
+} from './embedding-set.js';
 
 export {
   ensureLocalOnnxModelArtifact,
@@ -42,8 +42,8 @@ export {
   localOnnxTokenizerConfigPath,
   localOnnxTokenizerJsonPath,
   ONNXRUNTIME_NODE_RUNTIME_VERSION,
-  resolveLocalOnnxModelKey
-} from "./artifacts.js";
+  resolveLocalOnnxModelKey,
+} from './artifacts.js';
 
 export type {
   LocalOnnxArtifactEnsureOptions,
@@ -54,8 +54,8 @@ export type {
   LocalOnnxArtifactState,
   LocalOnnxModelAlias,
   LocalOnnxModelDescriptor,
-  LocalOnnxModelKey
-} from "./artifacts.js";
+  LocalOnnxModelKey,
+} from './artifacts.js';
 
 export {
   candidateExecutionProviders,
@@ -66,8 +66,8 @@ export {
   meanPoolLastHiddenState,
   renderLocalOnnxEmbeddingInput,
   resolveLocalOnnxProviderSelection,
-  truncateEncoding
-} from "./local-onnx.js";
+  truncateEncoding,
+} from './local-onnx.js';
 
 export type {
   LocalOnnxProviderOptions,
@@ -79,32 +79,24 @@ export type {
   LocalOnnxTokenizer,
   LocalOnnxTokenizerEncoding,
   OnnxExecutionProvider,
-  OnnxExecutionProviderPreference
-} from "./local-onnx.js";
+  OnnxExecutionProviderPreference,
+} from './local-onnx.js';
 
 export {
   cosineSimilarity,
   denseAgreementFromCosine,
   DeterministicHashProvider,
-  normalizeEmbeddingVector
-} from "./provider.js";
+  normalizeEmbeddingVector,
+} from './provider.js';
 
 export type {
   DeterministicHashProviderOptions,
   EmbeddingInputKind,
   EmbeddingProvider,
   EmbeddingProviderIdentity,
-  EmbeddingVector
-} from "./provider.js";
+  EmbeddingVector,
+} from './provider.js';
 
-export {
-  createDenseRetriever,
-  DENSE_RETRIEVER_VERSION
-} from "./retriever.js";
+export { createDenseRetriever, DENSE_RETRIEVER_VERSION } from './retriever.js';
 
-export type {
-  DenseEmbeddingRecord,
-  DenseEmbeddingSet,
-  DenseMetric,
-  DenseRetrieverOptions
-} from "./retriever.js";
+export type { DenseEmbeddingRecord, DenseEmbeddingSet, DenseMetric, DenseRetrieverOptions } from './retriever.js';

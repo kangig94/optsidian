@@ -3,5 +3,5 @@ export {
   type CanonicalDocProjectionDoc,
   type CanonicalDocProjectionFieldLength,
   type CanonicalDocProjectionIdentityKeys,
-  type CanonicalDocProjectionOffsets
-} from "../../segments/index.js";
+  type CanonicalDocProjectionOffsets,
+} from '../../segments/index.js';

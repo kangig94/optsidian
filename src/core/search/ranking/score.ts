@@ -1,4 +1,4 @@
-import type { SearchField, SearchMatch } from "../../types.js";
+import type { SearchField, SearchMatch } from '../../types.js';
 import {
   COVERAGE_BUCKET_MIN_TERMS,
   EXACT_DOMINANCE_EPSILON,
@@ -6,15 +6,12 @@ import {
   RANK_BUCKET,
   SEARCH_SCORING_LAMBDAS,
   SEARCH_TOKEN_CHANNEL_WEIGHT,
-  type SearchScoringLambdas
-} from "../constants.js";
-import type { RankedCandidate } from "../internal-types.js";
-import { SEARCH_FIELD_CHANNEL_BOOST } from "../schema.js";
-import {
-  SEARCH_TOKEN_CHANNELS,
-  type SearchTokenChannel,
-} from "../analysis/index.js";
-export { identityScoreFromExactPriority } from "./identity.js";
+  type SearchScoringLambdas,
+} from '../constants.js';
+import type { RankedCandidate } from '../internal-types.js';
+import { SEARCH_FIELD_CHANNEL_BOOST } from '../schema.js';
+import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../analysis/index.js';
+export { identityScoreFromExactPriority } from './identity.js';
 
 export type RankDocument = {
   id: string;
@@ -63,7 +60,7 @@ export function bm25BoundKey(channel: SearchTokenChannel, field: SearchField): s
 // ordering.
 export function compareCanonicalBm25Terms(
   left: { channel: SearchTokenChannel; fieldId: number; term: string },
-  right: { channel: SearchTokenChannel; fieldId: number; term: string }
+  right: { channel: SearchTokenChannel; fieldId: number; term: string },
 ): number {
   return (
     SEARCH_TOKEN_CHANNELS.indexOf(left.channel) - SEARCH_TOKEN_CHANNELS.indexOf(right.channel) ||
@@ -78,7 +75,7 @@ export function rerankCandidatesWithSignals(
   hits: Array<{ document: RankDocument; score: number }>,
   _fields: SearchField[] | undefined,
   signals: Map<string, CandidateRankSignals>,
-  options: { lambdas?: Partial<SearchScoringLambdas> } = {}
+  options: { lambdas?: Partial<SearchScoringLambdas> } = {},
 ): RankedCandidate[] {
   return rerankCandidates(hits, signals, options);
 }
@@ -86,7 +83,7 @@ export function rerankCandidatesWithSignals(
 function rerankCandidates(
   hits: Array<{ document: RankDocument; score: number }>,
   signals: Map<string, CandidateRankSignals>,
-  options: { lambdas?: Partial<SearchScoringLambdas> }
+  options: { lambdas?: Partial<SearchScoringLambdas> },
 ): RankedCandidate[] {
   const candidates = hits.map((hit, index) => {
     const signal = requiredRankSignals(hit.document, signals);
@@ -96,40 +93,45 @@ function rerankCandidates(
   return candidates
     .map((candidate) => ({
       ...candidate,
-      score: rerankScore(candidate, options.lambdas)
+      score: rerankScore(candidate, options.lambdas),
     }))
     .sort(compareRankedMatches);
 }
 
 const REQUIRED_FINITE_RANK_SIGNAL_KEYS = [
-  "coverageTerms",
-  "coverageFieldScore",
-  "lexicalScore",
-  "identityScore",
-  "exactLambda",
-  "rarityScore",
-  "proximityScore",
-  "bodyScore"
+  'coverageTerms',
+  'coverageFieldScore',
+  'lexicalScore',
+  'identityScore',
+  'exactLambda',
+  'rarityScore',
+  'proximityScore',
+  'bodyScore',
 ] as const satisfies readonly (keyof CandidateRankSignals)[];
 
 const OPTIONAL_FINITE_RANK_SIGNAL_KEYS = [
-  "denseAgreement",
-  "linkAgreement",
-  "rrfScore"
+  'denseAgreement',
+  'linkAgreement',
+  'rrfScore',
 ] as const satisfies readonly (keyof CandidateRankSignals)[];
 
-function requiredRankSignals(doc: RankDocument, signals: ReadonlyMap<string, CandidateRankSignals>): CandidateRankSignals {
+function requiredRankSignals(
+  doc: RankDocument,
+  signals: ReadonlyMap<string, CandidateRankSignals>,
+): CandidateRankSignals {
   const signal = signals.get(doc.id);
   if (!signal) throw new Error(`missing rank signals for document ${doc.id} (${doc.path})`);
-  if (!isRankPriority(signal.exactPriority)) throw new Error(`incomplete rank signals for document ${doc.id}: exactPriority`);
-  if (!isRankPriority(signal.phrasePriority)) throw new Error(`incomplete rank signals for document ${doc.id}: phrasePriority`);
+  if (!isRankPriority(signal.exactPriority))
+    throw new Error(`incomplete rank signals for document ${doc.id}: exactPriority`);
+  if (!isRankPriority(signal.phrasePriority))
+    throw new Error(`incomplete rank signals for document ${doc.id}: phrasePriority`);
   for (const key of REQUIRED_FINITE_RANK_SIGNAL_KEYS) {
-    if (typeof signal[key] !== "number" || !Number.isFinite(signal[key])) {
+    if (typeof signal[key] !== 'number' || !Number.isFinite(signal[key])) {
       throw new Error(`incomplete rank signals for document ${doc.id}: ${key}`);
     }
   }
   for (const key of OPTIONAL_FINITE_RANK_SIGNAL_KEYS) {
-    if (signal[key] !== undefined && (typeof signal[key] !== "number" || !Number.isFinite(signal[key]))) {
+    if (signal[key] !== undefined && (typeof signal[key] !== 'number' || !Number.isFinite(signal[key]))) {
       throw new Error(`incomplete rank signals for document ${doc.id}: ${key}`);
     }
   }
@@ -137,18 +139,18 @@ function requiredRankSignals(doc: RankDocument, signals: ReadonlyMap<string, Can
 }
 
 function isRankPriority(value: unknown): value is number {
-  return typeof value === "number" && (Number.isFinite(value) || value === Number.POSITIVE_INFINITY);
+  return typeof value === 'number' && (Number.isFinite(value) || value === Number.POSITIVE_INFINITY);
 }
 
 export function isRankedCandidate(match: { path: string }): match is RankedCandidate {
-  return "baseRank" in match && "bucket" in match;
+  return 'baseRank' in match && 'bucket' in match;
 }
 
-export function rankBucketName(bucket: number): NonNullable<SearchMatch["debug"]>["bucket"] {
-  if (bucket === RANK_BUCKET.exact) return "exact";
-  if (bucket === RANK_BUCKET.phrase) return "phrase";
-  if (bucket === RANK_BUCKET.coverage) return "coverage";
-  return "base";
+export function rankBucketName(bucket: number): NonNullable<SearchMatch['debug']>['bucket'] {
+  if (bucket === RANK_BUCKET.exact) return 'exact';
+  if (bucket === RANK_BUCKET.phrase) return 'phrase';
+  if (bucket === RANK_BUCKET.coverage) return 'coverage';
+  return 'base';
 }
 
 export function nullableRankPriority(priority: number): number | null {
@@ -159,16 +161,12 @@ export function compareTagOnlyMatches(left: { path: string }, right: { path: str
   return left.path.localeCompare(right.path);
 }
 
-function rankedCandidate(
-  doc: RankDocument,
-  baseRank: number,
-  signals: CandidateRankSignals
-): RankedCandidate {
+function rankedCandidate(doc: RankDocument, baseRank: number, signals: CandidateRankSignals): RankedCandidate {
   const exactPriority = signals.exactPriority;
   const phrasePriority = signals.phrasePriority;
   const coverage = {
     terms: signals.coverageTerms,
-    fieldScore: signals.coverageFieldScore
+    fieldScore: signals.coverageFieldScore,
   };
   return {
     path: doc.path,
@@ -189,7 +187,7 @@ function rankedCandidate(
     rrfScore: finiteNumber(signals.rrfScore),
     rarityScore: finiteNumber(signals.rarityScore),
     proximityScore: finiteNumber(signals.proximityScore),
-    bodyScore: finiteNumber(signals.bodyScore)
+    bodyScore: finiteNumber(signals.bodyScore),
   };
 }
 
@@ -206,15 +204,18 @@ function rankBucket(exactPriority: number, phrasePriority: number, coverageTerms
 }
 
 export function rerankScore(
-  candidate: Pick<RankedCandidate, "lexicalScore" | "proximityScore" | "identityScore" | "exactLambda"> & Partial<Pick<RankedCandidate, "denseAgreement" | "linkAgreement">>,
-  lambdas: Partial<SearchScoringLambdas> = {}
+  candidate: Pick<RankedCandidate, 'lexicalScore' | 'proximityScore' | 'identityScore' | 'exactLambda'> &
+    Partial<Pick<RankedCandidate, 'denseAgreement' | 'linkAgreement'>>,
+  lambdas: Partial<SearchScoringLambdas> = {},
 ): number {
   const effective = { ...SEARCH_SCORING_LAMBDAS, ...lambdas };
-  return finiteNumber(candidate.lexicalScore) +
+  return (
+    finiteNumber(candidate.lexicalScore) +
     effective.phrase * finiteNumber(candidate.proximityScore) +
     finiteNumber(candidate.exactLambda) * finiteNumber(candidate.identityScore) +
     effective.dense * finiteNumber(candidate.denseAgreement) +
-    effective.link * finiteNumber(candidate.linkAgreement ?? 0);
+    effective.link * finiteNumber(candidate.linkAgreement ?? 0)
+  );
 }
 
 export function exactDominanceLambda(input: ExactDominanceBoundInput): ExactDominanceBound {
@@ -233,7 +234,8 @@ export function exactDominanceLambda(input: ExactDominanceBoundInput): ExactDomi
       if (!input.bm25SingleTermBounds.has(key)) throw new Error(`missing BM25 bound for ${channel}/${field}`);
       const bm25Bound = input.bm25SingleTermBounds.get(key) ?? 0;
       assertFiniteNonNegative(bm25Bound, `BM25 bound for ${channel}/${field}`);
-      channelFieldBound += Math.abs(SEARCH_TOKEN_CHANNEL_WEIGHT[channel] * SEARCH_FIELD_CHANNEL_BOOST[channel][field]) * bm25Bound;
+      channelFieldBound +=
+        Math.abs(SEARCH_TOKEN_CHANNEL_WEIGHT[channel] * SEARCH_FIELD_CHANNEL_BOOST[channel][field]) * bm25Bound;
     }
     lexicalBound += termCount * channelFieldBound;
   }
@@ -241,7 +243,7 @@ export function exactDominanceLambda(input: ExactDominanceBoundInput): ExactDomi
   const proximityBound = searchedChannels * input.fields.length;
   const dominanceBound = lexicalBound + Math.abs(lambdaPhrase) * proximityBound;
   const lambdaExact = dominanceBound + epsilon;
-  assertFiniteNonNegative(lambdaExact, "lambdaExact");
+  assertFiniteNonNegative(lambdaExact, 'lambdaExact');
   return { lexicalBound, proximityBound, lambdaExact };
 }
 
@@ -250,5 +252,5 @@ function assertFiniteNonNegative(value: number, label: string): void {
 }
 
 function finiteNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }

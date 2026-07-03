@@ -1,12 +1,18 @@
-export { applyVaultPatch } from "./apply-patch.js";
-export { copyVaultPath } from "./copy.js";
-export { editVaultFile } from "./edit.js";
-export { addFrontmatterValue, deleteFrontmatter, readFrontmatter, removeFrontmatterValue, setFrontmatter } from "./frontmatter.js";
-export { grepVault } from "./grep.js";
-export { mkdirVaultPath } from "./mkdir.js";
-export { readVaultFile, DEFAULT_READ_MAX_LINES } from "./read.js";
-export { normalizeSimilarityParams } from "./similarity.js";
-export { writeVaultFile } from "./write.js";
+export { applyVaultPatch } from './apply-patch.js';
+export { copyVaultPath } from './copy.js';
+export { editVaultFile } from './edit.js';
+export {
+  addFrontmatterValue,
+  deleteFrontmatter,
+  readFrontmatter,
+  removeFrontmatterValue,
+  setFrontmatter,
+} from './frontmatter.js';
+export { grepVault } from './grep.js';
+export { mkdirVaultPath } from './mkdir.js';
+export { readVaultFile, DEFAULT_READ_MAX_LINES } from './read.js';
+export { normalizeSimilarityParams } from './similarity.js';
+export { writeVaultFile } from './write.js';
 export type {
   ChangeCode,
   CopyParams,
@@ -51,5 +57,5 @@ export type {
   SimilarityProviderParams,
   SimilarityReference,
   SimilarityResult,
-  WriteParams
-} from "./types.js";
+  WriteParams,
+} from './types.js';

@@ -1,28 +1,28 @@
-import crypto from "node:crypto";
-import type { EmbeddingSetId, ShardDocRef } from "../contracts.js";
-import { canonicalValueBytes } from "../segments/index.js";
+import crypto from 'node:crypto';
+import type { EmbeddingSetId, ShardDocRef } from '../contracts.js';
+import { canonicalValueBytes } from '../segments/index.js';
 import {
   normalizeEmbeddingVector,
   type EmbeddingProvider,
   type EmbeddingProviderIdentity,
-  type EmbeddingVector
-} from "./provider.js";
+  type EmbeddingVector,
+} from './provider.js';
 
-export const DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION = "deterministic-hash-embedding-recipe-v1";
-export const EMBEDDING_VECTOR_PROJECTION_VERSION = "l2-float64-projection-v1";
-export const EMBEDDING_SPACE_ID_VERSION = "embedding-space-v1";
-export const EMBEDDING_RECIPE_FRESHNESS_ID_VERSION = "embedding-recipe-freshness-v1";
-export const VECTOR_GENERATION_MANIFEST_ID_VERSION = "vector-generation-manifest-v1";
+export const DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION = 'deterministic-hash-embedding-recipe-v1';
+export const EMBEDDING_VECTOR_PROJECTION_VERSION = 'l2-float64-projection-v1';
+export const EMBEDDING_SPACE_ID_VERSION = 'embedding-space-v1';
+export const EMBEDDING_RECIPE_FRESHNESS_ID_VERSION = 'embedding-recipe-freshness-v1';
+export const VECTOR_GENERATION_MANIFEST_ID_VERSION = 'vector-generation-manifest-v1';
 
-export type EmbeddingSpaceId = string & { readonly __brand: "EmbeddingSpaceId" };
-export type EmbeddingRecipeFreshnessId = string & { readonly __brand: "EmbeddingRecipeFreshnessId" };
+export type EmbeddingSpaceId = string & { readonly __brand: 'EmbeddingSpaceId' };
+export type EmbeddingRecipeFreshnessId = string & { readonly __brand: 'EmbeddingRecipeFreshnessId' };
 
 export type EmbeddingRecipeIdentity = {
   schemaVersion: 1;
   provider: EmbeddingProviderIdentity;
   recipeVersion: string;
   projectionVersion: string;
-  normalization: "l2";
+  normalization: 'l2';
   modelArtifact?: {
     modelId: string;
     revision: string;
@@ -88,11 +88,11 @@ export function deterministicHashEmbeddingRecipeIdentity(provider: EmbeddingProv
       id: provider.id,
       model: provider.model,
       dim: provider.dim,
-      version: provider.version
+      version: provider.version,
     },
     recipeVersion: DETERMINISTIC_HASH_EMBEDDING_RECIPE_VERSION,
     projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,
-    normalization: "l2"
+    normalization: 'l2',
   };
 }
 
@@ -101,17 +101,19 @@ export async function buildEmbeddingSet(input: {
   documents: readonly EmbeddingSetDocumentInput[];
 }): Promise<BuiltEmbeddingSet> {
   const recipe = embeddingRecipeIdentityForProvider(input.provider);
-  const vectors = await Promise.all(input.documents.map(async (document) =>
-    normalizeEmbeddingVector(
-      await input.provider.embed(document.text, { inputKind: "document" }),
-      input.provider.identity.dim
-    )
-  ));
+  const vectors = await Promise.all(
+    input.documents.map(async (document) =>
+      normalizeEmbeddingVector(
+        await input.provider.embed(document.text, { inputKind: 'document' }),
+        input.provider.identity.dim,
+      ),
+    ),
+  );
   return buildEmbeddingSetFromVectors({
     provider: input.provider.identity,
     recipe,
     documents: input.documents,
-    vectors
+    vectors,
   });
 }
 
@@ -122,7 +124,9 @@ export function buildEmbeddingSetFromVectors(input: {
   vectors: readonly EmbeddingVector[];
 }): BuiltEmbeddingSet {
   if (input.documents.length !== input.vectors.length) {
-    throw new Error(`embedding set vector count ${input.vectors.length} does not match document count ${input.documents.length}`);
+    throw new Error(
+      `embedding set vector count ${input.vectors.length} does not match document count ${input.documents.length}`,
+    );
   }
   const records = input.documents.map((document, index) => {
     const rawVector = input.vectors[index];
@@ -131,13 +135,13 @@ export function buildEmbeddingSetFromVectors(input: {
     return {
       ...document,
       vector,
-      vectorProjectionHash: vectorProjectionHash(vector)
+      vectorProjectionHash: vectorProjectionHash(vector),
     };
   });
   const sorted = sortEmbeddingSetRecords(records);
   const embeddingSetId = computeEmbeddingSetId({
     recipe: input.recipe,
-    records: sorted
+    records: sorted,
   });
   return {
     schemaVersion: 1,
@@ -146,7 +150,7 @@ export function buildEmbeddingSetFromVectors(input: {
     model: input.provider.model,
     dim: input.provider.dim,
     records: sorted,
-    coveredDocumentIds: new Set(sorted.map((record) => record.documentId))
+    coveredDocumentIds: new Set(sorted.map((record) => record.documentId)),
   };
 }
 
@@ -156,106 +160,122 @@ export function embeddingRecipeIdentityForProvider(provider: EmbeddingProvider):
 }
 
 export function embeddingSpaceIdForRecipe(recipe: EmbeddingRecipeIdentity): EmbeddingSpaceId {
-  return sha256(canonicalValueBytes({
-    schemaVersion: 1,
-    identityVersion: EMBEDDING_SPACE_ID_VERSION,
-    providerKind: recipe.provider.id,
-    providerModel: recipe.provider.model,
-    providerDim: recipe.provider.dim,
-    providerVersion: recipe.provider.version,
-    modelArtifact: recipe.modelArtifact
-      ? {
-          modelId: recipe.modelArtifact.modelId,
-          revision: recipe.modelArtifact.revision,
-          sha256: recipe.modelArtifact.sha256,
-          files: sortedArtifactFiles(recipe.modelArtifact.files)
-        }
-      : null,
-    dim: recipe.dim ?? recipe.provider.dim,
-    normalization: recipe.normalization,
-    pooling: recipe.pooling ?? null,
-    tokenizer: recipe.tokenizer
-      ? {
-          sha256: recipe.tokenizer.sha256,
-          runtime: recipe.tokenizer.runtime,
-          files: sortedArtifactFiles(recipe.tokenizer.files)
-        }
-      : null,
-    onnx: recipe.onnx ?? null,
-    quantization: recipe.quantization ?? null,
-    dtype: recipe.dtype ?? null,
-    maxTokens: recipe.maxTokens ?? null,
-    inputTemplate: recipe.inputTemplate
-      ? {
-          default: recipe.inputTemplate.default,
-          query: recipe.inputTemplate.query
-        }
-      : null
-  })) as EmbeddingSpaceId;
+  return sha256(
+    canonicalValueBytes({
+      schemaVersion: 1,
+      identityVersion: EMBEDDING_SPACE_ID_VERSION,
+      providerKind: recipe.provider.id,
+      providerModel: recipe.provider.model,
+      providerDim: recipe.provider.dim,
+      providerVersion: recipe.provider.version,
+      modelArtifact: recipe.modelArtifact
+        ? {
+            modelId: recipe.modelArtifact.modelId,
+            revision: recipe.modelArtifact.revision,
+            sha256: recipe.modelArtifact.sha256,
+            files: sortedArtifactFiles(recipe.modelArtifact.files),
+          }
+        : null,
+      dim: recipe.dim ?? recipe.provider.dim,
+      normalization: recipe.normalization,
+      pooling: recipe.pooling ?? null,
+      tokenizer: recipe.tokenizer
+        ? {
+            sha256: recipe.tokenizer.sha256,
+            runtime: recipe.tokenizer.runtime,
+            files: sortedArtifactFiles(recipe.tokenizer.files),
+          }
+        : null,
+      onnx: recipe.onnx ?? null,
+      quantization: recipe.quantization ?? null,
+      dtype: recipe.dtype ?? null,
+      maxTokens: recipe.maxTokens ?? null,
+      inputTemplate: recipe.inputTemplate
+        ? {
+            default: recipe.inputTemplate.default,
+            query: recipe.inputTemplate.query,
+          }
+        : null,
+    }),
+  ) as EmbeddingSpaceId;
 }
 
 export function embeddingRecipeFreshnessId(recipe: EmbeddingRecipeIdentity): EmbeddingRecipeFreshnessId {
-  return sha256(canonicalValueBytes({
-    schemaVersion: 1,
-    identityVersion: EMBEDDING_RECIPE_FRESHNESS_ID_VERSION,
-    recipe
-  })) as EmbeddingRecipeFreshnessId;
+  return sha256(
+    canonicalValueBytes({
+      schemaVersion: 1,
+      identityVersion: EMBEDDING_RECIPE_FRESHNESS_ID_VERSION,
+      recipe,
+    }),
+  ) as EmbeddingRecipeFreshnessId;
 }
 
 export function computeEmbeddingSetId(input: {
   recipe: EmbeddingRecipeIdentity;
-  records: readonly Pick<EmbeddingSetRecord, "documentId" | "path" | "contentHash" | "vector" | "vectorProjectionHash">[];
+  records: readonly Pick<
+    EmbeddingSetRecord,
+    'documentId' | 'path' | 'contentHash' | 'vector' | 'vectorProjectionHash'
+  >[];
 }): EmbeddingSetId {
-  return sha256(canonicalValueBytes({
-    schemaVersion: 1,
-    recipe: input.recipe,
-    documents: sortEmbeddingSetRecords(input.records).map((record) => ({
-      documentId: record.documentId,
-      path: record.path ?? null,
-      contentHash: record.contentHash,
-      vectorProjectionHash: record.vectorProjectionHash,
-      vectorProjection: projectVector(record.vector)
-    }))
-  }));
+  return sha256(
+    canonicalValueBytes({
+      schemaVersion: 1,
+      recipe: input.recipe,
+      documents: sortEmbeddingSetRecords(input.records).map((record) => ({
+        documentId: record.documentId,
+        path: record.path ?? null,
+        contentHash: record.contentHash,
+        vectorProjectionHash: record.vectorProjectionHash,
+        vectorProjection: projectVector(record.vector),
+      })),
+    }),
+  );
 }
 
 export function vectorGenerationIdForManifest(input: {
   embeddingSpaceId: EmbeddingSpaceId;
   embeddingRecipeFreshnessId: EmbeddingRecipeFreshnessId;
   corpusRevision: string;
-  records: readonly Pick<EmbeddingSetRecord, "documentId" | "contentHash" | "vectorProjectionHash">[];
+  records: readonly Pick<EmbeddingSetRecord, 'documentId' | 'contentHash' | 'vectorProjectionHash'>[];
 }): string {
-  return `gen-${sha256(canonicalValueBytes({
-    schemaVersion: 1,
-    identityVersion: VECTOR_GENERATION_MANIFEST_ID_VERSION,
-    embeddingSpaceId: input.embeddingSpaceId,
-    embeddingRecipeFreshnessId: input.embeddingRecipeFreshnessId,
-    corpusRevision: input.corpusRevision,
-    documents: [...input.records]
-      .sort((left, right) =>
-        left.documentId.localeCompare(right.documentId) ||
-        left.contentHash.localeCompare(right.contentHash) ||
-        left.vectorProjectionHash.localeCompare(right.vectorProjectionHash)
-      )
-      .map((record) => ({
-        documentId: record.documentId,
-        contentHash: record.contentHash,
-        vectorProjectionHash: record.vectorProjectionHash
-      }))
-  }))}`;
+  return `gen-${sha256(
+    canonicalValueBytes({
+      schemaVersion: 1,
+      identityVersion: VECTOR_GENERATION_MANIFEST_ID_VERSION,
+      embeddingSpaceId: input.embeddingSpaceId,
+      embeddingRecipeFreshnessId: input.embeddingRecipeFreshnessId,
+      corpusRevision: input.corpusRevision,
+      documents: [...input.records]
+        .sort(
+          (left, right) =>
+            left.documentId.localeCompare(right.documentId) ||
+            left.contentHash.localeCompare(right.contentHash) ||
+            left.vectorProjectionHash.localeCompare(right.vectorProjectionHash),
+        )
+        .map((record) => ({
+          documentId: record.documentId,
+          contentHash: record.contentHash,
+          vectorProjectionHash: record.vectorProjectionHash,
+        })),
+    }),
+  )}`;
 }
 
 export function vectorProjectionHash(vector: EmbeddingVector): string {
-  return sha256(canonicalValueBytes({
-    projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,
-    vector: projectVector(vector)
-  }));
+  return sha256(
+    canonicalValueBytes({
+      projectionVersion: EMBEDDING_VECTOR_PROJECTION_VERSION,
+      vector: projectVector(vector),
+    }),
+  );
 }
 
-function sortEmbeddingSetRecords<T extends Pick<EmbeddingSetRecord, "documentId" | "path">>(records: readonly T[]): T[] {
+function sortEmbeddingSetRecords<T extends Pick<EmbeddingSetRecord, 'documentId' | 'path'>>(
+  records: readonly T[],
+): T[] {
   return [...records].sort((left, right) => {
-    const leftPath = left.path ?? "";
-    const rightPath = right.path ?? "";
+    const leftPath = left.path ?? '';
+    const rightPath = right.path ?? '';
     return left.documentId.localeCompare(right.documentId) || leftPath.localeCompare(rightPath);
   });
 }
@@ -265,15 +285,16 @@ function projectVector(vector: EmbeddingVector): number[] {
 }
 
 function sortedArtifactFiles(
-  files: readonly { path: string; sha256: string; sizeBytes: number }[]
+  files: readonly { path: string; sha256: string; sizeBytes: number }[],
 ): { path: string; sha256: string; sizeBytes: number }[] {
-  return [...files].sort((left, right) =>
-    left.path.localeCompare(right.path) ||
-    left.sha256.localeCompare(right.sha256) ||
-    left.sizeBytes - right.sizeBytes
+  return [...files].sort(
+    (left, right) =>
+      left.path.localeCompare(right.path) ||
+      left.sha256.localeCompare(right.sha256) ||
+      left.sizeBytes - right.sizeBytes,
   );
 }
 
 function sha256(bytes: Uint8Array): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+  return crypto.createHash('sha256').update(bytes).digest('hex');
 }

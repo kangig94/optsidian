@@ -4,13 +4,10 @@ export {
   DEFAULT_RRF_K,
   fuseCandidateSets,
   FUSION_RETRIEVER_VERSION,
-  retrieveWithFusion
-} from "./fusion.js";
+  retrieveWithFusion,
+} from './fusion.js';
 
-export type {
-  FusionOptions,
-  FusionParameters
-} from "./fusion.js";
+export type { FusionOptions, FusionParameters } from './fusion.js';
 
 export {
   canonicalLinkGraphBacklinks,
@@ -19,12 +16,10 @@ export {
   createLinkGraphView,
   LINK_ADJACENCY_DIRECT_SCORE,
   LINK_ADJACENCY_RETRIEVER_VERSION,
-  LINK_ADJACENCY_SCORING_VERSION
-} from "./link.js";
+  LINK_ADJACENCY_SCORING_VERSION,
+} from './link.js';
 
-export type {
-  LinkAdjacencyRetrieverOptions
-} from "./link.js";
+export type { LinkAdjacencyRetrieverOptions } from './link.js';
 
 export {
   bm25CorpusStats,
@@ -61,8 +56,8 @@ export {
   proximityScore,
   retrievePositionalCandidates,
   splitCanonicalPostingTerm,
-  tokenChannelFusionWeight
-} from "./positional/index.js";
+  tokenChannelFusionWeight,
+} from './positional/index.js';
 
 export type {
   Bm25DocumentFieldInput,
@@ -97,5 +92,5 @@ export type {
   SearchFieldLengthLookup,
   SearchSnapshot,
   SearchSnapshotSegment,
-  TermWindow
-} from "./positional/index.js";
+  TermWindow,
+} from './positional/index.js';

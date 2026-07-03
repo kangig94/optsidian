@@ -1,4 +1,4 @@
-import path from "node:path";
+import path from 'node:path';
 
 export type ParsedMarkdownNote = {
   id: string;
@@ -50,23 +50,23 @@ export function parseMarkdownNote(relPath: string, content: string): ParsedMarkd
     aliases: parsed.frontmatter.aliases,
     tags: unique([...parsed.frontmatter.tags, ...inlineTags]),
     headings: headings.map((heading) => heading.text),
-    body: parsed.body
+    body: parsed.body,
   };
 }
 
 function splitFrontmatter(content: string): { frontmatter: Frontmatter; body: string } {
-  if (!content.startsWith("---\n") && !content.startsWith("---\r\n")) {
+  if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
     return { frontmatter: { aliases: [], tags: [] }, body: content };
   }
 
   const lines = content.split(/\r?\n/);
   for (let index = 1; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
-    if (trimmed !== "---" && trimmed !== "...") continue;
+    if (trimmed !== '---' && trimmed !== '...') continue;
     const yaml = lines.slice(1, index);
     return {
       frontmatter: parseSimpleFrontmatter(yaml),
-      body: lines.slice(index + 1).join("\n")
+      body: lines.slice(index + 1).join('\n'),
     };
   }
 
@@ -81,16 +81,16 @@ function parseSimpleFrontmatter(lines: string[]): Frontmatter {
     if (!match) continue;
     const key = match[1].toLowerCase();
     const raw = match[2].trim();
-    if (key === "title" && raw) {
+    if (key === 'title' && raw) {
       output.title = stripQuotes(raw);
       continue;
     }
-    if (key !== "tags" && key !== "aliases" && key !== "alias" && key !== "keywords" && key !== "keyword") continue;
+    if (key !== 'tags' && key !== 'aliases' && key !== 'alias' && key !== 'keywords' && key !== 'keyword') continue;
 
     const block: string[] = [];
     let next = index + 1;
     while (next < lines.length && /^\s+-\s+/.test(lines[next])) {
-      block.push(lines[next].replace(/^\s+-\s+/, ""));
+      block.push(lines[next].replace(/^\s+-\s+/, ''));
       next += 1;
     }
     if (block.length > 0) {
@@ -98,7 +98,7 @@ function parseSimpleFrontmatter(lines: string[]): Frontmatter {
     }
 
     const values = block.length > 0 ? block : parseInlineList(raw);
-    if (key === "tags") output.tags.push(...values.map(normalizeTag).filter(Boolean));
+    if (key === 'tags') output.tags.push(...values.map(normalizeTag).filter(Boolean));
     else output.aliases.push(...values.map(stripQuotes).filter(Boolean));
   }
   output.aliases = unique(output.aliases);
@@ -108,8 +108,12 @@ function parseSimpleFrontmatter(lines: string[]): Frontmatter {
 
 function parseInlineList(raw: string): string[] {
   if (!raw) return [];
-  const value = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
-  return value.split(",").map(stripQuotes).map((item) => item.trim()).filter(Boolean);
+  const value = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1) : raw;
+  return value
+    .split(',')
+    .map(stripQuotes)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function extractHeadings(content: string): Array<{ level: number; text: string }> {
@@ -132,11 +136,11 @@ function extractInlineTags(content: string): string[] {
 }
 
 function filenameTitle(relPath: string): string {
-  return path.basename(relPath, path.extname(relPath)).replace(/[_-]+/g, " ").trim() || relPath;
+  return path.basename(relPath, path.extname(relPath)).replace(/[_-]+/g, ' ').trim() || relPath;
 }
 
 function normalizeTag(value: string): string {
-  return stripQuotes(value).replace(/^#+/, "").trim();
+  return stripQuotes(value).replace(/^#+/, '').trim();
 }
 
 function stripQuotes(value: string): string {

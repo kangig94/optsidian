@@ -1,12 +1,18 @@
-import fs from "node:fs";
-import path from "node:path";
-import { isMap, isNode, isSeq, parseDocument } from "yaml";
-import type { Document } from "yaml";
-import { UsageError } from "../errors.js";
-import { resolveVaultPath } from "./path.js";
-import { simpleDiff } from "./text.js";
-import { atomicWriteFile } from "./write-file.js";
-import type { FrontmatterMutationParams, FrontmatterReadParams, FrontmatterReadResult, FrontmatterValue, MutationResult } from "./types.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { isMap, isNode, isSeq, parseDocument } from 'yaml';
+import type { Document } from 'yaml';
+import { UsageError } from '../errors.js';
+import { resolveVaultPath } from './path.js';
+import { simpleDiff } from './text.js';
+import { atomicWriteFile } from './write-file.js';
+import type {
+  FrontmatterMutationParams,
+  FrontmatterReadParams,
+  FrontmatterReadResult,
+  FrontmatterValue,
+  MutationResult,
+} from './types.js';
 
 type FrontmatterSlice = {
   bom: string;
@@ -28,11 +34,11 @@ export function readFrontmatter(vaultRoot: string, params: FrontmatterReadParams
   const doc = parseFrontmatterDocument(slice.yaml);
   return {
     ok: true,
-    command: "frontmatter",
-    action: "read",
+    command: 'frontmatter',
+    action: 'read',
     path: target.rel,
     hasFrontmatter: slice.hasFrontmatter,
-    frontmatter: documentToRecord(doc)
+    frontmatter: documentToRecord(doc),
   };
 }
 
@@ -91,7 +97,11 @@ export function removeFrontmatterValue(vaultRoot: string, params: FrontmatterMut
   });
 }
 
-function mutateFrontmatter(vaultRoot: string, params: FrontmatterMutationParams, mutator: (doc: Document) => boolean): MutationResult {
+function mutateFrontmatter(
+  vaultRoot: string,
+  params: FrontmatterMutationParams,
+  mutator: (doc: Document) => boolean,
+): MutationResult {
   validateFrontmatterKey(params.key);
   const target = resolveMarkdownFile(vaultRoot, params.path);
   const before = readUtf8PreserveBom(target.abs, target.rel);
@@ -100,20 +110,20 @@ function mutateFrontmatter(vaultRoot: string, params: FrontmatterMutationParams,
   if (!changed) {
     return {
       ok: true,
-      command: "frontmatter",
+      command: 'frontmatter',
       dryRun: Boolean(params.dryRun),
       changes: [],
-      message: "No changes."
+      message: 'No changes.',
     };
   }
   const after = renderFrontmatter(parsed.slice, parsed.doc);
   if (before === after) {
     return {
       ok: true,
-      command: "frontmatter",
+      command: 'frontmatter',
       dryRun: Boolean(params.dryRun),
       changes: [],
-      message: "No changes."
+      message: 'No changes.',
     };
   }
   if (!params.dryRun) {
@@ -121,9 +131,9 @@ function mutateFrontmatter(vaultRoot: string, params: FrontmatterMutationParams,
   }
   return {
     ok: true,
-    command: "frontmatter",
+    command: 'frontmatter',
     dryRun: Boolean(params.dryRun),
-    changes: [{ code: "M", path: target.rel, before, after, diff: simpleDiff(target.rel, before, after) }]
+    changes: [{ code: 'M', path: target.rel, before, after, diff: simpleDiff(target.rel, before, after) }],
   };
 }
 
@@ -133,12 +143,12 @@ function parseFrontmatter(text: string): ParsedFrontmatter {
 }
 
 function splitFrontmatter(text: string): FrontmatterSlice {
-  const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
   const content = bom ? text.slice(1) : text;
-  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const first = readLine(content, 0);
-  if (!first || first.text.trim() !== "---") {
-    return { bom, eol, hasFrontmatter: false, yaml: "", body: content };
+  if (!first || first.text.trim() !== '---') {
+    return { bom, eol, hasFrontmatter: false, yaml: '', body: content };
   }
 
   let cursor = first.next;
@@ -147,28 +157,28 @@ function splitFrontmatter(text: string): FrontmatterSlice {
     const line = readLine(content, cursor);
     if (!line) break;
     const trimmed = line.text.trim();
-    if (trimmed === "---" || trimmed === "...") {
+    if (trimmed === '---' || trimmed === '...') {
       return {
         bom,
         eol,
         hasFrontmatter: true,
         yaml: content.slice(yamlStart, cursor),
-        body: content.slice(line.next)
+        body: content.slice(line.next),
       };
     }
     if (line.next === cursor) break;
     cursor = line.next;
   }
 
-  throw new UsageError("Frontmatter opening delimiter has no closing delimiter");
+  throw new UsageError('Frontmatter opening delimiter has no closing delimiter');
 }
 
 function readLine(text: string, start: number): { text: string; next: number } | undefined {
   if (start > text.length) return undefined;
-  if (start === text.length) return { text: "", next: start };
-  const lf = text.indexOf("\n", start);
+  if (start === text.length) return { text: '', next: start };
+  const lf = text.indexOf('\n', start);
   if (lf === -1) return { text: text.slice(start), next: text.length };
-  const lineEnd = lf > start && text[lf - 1] === "\r" ? lf - 1 : lf;
+  const lineEnd = lf > start && text[lf - 1] === '\r' ? lf - 1 : lf;
   return { text: text.slice(start, lineEnd), next: lf + 1 };
 }
 
@@ -176,13 +186,13 @@ function parseFrontmatterDocument(yamlText: string): Document {
   const doc = parseDocument(yamlText, {
     strict: true,
     stringKeys: true,
-    keepSourceTokens: true
+    keepSourceTokens: true,
   });
   if (doc.errors.length > 0) {
-    throw new UsageError(`Invalid frontmatter YAML: ${doc.errors.map((error) => error.message).join("; ")}`);
+    throw new UsageError(`Invalid frontmatter YAML: ${doc.errors.map((error) => error.message).join('; ')}`);
   }
   if (doc.contents !== null && !isMap(doc.contents)) {
-    throw new UsageError("Frontmatter root must be a YAML mapping");
+    throw new UsageError('Frontmatter root must be a YAML mapping');
   }
   return doc;
 }
@@ -193,7 +203,7 @@ function renderFrontmatter(slice: FrontmatterSlice, doc: Document): string {
 }
 
 function documentToYaml(doc: Document, eol: string): string {
-  if (Object.keys(documentToRecord(doc)).length === 0) return "";
+  if (Object.keys(documentToRecord(doc)).length === 0) return '';
   const yaml = doc.toString({ lineWidth: 0 }).replace(/\r\n|\n/g, eol);
   return yaml.endsWith(eol) ? yaml : `${yaml}${eol}`;
 }
@@ -201,28 +211,28 @@ function documentToYaml(doc: Document, eol: string): string {
 function documentToRecord(doc: Document): Record<string, FrontmatterValue> {
   const value = doc.toJSON();
   if (value === null || value === undefined) return {};
-  const normalized = normalizeFrontmatterValue(value, "frontmatter");
+  const normalized = normalizeFrontmatterValue(value, 'frontmatter');
   if (!isPlainObject(normalized)) {
-    throw new UsageError("Frontmatter root must be a YAML mapping");
+    throw new UsageError('Frontmatter root must be a YAML mapping');
   }
   return normalized;
 }
 
 function requireFrontmatterValue(params: FrontmatterMutationParams): FrontmatterValue {
-  if (!("value" in params)) {
-    throw new UsageError("Missing required frontmatter value");
+  if (!('value' in params)) {
+    throw new UsageError('Missing required frontmatter value');
   }
-  return normalizeFrontmatterValue(params.value, "value");
+  return normalizeFrontmatterValue(params.value, 'value');
 }
 
 function nodeToValue(node: unknown): FrontmatterValue {
   const value = isNode(node) ? JSON.parse(JSON.stringify(node)) : node;
-  return normalizeFrontmatterValue(value, "value");
+  return normalizeFrontmatterValue(value, 'value');
 }
 
 function normalizeFrontmatterValue(value: unknown, label: string): FrontmatterValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new UsageError(`${label} must be JSON-compatible`);
     return value;
   }
@@ -238,14 +248,14 @@ function normalizeFrontmatterValue(value: unknown, label: string): FrontmatterVa
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
 function validateFrontmatterKey(key: string): void {
-  if (!key.trim()) throw new UsageError("key must not be empty");
-  if (/[\r\n]/.test(key)) throw new UsageError("key must be a single line");
+  if (!key.trim()) throw new UsageError('key must not be empty');
+  if (/[\r\n]/.test(key)) throw new UsageError('key must be a single line');
 }
 
 function resolveMarkdownFile(vaultRoot: string, input: string): { abs: string; rel: string } {
@@ -253,7 +263,7 @@ function resolveMarkdownFile(vaultRoot: string, input: string): { abs: string; r
   if (!fs.statSync(target.abs).isFile()) {
     throw new UsageError(`Path is not a file: ${target.rel}`);
   }
-  if (path.extname(target.rel).toLowerCase() !== ".md") {
+  if (path.extname(target.rel).toLowerCase() !== '.md') {
     throw new UsageError(`Frontmatter tools only support Markdown files: ${target.rel}`);
   }
   return target;
@@ -277,7 +287,7 @@ function valuesEqual(a: FrontmatterValue, b: FrontmatterValue): boolean {
 
 function readUtf8PreserveBom(abs: string, label: string): string {
   try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(abs));
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(abs));
   } catch {
     throw new Error(`${label} is not valid UTF-8`);
   }

@@ -1,4 +1,4 @@
-export type ParsedNoteLinkKind = "wikilink" | "markdown";
+export type ParsedNoteLinkKind = 'wikilink' | 'markdown';
 
 export type UnresolvedNoteLink = {
   kind: ParsedNoteLinkKind;
@@ -15,7 +15,7 @@ export type ParsedNoteLinks = {
 
 export function parseNoteLinks(body: string): ParsedNoteLinks {
   const unresolvedLinks: UnresolvedNoteLink[] = [];
-  let renderedText = "";
+  let renderedText = '';
   let index = 0;
 
   while (index < body.length) {
@@ -47,43 +47,49 @@ export function noteLinkTargetPath(rawTarget: string): string {
   return stripBlockId(stripQuery(strippedAnchor)).trim();
 }
 
-function parseWikilinkAt(body: string, index: number): { end: number; label: string; link: UnresolvedNoteLink } | undefined {
-  const embed = body[index] === "!" && body.startsWith("[[", index + 1);
+function parseWikilinkAt(
+  body: string,
+  index: number,
+): { end: number; label: string; link: UnresolvedNoteLink } | undefined {
+  const embed = body[index] === '!' && body.startsWith('[[', index + 1);
   const openIndex = embed ? index + 1 : index;
-  if (!body.startsWith("[[", openIndex)) return undefined;
+  if (!body.startsWith('[[', openIndex)) return undefined;
 
-  const closeIndex = body.indexOf("]]", openIndex + 2);
+  const closeIndex = body.indexOf(']]', openIndex + 2);
   if (closeIndex < 0) return undefined;
 
   const inner = body.slice(openIndex + 2, closeIndex);
-  const pipeIndex = findUnescaped(inner, "|");
+  const pipeIndex = findUnescaped(inner, '|');
   const rawTarget = unescapeLinkEscapes((pipeIndex >= 0 ? inner.slice(0, pipeIndex) : inner).trim());
-  const alias = pipeIndex >= 0 ? inner.slice(pipeIndex + 1).trim() : "";
+  const alias = pipeIndex >= 0 ? inner.slice(pipeIndex + 1).trim() : '';
   const label = cleanedLabel(alias || labelForTarget(rawTarget));
   return {
     end: closeIndex + 2,
     label,
     link: {
-      kind: "wikilink",
+      kind: 'wikilink',
       embed,
       rawTarget,
       targetPath: noteLinkTargetPath(rawTarget),
-      label
-    }
+      label,
+    },
   };
 }
 
-function parseMarkdownLinkAt(body: string, index: number): { end: number; label: string; link?: UnresolvedNoteLink } | undefined {
-  const embed = body[index] === "!" && body[index + 1] === "[";
+function parseMarkdownLinkAt(
+  body: string,
+  index: number,
+): { end: number; label: string; link?: UnresolvedNoteLink } | undefined {
+  const embed = body[index] === '!' && body[index + 1] === '[';
   const openIndex = embed ? index + 1 : index;
-  if (body[openIndex] !== "[") return undefined;
-  if (body.startsWith("[[", openIndex)) return undefined;
+  if (body[openIndex] !== '[') return undefined;
+  if (body.startsWith('[[', openIndex)) return undefined;
 
-  const labelEnd = findClosingDelimited(body, openIndex, "[", "]");
-  if (labelEnd < 0 || body[labelEnd + 1] !== "(") return undefined;
+  const labelEnd = findClosingDelimited(body, openIndex, '[', ']');
+  if (labelEnd < 0 || body[labelEnd + 1] !== '(') return undefined;
 
   const targetOpen = labelEnd + 1;
-  const targetEnd = findClosingDelimited(body, targetOpen, "(", ")");
+  const targetEnd = findClosingDelimited(body, targetOpen, '(', ')');
   if (targetEnd < 0) return undefined;
 
   const displayText = cleanedLabel(body.slice(openIndex + 1, labelEnd));
@@ -91,17 +97,17 @@ function parseMarkdownLinkAt(body: string, index: number): { end: number; label:
   const label = displayText || cleanedLabel(labelForTarget(rawTarget));
   const link = rawTarget
     ? {
-        kind: "markdown" as const,
+        kind: 'markdown' as const,
         embed,
         rawTarget,
         targetPath: noteLinkTargetPath(rawTarget),
-        label
+        label,
       }
     : undefined;
   return {
     end: targetEnd + 1,
     label,
-    ...(link ? { link } : {})
+    ...(link ? { link } : {}),
   };
 }
 
@@ -113,7 +119,7 @@ function findUnescaped(value: string, needle: string): number {
       escaped = false;
       continue;
     }
-    if (char === "\\") {
+    if (char === '\\') {
       escaped = true;
       continue;
     }
@@ -131,7 +137,7 @@ function findClosingDelimited(value: string, openIndex: number, open: string, cl
       escaped = false;
       continue;
     }
-    if (char === "\\") {
+    if (char === '\\') {
       escaped = true;
       continue;
     }
@@ -149,9 +155,9 @@ function findClosingDelimited(value: string, openIndex: number, open: string, cl
 
 function markdownDestination(raw: string): string {
   const trimmed = raw.trim();
-  if (!trimmed) return "";
-  if (trimmed.startsWith("<")) {
-    const end = findUnescaped(trimmed.slice(1), ">");
+  if (!trimmed) return '';
+  if (trimmed.startsWith('<')) {
+    const end = findUnescaped(trimmed.slice(1), '>');
     if (end >= 0) return unescapeLinkEscapes(trimmed.slice(1, end + 1).trim());
   }
   const titled = /^(.+?)\s+(?:"[^"]*"|'[^']*'|\([^)]*\))\s*$/u.exec(trimmed);
@@ -162,36 +168,39 @@ function labelForTarget(rawTarget: string): string {
   const { path, anchor } = splitTargetAnchor(rawTarget);
   const pathLabel = basenameWithoutExtension(stripBlockId(stripQuery(path)));
   const headingLabel = headingAnchorLabel(anchor);
-  return [pathLabel, headingLabel].filter(Boolean).join(" ").trim() || headingLabel || pathLabel;
+  return [pathLabel, headingLabel].filter(Boolean).join(' ').trim() || headingLabel || pathLabel;
 }
 
 function splitTargetAnchor(rawTarget: string): { path: string; anchor: string } {
   const trimmed = rawTarget.trim();
-  const hashIndex = trimmed.indexOf("#");
-  if (hashIndex < 0) return { path: trimmed, anchor: "" };
+  const hashIndex = trimmed.indexOf('#');
+  if (hashIndex < 0) return { path: trimmed, anchor: '' };
   return {
     path: trimmed.slice(0, hashIndex),
-    anchor: trimmed.slice(hashIndex + 1)
+    anchor: trimmed.slice(hashIndex + 1),
   };
 }
 
 function headingAnchorLabel(anchor: string): string {
-  return stripBlockId(anchor.replace(/#/gu, " ")).replace(/\s+/gu, " ").trim();
+  return stripBlockId(anchor.replace(/#/gu, ' ')).replace(/\s+/gu, ' ').trim();
 }
 
 function stripQuery(value: string): string {
-  const queryIndex = value.indexOf("?");
+  const queryIndex = value.indexOf('?');
   return queryIndex < 0 ? value : value.slice(0, queryIndex);
 }
 
 function stripBlockId(value: string): string {
-  return value.replace(/\^[^\s#|)\]]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return value
+    .replace(/\^[^\s#|)\]]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 function basenameWithoutExtension(targetPath: string): string {
-  const normalized = decodePathLabel(targetPath).replace(/\\/gu, "/").replace(/\/+$/gu, "");
-  const basename = normalized.split("/").filter(Boolean).pop() ?? "";
-  return basename.replace(/\.[^.]+$/u, "").trim();
+  const normalized = decodePathLabel(targetPath).replace(/\\/gu, '/').replace(/\/+$/gu, '');
+  const basename = normalized.split('/').filter(Boolean).pop() ?? '';
+  return basename.replace(/\.[^.]+$/u, '').trim();
 }
 
 function decodePathLabel(value: string): string {
@@ -203,10 +212,10 @@ function decodePathLabel(value: string): string {
 }
 
 function cleanedLabel(value: string): string {
-  if (!value) return "";
-  return unescapeLinkEscapes(parseNoteLinks(value).renderedText).replace(/\s+/gu, " ").trim();
+  if (!value) return '';
+  return unescapeLinkEscapes(parseNoteLinks(value).renderedText).replace(/\s+/gu, ' ').trim();
 }
 
 function unescapeLinkEscapes(value: string): string {
-  return value.replace(/\\([\\[\]()<>|#!"'])/gu, "$1");
+  return value.replace(/\\([\\[\]()<>|#!"'])/gu, '$1');
 }

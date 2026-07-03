@@ -1,6 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-import { UsageError } from "../errors.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { UsageError } from '../errors.js';
 
 export type SafePath = {
   abs: string;
@@ -14,7 +14,7 @@ export type HardenedVaultFileRead = {
 };
 
 function normalizeForCompare(value: string): string {
-  return process.platform === "win32" ? value.toLowerCase() : value;
+  return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
 function isUnder(root: string, candidate: string): boolean {
@@ -28,8 +28,8 @@ export function vaultRealpath(vaultRoot: string): string {
 }
 
 export function vaultRelative(vaultRoot: string, abs: string): string {
-  const rel = path.relative(vaultRoot, abs) || ".";
-  return rel.split(path.sep).join("/");
+  const rel = path.relative(vaultRoot, abs) || '.';
+  return rel.split(path.sep).join('/');
 }
 
 function nearestExistingParent(abs: string): string {
@@ -42,9 +42,13 @@ function nearestExistingParent(abs: string): string {
   return current;
 }
 
-export function resolveVaultPath(vaultRoot: string, input: string, options: { mustExist?: boolean; forNew?: boolean } = {}): SafePath {
+export function resolveVaultPath(
+  vaultRoot: string,
+  input: string,
+  options: { mustExist?: boolean; forNew?: boolean } = {},
+): SafePath {
   if (!input) {
-    throw new UsageError("path must not be empty");
+    throw new UsageError('path must not be empty');
   }
   const rootReal = vaultRealpath(vaultRoot);
   const abs = path.resolve(path.isAbsolute(input) ? input : path.join(vaultRoot, input));
@@ -76,7 +80,7 @@ export function readVaultFileHardened(vaultRoot: string, input: string): Hardene
   const rootReal = vaultRealpath(vaultRoot);
   const rel = relativePathUnderVault(vaultRoot, rootReal, resolved.abs, input);
   const abs = path.join(rootReal, rel);
-  const safe = { abs, rel: rel.split(path.sep).join("/") };
+  const safe = { abs, rel: rel.split(path.sep).join('/') };
   const parentReal = fs.realpathSync(path.dirname(abs));
   if (!isUnder(rootReal, parentReal)) {
     throw new UsageError(`Path parent resolves outside the vault: ${input}`);
@@ -110,8 +114,8 @@ export function readVaultFileHardened(vaultRoot: string, input: string): Hardene
 }
 
 export function shouldSkipDir(name: string, includeHidden: boolean): boolean {
-  if ([".obsidian", ".git", ".trash", "node_modules"].includes(name)) return true;
-  return !includeHidden && name.startsWith(".");
+  if (['.obsidian', '.git', '.trash', 'node_modules'].includes(name)) return true;
+  return !includeHidden && name.startsWith('.');
 }
 
 export function walkFiles(root: string, start: string, options: { includeHidden: boolean; all: boolean }): string[] {
@@ -126,14 +130,14 @@ export function walkFiles(root: string, start: string, options: { includeHidden:
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!options.all && path.extname(entry.name).toLowerCase() !== ".md") continue;
+    if (!options.all && path.extname(entry.name).toLowerCase() !== '.md') continue;
     output.push(abs);
   }
   return output;
 }
 
 function hardenedReadFlags(): number {
-  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
   return fs.constants.O_RDONLY | noFollow;
 }
 
@@ -148,10 +152,10 @@ function relativePathUnderVault(vaultRoot: string, rootReal: string, abs: string
   } else {
     throw new UsageError(`Path is outside the vault: ${input}`);
   }
-  if (!rel || rel === ".") {
+  if (!rel || rel === '.') {
     throw new UsageError(`Path is not a file: ${input}`);
   }
-  if (rel.split(path.sep).some((part) => part === "..")) {
+  if (rel.split(path.sep).some((part) => part === '..')) {
     throw new UsageError(`Path is outside the vault: ${input}`);
   }
   return rel;
@@ -159,8 +163,8 @@ function relativePathUnderVault(vaultRoot: string, rootReal: string, abs: string
 
 function assertNoSymlinkComponents(rootReal: string, abs: string, input: string): void {
   const rel = path.relative(rootReal, path.resolve(abs));
-  if (!rel || rel === ".") return;
-  if (rel.split(path.sep).some((part) => part === "..")) {
+  if (!rel || rel === '.') return;
+  if (rel.split(path.sep).some((part) => part === '..')) {
     throw new UsageError(`Path is outside the vault: ${input}`);
   }
   let current = rootReal;

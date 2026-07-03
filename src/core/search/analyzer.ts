@@ -1,10 +1,10 @@
-import crypto from "node:crypto";
-import { UsageError } from "../../errors.js";
-import { ANALYZER_VERSION } from "./constants.js";
-import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../kiwi/artifact.js";
-import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from "../kiwi/manager.js";
-import type { OptsidianSettings } from "../settings.js";
-import type { SearchAnalyzerRuntimeStatus } from "../types.js";
+import crypto from 'node:crypto';
+import { UsageError } from '../../errors.js';
+import { ANALYZER_VERSION } from './constants.js';
+import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from '../kiwi/artifact.js';
+import { getKiwiAnalyzerManager, type KiwiDeclaredAnalyzer } from '../kiwi/manager.js';
+import type { OptsidianSettings } from '../settings.js';
+import type { SearchAnalyzerRuntimeStatus } from '../types.js';
 
 export type SearchEmbeddingModelIdentity = {
   id: string;
@@ -52,15 +52,15 @@ export type SearchAnalyzerDegradedEvent = {
   error: unknown;
   analyzer: SearchAnalyzer;
   degradedAnalyzer: SearchAnalyzer;
-  reason: "terminal-load-error";
+  reason: 'terminal-load-error';
 };
 
 export type SearchDeclaredAnalyzer = KiwiDeclaredAnalyzer;
 
-export const SEARCH_EXTRA_LANGS_ENV = "OPTSIDIAN_SEARCH_EXTRA_LANGS";
+export const SEARCH_EXTRA_LANGS_ENV = 'OPTSIDIAN_SEARCH_EXTRA_LANGS';
 
-const ANALYZER_MODE_ENV = "OPTSIDIAN_SEARCH_ANALYZER";
-const REGISTERED_ANALYZERS = ["ko"] as const satisfies readonly SearchDeclaredAnalyzer[];
+const ANALYZER_MODE_ENV = 'OPTSIDIAN_SEARCH_ANALYZER';
+const REGISTERED_ANALYZERS = ['ko'] as const satisfies readonly SearchDeclaredAnalyzer[];
 const REGISTERED_ANALYZER_SET: ReadonlySet<string> = new Set(REGISTERED_ANALYZERS);
 const WORD_SCRIPT_RUN_PATTERN =
   /[\p{Script=Latin}\p{Mark}\p{Number}]+|[\p{Script=Hangul}\p{Mark}\p{Number}]+|[\p{Script=Han}\p{Mark}\p{Number}]+|[\p{Script=Hiragana}\p{Mark}\p{Number}]+|[\p{Script=Katakana}\p{Mark}\p{Number}]+|[\p{Letter}\p{Mark}\p{Number}]+/gu;
@@ -77,7 +77,7 @@ export class SearchAnalyzerTerminalLoadError extends Error {
 
   constructor(message: string, cause?: unknown) {
     super(message);
-    this.name = "SearchAnalyzerTerminalLoadError";
+    this.name = 'SearchAnalyzerTerminalLoadError';
     this.cause = cause;
     Object.setPrototypeOf(this, SearchAnalyzerTerminalLoadError.prototype);
   }
@@ -90,40 +90,41 @@ export function isSearchAnalyzerTerminalLoadError(error: unknown): error is Sear
 export function resolveSearchAnalyzer(
   env: NodeJS.ProcessEnv,
   settings: OptsidianSettings,
-  runtime: SearchAnalyzerRuntime
+  runtime: SearchAnalyzerRuntime,
 ): SearchAnalyzer {
   const mode = searchAnalyzerMode(env, settings);
   const parsedDeclaredAnalyzers = parseDeclaredSearchAnalyzers(searchExtraLangsValue(env, settings));
-  const declaredAnalyzers = mode === "kiwi" && !parsedDeclaredAnalyzers.includes("ko")
-    ? [...parsedDeclaredAnalyzers, "ko" as const]
-    : parsedDeclaredAnalyzers;
+  const declaredAnalyzers =
+    mode === 'kiwi' && !parsedDeclaredAnalyzers.includes('ko')
+      ? [...parsedDeclaredAnalyzers, 'ko' as const]
+      : parsedDeclaredAnalyzers;
   const baseline = createRouterAnalyzer(declaredAnalyzers, runtime);
-  if (mode === "intl") {
-    return declaredAnalyzers.includes("ko")
+  if (mode === 'intl') {
+    return declaredAnalyzers.includes('ko')
       ? createKiwiAnalyzer(env, settings, declaredAnalyzers, baseline, runtime)
       : baseline;
   }
-  if (mode === "kiwi") {
+  if (mode === 'kiwi') {
     return createKiwiAnalyzer(env, settings, declaredAnalyzers, baseline, runtime);
   }
   throw new UsageError(`${ANALYZER_MODE_ENV} must be one of: intl, kiwi`);
 }
 
 function searchAnalyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string {
-  const raw = env[ANALYZER_MODE_ENV] ?? settings.search?.analyzer ?? "intl";
+  const raw = env[ANALYZER_MODE_ENV] ?? settings.search?.analyzer ?? 'intl';
   return raw.trim().toLowerCase();
 }
 
 function searchExtraLangsValue(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string | undefined {
   if (env[SEARCH_EXTRA_LANGS_ENV] !== undefined) return env[SEARCH_EXTRA_LANGS_ENV];
-  return settings.search?.extraLangs?.join(",");
+  return settings.search?.extraLangs?.join(',');
 }
 
 export function analyzerCacheKey(identity: SearchAnalyzerIdentity): string {
-  const name = identity.name.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "analyzer";
+  const name = identity.name.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'analyzer';
   const activeAnalyzers = normalizeAnalyzerNames(identity.activeAnalyzers ?? []);
-  if ((name === "intl" || name === "router") && activeAnalyzers.length === 0) return "intl";
-  const tier = activeAnalyzers.includes("ko") ? "kiwi" : name;
+  if ((name === 'intl' || name === 'router') && activeAnalyzers.length === 0) return 'intl';
+  const tier = activeAnalyzers.includes('ko') ? 'kiwi' : name;
   return `${tier}-${stableHash(analyzerIdentityKey(identity)).slice(0, 12)}`;
 }
 
@@ -132,17 +133,19 @@ export function analyzerIdentityKey(identity: SearchAnalyzerIdentity): string {
 }
 
 export function tokensToSearchText(tokens: readonly string[]): string {
-  return unique(tokens).join(" ");
+  return unique(tokens).join(' ');
 }
 
 export function parseDeclaredSearchAnalyzers(raw: string | undefined): SearchDeclaredAnalyzer[] {
-  if (raw === undefined || raw.trim() === "") return [];
+  if (raw === undefined || raw.trim() === '') return [];
   const declared = new Set<SearchDeclaredAnalyzer>();
-  for (const part of raw.split(",")) {
+  for (const part of raw.split(',')) {
     const code = part.trim().toLowerCase();
     if (!code) continue;
     if (!REGISTERED_ANALYZER_SET.has(code)) {
-      throw new UsageError(`${SEARCH_EXTRA_LANGS_ENV} must include only registered analyzers: ${REGISTERED_ANALYZERS.join(", ")}`);
+      throw new UsageError(
+        `${SEARCH_EXTRA_LANGS_ENV} must include only registered analyzers: ${REGISTERED_ANALYZERS.join(', ')}`,
+      );
     }
     declared.add(code as SearchDeclaredAnalyzer);
   }
@@ -155,29 +158,32 @@ function normalizeDeclaredSearchAnalyzers(values: readonly SearchDeclaredAnalyze
 
 export function createServedSearchAnalyzer(identity: SearchAnalyzerIdentity): SearchAnalyzer | undefined {
   const name = identity.name.trim().toLowerCase();
-  if (name !== "router" && name !== "intl") return undefined;
+  if (name !== 'router' && name !== 'intl') return undefined;
   if ((identity.activeAnalyzers ?? []).length > 0) return undefined;
-  return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(",")), {
+  return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(',')), {
     node: identity.node,
-    ...(identity.icu ? { icu: identity.icu } : {})
+    ...(identity.icu ? { icu: identity.icu } : {}),
   });
 }
 
-export function createInlineQueryAnalyzer(identity: SearchAnalyzerIdentity, rawQuery: string): SearchAnalyzer | undefined {
+export function createInlineQueryAnalyzer(
+  identity: SearchAnalyzerIdentity,
+  rawQuery: string,
+): SearchAnalyzer | undefined {
   const served = createServedSearchAnalyzer(identity);
   if (served) return served;
   const name = identity.name.trim().toLowerCase();
-  if (name !== "router" && name !== "intl") return undefined;
+  if (name !== 'router' && name !== 'intl') return undefined;
   if (searchTextNeedsBlockingAnalyzer(rawQuery, identity)) return undefined;
-  return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(",")), {
+  return createRouterAnalyzer(parseDeclaredSearchAnalyzers((identity.declaredAnalyzers ?? []).join(',')), {
     node: identity.node,
-    ...(identity.icu ? { icu: identity.icu } : {})
+    ...(identity.icu ? { icu: identity.icu } : {}),
   });
 }
 
 export function searchTextNeedsBlockingAnalyzer(text: string, identity: SearchAnalyzerIdentity): boolean {
   const activeAnalyzers = normalizeAnalyzerNames(identity.activeAnalyzers ?? []);
-  if (!activeAnalyzers.includes("ko")) return false;
+  if (!activeAnalyzers.includes('ko')) return false;
   return searchTextContainsHangul(text);
 }
 
@@ -189,7 +195,7 @@ export async function withSearchAnalyzerLease<T>(
   analyzer: SearchAnalyzer,
   run: (analyzer: SearchAnalyzer) => T | Promise<T>,
   onDegraded?: (event: SearchAnalyzerDegradedEvent) => void | Promise<void>,
-  options: SearchAnalyzerLeaseOptions = {}
+  options: SearchAnalyzerLeaseOptions = {},
 ): Promise<T> {
   try {
     return analyzer.withLease ? await analyzer.withLease(run, options) : await run(analyzer);
@@ -202,7 +208,7 @@ export async function withSearchAnalyzerLease<T>(
       error,
       analyzer,
       degradedAnalyzer,
-      reason: "terminal-load-error"
+      reason: 'terminal-load-error',
     };
     notifySearchAnalyzerDegraded(onDegraded, event);
     return withSearchAnalyzerLease(degradedAnalyzer, run, onDegraded, options);
@@ -215,7 +221,7 @@ function isTerminalAnalyzerError(analyzer: SearchAnalyzer, error: unknown): bool
 
 function notifySearchAnalyzerDegraded(
   onDegraded: ((event: SearchAnalyzerDegradedEvent) => void | Promise<void>) | undefined,
-  event: SearchAnalyzerDegradedEvent
+  event: SearchAnalyzerDegradedEvent,
 ): void {
   if (!onDegraded) return;
   void Promise.resolve()
@@ -224,14 +230,20 @@ function notifySearchAnalyzerDegraded(
 }
 
 function normalizeAnalyzerNames(values: readonly string[]): string[] {
-  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+  return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 export function tokenizeIntlText(text: string): string[] {
   return tokenizeRoutedText(text, []);
 }
 
-export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi?: { tokens(text: string): string[] } | null): string[] {
+export function tokenizeRoutedText(
+  text: string,
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  kiwi?: { tokens(text: string): string[] } | null,
+): string[] {
   const normalized = normalizeAnalyzerInput(text);
   if (!normalized) return [];
   const tokens: string[] = [];
@@ -241,32 +253,36 @@ export function tokenizeRoutedText(text: string, declaredAnalyzers: readonly Sea
   return unique(tokens.map((token) => normalizeToken(token.trim())).filter(Boolean));
 }
 
-function tokenizeScriptRun(run: ScriptRun, declaredAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi?: { tokens(text: string): string[] } | null): string[] {
-  if (run.script === "hangul" && declaredAnalyzers.includes("ko") && kiwi) {
+function tokenizeScriptRun(
+  run: ScriptRun,
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  kiwi?: { tokens(text: string): string[] } | null,
+): string[] {
+  if (run.script === 'hangul' && declaredAnalyzers.includes('ko') && kiwi) {
     return kiwi.tokens(run.text);
   }
   return tokenizeIntlRun(run.text);
 }
 
 type ScriptRun = {
-  script: "latin" | "hangul" | "han" | "hiragana" | "katakana" | "other";
+  script: 'latin' | 'hangul' | 'han' | 'hiragana' | 'katakana' | 'other';
   text: string;
 };
 
 function scriptRuns(text: string): ScriptRun[] {
   return [...text.matchAll(SCRIPT_RUN_PATTERN)].map((match) => ({
     script: scriptForRun(match[0]),
-    text: match[0]
+    text: match[0],
   }));
 }
 
-function scriptForRun(text: string): ScriptRun["script"] {
-  if (/\p{Script=Hangul}/u.test(text)) return "hangul";
-  if (/\p{Script=Han}/u.test(text)) return "han";
-  if (/\p{Script=Hiragana}/u.test(text)) return "hiragana";
-  if (/\p{Script=Katakana}/u.test(text)) return "katakana";
-  if (/\p{Script=Latin}/u.test(text)) return "latin";
-  return "other";
+function scriptForRun(text: string): ScriptRun['script'] {
+  if (/\p{Script=Hangul}/u.test(text)) return 'hangul';
+  if (/\p{Script=Han}/u.test(text)) return 'han';
+  if (/\p{Script=Hiragana}/u.test(text)) return 'hiragana';
+  if (/\p{Script=Katakana}/u.test(text)) return 'katakana';
+  if (/\p{Script=Latin}/u.test(text)) return 'latin';
+  return 'other';
 }
 
 function tokenizeIntlRun(text: string): string[] {
@@ -296,12 +312,12 @@ function normalizeToken(token: string): string {
 }
 
 function foldLatinRun(raw: string): string {
-  return raw.normalize("NFD").replace(COMBINING_MARKS_PATTERN, "");
+  return raw.normalize('NFD').replace(COMBINING_MARKS_PATTERN, '');
 }
 
 function foldLatinDiacritics(raw: string): string {
-  let folded = "";
-  let latinRun = "";
+  let folded = '';
+  let latinRun = '';
 
   for (const char of raw) {
     if (LATIN_SCRIPT_PATTERN.test(char)) {
@@ -316,7 +332,7 @@ function foldLatinDiacritics(raw: string): string {
 
     if (latinRun) {
       folded += foldLatinRun(latinRun);
-      latinRun = "";
+      latinRun = '';
     }
     folded += char;
   }
@@ -330,8 +346,8 @@ function foldLatinDiacritics(raw: string): string {
 
 function isAsciiConsonant(word: string, index: number): boolean {
   const char = word[index];
-  if (char === "a" || char === "e" || char === "i" || char === "o" || char === "u") return false;
-  if (char === "y") return index === 0 ? true : !isAsciiConsonant(word, index - 1);
+  if (char === 'a' || char === 'e' || char === 'i' || char === 'o' || char === 'u') return false;
+  if (char === 'y') return index === 0 ? true : !isAsciiConsonant(word, index - 1);
   return true;
 }
 
@@ -372,13 +388,18 @@ function isAsciiCvc(word: string): boolean {
     isAsciiConsonant(word, last) &&
     !isAsciiConsonant(word, last - 1) &&
     isAsciiConsonant(word, last - 2) &&
-    finalChar !== "w" &&
-    finalChar !== "x" &&
-    finalChar !== "y"
+    finalChar !== 'w' &&
+    finalChar !== 'x' &&
+    finalChar !== 'y'
   );
 }
 
-function replaceSuffixByMeasure(word: string, suffix: string, replacement: string, minMeasureExclusive: number): string | null {
+function replaceSuffixByMeasure(
+  word: string,
+  suffix: string,
+  replacement: string,
+  minMeasureExclusive: number,
+): string | null {
   if (!word.endsWith(suffix)) return null;
   const stem = word.slice(0, -suffix.length);
   if (asciiMeasure(stem) <= minMeasureExclusive) return null;
@@ -386,31 +407,31 @@ function replaceSuffixByMeasure(word: string, suffix: string, replacement: strin
 }
 
 function porterStep1a(word: string): string {
-  if (word.endsWith("sses")) return word.slice(0, -2);
-  if (word.endsWith("ies")) return word.slice(0, -2);
-  if (word.endsWith("ss")) return word;
-  if (word.endsWith("s")) return word.slice(0, -1);
+  if (word.endsWith('sses')) return word.slice(0, -2);
+  if (word.endsWith('ies')) return word.slice(0, -2);
+  if (word.endsWith('ss')) return word;
+  if (word.endsWith('s')) return word.slice(0, -1);
   return word;
 }
 
 function porterStep1b(word: string): string {
-  const eedReplacement = replaceSuffixByMeasure(word, "eed", "ee", 0);
+  const eedReplacement = replaceSuffixByMeasure(word, 'eed', 'ee', 0);
   if (eedReplacement !== null) return eedReplacement;
-  if (word.endsWith("eed")) return word;
+  if (word.endsWith('eed')) return word;
 
-  for (const suffix of ["ed", "ing"] as const) {
+  for (const suffix of ['ed', 'ing'] as const) {
     if (!word.endsWith(suffix)) continue;
     let stem = word.slice(0, -suffix.length);
     if (!containsAsciiVowel(stem)) return word;
-    if (stem.endsWith("at") || stem.endsWith("bl") || stem.endsWith("iz")) {
-      stem += "e";
+    if (stem.endsWith('at') || stem.endsWith('bl') || stem.endsWith('iz')) {
+      stem += 'e';
     } else if (endsWithDoubleAsciiConsonant(stem)) {
       const finalChar = stem[stem.length - 1];
-      if (finalChar !== "l" && finalChar !== "s" && finalChar !== "z") {
+      if (finalChar !== 'l' && finalChar !== 's' && finalChar !== 'z') {
         stem = stem.slice(0, -1);
       }
     } else if (asciiMeasure(stem) === 1 && isAsciiCvc(stem)) {
-      stem += "e";
+      stem += 'e';
     }
     return stem;
   }
@@ -419,67 +440,70 @@ function porterStep1b(word: string): string {
 }
 
 function porterStep1c(word: string): string {
-  if (!word.endsWith("y")) return word;
+  if (!word.endsWith('y')) return word;
   const stem = word.slice(0, -1);
   return containsAsciiVowel(stem) ? `${stem}i` : word;
 }
 
 const PORTER_STEP2_SUFFIXES: ReadonlyArray<readonly [suffix: string, replacement: string]> = [
-  ["ization", "ize"],
-  ["ational", "ate"],
-  ["fulness", "ful"],
-  ["ousness", "ous"],
-  ["iveness", "ive"],
-  ["tional", "tion"],
-  ["biliti", "ble"],
-  ["alism", "al"],
-  ["ation", "ate"],
-  ["ator", "ate"],
-  ["aliti", "al"],
-  ["iviti", "ive"],
-  ["enci", "ence"],
-  ["anci", "ance"],
-  ["izer", "ize"],
-  ["alli", "al"],
-  ["entli", "ent"],
-  ["ousli", "ous"],
-  ["bli", "ble"],
-  ["eli", "e"],
-  ["logi", "log"]
+  ['ization', 'ize'],
+  ['ational', 'ate'],
+  ['fulness', 'ful'],
+  ['ousness', 'ous'],
+  ['iveness', 'ive'],
+  ['tional', 'tion'],
+  ['biliti', 'ble'],
+  ['alism', 'al'],
+  ['ation', 'ate'],
+  ['ator', 'ate'],
+  ['aliti', 'al'],
+  ['iviti', 'ive'],
+  ['enci', 'ence'],
+  ['anci', 'ance'],
+  ['izer', 'ize'],
+  ['alli', 'al'],
+  ['entli', 'ent'],
+  ['ousli', 'ous'],
+  ['bli', 'ble'],
+  ['eli', 'e'],
+  ['logi', 'log'],
 ];
 
 const PORTER_STEP3_SUFFIXES: ReadonlyArray<readonly [suffix: string, replacement: string]> = [
-  ["icate", "ic"],
-  ["ative", ""],
-  ["alize", "al"],
-  ["iciti", "ic"],
-  ["ical", "ic"],
-  ["ful", ""],
-  ["ness", ""]
+  ['icate', 'ic'],
+  ['ative', ''],
+  ['alize', 'al'],
+  ['iciti', 'ic'],
+  ['ical', 'ic'],
+  ['ful', ''],
+  ['ness', ''],
 ];
 
 const PORTER_STEP4_SUFFIXES = [
-  "ement",
-  "ance",
-  "ence",
-  "able",
-  "ible",
-  "ment",
-  "ant",
-  "ent",
-  "ism",
-  "ate",
-  "iti",
-  "ous",
-  "ive",
-  "ize",
-  "al",
-  "er",
-  "ic",
-  "ou"
+  'ement',
+  'ance',
+  'ence',
+  'able',
+  'ible',
+  'ment',
+  'ant',
+  'ent',
+  'ism',
+  'ate',
+  'iti',
+  'ous',
+  'ive',
+  'ize',
+  'al',
+  'er',
+  'ic',
+  'ou',
 ] as const;
 
-function applyPorterSuffixes(word: string, suffixes: ReadonlyArray<readonly [suffix: string, replacement: string]>): string {
+function applyPorterSuffixes(
+  word: string,
+  suffixes: ReadonlyArray<readonly [suffix: string, replacement: string]>,
+): string {
   for (const [suffix, replacement] of suffixes) {
     const replaced = replaceSuffixByMeasure(word, suffix, replacement, 0);
     if (replaced !== null) return replaced;
@@ -488,14 +512,14 @@ function applyPorterSuffixes(word: string, suffixes: ReadonlyArray<readonly [suf
 }
 
 function porterStep4(word: string): string {
-  if (word.endsWith("ion")) {
+  if (word.endsWith('ion')) {
     const stem = word.slice(0, -3);
-    if (asciiMeasure(stem) > 1 && (stem.endsWith("s") || stem.endsWith("t"))) return stem;
+    if (asciiMeasure(stem) > 1 && (stem.endsWith('s') || stem.endsWith('t'))) return stem;
     return word;
   }
 
   for (const suffix of PORTER_STEP4_SUFFIXES) {
-    const replaced = replaceSuffixByMeasure(word, suffix, "", 1);
+    const replaced = replaceSuffixByMeasure(word, suffix, '', 1);
     if (replaced !== null) return replaced;
   }
 
@@ -503,7 +527,7 @@ function porterStep4(word: string): string {
 }
 
 function porterStep5a(word: string): string {
-  if (!word.endsWith("e")) return word;
+  if (!word.endsWith('e')) return word;
   const stem = word.slice(0, -1);
   const measure = asciiMeasure(stem);
   if (measure > 1 || (measure === 1 && !isAsciiCvc(stem))) return stem;
@@ -511,7 +535,7 @@ function porterStep5a(word: string): string {
 }
 
 function porterStep5b(word: string): string {
-  if (asciiMeasure(word) > 1 && endsWithDoubleAsciiConsonant(word) && word.endsWith("l")) {
+  if (asciiMeasure(word) > 1 && endsWithDoubleAsciiConsonant(word) && word.endsWith('l')) {
     return word.slice(0, -1);
   }
   return word;
@@ -530,12 +554,15 @@ function porterStemAscii(word: string): string {
   return stem;
 }
 
-function createRouterAnalyzer(declaredAnalyzers: readonly SearchDeclaredAnalyzer[], runtime: SearchAnalyzerRuntime): SearchAnalyzer {
+function createRouterAnalyzer(
+  declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
+  runtime: SearchAnalyzerRuntime,
+): SearchAnalyzer {
   const identity = routerIdentity(declaredAnalyzers, [], runtime);
   return {
     identity,
     tokenize: async (text) => tokenizeRoutedText(text, declaredAnalyzers),
-    tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, declaredAnalyzers))
+    tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, declaredAnalyzers)),
   };
 }
 
@@ -544,17 +571,20 @@ function createKiwiAnalyzer(
   settings: OptsidianSettings,
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   degradedAnalyzer: SearchAnalyzer,
-  runtime: SearchAnalyzerRuntime
+  runtime: SearchAnalyzerRuntime,
 ): SearchAnalyzer {
   const normalizedDeclared = normalizeDeclaredSearchAnalyzers(declaredAnalyzers);
   const manager = getKiwiAnalyzerManager();
-  const identity = kiwiRouterIdentity(normalizedDeclared, normalizedDeclared.includes("ko") ? ["ko"] : [], runtime);
-  const createLeasedAnalyzer = (activeAnalyzers: readonly SearchDeclaredAnalyzer[], kiwi: { tokens(text: string): string[] } | null): SearchAnalyzer => {
+  const identity = kiwiRouterIdentity(normalizedDeclared, normalizedDeclared.includes('ko') ? ['ko'] : [], runtime);
+  const createLeasedAnalyzer = (
+    activeAnalyzers: readonly SearchDeclaredAnalyzer[],
+    kiwi: { tokens(text: string): string[] } | null,
+  ): SearchAnalyzer => {
     const active = normalizeDeclaredSearchAnalyzers(activeAnalyzers);
-    if (!active.includes("ko")) {
+    if (!active.includes('ko')) {
       return {
         ...degradedAnalyzer,
-        reconcileTargetAnalyzer: targetAnalyzer
+        reconcileTargetAnalyzer: targetAnalyzer,
       };
     }
     return {
@@ -562,7 +592,7 @@ function createKiwiAnalyzer(
       degradedAnalyzer,
       isTerminalLoadError: (error) => manager.isTerminalLoadError(error),
       tokenize: async (text) => tokenizeRoutedText(text, normalizedDeclared, kiwi),
-      tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, normalizedDeclared, kiwi))
+      tokenizeBatch: async (texts) => texts.map((text) => tokenizeRoutedText(text, normalizedDeclared, kiwi)),
     };
   };
 
@@ -577,14 +607,14 @@ function createKiwiAnalyzer(
           env,
           normalizedDeclared,
           { wait: true, installIfMissing: options.installIfMissing ?? true },
-          (lease) => run(createLeasedAnalyzer(lease.activeAnalyzers, lease.analyzer))
+          (lease) => run(createLeasedAnalyzer(lease.activeAnalyzers, lease.analyzer)),
         );
       } catch {
         return run(createLeasedAnalyzer([], null));
       }
     },
     tokenize: async (text) => degradedAnalyzer.tokenize(text),
-    tokenizeBatch: async (texts) => degradedAnalyzer.tokenizeBatch(texts)
+    tokenizeBatch: async (texts) => degradedAnalyzer.tokenizeBatch(texts),
   };
   return targetAnalyzer;
 }
@@ -592,22 +622,22 @@ function createKiwiAnalyzer(
 function kiwiRouterIdentity(
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   activeAnalyzers: readonly SearchDeclaredAnalyzer[],
-  runtime: SearchAnalyzerRuntime
+  runtime: SearchAnalyzerRuntime,
 ): SearchAnalyzerIdentity {
   return {
     ...routerIdentity(declaredAnalyzers, activeAnalyzers, runtime),
-    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`
+    model: `kiwi-nlp:${KIWI_NLP_VERSION}:model:${KIWI_MODEL_VERSION}:${KIWI_MODEL_TYPE}`,
   };
 }
 
 export function searchAnalyzerRuntimeStatus(
   analyzer: SearchAnalyzer,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
 ): SearchAnalyzerRuntimeStatus {
   const declaredAnalyzers = normalizeAnalyzerNames(analyzer.identity.declaredAnalyzers ?? []);
   const activeAnalyzers = normalizeAnalyzerNames(analyzer.identity.activeAnalyzers ?? []);
-  const targetTier = activeAnalyzers.includes("ko") ? "kiwi" : "intl";
-  if (targetTier !== "kiwi") {
+  const targetTier = activeAnalyzers.includes('ko') ? 'kiwi' : 'intl';
+  if (targetTier !== 'kiwi') {
     return { targetTier, declaredAnalyzers, activeAnalyzers };
   }
 
@@ -617,41 +647,41 @@ export function searchAnalyzerRuntimeStatus(
     declaredAnalyzers,
     activeAnalyzers,
     kiwi: {
-      modelState: managerStatus.model.installed ? "installed" : "missing",
+      modelState: managerStatus.model.installed ? 'installed' : 'missing',
       modelPath: managerStatus.model.targetDir,
       missingFiles: managerStatus.model.missingFiles,
       analyzerState: managerStatus.state,
-      leaseCount: managerStatus.leaseCount
-    }
+      leaseCount: managerStatus.leaseCount,
+    },
   };
 }
 
 function normalizeAnalyzerInput(text: string): string {
   return text
     .toLocaleLowerCase()
-    .replace(/[#._/\\-]+/gu, " ")
-    .replace(/\s+/gu, " ")
+    .replace(/[#._/\\-]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
     .trim();
 }
 
 function intlSegmenter(): Intl.Segmenter | undefined {
-  if (typeof Intl.Segmenter !== "function") return undefined;
-  return new Intl.Segmenter(undefined, { granularity: "word" });
+  if (typeof Intl.Segmenter !== 'function') return undefined;
+  return new Intl.Segmenter(undefined, { granularity: 'word' });
 }
 
 function routerIdentity(
   declaredAnalyzers: readonly SearchDeclaredAnalyzer[],
   activeAnalyzers: readonly SearchDeclaredAnalyzer[],
-  runtime: SearchAnalyzerRuntime
+  runtime: SearchAnalyzerRuntime,
 ): SearchAnalyzerIdentity {
   return {
-    name: "router",
+    name: 'router',
     version: ANALYZER_VERSION,
-    runtime: "node-intl",
+    runtime: 'node-intl',
     node: runtime.node,
     ...(runtime.icu ? { icu: runtime.icu } : {}),
     declaredAnalyzers: [...declaredAnalyzers].sort((left, right) => left.localeCompare(right)),
-    activeAnalyzers: [...activeAnalyzers].sort((left, right) => left.localeCompare(right))
+    activeAnalyzers: [...activeAnalyzers].sort((left, right) => left.localeCompare(right)),
   };
 }
 
@@ -660,16 +690,16 @@ function unique(values: readonly string[]): string[] {
 }
 
 function stableHash(input: string): string {
-  return crypto.createHash("sha256").update(input).digest("hex");
+  return crypto.createHash('sha256').update(input).digest('hex');
 }
 
 function stableStringify(value: unknown): string {
-  if (value === undefined) return "undefined";
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
-  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined';
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
   return `{${Object.entries(value as Record<string, unknown>)
     .filter(([, entry]) => entry !== undefined)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
-    .join(",")}}`;
+    .join(',')}}`;
 }

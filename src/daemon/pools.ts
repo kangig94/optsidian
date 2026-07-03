@@ -1,9 +1,9 @@
-import type { SearchTextAnalysis, SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
-import type { SearchAnalyzer, SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { SearchTextAnalysis, SearchTextAnalysisOptions } from '../core/search/analysis/index.js';
+import type { SearchAnalyzer, SearchAnalyzerIdentity } from '../core/search/analyzer.js';
 import {
   normalizeIndexAffectingSearchSettings,
-  type IndexAffectingSearchSettings
-} from "../core/search/index-settings.js";
+  type IndexAffectingSearchSettings,
+} from '../core/search/index-settings.js';
 import {
   DEFAULT_PARTITION_BITS,
   buildCanonicalSearchSnapshot,
@@ -13,16 +13,16 @@ import {
   shuffleParsedBuildDocumentsByPartition,
   sortParsedBuildDocuments,
   type BuildSnapshotBase,
-  type ReduceBuildSegmentInput
-} from "./search-store/builder.js";
-import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
+  type ReduceBuildSegmentInput,
+} from './search-store/builder.js';
+import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from './search-store/types.js';
 import {
   DaemonWorkerPool,
   defaultSearchExecutionWorkerCount,
   optionalWorkerCountFromEnv,
   workerCountFromEnv,
-  type WorkerPoolRunOptions
-} from "./worker-pool.js";
+  type WorkerPoolRunOptions,
+} from './worker-pool.js';
 import type {
   SearchExecutionCacheStats,
   SearchExecutionJob,
@@ -30,8 +30,8 @@ import type {
   SearchExecutionResult,
   SearchExecutionSnapshotHandle,
   SearchShardExecutionJob,
-  SearchShardExecutionResult
-} from "./search-execution.js";
+  SearchShardExecutionResult,
+} from './search-execution.js';
 import type {
   ModelEncodeWorkerPayload,
   ModelEncodeWorkerResult,
@@ -44,9 +44,9 @@ import type {
   VectorCloseWorkerPayload,
   VectorPrewarmWorkerPayload,
   VectorUpsertWorkerPayload,
-  VectorWorkerResult
-} from "./protocol.js";
-import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
+  VectorWorkerResult,
+} from './protocol.js';
+import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
 
 export type AnalyzerPoolAnalysis = {
   analyzerIdentity: SearchAnalyzerIdentity;
@@ -101,12 +101,15 @@ export class AnalyzerWorkerPool {
   async analyzeQuery(
     rawQuery: string,
     options: WorkerPoolRunOptions,
-    analysisOptions: SearchTextAnalysisOptions = {}
+    analysisOptions: SearchTextAnalysisOptions = {},
   ): Promise<AnalyzerPoolAnalysis> {
-    const result = await this.pool.run<AnalyzerPoolAnalysis>({
-      type: "analyzeQuery",
-      payload: { rawQuery, options: analysisOptions }
-    }, options);
+    const result = await this.pool.run<AnalyzerPoolAnalysis>(
+      {
+        type: 'analyzeQuery',
+        payload: { rawQuery, options: analysisOptions },
+      },
+      options,
+    );
     this.analyzerIdentityValue = result.analyzerIdentity;
     return result;
   }
@@ -117,12 +120,14 @@ export class AnalyzerWorkerPool {
       return { analyzerIdentity, tokens: [] };
     }
     const chunks = chunk(texts, this.pool.microbatchSize);
-    const results = await Promise.all(chunks.map((batch) =>
-      this.pool.run<AnalyzerPoolTokenization>({ type: "tokenizeBatch", payload: { texts: batch } }, options)
-    ));
+    const results = await Promise.all(
+      chunks.map((batch) =>
+        this.pool.run<AnalyzerPoolTokenization>({ type: 'tokenizeBatch', payload: { texts: batch } }, options),
+      ),
+    );
     const analyzerIdentity = commonAnalyzerIdentity(
       results.map((result) => result.analyzerIdentity),
-      this.analyzerIdentityValue
+      this.analyzerIdentityValue,
     );
     const tokens = results.flatMap((result) => result.tokens);
     this.analyzerIdentityValue = analyzerIdentity;
@@ -134,7 +139,7 @@ export class AnalyzerWorkerPool {
     partitionBits: number | undefined,
     options: WorkerPoolRunOptions,
     searchSettings?: Partial<IndexAffectingSearchSettings>,
-    base?: BuildSnapshotBase
+    base?: BuildSnapshotBase,
   ): Promise<BuiltSnapshot> {
     const analyzerIdentity = await this.warmAnalyzerIdentity();
     if (base) {
@@ -146,24 +151,26 @@ export class AnalyzerWorkerPool {
         searchSettings,
         base,
         reduceSegments: (inputs, progress) => this.reduceBuildSegmentInputs(inputs, options, progress),
-        progress: options.onProgress
+        progress: options.onProgress,
       });
       this.analyzerIdentityValue = built.diagnostics.analyzer;
       return built;
     }
-    options.onProgress?.({ phase: "scanning", completed: 0 });
+    options.onProgress?.({ phase: 'scanning', completed: 0 });
     const scan = scanBuildDocuments(vaultRoot);
-    options.onProgress?.({ phase: "scanning", total: scan.files.length, completed: scan.files.length });
+    options.onProgress?.({ phase: 'scanning', total: scan.files.length, completed: scan.files.length });
     const effectivePartitionBits = partitionBits ?? DEFAULT_PARTITION_BITS;
     const effectiveSearchSettings = normalizeIndexAffectingSearchSettings(searchSettings);
     const parseBatches = chunk(scan.files, this.pool.microbatchSize);
-    const documents = sortParsedBuildDocuments(await this.parseBuildDocumentBatches(
-      scan.root,
-      parseBatches,
-      effectivePartitionBits,
-      effectiveSearchSettings,
-      options
-    ));
+    const documents = sortParsedBuildDocuments(
+      await this.parseBuildDocumentBatches(
+        scan.root,
+        parseBatches,
+        effectivePartitionBits,
+        effectiveSearchSettings,
+        options,
+      ),
+    );
     const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
     const segments = sortBuiltSegmentsByPartitionId(await this.reduceBuildSegments(partitionEntries, options));
     const built = buildCanonicalSearchSnapshotFromSegments({
@@ -173,7 +180,7 @@ export class AnalyzerWorkerPool {
       partitionBits: effectivePartitionBits,
       searchSettings: effectiveSearchSettings,
       documents: documentProjectionsFromParses(documents, scan.documents),
-      segments
+      segments,
     });
     this.analyzerIdentityValue = built.diagnostics.analyzer;
     return built;
@@ -189,15 +196,16 @@ export class AnalyzerWorkerPool {
       tokenizeBatch: async (texts) => {
         const result = await this.tokenizeBatch(texts, options);
         return result.tokens;
-      }
+      },
     };
   }
 
   private async warmAnalyzerIdentity(): Promise<SearchAnalyzerIdentity> {
     const warmed = await this.pool.warmup<{ analyzerIdentity?: SearchAnalyzerIdentity }>(1);
-    const analyzerIdentity = warmed.find((result) => result.analyzerIdentity)?.analyzerIdentity ?? this.analyzerIdentityValue;
+    const analyzerIdentity =
+      warmed.find((result) => result.analyzerIdentity)?.analyzerIdentity ?? this.analyzerIdentityValue;
     if (!analyzerIdentity) {
-      throw Object.assign(new Error("analyzer pool is not warmed"), { code: "SEARCH_DAEMON_NOT_READY" });
+      throw Object.assign(new Error('analyzer pool is not warmed'), { code: 'SEARCH_DAEMON_NOT_READY' });
     }
     this.analyzerIdentityValue = analyzerIdentity;
     return analyzerIdentity;
@@ -208,88 +216,103 @@ export class AnalyzerWorkerPool {
     batches: readonly (readonly string[])[],
     partitionBits: number,
     searchSettings: IndexAffectingSearchSettings,
-    options: WorkerPoolRunOptions
+    options: WorkerPoolRunOptions,
   ): Promise<ParsedBuildDocument[]> {
-    options.onProgress?.({ phase: "parsing", total: totalItems(batches), completed: 0 });
+    options.onProgress?.({ phase: 'parsing', total: totalItems(batches), completed: 0 });
     let completed = 0;
     let indexed = 0;
     const interval = progressInterval(totalItems(batches));
     const workerOptions = withoutProgress(options);
-    const results = await Promise.all(batches.map(async (batch) => {
-      const result = await this.pool.run<ParseBuildDocumentsWorkerResult>({
-        type: "parseBuildDocuments",
-        payload: {
-          vaultRoot,
-          relPaths: batch,
-          partitionBits,
-          searchSettings
+    const results = await Promise.all(
+      batches.map(async (batch) => {
+        const result = await this.pool.run<ParseBuildDocumentsWorkerResult>(
+          {
+            type: 'parseBuildDocuments',
+            payload: {
+              vaultRoot,
+              relPaths: batch,
+              partitionBits,
+              searchSettings,
+            },
+          },
+          workerOptions,
+        );
+        const nextCompleted = completed + batch.length;
+        const nextIndexed = indexed + result.documents.length;
+        completed = nextCompleted;
+        indexed = nextIndexed;
+        if (completed === totalItems(batches) || completed % interval === 0) {
+          options.onProgress?.({
+            phase: 'parsing',
+            total: totalItems(batches),
+            completed,
+            current: batch[batch.length - 1],
+            message: `${indexed} indexed`,
+          });
         }
-      }, workerOptions);
-      const nextCompleted = completed + batch.length;
-      const nextIndexed = indexed + result.documents.length;
-      completed = nextCompleted;
-      indexed = nextIndexed;
-      if (completed === totalItems(batches) || completed % interval === 0) {
-        options.onProgress?.({
-          phase: "parsing",
-          total: totalItems(batches),
-          completed,
-          current: batch[batch.length - 1],
-          message: `${indexed} indexed`
-        });
-      }
-      this.analyzerIdentityValue = commonAnalyzerIdentity([result.analyzerIdentity], this.analyzerIdentityValue);
-      return result.documents;
-    }));
+        this.analyzerIdentityValue = commonAnalyzerIdentity([result.analyzerIdentity], this.analyzerIdentityValue);
+        return result.documents;
+      }),
+    );
     return results.flat();
   }
 
   private async reduceBuildSegments(
     partitionEntries: readonly (readonly [partitionId: number, documents: readonly ParsedBuildDocument[]])[],
-    options: WorkerPoolRunOptions
+    options: WorkerPoolRunOptions,
   ): Promise<BuiltSegment[]> {
-    options.onProgress?.({ phase: "segmenting", total: partitionEntries.length, completed: 0 });
+    options.onProgress?.({ phase: 'segmenting', total: partitionEntries.length, completed: 0 });
     let completed = 0;
     const workerOptions = withoutProgress(options);
-    const segments = await Promise.all(partitionEntries.map(async ([partitionId, documents]) => {
-      const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>({
-        type: "reduceBuildSegment",
-        payload: { mode: "full", partitionId, documents }
-      }, workerOptions);
-      completed += 1;
-      options.onProgress?.({
-        phase: "segmenting",
-        total: partitionEntries.length,
-        completed,
-        current: String(partitionId)
-      });
-      return segment;
-    }));
+    const segments = await Promise.all(
+      partitionEntries.map(async ([partitionId, documents]) => {
+        const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>(
+          {
+            type: 'reduceBuildSegment',
+            payload: { mode: 'full', partitionId, documents },
+          },
+          workerOptions,
+        );
+        completed += 1;
+        options.onProgress?.({
+          phase: 'segmenting',
+          total: partitionEntries.length,
+          completed,
+          current: String(partitionId),
+        });
+        return segment;
+      }),
+    );
     return segments;
   }
 
   private async reduceBuildSegmentInputs(
     inputs: readonly ReduceBuildSegmentInput[],
     options: WorkerPoolRunOptions,
-    progress?: (progress: SearchIndexProgressUpdate) => void
+    progress?: (progress: SearchIndexProgressUpdate) => void,
   ): Promise<BuiltSegment[]> {
-    progress?.({ phase: "segmenting", total: inputs.length, completed: 0 });
+    progress?.({ phase: 'segmenting', total: inputs.length, completed: 0 });
     let completed = 0;
     const workerOptions = withoutProgress(options);
-    const segments = await Promise.all(inputs.map(async (input) => {
-      const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>({
-        type: "reduceBuildSegment",
-        payload: input
-      }, workerOptions);
-      completed += 1;
-      progress?.({
-        phase: "segmenting",
-        total: inputs.length,
-        completed,
-        current: String(input.partitionId)
-      });
-      return segment;
-    }));
+    const segments = await Promise.all(
+      inputs.map(async (input) => {
+        const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>(
+          {
+            type: 'reduceBuildSegment',
+            payload: input,
+          },
+          workerOptions,
+        );
+        completed += 1;
+        progress?.({
+          phase: 'segmenting',
+          total: inputs.length,
+          completed,
+          current: String(input.partitionId),
+        });
+        return segment;
+      }),
+    );
     return segments;
   }
 
@@ -307,7 +330,7 @@ export class AnalyzerWorkerPool {
 
   private requireAnalyzerIdentity(): SearchAnalyzerIdentity {
     if (!this.analyzerIdentityValue) {
-      throw Object.assign(new Error("analyzer pool is not warmed"), { code: "SEARCH_DAEMON_NOT_READY" });
+      throw Object.assign(new Error('analyzer pool is not warmed'), { code: 'SEARCH_DAEMON_NOT_READY' });
     }
     return this.analyzerIdentityValue;
   }
@@ -321,7 +344,7 @@ export class SearchExecutionWorkerPool {
   }
 
   search(job: SearchExecutionJob, options: WorkerPoolRunOptions): Promise<SearchExecutionResult> {
-    return this.pool.run<SearchExecutionResult>({ type: "search", payload: job }, options);
+    return this.pool.run<SearchExecutionResult>({ type: 'search', payload: job }, options);
   }
 
   idleReadySlotIds(): number[] {
@@ -336,36 +359,42 @@ export class SearchExecutionWorkerPool {
     return this.pool.releaseIdleSlot(slotId);
   }
 
-  runOnSlot(job: SearchShardExecutionJob, options: WorkerPoolRunOptions, slotId: number): Promise<SearchShardExecutionResult> {
-    return this.pool.runOnSlot<SearchShardExecutionResult>({ type: "searchShard", payload: job }, options, slotId);
+  runOnSlot(
+    job: SearchShardExecutionJob,
+    options: WorkerPoolRunOptions,
+    slotId: number,
+  ): Promise<SearchShardExecutionResult> {
+    return this.pool.runOnSlot<SearchShardExecutionResult>({ type: 'searchShard', payload: job }, options, slotId);
   }
 
   async preloadSnapshot(
     snapshot: SearchExecutionSnapshotHandle,
     options: WorkerPoolRunOptions,
-    preloadOptions: SearchExecutionPreloadOptions = {}
+    preloadOptions: SearchExecutionPreloadOptions = {},
   ): Promise<SearchExecutionPreloadResult[]> {
     const allSlotIds = this.pool.slotIds();
     const minimumWorkers = Math.max(
       1,
-      Math.min(allSlotIds.length, Math.floor(preloadOptions.minimumWorkers ?? allSlotIds.length))
+      Math.min(allSlotIds.length, Math.floor(preloadOptions.minimumWorkers ?? allSlotIds.length)),
     );
     await this.pool.warmup(minimumWorkers);
     const blockingSlotIds = this.pool.readySlotIds().slice(0, minimumWorkers);
     const warmed = await this.pool.runOnSlots<SearchExecutionPreloadResult>(
-      { type: "preloadSnapshot", payload: snapshot },
+      { type: 'preloadSnapshot', payload: snapshot },
       options,
-      blockingSlotIds
+      blockingSlotIds,
     );
     if (preloadOptions.backgroundRemaining) {
       const blocking = new Set(blockingSlotIds);
       const backgroundSlotIds = this.pool.slotIds().filter((slotId) => !blocking.has(slotId));
       if (backgroundSlotIds.length > 0) {
-        void this.pool.runOnSlots<SearchExecutionPreloadResult>(
-          { type: "preloadSnapshot", payload: snapshot },
-          options,
-          backgroundSlotIds
-        ).catch(() => undefined);
+        void this.pool
+          .runOnSlots<SearchExecutionPreloadResult>(
+            { type: 'preloadSnapshot', payload: snapshot },
+            options,
+            backgroundSlotIds,
+          )
+          .catch(() => undefined);
       }
     }
     return warmed;
@@ -374,7 +403,7 @@ export class SearchExecutionWorkerPool {
   cacheStats(options: WorkerPoolRunOptions): Promise<SearchExecutionCacheStats[]> {
     const readySlotIds = this.pool.readySlotIds();
     if (readySlotIds.length === 0) return Promise.resolve([]);
-    return this.pool.runOnSlots<SearchExecutionCacheStats>({ type: "searchExecutionStats" }, options, readySlotIds);
+    return this.pool.runOnSlots<SearchExecutionCacheStats>({ type: 'searchExecutionStats' }, options, readySlotIds);
   }
 
   async warmup(minimumReady?: number): Promise<void> {
@@ -402,15 +431,15 @@ export class EmbeddingWorkerPool {
   }
 
   encode(payload: ModelEncodeWorkerPayload, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
-    return this.pool.run<ModelEncodeWorkerResult>({ type: "modelEncode", payload }, options);
+    return this.pool.run<ModelEncodeWorkerResult>({ type: 'modelEncode', payload }, options);
   }
 
   unload(options: WorkerPoolRunOptions): Promise<ModelUnloadWorkerResult> {
-    return this.pool.run<ModelUnloadWorkerResult>({ type: "modelUnload" }, options);
+    return this.pool.run<ModelUnloadWorkerResult>({ type: 'modelUnload' }, options);
   }
 
   modelStats(options: WorkerPoolRunOptions): Promise<ModelStatsWorkerResult> {
-    return this.pool.run<ModelStatsWorkerResult>({ type: "modelStats" }, options);
+    return this.pool.run<ModelStatsWorkerResult>({ type: 'modelStats' }, options);
   }
 
   async warmup(minimumReady?: number): Promise<void> {
@@ -438,19 +467,19 @@ export class VectorWorkerPool {
   }
 
   upsert(payload: VectorUpsertWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
-    return this.pool.run<VectorWorkerResult>({ type: "vectorUpsert", payload }, options);
+    return this.pool.run<VectorWorkerResult>({ type: 'vectorUpsert', payload }, options);
   }
 
   build(payload: VectorBuildWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
-    return this.pool.run<VectorWorkerResult>({ type: "vectorBuild", payload }, options);
+    return this.pool.run<VectorWorkerResult>({ type: 'vectorBuild', payload }, options);
   }
 
   prewarm(payload: VectorPrewarmWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
-    return this.pool.run<VectorWorkerResult>({ type: "vectorPrewarm", payload }, options);
+    return this.pool.run<VectorWorkerResult>({ type: 'vectorPrewarm', payload }, options);
   }
 
   closeInstance(payload: VectorCloseWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
-    return this.pool.run<VectorWorkerResult>({ type: "vectorClose", payload }, options);
+    return this.pool.run<VectorWorkerResult>({ type: 'vectorClose', payload }, options);
   }
 
   async warmup(minimumReady?: number): Promise<void> {
@@ -473,47 +502,64 @@ export class VectorWorkerPool {
 export async function createDaemonPools(
   env: NodeJS.ProcessEnv = process.env,
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env),
-  options: DaemonPoolsOptions = {}
+  options: DaemonPoolsOptions = {},
 ): Promise<DaemonPools> {
-  const singleWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
-  const queryWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (singleWorkers ? 1 : settings.search?.queryWorkers ?? 1);
-  const indexWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (singleWorkers ? 1 : settings.search?.indexWorkers ?? 1);
-  const searchWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? singleWorkers ?? settings.search?.executionWorkers ?? defaultSearchExecutionWorkerCount();
-  const vectorWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_VECTOR_WORKERS") ?? 1;
-  const latencyAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
-    name: "latency-analyzer",
-    kind: "analyzer",
-    size: queryWorkers,
-    env,
-    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH", 16),
-    autoWarmup: false
-  }));
-  const throughputAnalyzer = new AnalyzerWorkerPool(new DaemonWorkerPool({
-    name: "throughput-analyzer",
-    kind: "analyzer",
-    size: indexWorkers,
-    env,
-    microbatchSize: workerCountFromEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH", 128),
-    autoWarmup: false
-  }));
-  const searchExecution = new SearchExecutionWorkerPool(new DaemonWorkerPool({
-    name: "search-execution",
-    kind: "search",
-    size: searchWorkers,
-    env,
-    microbatchSize: 1
-  }));
+  const singleWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_WORKERS');
+  const queryWorkers =
+    optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_QUERY_WORKERS') ??
+    (singleWorkers ? 1 : (settings.search?.queryWorkers ?? 1));
+  const indexWorkers =
+    optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_INDEX_WORKERS') ??
+    (singleWorkers ? 1 : (settings.search?.indexWorkers ?? 1));
+  const searchWorkers =
+    optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_EXECUTION_WORKERS') ??
+    singleWorkers ??
+    settings.search?.executionWorkers ??
+    defaultSearchExecutionWorkerCount();
+  const vectorWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_VECTOR_WORKERS') ?? 1;
+  const latencyAnalyzer = new AnalyzerWorkerPool(
+    new DaemonWorkerPool({
+      name: 'latency-analyzer',
+      kind: 'analyzer',
+      size: queryWorkers,
+      env,
+      microbatchSize: workerCountFromEnv(env, 'OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH', 16),
+      autoWarmup: false,
+    }),
+  );
+  const throughputAnalyzer = new AnalyzerWorkerPool(
+    new DaemonWorkerPool({
+      name: 'throughput-analyzer',
+      kind: 'analyzer',
+      size: indexWorkers,
+      env,
+      microbatchSize: workerCountFromEnv(env, 'OPTSIDIAN_SEARCH_INDEX_MICROBATCH', 128),
+      autoWarmup: false,
+    }),
+  );
+  const searchExecution = new SearchExecutionWorkerPool(
+    new DaemonWorkerPool({
+      name: 'search-execution',
+      kind: 'search',
+      size: searchWorkers,
+      env,
+      microbatchSize: 1,
+    }),
+  );
   const embedding = options.embedding ?? createEmbeddingWorkerPool(env, settings);
-  const vector = new VectorWorkerPool(new DaemonWorkerPool({
-    name: "vector-store",
-    kind: "vector",
-    size: vectorWorkers,
-    env,
-    microbatchSize: 1,
-    rssGuardBytes: envBytesForPool(env, "OPTSIDIAN_SEARCH_VECTOR_RSS_GUARD_MB") ??
-      envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB"),
-    autoWarmup: false
-  }));
+  const vector = new VectorWorkerPool(
+    new DaemonWorkerPool({
+      name: 'vector-store',
+      kind: 'vector',
+      size: vectorWorkers,
+      env,
+      microbatchSize: 1,
+      rssGuardBytes:
+        envBytesForPool(env, 'OPTSIDIAN_SEARCH_VECTOR_RSS_GUARD_MB') ??
+        envBytesForPool(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB'),
+      autoWarmup: false,
+    }),
+  );
   const pools: DaemonPools = {
     latencyAnalyzer,
     throughputAnalyzer,
@@ -536,7 +582,7 @@ export async function createDaemonPools(
         throughputAnalyzer.close(),
         searchExecution.close(),
         options.embedding && options.closeSharedEmbedding !== true ? Promise.resolve() : embedding.close(),
-        vector.close()
+        vector.close(),
       ]);
     },
     async stats(options) {
@@ -545,7 +591,7 @@ export async function createDaemonPools(
         searchExecutionCache = await searchExecution.cacheStats(options);
       } catch (error) {
         searchExecutionCache = {
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
         };
       }
       return {
@@ -555,10 +601,10 @@ export async function createDaemonPools(
         vector: vector.stats(),
         searchExecution: {
           ...searchExecution.stats(),
-          cache: searchExecutionCache
-        }
+          cache: searchExecutionCache,
+        },
       };
-    }
+    },
   };
   try {
     await pools.warmup();
@@ -574,22 +620,25 @@ export async function createDaemonPools(
 
 export function createEmbeddingWorkerPool(
   env: NodeJS.ProcessEnv = process.env,
-  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env)
+  settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env),
 ): EmbeddingWorkerPool {
-  const embeddingWorkers = optionalWorkerCountFromEnv(env, "OPTSIDIAN_SEARCH_EMBEDDING_WORKERS") ?? 1;
-  const modelRssGuardBytes = envBytesForPool(env, "OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB") ??
-    envBytesForPool(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB");
+  const embeddingWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_EMBEDDING_WORKERS') ?? 1;
+  const modelRssGuardBytes =
+    envBytesForPool(env, 'OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB') ??
+    envBytesForPool(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB');
   void settings;
-  return new EmbeddingWorkerPool(new DaemonWorkerPool({
-    name: "embedding-model",
-    kind: "embedding",
-    size: embeddingWorkers,
-    env,
-    microbatchSize: 1,
-    rssGuardBytes: modelRssGuardBytes,
-    rssGuardExempt: true,
-    autoWarmup: false
-  }));
+  return new EmbeddingWorkerPool(
+    new DaemonWorkerPool({
+      name: 'embedding-model',
+      kind: 'embedding',
+      size: embeddingWorkers,
+      env,
+      microbatchSize: 1,
+      rssGuardBytes: modelRssGuardBytes,
+      rssGuardExempt: true,
+      autoWarmup: false,
+    }),
+  );
 }
 
 function envBytesForPool(env: NodeJS.ProcessEnv, key: string): number | undefined {
@@ -608,15 +657,15 @@ function chunk<T>(values: readonly T[], size: number): T[][] {
 
 function commonAnalyzerIdentity(
   identities: readonly SearchAnalyzerIdentity[],
-  fallback?: SearchAnalyzerIdentity
+  fallback?: SearchAnalyzerIdentity,
 ): SearchAnalyzerIdentity {
   const checked = fallback ? [fallback, ...identities] : [...identities];
   const first = checked[0];
-  if (!first) throw Object.assign(new Error("analyzer pool is not warmed"), { code: "SEARCH_DAEMON_NOT_READY" });
+  if (!first) throw Object.assign(new Error('analyzer pool is not warmed'), { code: 'SEARCH_DAEMON_NOT_READY' });
   const expected = stableJson(first);
   for (const identity of checked) {
     if (stableJson(identity) !== expected) {
-      throw Object.assign(new Error("analyzer worker identities diverged during parallel build"), { code: "INTERNAL" });
+      throw Object.assign(new Error('analyzer worker identities diverged during parallel build'), { code: 'INTERNAL' });
     }
   }
   return first;
@@ -626,7 +675,9 @@ function sortBuiltSegmentsByPartitionId(segments: readonly BuiltSegment[]): Buil
   const sorted = [...segments].sort((left, right) => left.partitionId - right.partitionId);
   for (let index = 1; index < sorted.length; index += 1) {
     if (sorted[index - 1].partitionId === sorted[index].partitionId) {
-      throw Object.assign(new Error(`duplicate partition ${sorted[index].partitionId} in parallel build reduce`), { code: "INTERNAL" });
+      throw Object.assign(new Error(`duplicate partition ${sorted[index].partitionId} in parallel build reduce`), {
+        code: 'INTERNAL',
+      });
     }
   }
   return sorted;
@@ -637,7 +688,7 @@ function withoutProgress(options: WorkerPoolRunOptions): WorkerPoolRunOptions {
   return rest;
 }
 
-function totalItems<T>(batches: readonly (readonly T[])[]): number {
+function totalItems(batches: readonly (readonly unknown[])[]): number {
   return batches.reduce((sum, batch) => sum + batch.length, 0);
 }
 
@@ -647,10 +698,13 @@ function progressInterval(total: number): number {
 }
 
 function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 }

@@ -1,13 +1,13 @@
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import { RuntimeError } from "../errors.js";
-import { findObsidianAppLaunch, mergeObsidianLaunchEnv, recoverLinuxGuiEnv } from "./launcher.js";
-import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./obsidian.js";
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { RuntimeError } from '../errors.js';
+import { findObsidianAppLaunch, mergeObsidianLaunchEnv, recoverLinuxGuiEnv } from './launcher.js';
+import { resolveObsidianVaultRoot, resolveVaultPathInput } from './obsidian.js';
 
 export type OpenObsidianGuiResult = {
   ok: true;
-  command: "open-gui";
+  command: 'open-gui';
   target: string;
   launcher: string;
   wait: boolean;
@@ -34,18 +34,18 @@ export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Pro
   const launcher = launchObsidianGui(target, env);
   const result: OpenObsidianGuiResult = {
     ok: true,
-    command: "open-gui",
+    command: 'open-gui',
     target,
     launcher,
     wait: Boolean(options.wait),
-    ...(vaultPath ? { vaultPath } : {})
+    ...(vaultPath ? { vaultPath } : {}),
   };
 
   if (options.wait) {
     result.readyVaultPath = await waitForNativeVaultReady({
       env,
       expectedVaultPath: vaultPath,
-      timeoutMs: options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
+      timeoutMs: options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS,
     });
   }
 
@@ -54,13 +54,13 @@ export async function openObsidianGui(options: OpenObsidianGuiOptions = {}): Pro
 
 export function obsidianOpenUrl(vaultPath?: string): string {
   if (!vaultPath) {
-    return "obsidian://open";
+    return 'obsidian://open';
   }
   return `obsidian://open?path=${encodeURIComponent(vaultPath)}`;
 }
 
 function buildGuiLaunchEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (process.platform !== "linux") {
+  if (process.platform !== 'linux') {
     return baseEnv;
   }
   return mergeObsidianLaunchEnv(baseEnv, recoverLinuxGuiEnv(baseEnv));
@@ -69,37 +69,39 @@ function buildGuiLaunchEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 function launchObsidianGui(target: string, env: NodeJS.ProcessEnv): string {
   const installed = findObsidianAppLaunch(env);
   if (installed) {
-    if (installed.kind === "darwin-bundle") {
-      launchDetached("open", ["-a", installed.appBundle, target], env);
+    if (installed.kind === 'darwin-bundle') {
+      launchDetached('open', ['-a', installed.appBundle, target], env);
       return `open -a ${installed.appBundle}`;
     }
     launchDetached(installed.binary, [target], env);
     return installed.binary;
   }
 
-  if (process.platform === "darwin") {
-    launchDetached("open", [target], env);
-    return "open";
+  if (process.platform === 'darwin') {
+    launchDetached('open', [target], env);
+    return 'open';
   }
 
-  if (process.platform === "win32") {
-    launchDetached("cmd", ["/c", "start", "", target], env);
-    return "cmd";
+  if (process.platform === 'win32') {
+    launchDetached('cmd', ['/c', 'start', '', target], env);
+    return 'cmd';
   }
 
-  const xdgOpen = findExecutable("xdg-open", env);
+  const xdgOpen = findExecutable('xdg-open', env);
   if (xdgOpen) {
     launchDetached(xdgOpen, [target], env);
     return xdgOpen;
   }
 
-  const gio = findExecutable("gio", env);
+  const gio = findExecutable('gio', env);
   if (gio) {
-    launchDetached(gio, ["open", target], env);
+    launchDetached(gio, ['open', target], env);
     return gio;
   }
 
-  throw new RuntimeError("Could not find a GUI opener. Install Obsidian to a standard location, install xdg-open/gio, or set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian.");
+  throw new RuntimeError(
+    'Could not find a GUI opener. Install Obsidian to a standard location, install xdg-open/gio, or set OPTSIDIAN_OBSIDIAN_APP_BIN=/path/to/obsidian.',
+  );
 }
 
 function launchDetached(command: string, args: string[], env: NodeJS.ProcessEnv): void {
@@ -108,10 +110,10 @@ function launchDetached(command: string, args: string[], env: NodeJS.ProcessEnv)
   }
   const child = spawn(command, args, {
     detached: true,
-    stdio: "ignore",
-    env
+    stdio: 'ignore',
+    env,
   });
-  child.on("error", () => {});
+  child.on('error', () => {});
   child.unref();
 }
 
@@ -123,7 +125,7 @@ async function waitForNativeVaultReady(options: {
   const deadline = Date.now() + options.timeoutMs;
   const startedAt = Date.now();
   const expected = options.expectedVaultPath ? realpathForCompare(options.expectedVaultPath) : undefined;
-  let lastReason = "native vault resolution has not succeeded yet";
+  let lastReason = 'native vault resolution has not succeeded yet';
 
   while (Date.now() <= deadline) {
     try {
@@ -155,7 +157,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function findExecutable(command: string, env: NodeJS.ProcessEnv): string | undefined {
-  const pathValue = env.PATH ?? "";
+  const pathValue = env.PATH ?? '';
   for (const dir of pathValue.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, command);

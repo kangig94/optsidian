@@ -27,12 +27,12 @@ export function ngramSearchTerms(terms: readonly string[], options: NgramSearchT
 
 function characterNgrams(value: string, minLength: number, maxLength: number): string[] {
   const bounded = value.length > MAX_NGRAM_SOURCE_LENGTH ? value.slice(0, MAX_NGRAM_SOURCE_LENGTH) : value;
-  const chars = [...bounded].filter((char) => HANGUL_PATTERN.test(char));
+  const chars = Array.from(bounded).filter((char) => HANGUL_PATTERN.test(char));
   const grams: string[] = [];
   for (let size = minLength; size <= maxLength; size += 1) {
     if (chars.length < size) continue;
     for (let index = 0; index <= chars.length - size; index += 1) {
-      grams.push(chars.slice(index, index + size).join(""));
+      grams.push(chars.slice(index, index + size).join(''));
       if (grams.length >= MAX_NGRAMS_PER_TERM) return grams;
     }
   }
@@ -40,7 +40,7 @@ function characterNgrams(value: string, minLength: number, maxLength: number): s
 }
 
 function safeMaxTerms(maxTerms?: number): number {
-  if (typeof maxTerms !== "number") return Number.POSITIVE_INFINITY;
+  if (typeof maxTerms !== 'number') return Number.POSITIVE_INFINITY;
   if (!Number.isFinite(maxTerms)) return Number.POSITIVE_INFINITY;
   return Math.max(0, Math.trunc(maxTerms));
 }

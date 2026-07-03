@@ -6,7 +6,7 @@ export type TextLines = {
 
 export function decodeUtf8(buffer: Buffer, label: string): string {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
   } catch {
     throw new Error(`${label} is not valid UTF-8`);
   }
@@ -14,10 +14,10 @@ export function decodeUtf8(buffer: Buffer, label: string): string {
 
 export function splitText(text: string): TextLines {
   if (text.length === 0) {
-    return { lines: [], eol: "\n", finalNewline: false };
+    return { lines: [], eol: '\n', finalNewline: false };
   }
-  const eol = text.includes("\r\n") ? "\r\n" : "\n";
-  const finalNewline = text.endsWith("\n");
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const finalNewline = text.endsWith('\n');
   const lines = text.split(/\r\n|\n/);
   if (finalNewline) lines.pop();
   return { lines, eol, finalNewline };
@@ -31,13 +31,11 @@ export function joinText(parts: TextLines): string {
 export function lineNumbered(lines: string[], startLine: number): string {
   const end = startLine + lines.length - 1;
   const width = String(Math.max(end, 1)).length;
-  return lines
-    .map((line, index) => `${String(startLine + index).padStart(width, " ")}\t${line}`)
-    .join("\n");
+  return lines.map((line, index) => `${String(startLine + index).padStart(width, ' ')}\t${line}`).join('\n');
 }
 
 export function simpleDiff(pathLabel: string, before: string, after: string, context = 3): string {
-  if (before === after) return "";
+  if (before === after) return '';
   const oldLines = splitText(before).lines;
   const newLines = splitText(after).lines;
   let prefix = 0;
@@ -62,5 +60,5 @@ export function simpleDiff(pathLabel: string, before: string, after: string, con
   for (let i = oldSuffix + 1; i <= suffixEnd && i < oldLines.length; i += 1) {
     if (oldLines[i] === newLines[i - oldSuffix + newSuffix]) out.push(` ${oldLines[i]}`);
   }
-  return out.join("\n");
+  return out.join('\n');
 }

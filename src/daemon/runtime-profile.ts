@@ -1,16 +1,21 @@
-import crypto from "node:crypto";
-import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from "../core/kiwi/artifact.js";
-import { ANALYZER_VERSION, DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS } from "../core/search/constants.js";
-import { SEARCH_SCHEMA_DIGEST } from "../core/search/schema.js";
-import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type SearchSettings } from "../core/settings.js";
-import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
-import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
-import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
-import { DEFAULT_PARTITION_BITS, INDEX_BUILD_VERSION } from "./search-store/builder.js";
+import crypto from 'node:crypto';
+import { KIWI_MODEL_TYPE, KIWI_MODEL_VERSION, KIWI_NLP_VERSION } from '../core/kiwi/artifact.js';
+import { ANALYZER_VERSION, DEFAULT_RRF_K, SEARCH_SCORING_LAMBDAS } from '../core/search/constants.js';
+import { SEARCH_SCHEMA_DIGEST } from '../core/search/schema.js';
+import {
+  readOptsidianSettings,
+  searchNgramEnabled,
+  type OptsidianSettings,
+  type SearchSettings,
+} from '../core/settings.js';
+import type { IndexAffectingSearchSettings } from '../core/search/index-settings.js';
+import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from './query-analysis-cache-defaults.js';
+import { defaultSearchExecutionWorkerCount } from './worker-pool.js';
+import { DEFAULT_PARTITION_BITS, INDEX_BUILD_VERSION } from './search-store/builder.js';
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
-export type SearchEmbeddingProviderKind = "local-onnx" | "deterministic-hash";
+export type SearchEmbeddingProviderKind = 'local-onnx' | 'deterministic-hash';
 
 export type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
   partitionBits: number;
@@ -19,7 +24,7 @@ export type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
 export type SearchRuntimeProfile = {
   schemaVersion: typeof SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION;
   analyzer: {
-    mode: "intl" | "kiwi";
+    mode: 'intl' | 'kiwi';
     extraLangs: string[];
     kiwiModel: {
       nlpVersion: string;
@@ -30,7 +35,7 @@ export type SearchRuntimeProfile = {
   index: SearchRuntimeProfileIndexSettings;
   embedding: {
     provider: SearchEmbeddingProviderKind;
-    model: "bge-m3" | "multilingual-e5-small";
+    model: 'bge-m3' | 'multilingual-e5-small';
   };
   ranking: {
     denseLambda: number;
@@ -64,11 +69,13 @@ export type SearchRuntimeProfile = {
 export function effectiveSearchRuntimeProfile(
   cwd = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
-  settings: OptsidianSettings = readOptsidianSettings(cwd, env)
+  settings: OptsidianSettings = readOptsidianSettings(cwd, env),
 ): SearchRuntimeProfile {
-  const searchWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKERS");
-  const queryWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_WORKERS") ?? (searchWorkers ? 1 : settings.search?.queryWorkers ?? 1);
-  const indexWorkers = positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_WORKERS") ?? (searchWorkers ? 1 : settings.search?.indexWorkers ?? 1);
+  const searchWorkers = positiveIntEnv(env, 'OPTSIDIAN_SEARCH_WORKERS');
+  const queryWorkers =
+    positiveIntEnv(env, 'OPTSIDIAN_SEARCH_QUERY_WORKERS') ?? (searchWorkers ? 1 : (settings.search?.queryWorkers ?? 1));
+  const indexWorkers =
+    positiveIntEnv(env, 'OPTSIDIAN_SEARCH_INDEX_WORKERS') ?? (searchWorkers ? 1 : (settings.search?.indexWorkers ?? 1));
   return normalizeSearchRuntimeProfile({
     schemaVersion: SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION,
     analyzer: {
@@ -77,110 +84,156 @@ export function effectiveSearchRuntimeProfile(
       kiwiModel: {
         nlpVersion: KIWI_NLP_VERSION,
         modelVersion: KIWI_MODEL_VERSION,
-        modelType: KIWI_MODEL_TYPE
-      }
+        modelType: KIWI_MODEL_TYPE,
+      },
     },
     index: {
       ngram: searchNgramEnabled(env, settings),
-      partitionBits: positiveIntEnv(env, "OPTSIDIAN_SEARCH_PARTITION_BITS") ?? settings.search?.partitionBits ?? DEFAULT_PARTITION_BITS
+      partitionBits:
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_PARTITION_BITS') ??
+        settings.search?.partitionBits ??
+        DEFAULT_PARTITION_BITS,
     },
     embedding: {
       provider: embeddingProvider(env),
-      model: embeddingModel(env, settings)
+      model: embeddingModel(env, settings),
     },
     ranking: {
-      denseLambda: nonNegativeFloatEnv(env, "OPTSIDIAN_SEARCH_DENSE_LAMBDA") ?? settings.search?.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense,
-      linkLambda: nonNegativeFloatEnv(env, "OPTSIDIAN_SEARCH_LINK_LAMBDA") ?? settings.search?.linkLambda ?? SEARCH_SCORING_LAMBDAS.link,
-      rrfK: positiveIntEnv(env, "OPTSIDIAN_SEARCH_RRF_K") ?? settings.search?.rrfK ?? DEFAULT_RRF_K
+      denseLambda:
+        nonNegativeFloatEnv(env, 'OPTSIDIAN_SEARCH_DENSE_LAMBDA') ??
+        settings.search?.denseLambda ??
+        SEARCH_SCORING_LAMBDAS.dense,
+      linkLambda:
+        nonNegativeFloatEnv(env, 'OPTSIDIAN_SEARCH_LINK_LAMBDA') ??
+        settings.search?.linkLambda ??
+        SEARCH_SCORING_LAMBDAS.link,
+      rrfK: positiveIntEnv(env, 'OPTSIDIAN_SEARCH_RRF_K') ?? settings.search?.rrfK ?? DEFAULT_RRF_K,
     },
     workers: {
       query: queryWorkers,
       index: indexWorkers,
-      searchExecution: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_WORKERS") ?? searchWorkers ?? settings.search?.executionWorkers ?? defaultSearchExecutionWorkerCount(),
-      analyzerMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH") ?? 16,
-      indexMicrobatch: positiveIntEnv(env, "OPTSIDIAN_SEARCH_INDEX_MICROBATCH") ?? 128
+      searchExecution:
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_EXECUTION_WORKERS') ??
+        searchWorkers ??
+        settings.search?.executionWorkers ??
+        defaultSearchExecutionWorkerCount(),
+      analyzerMicrobatch: positiveIntEnv(env, 'OPTSIDIAN_SEARCH_ANALYZER_MICROBATCH') ?? 16,
+      indexMicrobatch: positiveIntEnv(env, 'OPTSIDIAN_SEARCH_INDEX_MICROBATCH') ?? 128,
     },
     cache: {
-      queryAnalysisEntries: nonNegativeIntEnv(env, "OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE") ?? settings.search?.queryCacheSize ?? DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES,
-      snapshotRetention: positiveIntEnv(env, "OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT") ?? settings.search?.snapshotRetentionCount ?? 2,
-      executionSnapshots: positiveIntEnv(env, "OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS") ?? 2
+      queryAnalysisEntries:
+        nonNegativeIntEnv(env, 'OPTSIDIAN_SEARCH_QUERY_CACHE_SIZE') ??
+        settings.search?.queryCacheSize ??
+        DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES,
+      snapshotRetention:
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT') ??
+        settings.search?.snapshotRetentionCount ??
+        2,
+      executionSnapshots: positiveIntEnv(env, 'OPTSIDIAN_SEARCH_EXECUTION_CACHE_SNAPSHOTS') ?? 2,
     },
     memory: {
-      ...optionalNumber("snapshotCountCap", positiveIntEnv(env, "OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT") ??
-        positiveIntEnv(env, "OPTSIDIAN_SEARCH_SNAPSHOT_COUNT_CAP") ??
-        settings.search?.memoryBudgetCount),
-      ...optionalNumber("snapshotByteCap", positiveIntEnv(env, "OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES") ??
-        positiveIntEnv(env, "OPTSIDIAN_SEARCH_SNAPSHOT_BYTE_CAP") ??
-        settings.search?.memoryBudgetBytes),
-      ...optionalNumber("workerHeapGuardMb", positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB") ??
-        positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKER_MEMORY_MB")),
-      ...optionalNumber("workerRssGuardMb", positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB")),
-      ...optionalNumber("workerRssGuardStrikes", positiveIntEnv(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES"))
+      ...optionalNumber(
+        'snapshotCountCap',
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_MEMORY_BUDGET_COUNT') ??
+          positiveIntEnv(env, 'OPTSIDIAN_SEARCH_SNAPSHOT_COUNT_CAP') ??
+          settings.search?.memoryBudgetCount,
+      ),
+      ...optionalNumber(
+        'snapshotByteCap',
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_MEMORY_BUDGET_BYTES') ??
+          positiveIntEnv(env, 'OPTSIDIAN_SEARCH_SNAPSHOT_BYTE_CAP') ??
+          settings.search?.memoryBudgetBytes,
+      ),
+      ...optionalNumber(
+        'workerHeapGuardMb',
+        positiveIntEnv(env, 'OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB') ??
+          positiveIntEnv(env, 'OPTSIDIAN_SEARCH_WORKER_MEMORY_MB'),
+      ),
+      ...optionalNumber('workerRssGuardMb', positiveIntEnv(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB')),
+      ...optionalNumber('workerRssGuardStrikes', positiveIntEnv(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES')),
     },
     daemon: {
-      idleMs: nonNegativeIntEnv(env, "OPTSIDIAN_SEARCH_DAEMON_IDLE_MS") ?? settings.search?.daemonIdleMs ?? 6 * 60 * 60 * 1000
-    }
+      idleMs:
+        nonNegativeIntEnv(env, 'OPTSIDIAN_SEARCH_DAEMON_IDLE_MS') ??
+        settings.search?.daemonIdleMs ??
+        6 * 60 * 60 * 1000,
+    },
   });
 }
 
 export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProfile {
-  if (!isRecord(value)) throw new Error("search runtime profile must be an object");
-  const analyzer = asRecord(value.analyzer, "search runtime profile analyzer");
-  const index = optionalRecord(value.index, "search runtime profile index");
-  const embedding = optionalRecord(value.embedding, "search runtime profile embedding");
-  const ranking = optionalRecord(value.ranking, "search runtime profile ranking");
-  const workers = asRecord(value.workers, "search runtime profile workers");
-  const cache = asRecord(value.cache, "search runtime profile cache");
-  const memory = asRecord(value.memory, "search runtime profile memory");
-  const daemon = asRecord(value.daemon, "search runtime profile daemon");
-  const mode = stringValue(analyzer.mode, "search runtime analyzer mode").trim().toLowerCase();
-  if (mode !== "intl" && mode !== "kiwi") throw new Error("search runtime analyzer mode must be intl or kiwi");
+  if (!isRecord(value)) throw new Error('search runtime profile must be an object');
+  const analyzer = asRecord(value.analyzer, 'search runtime profile analyzer');
+  const index = optionalRecord(value.index, 'search runtime profile index');
+  const embedding = optionalRecord(value.embedding, 'search runtime profile embedding');
+  const ranking = optionalRecord(value.ranking, 'search runtime profile ranking');
+  const workers = asRecord(value.workers, 'search runtime profile workers');
+  const cache = asRecord(value.cache, 'search runtime profile cache');
+  const memory = asRecord(value.memory, 'search runtime profile memory');
+  const daemon = asRecord(value.daemon, 'search runtime profile daemon');
+  const mode = stringValue(analyzer.mode, 'search runtime analyzer mode').trim().toLowerCase();
+  if (mode !== 'intl' && mode !== 'kiwi') throw new Error('search runtime analyzer mode must be intl or kiwi');
   return {
     schemaVersion: SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION,
     analyzer: {
       mode,
-      extraLangs: [...new Set(stringList(analyzer.extraLangs).map((part) => part.trim().toLowerCase()).filter(Boolean))].sort(),
+      extraLangs: [
+        ...new Set(
+          stringList(analyzer.extraLangs)
+            .map((part) => part.trim().toLowerCase())
+            .filter(Boolean),
+        ),
+      ].sort(),
       kiwiModel: {
-        nlpVersion: stringValue(asRecord(analyzer.kiwiModel, "search runtime kiwi model").nlpVersion, "kiwi nlp version"),
-        modelVersion: stringValue(asRecord(analyzer.kiwiModel, "search runtime kiwi model").modelVersion, "kiwi model version"),
-        modelType: stringValue(asRecord(analyzer.kiwiModel, "search runtime kiwi model").modelType, "kiwi model type")
-      }
+        nlpVersion: stringValue(
+          asRecord(analyzer.kiwiModel, 'search runtime kiwi model').nlpVersion,
+          'kiwi nlp version',
+        ),
+        modelVersion: stringValue(
+          asRecord(analyzer.kiwiModel, 'search runtime kiwi model').modelVersion,
+          'kiwi model version',
+        ),
+        modelType: stringValue(asRecord(analyzer.kiwiModel, 'search runtime kiwi model').modelType, 'kiwi model type'),
+      },
     },
     index: {
-      ngram: booleanValue(index.ngram ?? false, "search runtime ngram"),
-      partitionBits: positiveInt(index.partitionBits ?? DEFAULT_PARTITION_BITS, "search runtime partition bits")
+      ngram: booleanValue(index.ngram ?? false, 'search runtime ngram'),
+      partitionBits: positiveInt(index.partitionBits ?? DEFAULT_PARTITION_BITS, 'search runtime partition bits'),
     },
     embedding: {
-      provider: normalizeEmbeddingProvider(embedding.provider ?? "local-onnx", "search runtime embedding provider"),
-      model: normalizeEmbeddingModel(embedding.model ?? "bge-m3", "search runtime embedding model")
+      provider: normalizeEmbeddingProvider(embedding.provider ?? 'local-onnx', 'search runtime embedding provider'),
+      model: normalizeEmbeddingModel(embedding.model ?? 'bge-m3', 'search runtime embedding model'),
     },
     ranking: {
-      denseLambda: nonNegativeFloat(ranking.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense, "dense lambda"),
-      linkLambda: nonNegativeFloat(ranking.linkLambda ?? SEARCH_SCORING_LAMBDAS.link, "link lambda"),
-      rrfK: positiveInt(ranking.rrfK ?? DEFAULT_RRF_K, "RRF k")
+      denseLambda: nonNegativeFloat(ranking.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense, 'dense lambda'),
+      linkLambda: nonNegativeFloat(ranking.linkLambda ?? SEARCH_SCORING_LAMBDAS.link, 'link lambda'),
+      rrfK: positiveInt(ranking.rrfK ?? DEFAULT_RRF_K, 'RRF k'),
     },
     workers: {
-      query: positiveInt(workers.query, "query workers"),
-      index: positiveInt(workers.index, "index workers"),
-      searchExecution: positiveInt(workers.searchExecution, "search execution workers"),
-      analyzerMicrobatch: positiveInt(workers.analyzerMicrobatch, "analyzer microbatch"),
-      indexMicrobatch: positiveInt(workers.indexMicrobatch, "index microbatch")
+      query: positiveInt(workers.query, 'query workers'),
+      index: positiveInt(workers.index, 'index workers'),
+      searchExecution: positiveInt(workers.searchExecution, 'search execution workers'),
+      analyzerMicrobatch: positiveInt(workers.analyzerMicrobatch, 'analyzer microbatch'),
+      indexMicrobatch: positiveInt(workers.indexMicrobatch, 'index microbatch'),
     },
     cache: {
-      queryAnalysisEntries: nonNegativeInt(cache.queryAnalysisEntries, "query analysis cache entries"),
-      snapshotRetention: positiveInt(cache.snapshotRetention, "snapshot retention"),
-      executionSnapshots: positiveInt(cache.executionSnapshots, "execution snapshot cache")
+      queryAnalysisEntries: nonNegativeInt(cache.queryAnalysisEntries, 'query analysis cache entries'),
+      snapshotRetention: positiveInt(cache.snapshotRetention, 'snapshot retention'),
+      executionSnapshots: positiveInt(cache.executionSnapshots, 'execution snapshot cache'),
     },
     memory: {
-      ...optionalNumber("snapshotCountCap", optionalPositiveInt(memory.snapshotCountCap, "snapshot count cap")),
-      ...optionalNumber("snapshotByteCap", optionalPositiveInt(memory.snapshotByteCap, "snapshot byte cap")),
-      ...optionalNumber("workerHeapGuardMb", optionalPositiveInt(memory.workerHeapGuardMb, "worker heap guard")),
-      ...optionalNumber("workerRssGuardMb", optionalPositiveInt(memory.workerRssGuardMb, "worker rss guard")),
-      ...optionalNumber("workerRssGuardStrikes", optionalPositiveInt(memory.workerRssGuardStrikes, "worker rss guard strikes"))
+      ...optionalNumber('snapshotCountCap', optionalPositiveInt(memory.snapshotCountCap, 'snapshot count cap')),
+      ...optionalNumber('snapshotByteCap', optionalPositiveInt(memory.snapshotByteCap, 'snapshot byte cap')),
+      ...optionalNumber('workerHeapGuardMb', optionalPositiveInt(memory.workerHeapGuardMb, 'worker heap guard')),
+      ...optionalNumber('workerRssGuardMb', optionalPositiveInt(memory.workerRssGuardMb, 'worker rss guard')),
+      ...optionalNumber(
+        'workerRssGuardStrikes',
+        optionalPositiveInt(memory.workerRssGuardStrikes, 'worker rss guard strikes'),
+      ),
     },
     daemon: {
-      idleMs: nonNegativeInt(daemon.idleMs, "daemon idle ms")
-    }
+      idleMs: nonNegativeInt(daemon.idleMs, 'daemon idle ms'),
+    },
   };
 }
 
@@ -190,23 +243,28 @@ export function searchRuntimeProfileHash(profile: SearchRuntimeProfile): string 
 
 export function lexicalIdentityHashForSearchRuntimeProfile(profile: SearchRuntimeProfile): string {
   const normalized = normalizeSearchRuntimeProfile(profile);
-  return sha256(canonicalJson({
-    buildVersion: INDEX_BUILD_VERSION,
-    analyzerVersion: ANALYZER_VERSION,
-    fieldSetVersion: SEARCH_SCHEMA_DIGEST,
-    analyzer: normalized.analyzer,
-    // index carries ngram + partitionBits — the index-affecting settings that scope the lexical store.
-    index: normalized.index
-  }));
+  return sha256(
+    canonicalJson({
+      buildVersion: INDEX_BUILD_VERSION,
+      analyzerVersion: ANALYZER_VERSION,
+      fieldSetVersion: SEARCH_SCHEMA_DIGEST,
+      analyzer: normalized.analyzer,
+      // index carries ngram + partitionBits — the index-affecting settings that scope the lexical store.
+      index: normalized.index,
+    }),
+  );
 }
 
-export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function envForSearchRuntimeProfile(
+  profile: SearchRuntimeProfile,
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
   const normalized = normalizeSearchRuntimeProfile(profile);
   return cleanEnv({
     ...baseEnv,
     OPTSIDIAN_SEARCH_ANALYZER: normalized.analyzer.mode,
-    OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(","),
-    OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? "true" : "false",
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: normalized.analyzer.extraLangs.join(','),
+    OPTSIDIAN_SEARCH_NGRAM: normalized.index.ngram ? 'true' : 'false',
     OPTSIDIAN_SEARCH_PARTITION_BITS: String(normalized.index.partitionBits),
     OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: normalized.embedding.provider,
     OPTSIDIAN_SEARCH_EMBEDDING_MODEL: normalized.embedding.model,
@@ -230,7 +288,7 @@ export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEn
     OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB: optionalEnv(normalized.memory.workerHeapGuardMb),
     OPTSIDIAN_SEARCH_WORKER_MEMORY_MB: optionalEnv(normalized.memory.workerHeapGuardMb),
     OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB: optionalEnv(normalized.memory.workerRssGuardMb),
-    OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES: optionalEnv(normalized.memory.workerRssGuardStrikes)
+    OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES: optionalEnv(normalized.memory.workerRssGuardStrikes),
   });
 }
 
@@ -250,27 +308,28 @@ export function settingsForSearchRuntimeProfile(profile: SearchRuntimeProfile): 
     embeddingModel: normalized.embedding.model,
     denseLambda: normalized.ranking.denseLambda,
     linkLambda: normalized.ranking.linkLambda,
-    rrfK: normalized.ranking.rrfK
+    rrfK: normalized.ranking.rrfK,
   };
   if (normalized.memory.snapshotCountCap !== undefined) search.memoryBudgetCount = normalized.memory.snapshotCountCap;
   if (normalized.memory.snapshotByteCap !== undefined) search.memoryBudgetBytes = normalized.memory.snapshotByteCap;
   return { search };
 }
 
-function analyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "intl" | "kiwi" {
-  const raw = env.OPTSIDIAN_SEARCH_ANALYZER ?? settings.search?.analyzer ?? "intl";
+function analyzerMode(env: NodeJS.ProcessEnv, settings: OptsidianSettings): 'intl' | 'kiwi' {
+  const raw = env.OPTSIDIAN_SEARCH_ANALYZER ?? settings.search?.analyzer ?? 'intl';
   const mode = raw.trim().toLowerCase();
-  if (mode === "intl" || mode === "kiwi") return mode;
-  return "intl";
+  if (mode === 'intl' || mode === 'kiwi') return mode;
+  return 'intl';
 }
 
 function extraLangs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): string[] {
   const raw = env.OPTSIDIAN_SEARCH_EXTRA_LANGS;
-  const values = raw !== undefined
-    ? raw.split(",")
-    : env.LANGS !== undefined
-      ? langsEnvExtraLangs(env.LANGS)
-      : settings.search?.extraLangs ?? [];
+  const values =
+    raw !== undefined
+      ? raw.split(',')
+      : env.LANGS !== undefined
+        ? langsEnvExtraLangs(env.LANGS)
+        : (settings.search?.extraLangs ?? []);
   return [...new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
@@ -279,15 +338,21 @@ function langsEnvExtraLangs(raw: string): string[] {
     .split(/[,:;\s]+/u)
     .map((value) => value.trim().toLowerCase())
     .map((value) => value.split(/[_.-]/u)[0])
-    .filter((value) => value === "ko");
+    .filter((value) => value === 'ko');
 }
 
-function embeddingModel(env: NodeJS.ProcessEnv, settings: OptsidianSettings): "bge-m3" | "multilingual-e5-small" {
-  return normalizeEmbeddingModel(env.OPTSIDIAN_SEARCH_EMBEDDING_MODEL ?? settings.search?.embeddingModel ?? "bge-m3", "search embedding model");
+function embeddingModel(env: NodeJS.ProcessEnv, settings: OptsidianSettings): 'bge-m3' | 'multilingual-e5-small' {
+  return normalizeEmbeddingModel(
+    env.OPTSIDIAN_SEARCH_EMBEDDING_MODEL ?? settings.search?.embeddingModel ?? 'bge-m3',
+    'search embedding model',
+  );
 }
 
 function embeddingProvider(env: NodeJS.ProcessEnv): SearchEmbeddingProviderKind {
-  return normalizeEmbeddingProvider(env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER ?? "local-onnx", "search embedding provider");
+  return normalizeEmbeddingProvider(
+    env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER ?? 'local-onnx',
+    'search embedding provider',
+  );
 }
 
 function optionalRecord(value: unknown, label: string): Record<string, unknown> {
@@ -308,17 +373,17 @@ function nonNegativeFloatEnv(env: NodeJS.ProcessEnv, key: string): number | unde
 }
 
 function optionalPositiveInt(value: unknown, label: string): number | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
+  if (value === undefined || value === null || value === '') return undefined;
   return positiveInt(value, label);
 }
 
 function optionalNonNegativeInt(value: unknown, label: string): number | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
+  if (value === undefined || value === null || value === '') return undefined;
   return nonNegativeInt(value, label);
 }
 
 function optionalNonNegativeFloat(value: unknown, label: string): number | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
+  if (value === undefined || value === null || value === '') return undefined;
   return nonNegativeFloat(value, label);
 }
 
@@ -329,56 +394,61 @@ function positiveInt(value: unknown, label: string): number {
 }
 
 function nonNegativeInt(value: unknown, label: string): number {
-  const number = typeof value === "number" ? value : Number(String(value).trim());
+  const number = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isInteger(number) || number < 0) throw new Error(`${label} must be a non-negative integer`);
   return number;
 }
 
 function nonNegativeFloat(value: unknown, label: string): number {
-  const number = typeof value === "number" ? value : Number(String(value).trim());
+  const number = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isFinite(number) || number < 0) throw new Error(`${label} must be a non-negative number`);
   return number;
 }
 
-function normalizeEmbeddingModel(value: unknown, label: string): "bge-m3" | "multilingual-e5-small" {
+function normalizeEmbeddingModel(value: unknown, label: string): 'bge-m3' | 'multilingual-e5-small' {
   const raw = stringValue(String(value), label).trim().toLowerCase();
-  if (raw === "bge" || raw === "bge-m3" || raw === "baai/bge-m3") return "bge-m3";
-  if (raw === "e5" || raw === "e5-small" || raw === "multilingual-e5-small" || raw === "intfloat/multilingual-e5-small") {
-    return "multilingual-e5-small";
+  if (raw === 'bge' || raw === 'bge-m3' || raw === 'baai/bge-m3') return 'bge-m3';
+  if (
+    raw === 'e5' ||
+    raw === 'e5-small' ||
+    raw === 'multilingual-e5-small' ||
+    raw === 'intfloat/multilingual-e5-small'
+  ) {
+    return 'multilingual-e5-small';
   }
   throw new Error(`${label} must be bge-m3 or multilingual-e5-small`);
 }
 
 function normalizeEmbeddingProvider(value: unknown, label: string): SearchEmbeddingProviderKind {
   const raw = stringValue(String(value), label).trim().toLowerCase();
-  if (raw === "local-onnx" || raw === "onnx") return "local-onnx";
-  if (raw === "deterministic-hash" || raw === "deterministic") return "deterministic-hash";
+  if (raw === 'local-onnx' || raw === 'onnx') return 'local-onnx';
+  if (raw === 'deterministic-hash' || raw === 'deterministic') return 'deterministic-hash';
   throw new Error(`${label} must be local-onnx or deterministic-hash`);
 }
 
 function stringList(value: unknown): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("search runtime profile string list must be an array");
-  return value.map((part) => stringValue(part, "search runtime profile list item")).filter(Boolean);
+  if (!Array.isArray(value)) throw new Error('search runtime profile string list must be an array');
+  return value.map((part) => stringValue(part, 'search runtime profile list item')).filter(Boolean);
 }
 
 function stringValue(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`);
   return value;
 }
 
 function booleanValue(value: unknown, label: string): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
-    if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
-    if (["0", "false", "no", "off", "disabled", ""].includes(normalized)) return false;
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off', 'disabled', ''].includes(normalized)) return false;
   }
   throw new Error(`${label} must be true or false`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
@@ -387,11 +457,11 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
 }
 
 function optionalNumber<K extends string>(key: K, value: number | undefined): { [P in K]?: number } {
-  return value === undefined ? {} : { [key]: value } as { [P in K]?: number };
+  return value === undefined ? {} : ({ [key]: value } as { [P in K]?: number });
 }
 
 function optionalEnv(value: number | undefined): string {
-  return value === undefined ? "" : String(value);
+  return value === undefined ? '' : String(value);
 }
 
 function cleanEnv(env: Record<string, string | undefined>): NodeJS.ProcessEnv {
@@ -409,9 +479,13 @@ function canonicalJson(value: unknown): string {
 function sortCanonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortCanonical);
   if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortCanonical(value[key])]));
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortCanonical(value[key])]),
+  );
 }
 
 function sha256(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex");
+  return crypto.createHash('sha256').update(value).digest('hex');
 }

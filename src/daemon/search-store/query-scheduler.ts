@@ -1,16 +1,16 @@
-import { remainingDeadlineMs } from "../protocol.js";
-import type { WorkerPoolRunOptions } from "../worker-pool.js";
-import { searchExecutionWarningLabels } from "../../core/search/internal-types.js";
+import { remainingDeadlineMs } from '../protocol.js';
+import type { WorkerPoolRunOptions } from '../worker-pool.js';
+import { searchExecutionWarningLabels } from '../../core/search/internal-types.js';
 import type {
   SearchExecutionResult,
   SearchShardExecutionJob,
-  SearchShardExecutionResult
-} from "../search-execution.js";
-import { SearchQueryPlanner, type SearchPlan, type SearchQueryPlanInput, type ShardTaskPlan } from "./query-planner.js";
-import { ResultAggregator } from "./result-aggregator.js";
-import { ResultHydrator } from "./result-hydrator.js";
-import { applySearchWarnings } from "./result-shaping.js";
-import type { PersistedDocumentRecord } from "./types.js";
+  SearchShardExecutionResult,
+} from '../search-execution.js';
+import { SearchQueryPlanner, type SearchPlan, type SearchQueryPlanInput, type ShardTaskPlan } from './query-planner.js';
+import { ResultAggregator } from './result-aggregator.js';
+import { ResultHydrator } from './result-hydrator.js';
+import { applySearchWarnings } from './result-shaping.js';
+import type { PersistedDocumentRecord } from './types.js';
 
 export type SearchQuerySchedulerInput = SearchQueryPlanInput & {
   requestId?: string;
@@ -22,7 +22,11 @@ export type SearchQueryLeasePool = {
   idleReadySlotIds(): number[];
   leaseIdleSlot(): number | undefined;
   releaseIdleSlot(slotId: number): boolean;
-  runOnSlot(job: SearchShardExecutionJob, options: WorkerPoolRunOptions, slotId: number): Promise<SearchShardExecutionResult>;
+  runOnSlot(
+    job: SearchShardExecutionJob,
+    options: WorkerPoolRunOptions,
+    slotId: number,
+  ): Promise<SearchShardExecutionResult>;
   cancel(cancellationId: string): void;
 };
 
@@ -63,7 +67,7 @@ export class SearchQueryScheduler {
     this.testOrdering = options.testOrdering;
     this.exhaustiveWorkCeiling =
       options.exhaustiveWorkCeiling ??
-      envPositiveInt(options.env ?? process.env, "OPTSIDIAN_SEARCH_EXHAUSTIVE_WORK_CEILING") ??
+      envPositiveInt(options.env ?? process.env, 'OPTSIDIAN_SEARCH_EXHAUSTIVE_WORK_CEILING') ??
       DEFAULT_EXHAUSTIVE_WORK_CEILING;
   }
 
@@ -72,7 +76,7 @@ export class SearchQueryScheduler {
   }
 
   submit(input: SearchQuerySchedulerInput): SearchQuerySession {
-    assertRemainingDeadline(input.deadline, "before query planning");
+    assertRemainingDeadline(input.deadline, 'before query planning');
     assertNotCancelled(input.cancellationId, this.cancelled);
     const plan = input.plan ?? this.planner.plan(input);
     assertNotCancelled(input.cancellationId, this.cancelled);
@@ -82,8 +86,12 @@ export class SearchQueryScheduler {
       pool: this.pool,
       exhaustiveWorkCeiling: this.exhaustiveWorkCeiling,
       testOrdering: this.testOrdering,
-      onRunnable: () => this.requestDrain(),
-      onTerminal: (terminalSession) => this.removeSession(terminalSession)
+      onRunnable: () => {
+        this.requestDrain();
+      },
+      onTerminal: (terminalSession) => {
+        this.removeSession(terminalSession);
+      },
     });
     session.start();
     if (session.isActive) {
@@ -95,7 +103,7 @@ export class SearchQueryScheduler {
 
   cancel(cancellationId: string): void {
     rememberCancelled(this.cancelled, cancellationId);
-    const error = Object.assign(new Error("query session was cancelled"), { code: "CANCELLED" });
+    const error = Object.assign(new Error('query session was cancelled'), { code: 'CANCELLED' });
     for (const session of [...this.activeSessions]) {
       if (session.cancellationId === cancellationId) session.cancel(error);
     }
@@ -131,7 +139,7 @@ export class SearchQueryScheduler {
   }
 
   private expireElapsedSessions(): void {
-    for (const session of [...this.activeSessions]) session.expireIfDeadlineElapsed("before leasing");
+    for (const session of [...this.activeSessions]) session.expireIfDeadlineElapsed('before leasing');
   }
 
   private allocateLeaseOrder(idleReadyCount: number): SearchQuerySession[] {
@@ -145,10 +153,11 @@ export class SearchQueryScheduler {
     let remaining = idleReadyCount;
 
     while (remaining > 0) {
-      const session = this.selectNextSession((candidate) =>
-        candidate.canSchedule &&
-        candidate.runningCount + (allocated.get(candidate) ?? 0) < fairTarget &&
-        candidate.pendingCount > (allocated.get(candidate) ?? 0)
+      const session = this.selectNextSession(
+        (candidate) =>
+          candidate.canSchedule &&
+          candidate.runningCount + (allocated.get(candidate) ?? 0) < fairTarget &&
+          candidate.pendingCount > (allocated.get(candidate) ?? 0),
       );
       if (!session) break;
       allocated.set(session, (allocated.get(session) ?? 0) + 1);
@@ -157,9 +166,8 @@ export class SearchQueryScheduler {
     }
 
     while (remaining > 0) {
-      const session = this.selectNextSession((candidate) =>
-        candidate.canSchedule &&
-        candidate.pendingCount > (allocated.get(candidate) ?? 0)
+      const session = this.selectNextSession(
+        (candidate) => candidate.canSchedule && candidate.pendingCount > (allocated.get(candidate) ?? 0),
       );
       if (!session) break;
       allocated.set(session, (allocated.get(session) ?? 0) + 1);
@@ -184,11 +192,11 @@ export class SearchQueryScheduler {
   }
 
   private scheduleOne(session: SearchQuerySession, leasesRemainingForSession: number): boolean {
-    if (!session.expireIfDeadlineElapsed("before leasing")) return true;
+    if (!session.expireIfDeadlineElapsed('before leasing')) return true;
     if (!session.canSchedule) return true;
     const slotId = this.pool.leaseIdleSlot();
     if (slotId === undefined) return false;
-    if (!session.expireIfDeadlineElapsed("after leasing") || !session.canSchedule) {
+    if (!session.expireIfDeadlineElapsed('after leasing') || !session.canSchedule) {
       this.pool.releaseIdleSlot(slotId);
       return true;
     }
@@ -232,7 +240,7 @@ export class SearchQuerySession {
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private timeBudgetTimer: ReturnType<typeof setTimeout> | undefined;
   private schedulingStopped = false;
-  private state: "pending" | "active" | "fulfilled" | "rejected" = "pending";
+  private state: 'pending' | 'active' | 'fulfilled' | 'rejected' = 'pending';
 
   constructor(args: {
     input: SearchQuerySchedulerInput;
@@ -251,12 +259,12 @@ export class SearchQuerySession {
     this.onTerminal = args.onTerminal;
     this.pending = orderedPendingTasks(
       boundedTaskPrefix(args.plan.tasks, args.input.search),
-      args.testOrdering?.orderPendingTasks
+      args.testOrdering?.orderPendingTasks,
     );
     this.warnings = searchExecutionWarningLabels(args.input.search);
     this.aggregator = new ResultAggregator({
       exactBound: args.plan.exactBound,
-      analysis: args.input.analysis
+      analysis: args.input.analysis,
     });
   }
 
@@ -265,12 +273,12 @@ export class SearchQuerySession {
   }
 
   get isActive(): boolean {
-    return this.state === "active";
+    return this.state === 'active';
   }
 
   get canSchedule(): boolean {
     return (
-      this.state === "active" &&
+      this.state === 'active' &&
       !this.schedulingStopped &&
       this.pending.length > 0 &&
       remainingDeadlineMs(this.input.deadline) > 0
@@ -290,8 +298,8 @@ export class SearchQuerySession {
   }
 
   start(): void {
-    if (this.state !== "pending") return;
-    if (!this.expireIfDeadlineElapsed("before query scheduling")) return;
+    if (this.state !== 'pending') return;
+    if (!this.expireIfDeadlineElapsed('before query scheduling')) return;
     const ceilingEstimate = this.workCeilingEstimate();
     if (ceilingEstimate > this.exhaustiveWorkCeiling) {
       this.reject(workCeilingError(ceilingEstimate, this.exhaustiveWorkCeiling), false);
@@ -301,12 +309,12 @@ export class SearchQuerySession {
       this.fulfill(this.hydrate());
       return;
     }
-    this.state = "active";
+    this.state = 'active';
     this.armDeadlineTimer();
     this.armTimeBudgetTimer();
   }
 
-  cancel(error: Error = Object.assign(new Error("query session was cancelled"), { code: "CANCELLED" })): void {
+  cancel(error: Error = Object.assign(new Error('query session was cancelled'), { code: 'CANCELLED' })): void {
     this.reject(error, true);
   }
 
@@ -325,7 +333,7 @@ export class SearchQuerySession {
   }
 
   dispatch(slotId: number, task: SearchQueryShardTask): void {
-    if (this.state !== "active") {
+    if (this.state !== 'active') {
       this.pool.releaseIdleSlot(slotId);
       return;
     }
@@ -339,14 +347,20 @@ export class SearchQuerySession {
       this.reject(error instanceof Error ? error : new Error(String(error)), true);
       return;
     }
-    promise.then(
-      (result) => this.completeShard(slotId, result),
-      (error: unknown) => {
-        this.inFlight.delete(slotId);
-        this.pool.releaseIdleSlot(slotId);
-        this.reject(error instanceof Error ? error : new Error(String(error)), true);
-      }
-    ).finally(() => this.onRunnable());
+    promise
+      .then(
+        (result) => {
+          this.completeShard(slotId, result);
+        },
+        (error: unknown) => {
+          this.inFlight.delete(slotId);
+          this.pool.releaseIdleSlot(slotId);
+          this.reject(error instanceof Error ? error : new Error(String(error)), true);
+        },
+      )
+      .finally(() => {
+        this.onRunnable();
+      });
   }
 
   private get workerOptions(): WorkerPoolRunOptions {
@@ -354,17 +368,20 @@ export class SearchQuerySession {
       deadline: this.input.deadline,
       cancellationId: this.input.cancellationId,
       requestId: this.input.requestId ?? this.input.cancellationId,
-      vault: this.input.vault
+      vault: this.input.vault,
     };
   }
 
   private completeShard(slotId: number, result: SearchShardExecutionResult): void {
     this.inFlight.delete(slotId);
-    if (this.state !== "active") return;
+    if (this.state !== 'active') return;
     if (result.snapshotId !== this.input.snapshot.snapshotId) {
       this.reject(
-        Object.assign(new Error(`shard returned snapshot ${result.snapshotId}, expected ${this.input.snapshot.snapshotId}`), { code: "INTERNAL" }),
-        true
+        Object.assign(
+          new Error(`shard returned snapshot ${result.snapshotId}, expected ${this.input.snapshot.snapshotId}`),
+          { code: 'INTERNAL' },
+        ),
+        true,
       );
       return;
     }
@@ -379,41 +396,41 @@ export class SearchQuerySession {
       analyzerIdentity: this.input.analyzerIdentity,
       explain: this.input.explain,
       documents: this.input.documents,
-      aggregation: this.aggregator.finalize()
+      aggregation: this.aggregator.finalize(),
     });
     return applySearchWarnings(result, this.warnings);
   }
 
   private workCeilingEstimate(): number {
     const budget = this.input.search.budget;
-    if (this.input.search.coverage === "bounded" && (budget?.work !== undefined || budget?.shards !== undefined)) {
+    if (this.input.search.coverage === 'bounded' && (budget?.work !== undefined || budget?.shards !== undefined)) {
       return this.pending.reduce((sum, task) => sum + task.workEstimate, 0);
     }
     return this.plan.estimatedWork;
   }
 
   private shardBatchSize(leasesRemainingForSession: number): number {
-    if (this.input.search.coverage === "bounded" && this.input.search.budget?.timeMs !== undefined) return 1;
+    if (this.input.search.coverage === 'bounded' && this.input.search.budget?.timeMs !== undefined) return 1;
     return Math.max(1, Math.ceil(this.pending.length / Math.max(1, leasesRemainingForSession)));
   }
 
   private armDeadlineTimer(): void {
     const remaining = remainingDeadlineMs(this.input.deadline);
     if (remaining <= 0) {
-      this.reject(deadlineError("before query scheduling"), true);
+      this.reject(deadlineError('before query scheduling'), true);
       return;
     }
     this.deadlineTimer = setTimeout(() => {
-      this.reject(deadlineError("during query execution"), true);
+      this.reject(deadlineError('during query execution'), true);
     }, remaining);
     this.deadlineTimer.unref();
   }
 
   private armTimeBudgetTimer(): void {
-    const timeMs = this.input.search.coverage === "bounded" ? this.input.search.budget?.timeMs : undefined;
+    const timeMs = this.input.search.coverage === 'bounded' ? this.input.search.budget?.timeMs : undefined;
     if (timeMs === undefined) return;
     this.timeBudgetTimer = setTimeout(() => {
-      if (this.state !== "active") return;
+      if (this.state !== 'active') return;
       this.schedulingStopped = true;
       this.pending.length = 0;
       if (this.inFlight.size === 0) this.fulfill(this.hydrate());
@@ -433,16 +450,16 @@ export class SearchQuerySession {
   }
 
   private fulfill(result: SearchExecutionResult): void {
-    if (this.state === "fulfilled" || this.state === "rejected") return;
-    this.state = "fulfilled";
+    if (this.state === 'fulfilled' || this.state === 'rejected') return;
+    this.state = 'fulfilled';
     this.clearTimers();
     this.resultDeferred.resolve(result);
     this.onTerminal(this);
   }
 
   private reject(error: Error, cancelLiveWork: boolean): void {
-    if (this.state === "fulfilled" || this.state === "rejected") return;
-    this.state = "rejected";
+    if (this.state === 'fulfilled' || this.state === 'rejected') return;
+    this.state = 'rejected';
     this.schedulingStopped = true;
     this.pending.length = 0;
     this.clearTimers();
@@ -452,8 +469,11 @@ export class SearchQuerySession {
   }
 }
 
-function boundedTaskPrefix(tasks: readonly ShardTaskPlan[], search: SearchQuerySchedulerInput["search"]): ShardTaskPlan[] {
-  if (search.coverage !== "bounded") return [...tasks];
+function boundedTaskPrefix(
+  tasks: readonly ShardTaskPlan[],
+  search: SearchQuerySchedulerInput['search'],
+): ShardTaskPlan[] {
+  if (search.coverage !== 'bounded') return [...tasks];
   const budget = search.budget;
   if (!budget) return [...tasks];
 
@@ -473,22 +493,29 @@ function boundedTaskPrefix(tasks: readonly ShardTaskPlan[], search: SearchQueryS
 
 function orderedPendingTasks(
   tasks: readonly ShardTaskPlan[],
-  orderPendingTasks: SearchQuerySchedulerTestOrdering["orderPendingTasks"] | undefined
+  orderPendingTasks: SearchQuerySchedulerTestOrdering['orderPendingTasks'] | undefined,
 ): ShardTaskPlan[] {
   if (!orderPendingTasks) return [...tasks];
   const ordered = [...orderPendingTasks(tasks)];
   const expected = new Set(tasks);
   const actual = new Set(ordered);
   if (ordered.length !== tasks.length || actual.size !== expected.size || ordered.some((task) => !expected.has(task))) {
-    throw Object.assign(new Error("scheduler test ordering must preserve the pending shard task set"), { code: "INTERNAL" });
+    throw Object.assign(new Error('scheduler test ordering must preserve the pending shard task set'), {
+      code: 'INTERNAL',
+    });
   }
   return ordered;
 }
 
-function shardTaskFromUnits(units: readonly ShardTaskPlan[], exactBound: SearchPlan["exactBound"]): SearchQueryShardTask {
+function shardTaskFromUnits(
+  units: readonly ShardTaskPlan[],
+  exactBound: SearchPlan['exactBound'],
+): SearchQueryShardTask {
   const first = units[0];
-  if (!first) throw Object.assign(new Error("cannot build a shard task from an empty unit batch"), { code: "INTERNAL" });
-  if (!exactBound) throw Object.assign(new Error("search shard task requires exact-bound evidence"), { code: "INTERNAL" });
+  if (!first)
+    throw Object.assign(new Error('cannot build a shard task from an empty unit batch'), { code: 'INTERNAL' });
+  if (!exactBound)
+    throw Object.assign(new Error('search shard task requires exact-bound evidence'), { code: 'INTERNAL' });
   const workEstimate = units.reduce((sum, unit) => sum + unit.workEstimate, 0);
   const job: SearchShardExecutionJob = {
     vault: first.vault,
@@ -502,7 +529,7 @@ function shardTaskFromUnits(units: readonly ShardTaskPlan[], exactBound: SearchP
       bm25Stats: first.snapshot.bm25Stats,
       documents: first.snapshot.documents,
       linkGraph: first.snapshot.linkGraph,
-      segments: units.flatMap((unit) => unit.snapshot.segments)
+      segments: units.flatMap((unit) => unit.snapshot.segments),
     },
     denseEmbeddingSet: first.denseEmbeddingSet,
     queryVector: first.queryVector,
@@ -519,13 +546,13 @@ function shardTaskFromUnits(units: readonly ShardTaskPlan[], exactBound: SearchP
     workEstimate,
     deadline: first.deadline,
     cancellationId: first.cancellationId,
-    explain: first.explain
+    explain: first.explain,
   };
   return {
     units,
     job,
     workEstimate,
-    mergeKey: units.map((unit) => unit.mergeKey).join("\u0000")
+    mergeKey: units.map((unit) => unit.mergeKey).join('\u0000'),
   };
 }
 
@@ -535,18 +562,17 @@ function assertRemainingDeadline(deadline: number, label: string): void {
 
 function assertNotCancelled(cancellationId: string, cancelled: ReadonlySet<string>): void {
   if (!cancelled.has(cancellationId)) return;
-  throw Object.assign(new Error("query session was cancelled"), { code: "CANCELLED" });
+  throw Object.assign(new Error('query session was cancelled'), { code: 'CANCELLED' });
 }
 
 function deadlineError(label: string): Error {
-  return Object.assign(new Error(`request deadline expired ${label}`), { code: "DEADLINE_EXCEEDED" });
+  return Object.assign(new Error(`request deadline expired ${label}`), { code: 'DEADLINE_EXCEEDED' });
 }
 
 function workCeilingError(estimatedWork: number, ceiling: number): Error {
-  return Object.assign(
-    new Error(`query exhaustive work bound ${estimatedWork} exceeds ceiling ${ceiling}`),
-    { code: "DEADLINE_EXCEEDED" }
-  );
+  return Object.assign(new Error(`query exhaustive work bound ${estimatedWork} exceeds ceiling ${ceiling}`), {
+    code: 'DEADLINE_EXCEEDED',
+  });
 }
 
 function envPositiveInt(env: NodeJS.ProcessEnv, key: string): number | undefined {

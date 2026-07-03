@@ -1,7 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
-import { createDaemonPools, type DaemonPools } from "./pools.js";
-import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from "./protocol.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { createDaemonPools, type DaemonPools } from './pools.js';
+import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from './protocol.js';
 import {
   createDaemonSnapshotStore,
   createWorkerEmbeddingSetBuilder,
@@ -9,16 +9,13 @@ import {
   SharedReclamationAuthority,
   VaultPublisherRegistry,
   type DaemonSnapshotStore,
-  type SnapshotDirtyMark
-} from "./search-store/index.js";
-import { SearchCacheCatalog } from "./search-store/cache-catalog.js";
-import { createEmbedScheduler, type EmbedScheduler, type VectorGenerationManager } from "./embed-scheduler.js";
-import type { SearchIndexPruneResult } from "../core/types.js";
-import {
-  DeterministicHashProvider,
-  createLocalOnnxProviderFromConfig
-} from "../core/search/dense/index.js";
-import { VaultRegistry } from "./vault-registry.js";
+  type SnapshotDirtyMark,
+} from './search-store/index.js';
+import { SearchCacheCatalog } from './search-store/cache-catalog.js';
+import { createEmbedScheduler, type EmbedScheduler, type VectorGenerationManager } from './embed-scheduler.js';
+import type { SearchIndexPruneResult } from '../core/types.js';
+import { DeterministicHashProvider, createLocalOnnxProviderFromConfig } from '../core/search/dense/index.js';
+import { VaultRegistry } from './vault-registry.js';
 import {
   effectiveSearchRuntimeProfile,
   envForSearchRuntimeProfile,
@@ -26,15 +23,15 @@ import {
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash,
   settingsForSearchRuntimeProfile,
-  type SearchRuntimeProfile
-} from "./runtime-profile.js";
+  type SearchRuntimeProfile,
+} from './runtime-profile.js';
 import {
   startRetrievalSaveWatcher,
   type RetrievalSaveWatcher,
   type VaultChangeProducerOptions,
-  type VaultDirtyMark
-} from "./vector-store/watcher.js";
-import type { CurrentWriterToken, TenancyFenceProvider } from "../core/lifecycle/conditional-commit.js";
+  type VaultDirtyMark,
+} from './vector-store/watcher.js';
+import type { CurrentWriterToken, TenancyFenceProvider } from '../core/lifecycle/conditional-commit.js';
 
 export type ProfileRuntimeStatus = {
   profileHash: string;
@@ -43,7 +40,7 @@ export type ProfileRuntimeStatus = {
   idleDeadline?: string;
   pools: unknown;
   searchStore: unknown;
-  vaults: ReturnType<VaultRegistry["list"]>;
+  vaults: ReturnType<VaultRegistry['list']>;
 };
 
 export type ProfileRuntimeLease = {
@@ -88,10 +85,16 @@ export class ProfileRuntime {
   readonly vectorPool: VectorGenerationManager;
   readonly searchStore: DaemonSearchStoreService;
   readonly vaults = new VaultRegistry();
-  private readonly embedScheduler: Pick<EmbedScheduler, "cancel">;
+  private readonly embedScheduler: Pick<EmbedScheduler, 'cancel'>;
   private readonly snapshotStore: Pick<
     DaemonSnapshotStore,
-    "publishSaveSnapshot" | "foldSaveDirtyMarks" | "journalSaveDirtyMarks" | "journalPendingDebounce" | "recordSaveFailure" | "drainPublishers" | "close"
+    | 'publishSaveSnapshot'
+    | 'foldSaveDirtyMarks'
+    | 'journalSaveDirtyMarks'
+    | 'journalPendingDebounce'
+    | 'recordSaveFailure'
+    | 'drainPublishers'
+    | 'close'
   >;
   private readonly startSaveWatcher: RuntimeSaveWatcherFactory;
   private readonly saveWatcherDebounceMs: number | undefined;
@@ -107,11 +110,17 @@ export class ProfileRuntime {
     vectorPool: VectorGenerationManager,
     snapshotStore: Pick<
       DaemonSnapshotStore,
-      "publishSaveSnapshot" | "foldSaveDirtyMarks" | "journalSaveDirtyMarks" | "journalPendingDebounce" | "recordSaveFailure" | "drainPublishers" | "close"
+      | 'publishSaveSnapshot'
+      | 'foldSaveDirtyMarks'
+      | 'journalSaveDirtyMarks'
+      | 'journalPendingDebounce'
+      | 'recordSaveFailure'
+      | 'drainPublishers'
+      | 'close'
     >,
     searchStore: DaemonSearchStoreService,
-    embedScheduler: Pick<EmbedScheduler, "cancel">,
-    options: ProfileManagerOptions
+    embedScheduler: Pick<EmbedScheduler, 'cancel'>,
+    options: ProfileManagerOptions,
   ) {
     this.profile = profile;
     this.profileHash = searchRuntimeProfileHash(profile);
@@ -132,7 +141,7 @@ export class ProfileRuntime {
     embedScheduler: EmbedScheduler,
     publisherRegistry: VaultPublisherRegistry,
     reclamationAuthority: SharedReclamationAuthority,
-    options: ProfileManagerOptions = {}
+    options: ProfileManagerOptions = {},
   ): Promise<ProfileRuntime> {
     const normalized = normalizeSearchRuntimeProfile(profile);
     const profileHash = searchRuntimeProfileHash(normalized);
@@ -140,19 +149,21 @@ export class ProfileRuntime {
     const settings = settingsForSearchRuntimeProfile(normalized);
     const pools = await createDaemonPools(env, settings, { embedding: embedScheduler.embedding });
     const vectorPool = embedScheduler.vectorManager;
-    const embeddingProvider = normalized.embedding.provider === "deterministic-hash"
-      ? new DeterministicHashProvider()
-      : createLocalOnnxProviderFromConfig(settings, env);
-    const providerPayload = normalized.embedding.provider === "deterministic-hash"
-      ? {
-          kind: "deterministic-hash" as const,
-          model: embeddingProvider.identity.model,
-          dim: embeddingProvider.identity.dim
-        }
-      : {
-          kind: "local-onnx" as const,
-          model: normalized.embedding.model
-        };
+    const embeddingProvider =
+      normalized.embedding.provider === 'deterministic-hash'
+        ? new DeterministicHashProvider()
+        : createLocalOnnxProviderFromConfig(settings, env);
+    const providerPayload =
+      normalized.embedding.provider === 'deterministic-hash'
+        ? {
+            kind: 'deterministic-hash' as const,
+            model: embeddingProvider.identity.model,
+            dim: embeddingProvider.identity.dim,
+          }
+        : {
+            kind: 'local-onnx' as const,
+            model: normalized.embedding.model,
+          };
     const snapshotStore = createDaemonSnapshotStore({
       env,
       countCap: normalized.memory.snapshotCountCap,
@@ -169,21 +180,34 @@ export class ProfileRuntime {
       embeddingSetBuilder: createWorkerEmbeddingSetBuilder({
         provider: embeddingProvider,
         providerPayload,
-        embedding: embedScheduler
+        embedding: embedScheduler,
       }),
-      snapshotBuilder: (input) => pools.throughputAnalyzer.buildSnapshot(input.vaultRoot, input.partitionBits, {
-        deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
-        cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
-        vault: input.vaultRoot,
-        onProgress: input.progress
-      }, input.searchSettings, input.base)
+      snapshotBuilder: (input) =>
+        pools.throughputAnalyzer.buildSnapshot(
+          input.vaultRoot,
+          input.partitionBits,
+          {
+            deadline: input.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
+            cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
+            vault: input.vaultRoot,
+            onProgress: input.progress,
+          },
+          input.searchSettings,
+          input.base,
+        ),
     });
-    const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, embedScheduler, pools.searchExecution, {
-      queryCacheSize: normalized.cache.queryAnalysisEntries,
-      searchSettings: normalized.index,
-      settings,
-      env
-    });
+    const searchStore = new DaemonSearchStoreService(
+      snapshotStore,
+      pools.latencyAnalyzer,
+      embedScheduler,
+      pools.searchExecution,
+      {
+        queryCacheSize: normalized.cache.queryAnalysisEntries,
+        searchSettings: normalized.index,
+        settings,
+        env,
+      },
+    );
     return new ProfileRuntime(normalized, pools, vectorPool, snapshotStore, searchStore, embedScheduler, options);
   }
 
@@ -200,7 +224,7 @@ export class ProfileRuntime {
       vaultRoot: canonicalVaultRoot,
       onDirtyMarks: (marks) => {
         this.enqueueSaveSnapshot(canonicalVaultRoot, marks);
-      }
+      },
     };
     if (this.saveWatcherDebounceMs !== undefined) options.debounceMs = this.saveWatcherDebounceMs;
     if (this.saveWatcherFallbackPollMs !== undefined) options.fallbackPollMs = this.saveWatcherFallbackPollMs;
@@ -229,7 +253,7 @@ export class ProfileRuntime {
 
   async status(
     context: { deadline: number; cancellationId: string; vault?: string },
-    lifecycle: { activeRequests: number; idleDeadline?: string }
+    lifecycle: { activeRequests: number; idleDeadline?: string },
   ): Promise<ProfileRuntimeStatus> {
     return {
       profileHash: this.profileHash,
@@ -238,7 +262,7 @@ export class ProfileRuntime {
       ...(lifecycle.idleDeadline ? { idleDeadline: lifecycle.idleDeadline } : {}),
       pools: await this.pools.stats(context),
       searchStore: this.searchStore.stats(),
-      vaults: this.vaults.list()
+      vaults: this.vaults.list(),
     };
   }
 
@@ -259,7 +283,7 @@ export class ProfileRuntime {
       state = {
         pendingMarks: new Map(),
         pendingJournalSeqs: new Set(),
-        foldChain: Promise.resolve()
+        foldChain: Promise.resolve(),
       };
       this.savePublications.set(vaultRoot, state);
     }
@@ -290,7 +314,7 @@ export class ProfileRuntime {
       try {
         await this.snapshotStore.publishSaveSnapshot(vaultRoot, {
           deadline,
-          cancellationId
+          cancellationId,
         });
       } catch (error) {
         await this.snapshotStore.recordSaveFailure(vaultRoot, journalSeqs, error);
@@ -299,13 +323,17 @@ export class ProfileRuntime {
     }
   }
 
-  private enqueueActiveSaveFold(vaultRoot: string, marks: readonly SnapshotDirtyMark[], state: SavePublicationState): void {
+  private enqueueActiveSaveFold(
+    vaultRoot: string,
+    marks: readonly SnapshotDirtyMark[],
+    state: SavePublicationState,
+  ): void {
     const saveJobId = this.nextSaveJobId++;
     const cancellationId = `save-fold:${this.profileHash}:${saveJobId}`;
     const fold = state.foldChain.then(async () => {
       await this.snapshotStore.foldSaveDirtyMarks(vaultRoot, marks, {
         deadline: Date.now() + this.saveMutationDeadlineMs,
-        cancellationId
+        cancellationId,
       });
     });
     state.foldChain = fold.catch(() => undefined);
@@ -317,7 +345,7 @@ function snapshotDirtyMarkFromVaultMark(mark: VaultDirtyMark): SnapshotDirtyMark
   return {
     docId: mark.docId,
     path: mark.path,
-    ...(mark.contentHash !== undefined ? { contentHash: mark.contentHash } : {})
+    ...(mark.contentHash !== undefined ? { contentHash: mark.contentHash } : {}),
   };
 }
 
@@ -354,8 +382,11 @@ export class ProfileManager {
     this.options = options;
   }
 
-  async acquire(payload: { profile?: SearchRuntimeProfile }, options: ProfileRuntimeAcquireOptions = {}): Promise<ProfileRuntimeLease> {
-    if (this.closed) throw Object.assign(new Error("profile manager is closed"), { code: "SEARCH_DAEMON_NOT_READY" });
+  async acquire(
+    payload: { profile?: SearchRuntimeProfile },
+    options: ProfileRuntimeAcquireOptions = {},
+  ): Promise<ProfileRuntimeLease> {
+    if (this.closed) throw Object.assign(new Error('profile manager is closed'), { code: 'SEARCH_DAEMON_NOT_READY' });
     const profile = this.profileForPayload(payload);
     const profileHash = searchRuntimeProfileHash(profile);
     assertNotCancelled(options.cancellationId, this.cancelled);
@@ -372,14 +403,14 @@ export class ProfileManager {
         if (released) return;
         released = true;
         this.release(profileHash, entry);
-      }
+      },
     };
   }
 
   async withRuntimeFor<T>(
     payload: { profile?: SearchRuntimeProfile },
     fn: (runtime: ProfileRuntime) => Promise<T>,
-    options: ProfileRuntimeAcquireOptions = {}
+    options: ProfileRuntimeAcquireOptions = {},
   ): Promise<T> {
     const lease = await this.acquire(payload, options);
     try {
@@ -394,15 +425,22 @@ export class ProfileManager {
     if (current) return current;
     const pending = this.pending.get(profileHash);
     if (pending) return pending;
-    const created = ProfileRuntime.create(profile, this.baseEnv, this.embedScheduler, this.publisherRegistry, this.reclamationAuthority, this.options)
+    const created = ProfileRuntime.create(
+      profile,
+      this.baseEnv,
+      this.embedScheduler,
+      this.publisherRegistry,
+      this.reclamationAuthority,
+      this.options,
+    )
       .then(async (runtime) => {
         if (this.closed) {
           await runtime.close();
-          throw Object.assign(new Error("profile manager is closed"), { code: "SEARCH_DAEMON_NOT_READY" });
+          throw Object.assign(new Error('profile manager is closed'), { code: 'SEARCH_DAEMON_NOT_READY' });
         }
         const entry: ProfileRuntimeEntry = {
           runtime,
-          activeRequests: 0
+          activeRequests: 0,
         };
         this.runtimes.set(profileHash, entry);
         this.pending.delete(profileHash);
@@ -419,7 +457,7 @@ export class ProfileManager {
   private async liveEntryFor(profileHash: string, profile: SearchRuntimeProfile): Promise<ProfileRuntimeEntry> {
     while (true) {
       const entry = await this.entryFor(profileHash, profile);
-      if (this.closed) throw Object.assign(new Error("profile manager is closed"), { code: "SEARCH_DAEMON_NOT_READY" });
+      if (this.closed) throw Object.assign(new Error('profile manager is closed'), { code: 'SEARCH_DAEMON_NOT_READY' });
       if (this.runtimes.get(profileHash) === entry) return entry;
     }
   }
@@ -429,7 +467,7 @@ export class ProfileManager {
     try {
       return normalizeSearchRuntimeProfile(payload.profile);
     } catch (error) {
-      throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: "BAD_REQUEST" });
+      throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { code: 'BAD_REQUEST' });
     }
   }
 
@@ -446,14 +484,23 @@ export class ProfileManager {
     if (this.ownsEmbedScheduler) await this.embedScheduler.close();
   }
 
-  async status(context: { deadline: number; cancellationId: string; vault?: string }): Promise<Record<string, ProfileRuntimeStatus>> {
-    const entries = await Promise.all([...this.runtimes.values()].map(async (entry) => [
-      entry.runtime.profileHash,
-      await entry.runtime.status(context, {
-        activeRequests: entry.activeRequests,
-        ...(entry.idleDeadline ? { idleDeadline: entry.idleDeadline } : {})
-      })
-    ] as const));
+  async status(context: {
+    deadline: number;
+    cancellationId: string;
+    vault?: string;
+  }): Promise<Record<string, ProfileRuntimeStatus>> {
+    const entries = await Promise.all(
+      [...this.runtimes.values()].map(
+        async (entry) =>
+          [
+            entry.runtime.profileHash,
+            await entry.runtime.status(context, {
+              activeRequests: entry.activeRequests,
+              ...(entry.idleDeadline ? { idleDeadline: entry.idleDeadline } : {}),
+            }),
+          ] as const,
+      ),
+    );
     return Object.fromEntries(entries);
   }
 
@@ -461,11 +508,11 @@ export class ProfileManager {
     return new SearchCacheCatalog({ env: this.baseEnv }).prune({
       unusedDays: payload.unusedDays,
       dryRun: payload.dryRun,
-      protectedStoreIds: this.protectedStoreIdsForPrune()
+      protectedStoreIds: this.protectedStoreIdsForPrune(),
     });
   }
 
-  listVaults(): ReturnType<VaultRegistry["list"]> {
+  listVaults(): ReturnType<VaultRegistry['list']> {
     return [...this.runtimes.values()].flatMap((entry) => entry.runtime.vaults.list());
   }
 
@@ -519,7 +566,7 @@ function assertNotCancelled(cancellationId: string | undefined, cancelled: Reado
 }
 
 function cancelledError(): Error {
-  return Object.assign(new Error("profile runtime request was cancelled"), { code: "CANCELLED" });
+  return Object.assign(new Error('profile runtime request was cancelled'), { code: 'CANCELLED' });
 }
 
 function rememberCancelled(cancelled: Set<string>, cancellationId: string): void {

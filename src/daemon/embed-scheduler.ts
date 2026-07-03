@@ -1,21 +1,15 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-import { readOptsidianSettings, type OptsidianSettings } from "../core/settings.js";
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
 import {
   SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   type ModelEncodeWorkerPayload,
-  type ModelEncodeWorkerResult
-} from "./protocol.js";
-import {
-  createEmbeddingWorkerPool,
-  type EmbeddingWorkerPool
-} from "./pools.js";
-import type { WorkerPoolRunOptions } from "./worker-pool.js";
-import {
-  VectorGenerationPool,
-  type VectorGenerationPoolOptions
-} from "./vector-store/index.js";
+  type ModelEncodeWorkerResult,
+} from './protocol.js';
+import { createEmbeddingWorkerPool, type EmbeddingWorkerPool } from './pools.js';
+import type { WorkerPoolRunOptions } from './worker-pool.js';
+import { VectorGenerationPool, type VectorGenerationPoolOptions } from './vector-store/index.js';
 
-export type EmbedSchedulerLane = "query" | "save" | "refresh" | "rebuild";
+export type EmbedSchedulerLane = 'query' | 'save' | 'refresh' | 'rebuild';
 
 export class VectorGenerationManager extends VectorGenerationPool {}
 
@@ -56,7 +50,7 @@ type QueryEncodeFlight = {
   settled?: { ok: true; result: ModelEncodeWorkerResult } | { ok: false; error: Error };
 };
 
-const LANE_ORDER: readonly EmbedSchedulerLane[] = ["query", "save", "refresh", "rebuild"];
+const LANE_ORDER: readonly EmbedSchedulerLane[] = ['query', 'save', 'refresh', 'rebuild'];
 const MAX_CANCELLED_IDS = 4096;
 
 export class EmbedScheduler {
@@ -71,19 +65,19 @@ export class EmbedScheduler {
     query: [],
     save: [],
     refresh: [],
-    rebuild: []
+    rebuild: [],
   };
   private readonly activeLaneCounts: Record<EmbedSchedulerLane, number> = {
     query: 0,
     save: 0,
     refresh: 0,
-    rebuild: 0
+    rebuild: 0,
   };
   private readonly laneScopes: Record<EmbedSchedulerLane, number> = {
     query: 0,
     save: 0,
     refresh: 0,
-    rebuild: 0
+    rebuild: 0,
   };
   private readonly cancelled = new Set<string>();
   private readonly querySingleFlights = new Map<string, QueryEncodeFlight>();
@@ -110,55 +104,81 @@ export class EmbedScheduler {
   encode(
     payload: ModelEncodeWorkerPayload,
     options: WorkerPoolRunOptions,
-    lane: EmbedSchedulerLane = payload.inputKind === "query" ? "query" : "rebuild"
+    lane: EmbedSchedulerLane = payload.inputKind === 'query' ? 'query' : 'rebuild',
   ): Promise<ModelEncodeWorkerResult> {
-    if (lane === "query" && payload.inputKind === "query") {
+    if (lane === 'query' && payload.inputKind === 'query') {
       const key = queryEncodeSingleFlightKey(payload);
       const existing = this.querySingleFlights.get(key);
       if (existing) return this.attachQueryEncodeWaiter(existing, options);
       const schedulerCancellationId = `query-encode:${this.nextQueryFlightId++}:${key}`;
-      const scheduled = this.run(lane, () => this.embedding.encode({
-        ...payload,
-        suppressCpuPromotion: payload.suppressCpuPromotion === true || this.rebuildLaneIsActive()
-      }, { ...options, cancellationId: schedulerCancellationId }), { ...options, cancellationId: schedulerCancellationId });
+      const scheduled = this.run(
+        lane,
+        () =>
+          this.embedding.encode(
+            {
+              ...payload,
+              suppressCpuPromotion: payload.suppressCpuPromotion === true || this.rebuildLaneIsActive(),
+            },
+            { ...options, cancellationId: schedulerCancellationId },
+          ),
+        { ...options, cancellationId: schedulerCancellationId },
+      );
       const flight: QueryEncodeFlight = {
         key,
         schedulerCancellationId,
         promise: scheduled,
-        waiters: new Set()
+        waiters: new Set(),
       };
       this.querySingleFlights.set(key, flight);
-      scheduled.then((result) => {
-        flight.settled = { ok: true, result };
-        for (const waiter of flight.waiters) waiter.resolve(result);
-      }, (error: unknown) => {
-        const failure = error instanceof Error ? error : new Error(String(error));
-        flight.settled = { ok: false, error: failure };
-        for (const waiter of flight.waiters) waiter.reject(failure);
-      }).finally(() => {
-        if (this.querySingleFlights.get(key) === flight) this.querySingleFlights.delete(key);
-        flight.waiters.clear();
-      });
+      scheduled
+        .then(
+          (result) => {
+            flight.settled = { ok: true, result };
+            for (const waiter of flight.waiters) waiter.resolve(result);
+          },
+          (error: unknown) => {
+            const failure = error instanceof Error ? error : new Error(String(error));
+            flight.settled = { ok: false, error: failure };
+            for (const waiter of flight.waiters) waiter.reject(failure);
+          },
+        )
+        .finally(() => {
+          if (this.querySingleFlights.get(key) === flight) this.querySingleFlights.delete(key);
+          flight.waiters.clear();
+        });
       return this.attachQueryEncodeWaiter(flight, options);
     }
-    return this.run(lane, () => this.embedding.encode({
-      ...payload,
-      // Only the foreground query lane may trigger an inline CPU→GPU promotion; a background
-      // document-embed batch (save/refresh/rebuild) must never block a queued query behind a GPU
-      // model load, which would violate the documented query > save > refresh > rebuild priority.
-      suppressCpuPromotion: payload.suppressCpuPromotion === true || lane !== "query" || this.rebuildLaneIsActive()
-    }, options), options);
+    return this.run(
+      lane,
+      () =>
+        this.embedding.encode(
+          {
+            ...payload,
+            // Only the foreground query lane may trigger an inline CPU→GPU promotion; a background
+            // document-embed batch (save/refresh/rebuild) must never block a queued query behind a GPU
+            // model load, which would violate the documented query > save > refresh > rebuild priority.
+            suppressCpuPromotion:
+              payload.suppressCpuPromotion === true || lane !== 'query' || this.rebuildLaneIsActive(),
+          },
+          options,
+        ),
+      options,
+    );
   }
 
   run<T>(lane: EmbedSchedulerLane, task: () => Promise<T>, options: WorkerPoolRunOptions): Promise<T> {
     if (this.closed || (this.closing && this.laneScopes[lane] === 0)) {
-      return Promise.reject(Object.assign(new Error("embed scheduler is closed"), { code: "SEARCH_DAEMON_NOT_READY" }));
+      return Promise.reject(Object.assign(new Error('embed scheduler is closed'), { code: 'SEARCH_DAEMON_NOT_READY' }));
     }
     if (this.now() >= options.deadline) {
-      return Promise.reject(Object.assign(new Error("embed scheduler deadline expired before admission"), { code: "DEADLINE_EXCEEDED" }));
+      return Promise.reject(
+        Object.assign(new Error('embed scheduler deadline expired before admission'), { code: 'DEADLINE_EXCEEDED' }),
+      );
     }
     if (this.cancelled.has(options.cancellationId)) {
-      return Promise.reject(Object.assign(new Error("embed scheduler request was cancelled before admission"), { code: "CANCELLED" }));
+      return Promise.reject(
+        Object.assign(new Error('embed scheduler request was cancelled before admission'), { code: 'CANCELLED' }),
+      );
     }
     if (this.runningLane === lane && this.activeLaneContext.getStore() === lane) {
       return Promise.resolve().then(task);
@@ -169,7 +189,7 @@ export class EmbedScheduler {
         options,
         task,
         resolve: resolve,
-        reject
+        reject,
       });
       this.pump();
     });
@@ -177,7 +197,7 @@ export class EmbedScheduler {
 
   async withLaneScope<T>(lane: EmbedSchedulerLane, fn: () => Promise<T>): Promise<T> {
     if (this.closed || this.closing) {
-      throw Object.assign(new Error("embed scheduler is closed"), { code: "SEARCH_DAEMON_NOT_READY" });
+      throw Object.assign(new Error('embed scheduler is closed'), { code: 'SEARCH_DAEMON_NOT_READY' });
     }
     this.laneScopes[lane] += 1;
     try {
@@ -196,7 +216,9 @@ export class EmbedScheduler {
         const job = this.lanes[lane][index];
         if (job.options.cancellationId !== cancellationId) continue;
         this.lanes[lane].splice(index, 1);
-        job.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+        job.reject(
+          Object.assign(new Error('embed scheduler request was cancelled before execution'), { code: 'CANCELLED' }),
+        );
       }
     }
     this.embedding.cancel(cancellationId);
@@ -210,8 +232,8 @@ export class EmbedScheduler {
     try {
       await this.embedding.unload({
         deadline: this.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
-        cancellationId: "embed-scheduler-close",
-        requestId: "embed-scheduler-close"
+        cancellationId: 'embed-scheduler-close',
+        requestId: 'embed-scheduler-close',
       });
     } catch {
       // Best-effort unload during close; owned resources are closed below.
@@ -232,7 +254,7 @@ export class EmbedScheduler {
       activeLaneScopes: Object.fromEntries(LANE_ORDER.map((lane) => [lane, this.laneScopes[lane]])),
       querySingleFlights: this.querySingleFlights.size,
       embedding: this.embedding.stats(),
-      vectorManager: this.vectorManager.statsForTests()
+      vectorManager: this.vectorManager.statsForTests(),
     };
   }
 
@@ -250,12 +272,16 @@ export class EmbedScheduler {
       return;
     }
     if (this.cancelled.has(job.options.cancellationId)) {
-      job.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+      job.reject(
+        Object.assign(new Error('embed scheduler request was cancelled before execution'), { code: 'CANCELLED' }),
+      );
       this.pump();
       return;
     }
     if (this.now() >= job.options.deadline) {
-      job.reject(Object.assign(new Error("embed scheduler deadline expired before execution"), { code: "DEADLINE_EXCEEDED" }));
+      job.reject(
+        Object.assign(new Error('embed scheduler deadline expired before execution'), { code: 'DEADLINE_EXCEEDED' }),
+      );
       this.pump();
       return;
     }
@@ -275,23 +301,26 @@ export class EmbedScheduler {
       });
   }
 
-  private attachQueryEncodeWaiter(flight: QueryEncodeFlight, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
+  private attachQueryEncodeWaiter(
+    flight: QueryEncodeFlight,
+    options: WorkerPoolRunOptions,
+  ): Promise<ModelEncodeWorkerResult> {
     if (this.cancelled.has(options.cancellationId)) {
-      return Promise.reject(Object.assign(new Error("embed scheduler request was cancelled before admission"), { code: "CANCELLED" }));
+      return Promise.reject(
+        Object.assign(new Error('embed scheduler request was cancelled before admission'), { code: 'CANCELLED' }),
+      );
     }
     // A waiter can attach after the flight already settled (its resolve/reject ran, but the
     // `.finally` that clears `waiters` has not yet). Serve the stored outcome directly instead of
     // enqueuing into a Set that is about to be cleared — otherwise this waiter would hang forever.
     if (flight.settled) {
-      return flight.settled.ok
-        ? Promise.resolve(flight.settled.result)
-        : Promise.reject(flight.settled.error);
+      return flight.settled.ok ? Promise.resolve(flight.settled.result) : Promise.reject(flight.settled.error);
     }
     return new Promise((resolve, reject) => {
       const waiter: QueryEncodeWaiter = {
         cancellationId: options.cancellationId,
         resolve,
-        reject
+        reject,
       };
       flight.waiters.add(waiter);
     });
@@ -306,7 +335,9 @@ export class EmbedScheduler {
       rememberCancelled(this.cancelled, flight.schedulerCancellationId);
       this.embedding.cancel(flight.schedulerCancellationId);
       for (const waiter of flight.waiters) {
-        waiter.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+        waiter.reject(
+          Object.assign(new Error('embed scheduler request was cancelled before execution'), { code: 'CANCELLED' }),
+        );
       }
       flight.waiters.clear();
     }
@@ -317,7 +348,9 @@ export class EmbedScheduler {
       for (const job of jobs) {
         rememberCancelled(this.cancelled, job.options.cancellationId);
         this.embedding.cancel(job.options.cancellationId);
-        job.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+        job.reject(
+          Object.assign(new Error('embed scheduler request was cancelled before execution'), { code: 'CANCELLED' }),
+        );
       }
     }
     this.resolveDrainWaitersIfIdle();
@@ -328,7 +361,9 @@ export class EmbedScheduler {
       for (const waiter of [...flight.waiters]) {
         if (waiter.cancellationId !== cancellationId) continue;
         flight.waiters.delete(waiter);
-        waiter.reject(Object.assign(new Error("embed scheduler request was cancelled before execution"), { code: "CANCELLED" }));
+        waiter.reject(
+          Object.assign(new Error('embed scheduler request was cancelled before execution'), { code: 'CANCELLED' }),
+        );
       }
       if (flight.waiters.size === 0) {
         rememberCancelled(this.cancelled, flight.schedulerCancellationId);
@@ -347,9 +382,7 @@ export class EmbedScheduler {
   }
 
   private rebuildLaneIsActive(): boolean {
-    return this.activeLaneCounts.rebuild > 0 ||
-      this.laneScopes.rebuild > 0 ||
-      this.lanes.rebuild.length > 0;
+    return this.activeLaneCounts.rebuild > 0 || this.laneScopes.rebuild > 0 || this.lanes.rebuild.length > 0;
   }
 
   private waitForDrained(): Promise<void> {
@@ -365,10 +398,12 @@ export class EmbedScheduler {
   }
 
   private isDrained(): boolean {
-    return !this.running &&
+    return (
+      !this.running &&
       LANE_ORDER.every((lane) => this.lanes[lane].length === 0) &&
       LANE_ORDER.every((lane) => this.activeLaneCounts[lane] === 0) &&
-      LANE_ORDER.every((lane) => this.laneScopes[lane] === 0);
+      LANE_ORDER.every((lane) => this.laneScopes[lane] === 0)
+    );
   }
 }
 
@@ -379,8 +414,8 @@ export function createEmbedScheduler(options: EmbedSchedulerOptions = {}): Embed
 function queryEncodeSingleFlightKey(payload: ModelEncodeWorkerPayload): string {
   return stableJson({
     provider: payload.provider,
-    inputKind: payload.inputKind ?? "document",
-    texts: payload.texts
+    inputKind: payload.inputKind ?? 'document',
+    texts: payload.texts,
   });
 }
 
@@ -395,10 +430,13 @@ function rememberCancelled(cancelled: Set<string>, cancellationId: string): void
 }
 
 function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 }

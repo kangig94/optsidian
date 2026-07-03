@@ -34,8 +34,8 @@ export {
   surfaceSearchTerms,
   termsToSearchText,
   tokenChannelsOverlap,
-  uniqueSearchTerms
-} from "./analysis/index.js";
+  uniqueSearchTerms,
+} from './analysis/index.js';
 
 export type {
   BodyIndexBudget,
@@ -49,8 +49,8 @@ export type {
   SearchTextAnalysisOptions,
   SearchTokenChannel,
   SearchTokenChannelTerms,
-  UnresolvedNoteLink
-} from "./analysis/index.js";
+  UnresolvedNoteLink,
+} from './analysis/index.js';
 
 export {
   ANALYZER_VERSION,
@@ -72,17 +72,12 @@ export {
   SEARCH_FUZZY_WEIGHT_MULTIPLIER,
   SEARCH_SCORING_LAMBDAS,
   SEARCH_TOKEN_CHANNEL_WEIGHT,
-  WEAK_METADATA_COVERAGE_TERMS
-} from "./constants.js";
+  WEAK_METADATA_COVERAGE_TERMS,
+} from './constants.js';
 
-export type {
-  CoverageField,
-  SearchScoringLambdas
-} from "./constants.js";
+export type { CoverageField, SearchScoringLambdas } from './constants.js';
 
-export {
-  SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION
-} from "./contracts.js";
+export { SEARCH_EXPLAIN_TRACE_SCHEMA_VERSION } from './contracts.js';
 
 export type {
   CandidateBm25Feature,
@@ -123,8 +118,8 @@ export type {
   SnapshotId,
   SnapshotManifestView,
   SnapshotStore,
-  SnapshotView
-} from "./contracts.js";
+  SnapshotView,
+} from './contracts.js';
 
 export {
   buildEmbeddingSet,
@@ -173,8 +168,8 @@ export {
   truncateEncoding,
   VECTOR_GENERATION_MANIFEST_ID_VERSION,
   vectorGenerationIdForManifest,
-  vectorProjectionHash
-} from "./dense/index.js";
+  vectorProjectionHash,
+} from './dense/index.js';
 
 export type {
   BuiltEmbeddingSet,
@@ -210,24 +205,14 @@ export type {
   LocalOnnxTokenizer,
   LocalOnnxTokenizerEncoding,
   OnnxExecutionProvider,
-  OnnxExecutionProviderPreference
-} from "./dense/index.js";
+  OnnxExecutionProviderPreference,
+} from './dense/index.js';
 
-export {
-  parseMarkdownNote
-} from "./markdown.js";
+export { parseMarkdownNote } from './markdown.js';
 
-export type {
-  ParsedMarkdownNote,
-  SearchBuildDocument
-} from "./markdown.js";
+export type { ParsedMarkdownNote, SearchBuildDocument } from './markdown.js';
 
-export {
-  matchesPathFilter,
-  matchesTagFilter,
-  MAX_SEARCH_QUERY_LENGTH,
-  normalizeSearchParams
-} from "./params.js";
+export { matchesPathFilter, matchesTagFilter, MAX_SEARCH_QUERY_LENGTH, normalizeSearchParams } from './params.js';
 
 export {
   bm25BoundKey,
@@ -239,15 +224,15 @@ export {
   nullableRankPriority,
   rankBucketName,
   rerankCandidatesWithSignals,
-  rerankScore
-} from "./ranking/index.js";
+  rerankScore,
+} from './ranking/index.js';
 
 export type {
   CandidateRankSignals,
   ExactDominanceBound,
   ExactDominanceBoundInput,
-  RankDocument
-} from "./ranking/index.js";
+  RankDocument,
+} from './ranking/index.js';
 
 export {
   bm25CorpusStats,
@@ -296,8 +281,8 @@ export {
   retrievePositionalCandidates,
   retrieveWithFusion,
   splitCanonicalPostingTerm,
-  tokenChannelFusionWeight
-} from "./retrieval/index.js";
+  tokenChannelFusionWeight,
+} from './retrieval/index.js';
 
 export type {
   Bm25DocumentFieldInput,
@@ -335,8 +320,8 @@ export type {
   SearchFieldLengthLookup,
   SearchSnapshot,
   SearchSnapshotSegment,
-  TermWindow
-} from "./retrieval/index.js";
+  TermWindow,
+} from './retrieval/index.js';
 
 export {
   SEARCH_BOOST,
@@ -345,8 +330,8 @@ export {
   SEARCH_FIELD_CHANNEL_INDEX_PROPERTY,
   SEARCH_FIELD_INDEX_PROPERTY,
   SEARCH_PROPERTIES,
-  SEARCH_SCHEMA_DIGEST
-} from "./schema.js";
+  SEARCH_SCHEMA_DIGEST,
+} from './schema.js';
 
 export {
   assertSafeSignedInteger,
@@ -380,8 +365,8 @@ export {
   partitionIdForDocument,
   readCanonicalPostingRow,
   reduceCanonicalBm25GlobalStats,
-  snapshotIdFromManifest
-} from "./segments/index.js";
+  snapshotIdFromManifest,
+} from './segments/index.js';
 
 export type {
   CanonicalBm25CorpusStats,
@@ -405,5 +390,5 @@ export type {
   SearchScoringModelIdentity,
   SearchSegmentSchemaIdentity,
   SearchSnapshotAnalyzerIdentity,
-  SnapshotIdentityTuple
-} from "./segments/index.js";
+  SnapshotIdentityTuple,
+} from './segments/index.js';

@@ -25,7 +25,7 @@ export const SNIPPET_LINE_MORPH_MAX_TERMS = 512;
 export const SNIPPET_DOC_ANALYZED_CHARS_MAX = 512 * KIB;
 export const SNIPPET_DOC_ANALYZED_LINES_MAX = 3000;
 
-export type BodyIndexBudgetTier = "short" | "paper" | "long" | "huge";
+export type BodyIndexBudgetTier = 'short' | 'paper' | 'long' | 'huge';
 
 export type BodyIndexBudget = {
   tier: BodyIndexBudgetTier;
@@ -51,12 +51,12 @@ export const BODY_INDEX_BUDGET_IDENTITY = {
     short: BODY_NGRAM_SHORT_MAX_TERMS,
     paper: BODY_NGRAM_PAPER_MAX_TERMS,
     long: BODY_NGRAM_LONG_MAX_TERMS,
-    huge: BODY_NGRAM_HUGE_MAX_TERMS
+    huge: BODY_NGRAM_HUGE_MAX_TERMS,
   },
   bodyLexicalSampleMaxChars: BODY_LEXICAL_SAMPLE_MAX_CHARS,
   bodyNgramSampleMaxChars: {
     long: BODY_NGRAM_LONG_SAMPLE_MAX_CHARS,
-    huge: BODY_NGRAM_HUGE_SAMPLE_MAX_CHARS
+    huge: BODY_NGRAM_HUGE_SAMPLE_MAX_CHARS,
   },
   bodySampleWindows: BODY_SAMPLE_WINDOWS,
   bodySurfaceMaxTerms: BODY_SURFACE_MAX_TERMS,
@@ -67,56 +67,56 @@ export const BODY_INDEX_BUDGET_IDENTITY = {
     lineSurfaceMaxTerms: SNIPPET_LINE_SURFACE_MAX_TERMS,
     lineMorphMaxTerms: SNIPPET_LINE_MORPH_MAX_TERMS,
     docAnalyzedCharsMax: SNIPPET_DOC_ANALYZED_CHARS_MAX,
-    docAnalyzedLinesMax: SNIPPET_DOC_ANALYZED_LINES_MAX
-  }
+    docAnalyzedLinesMax: SNIPPET_DOC_ANALYZED_LINES_MAX,
+  },
 } as const;
 
 export function bodyIndexBudgetForText(body: string): BodyIndexBudget {
   const bodyLength = body.length;
   if (bodyLength <= BODY_SHORT_MAX_CHARS) {
     return bodyIndexBudget({
-      tier: "short",
+      tier: 'short',
       bodyLength,
       bodyLexicalText: body,
       bodyNgramText: body,
-      bodyNgramMaxTerms: BODY_NGRAM_SHORT_MAX_TERMS
+      bodyNgramMaxTerms: BODY_NGRAM_SHORT_MAX_TERMS,
     });
   }
   if (bodyLength <= BODY_FULL_ANALYSIS_MAX_CHARS) {
     return bodyIndexBudget({
-      tier: "paper",
+      tier: 'paper',
       bodyLength,
       bodyLexicalText: body,
       bodyNgramText: body,
-      bodyNgramMaxTerms: BODY_NGRAM_PAPER_MAX_TERMS
+      bodyNgramMaxTerms: BODY_NGRAM_PAPER_MAX_TERMS,
     });
   }
   if (bodyLength <= BODY_LONG_MAX_CHARS) {
     return bodyIndexBudget({
-      tier: "long",
+      tier: 'long',
       bodyLength,
       bodyLexicalText: sampleTextWindows(body, BODY_LEXICAL_SAMPLE_MAX_CHARS, BODY_SAMPLE_WINDOWS),
       bodyNgramText: sampleTextWindows(body, BODY_NGRAM_LONG_SAMPLE_MAX_CHARS, BODY_SAMPLE_WINDOWS),
       bodyNgramMaxTerms: BODY_NGRAM_LONG_MAX_TERMS,
       snippetDocMaxAnalyzedChars: SNIPPET_DOC_ANALYZED_CHARS_MAX,
-      snippetDocMaxAnalyzedLines: SNIPPET_DOC_ANALYZED_LINES_MAX
+      snippetDocMaxAnalyzedLines: SNIPPET_DOC_ANALYZED_LINES_MAX,
     });
   }
   return bodyIndexBudget({
-    tier: "huge",
+    tier: 'huge',
     bodyLength,
     bodyLexicalText: sampleTextWindows(body, BODY_LEXICAL_SAMPLE_MAX_CHARS, BODY_SAMPLE_WINDOWS),
     bodyNgramText: sampleTextWindows(body, BODY_NGRAM_HUGE_SAMPLE_MAX_CHARS, BODY_SAMPLE_WINDOWS),
     bodyNgramMaxTerms: BODY_NGRAM_HUGE_MAX_TERMS,
     snippetDocMaxAnalyzedChars: SNIPPET_DOC_ANALYZED_CHARS_MAX,
-    snippetDocMaxAnalyzedLines: SNIPPET_DOC_ANALYZED_LINES_MAX
+    snippetDocMaxAnalyzedLines: SNIPPET_DOC_ANALYZED_LINES_MAX,
   });
 }
 
 export function sampleTextWindows(text: string, maxChars: number, windows: number): string {
   const limit = Number.isFinite(maxChars) ? Math.max(0, Math.trunc(maxChars)) : text.length;
   if (text.length <= limit) return text;
-  if (limit === 0) return "";
+  if (limit === 0) return '';
   const requestedWindows = Number.isFinite(windows) ? Math.max(1, Math.trunc(windows)) : 1;
   const windowCount = Math.max(1, Math.min(requestedWindows, limit, text.length));
   if (windowCount === 1) return text.slice(0, limit);
@@ -126,14 +126,11 @@ export function sampleTextWindows(text: string, maxChars: number, windows: numbe
   const maxStart = Math.max(0, text.length - windowSize);
   const chunks: string[] = [];
   for (let index = 0; index < windowCount; index += 1) {
-    const start = index === 0
-      ? 0
-      : index === windowCount - 1
-        ? maxStart
-        : Math.round((maxStart * index) / (windowCount - 1));
+    const start =
+      index === 0 ? 0 : index === windowCount - 1 ? maxStart : Math.round((maxStart * index) / (windowCount - 1));
     chunks.push(text.slice(start, start + windowSize));
   }
-  return chunks.join("\n").slice(0, limit);
+  return chunks.join('\n').slice(0, limit);
 }
 
 function bodyIndexBudget(input: {
@@ -158,6 +155,6 @@ function bodyIndexBudget(input: {
     snippetLineSurfaceMaxTerms: SNIPPET_LINE_SURFACE_MAX_TERMS,
     snippetLineMorphMaxTerms: SNIPPET_LINE_MORPH_MAX_TERMS,
     snippetDocMaxAnalyzedChars: input.snippetDocMaxAnalyzedChars ?? SNIPPET_DOC_ANALYZED_CHARS_MAX,
-    snippetDocMaxAnalyzedLines: input.snippetDocMaxAnalyzedLines ?? SNIPPET_DOC_ANALYZED_LINES_MAX
+    snippetDocMaxAnalyzedLines: input.snippetDocMaxAnalyzedLines ?? SNIPPET_DOC_ANALYZED_LINES_MAX,
   };
 }

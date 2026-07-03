@@ -4,7 +4,7 @@ export type Leb128Read = {
 };
 
 export function encodeUnsignedLeb128(value: number): Uint8Array {
-  assertSafeUnsignedInteger(value, "unsigned LEB128");
+  assertSafeUnsignedInteger(value, 'unsigned LEB128');
   const bytes: number[] = [];
   let remaining = value;
   do {
@@ -23,20 +23,20 @@ export function decodeUnsignedLeb128(bytes: Uint8Array, offset = 0): Leb128Read 
   while (cursor < bytes.length) {
     const byte = bytes[cursor];
     value += (byte & 0x7f) * multiplier;
-    if (value > Number.MAX_SAFE_INTEGER) throw new Error("unsigned LEB128 exceeds Number.MAX_SAFE_INTEGER");
+    if (value > Number.MAX_SAFE_INTEGER) throw new Error('unsigned LEB128 exceeds Number.MAX_SAFE_INTEGER');
     cursor += 1;
     if ((byte & 0x80) === 0) {
       assertShortestUnsignedEncoding(bytes.subarray(offset, cursor), value);
       return { value, offset: cursor };
     }
     multiplier *= 128;
-    if (multiplier > Number.MAX_SAFE_INTEGER) throw new Error("unsigned LEB128 exceeds Number.MAX_SAFE_INTEGER");
+    if (multiplier > Number.MAX_SAFE_INTEGER) throw new Error('unsigned LEB128 exceeds Number.MAX_SAFE_INTEGER');
   }
-  throw new Error("truncated unsigned LEB128");
+  throw new Error('truncated unsigned LEB128');
 }
 
 export function encodeZigZagLeb128(value: number): Uint8Array {
-  assertSafeSignedInteger(value, "zig-zag LEB128");
+  assertSafeSignedInteger(value, 'zig-zag LEB128');
   const encoded = value >= 0 ? value * 2 : -value * 2 - 1;
   return encodeUnsignedLeb128(encoded);
 }
@@ -44,7 +44,7 @@ export function encodeZigZagLeb128(value: number): Uint8Array {
 export function decodeZigZagLeb128(bytes: Uint8Array, offset = 0): Leb128Read {
   const read = decodeUnsignedLeb128(bytes, offset);
   const value = read.value % 2 === 0 ? read.value / 2 : -(read.value + 1) / 2;
-  assertSafeSignedInteger(value, "zig-zag LEB128");
+  assertSafeSignedInteger(value, 'zig-zag LEB128');
   return { value, offset: read.offset };
 }
 
@@ -62,8 +62,8 @@ export function assertSafeSignedInteger(value: number, label: string): void {
 
 function assertShortestUnsignedEncoding(encoded: Uint8Array, value: number): void {
   const shortest = encodeUnsignedLeb128(value);
-  if (shortest.length !== encoded.length) throw new Error("non-canonical unsigned LEB128 encoding");
+  if (shortest.length !== encoded.length) throw new Error('non-canonical unsigned LEB128 encoding');
   for (let index = 0; index < shortest.length; index += 1) {
-    if (shortest[index] !== encoded[index]) throw new Error("non-canonical unsigned LEB128 encoding");
+    if (shortest[index] !== encoded[index]) throw new Error('non-canonical unsigned LEB128 encoding');
   }
 }

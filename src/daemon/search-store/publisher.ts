@@ -1,23 +1,27 @@
-import fs from "node:fs";
-import path from "node:path";
-import { ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-path.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { ensurePrivateDirSync, writePrivateFileSync } from '../../core/private-path.js';
 import {
   currentWriterTokensEqual,
   type ConditionalCommitResult,
   type CurrentWriterToken,
-  type TenancyFenceProvider
-} from "../../core/lifecycle/conditional-commit.js";
-import { ExclusiveClaim, readExclusiveClaimOwner, reclaimExclusiveClaim } from "../../core/lifecycle/exclusive-claim.js";
-import { createProcessToken, isAlive as processTokenIsAlive } from "../../core/lifecycle/process-token.js";
+  type TenancyFenceProvider,
+} from '../../core/lifecycle/conditional-commit.js';
+import {
+  ExclusiveClaim,
+  readExclusiveClaimOwner,
+  reclaimExclusiveClaim,
+} from '../../core/lifecycle/exclusive-claim.js';
+import { createProcessToken, isAlive as processTokenIsAlive } from '../../core/lifecycle/process-token.js';
 import {
   FrontierJournal,
   frontierSubjectKey,
   type FrontierAppendOperation,
   type FrontierCoverageCandidate,
   type FrontierDirtyOperation,
-  type FrontierScanBoundary
-} from "../../core/lifecycle/frontier-journal.js";
-import { LevelReconciler } from "../../core/lifecycle/level-reconciler.js";
+  type FrontierScanBoundary,
+} from '../../core/lifecycle/frontier-journal.js';
+import { LevelReconciler } from '../../core/lifecycle/level-reconciler.js';
 import {
   decodeEditionRecord,
   encodeEditionRecord,
@@ -29,16 +33,16 @@ import {
   type EditionCorpusRecord,
   type EditionIdentity,
   type EditionRecord,
-  type RetrievalIdentity
-} from "./publication.js";
-import { safeStoreFileName } from "./cache-paths.js";
+  type RetrievalIdentity,
+} from './publication.js';
+import { safeStoreFileName } from './cache-paths.js';
 
 export type EditionCandidate = {
   baseEditionSeq?: number;
   frontierSeq: number;
   scanBoundaryJournalSeq: number;
   corpus: EditionCorpusRecord;
-  linkGraphId: EditionRecord["linkGraphId"];
+  linkGraphId: EditionRecord['linkGraphId'];
   dense: DenseEdition;
   identity: EditionIdentity;
   coverage: FrontierCoverageCandidate;
@@ -88,8 +92,7 @@ export type VaultPublisherOptions = {
 };
 
 type PublisherIntent =
-  | { kind: "dirty"; operations: FrontierAppendOperation[] }
-  | { kind: "diagnostic"; diagnostic: SaveDiagnosticRecord };
+  { kind: 'dirty'; operations: FrontierAppendOperation[] } | { kind: 'diagnostic'; diagnostic: SaveDiagnosticRecord };
 
 type PublisherWorld = {
   pendingOperations: readonly FrontierDirtyOperation[];
@@ -110,12 +113,12 @@ export class EditionLedger {
 
   constructor(options: EditionLedgerOptions) {
     this.ledgerRootDir = options.ledgerRootDir;
-    this.publicationsDir = path.join(options.ledgerRootDir, "publications");
+    this.publicationsDir = path.join(options.ledgerRootDir, 'publications');
     this.frontierJournal = options.frontierJournal;
     this.tenancyFence = options.tenancyFence;
     this.now = options.now ?? Date.now;
     this.beforeAppendForTests = options.beforeAppendForTests;
-    ensurePrivateDirSync(this.publicationsDir, "Optsidian edition publications directory");
+    ensurePrivateDirSync(this.publicationsDir, 'Optsidian edition publications directory');
     this.sweepIncomplete();
   }
 
@@ -132,13 +135,13 @@ export class EditionLedger {
     const records = this.history();
     for (let index = records.length - 1; index >= 0; index -= 1) {
       const record = records[index];
-      if (record.dense.state === "fresh" && record.identity.retrievalSnapshotId) return record;
+      if (record.dense.state === 'fresh' && record.identity.retrievalSnapshotId) return record;
     }
     return undefined;
   }
 
   history(): EditionRecord[] {
-    ensurePrivateDirSync(this.publicationsDir, "Optsidian edition publications directory");
+    ensurePrivateDirSync(this.publicationsDir, 'Optsidian edition publications directory');
     const records: EditionRecord[] = [];
     for (const entry of safeReadDir(this.publicationsDir)) {
       if (!/^\d+$/.test(entry)) continue;
@@ -153,19 +156,19 @@ export class EditionLedger {
   async commit(
     candidate: EditionCandidate,
     expectedHeadSeq: number | undefined,
-    writerToken: CurrentWriterToken
+    writerToken: CurrentWriterToken,
   ): Promise<EditionCommitResult> {
     await this.beforeAppendForTests?.();
 
     const currentHead = this.current();
     const actualHeadSeq = currentHead?.editionSeq;
     if (actualHeadSeq !== expectedHeadSeq) {
-      return { ok: false, reason: "not-head", message: headMismatchMessage(expectedHeadSeq, actualHeadSeq) };
+      return { ok: false, reason: 'not-head', message: headMismatchMessage(expectedHeadSeq, actualHeadSeq) };
     }
 
     const liveWriterToken = await this.tenancyFence.currentWriterToken();
     if (!liveWriterToken || !currentWriterTokensEqual(liveWriterToken, writerToken)) {
-      return { ok: false, reason: "not-current", message: "writer token is no longer current" };
+      return { ok: false, reason: 'not-current', message: 'writer token is no longer current' };
     }
 
     const validation = this.validateCandidate(candidate, currentHead);
@@ -183,7 +186,7 @@ export class EditionLedger {
       dense: candidate.dense,
       identity: candidate.identity,
       writerToken,
-      committedAt: new Date(this.now()).toISOString()
+      committedAt: new Date(this.now()).toISOString(),
     };
 
     const target = path.join(this.publicationsDir, String(editionSeq));
@@ -191,8 +194,8 @@ export class EditionLedger {
       writeEditionRecordExclusive(target, record);
       fsyncDirSync(this.publicationsDir);
     } catch (error) {
-      if (errorCode(error) === "EEXIST") {
-        return { ok: false, reason: "not-head", message: `publication ${editionSeq} already exists` };
+      if (errorCode(error) === 'EEXIST') {
+        return { ok: false, reason: 'not-head', message: `publication ${editionSeq} already exists` };
       }
       throw error;
     }
@@ -207,14 +210,14 @@ export class EditionLedger {
 
   private validateCandidate(
     candidate: EditionCandidate,
-    currentHead: EditionRecord | undefined
+    currentHead: EditionRecord | undefined,
   ): { ok: true; ackedJournalSeqs: number[] } | Extract<EditionCommitResult, { ok: false }> {
     if (!currentHead) {
       if (candidate.baseEditionSeq !== undefined) {
-        return { ok: false, reason: "rejected", message: "bootstrap edition cannot have a base edition" };
+        return { ok: false, reason: 'rejected', message: 'bootstrap edition cannot have a base edition' };
       }
       if (candidate.frontierSeq < 1) {
-        return { ok: false, reason: "rejected", message: "bootstrap edition must publish a corpus frontier" };
+        return { ok: false, reason: 'rejected', message: 'bootstrap edition must publish a corpus frontier' };
       }
       return this.validateCorpusAdvance(candidate);
     }
@@ -229,24 +232,25 @@ export class EditionLedger {
 
     return {
       ok: false,
-      reason: "rejected",
-      message: `candidate frontier ${candidate.frontierSeq} is older than current frontier ${currentHead.frontierSeq}`
+      reason: 'rejected',
+      message: `candidate frontier ${candidate.frontierSeq} is older than current frontier ${currentHead.frontierSeq}`,
     };
   }
 
   private validateCorpusAdvance(
-    candidate: EditionCandidate
+    candidate: EditionCandidate,
   ): { ok: true; ackedJournalSeqs: number[] } | Extract<EditionCommitResult, { ok: false }> {
-    const dirtyThroughBoundary = this.frontierJournal.operations()
-      .filter((operation) => operation.state !== "acked" && operation.journalSeq <= candidate.scanBoundaryJournalSeq);
-    const uncovered = dirtyThroughBoundary.filter((operation) =>
-      !this.frontierJournal.covers(operation, candidate.coverage, candidate.scanBoundaryJournalSeq)
+    const dirtyThroughBoundary = this.frontierJournal
+      .operations()
+      .filter((operation) => operation.state !== 'acked' && operation.journalSeq <= candidate.scanBoundaryJournalSeq);
+    const uncovered = dirtyThroughBoundary.filter(
+      (operation) => !this.frontierJournal.covers(operation, candidate.coverage, candidate.scanBoundaryJournalSeq),
     );
     if (uncovered.length > 0) {
       return {
         ok: false,
-        reason: "rejected",
-        message: `candidate frontier does not cover dirty journal seq ${uncovered.map((operation) => operation.journalSeq).join(",")}`
+        reason: 'rejected',
+        message: `candidate frontier does not cover dirty journal seq ${uncovered.map((operation) => operation.journalSeq).join(',')}`,
       };
     }
     return { ok: true, ackedJournalSeqs: dirtyThroughBoundary.map((operation) => operation.journalSeq) };
@@ -254,23 +258,27 @@ export class EditionLedger {
 
   private validateSameFrontier(
     candidate: EditionCandidate,
-    currentHead: EditionRecord
+    currentHead: EditionRecord,
   ): { ok: true; ackedJournalSeqs: number[] } | Extract<EditionCommitResult, { ok: false }> {
     if (candidate.baseEditionSeq !== currentHead.editionSeq) {
       return {
         ok: false,
-        reason: "not-head",
-        message: `same-frontier edition must be based on current edition ${currentHead.editionSeq}`
+        reason: 'not-head',
+        message: `same-frontier edition must be based on current edition ${currentHead.editionSeq}`,
       };
     }
     if (!sameCorpus(candidate.corpus, currentHead.corpus) || candidate.linkGraphId !== currentHead.linkGraphId) {
-      return { ok: false, reason: "rejected", message: "same-frontier edition cannot change corpus or link graph identity" };
+      return {
+        ok: false,
+        reason: 'rejected',
+        message: 'same-frontier edition cannot change corpus or link graph identity',
+      };
     }
     if (!sameStableIdentity(candidate.identity, currentHead.identity)) {
-      return { ok: false, reason: "rejected", message: "same-frontier edition cannot change retrieval identity" };
+      return { ok: false, reason: 'rejected', message: 'same-frontier edition cannot change retrieval identity' };
     }
     if (!isDenseLifecycleTransition(currentHead.dense, candidate.dense)) {
-      return { ok: false, reason: "rejected", message: "same-frontier edition may only change dense lifecycle state" };
+      return { ok: false, reason: 'rejected', message: 'same-frontier edition may only change dense lifecycle state' };
     }
     return { ok: true, ackedJournalSeqs: [] };
   }
@@ -279,16 +287,16 @@ export class EditionLedger {
     try {
       const stat = fs.statSync(filePath);
       if (!stat.isFile()) return undefined;
-      return decodeEditionRecord(fs.readFileSync(filePath, "utf8"));
+      return decodeEditionRecord(fs.readFileSync(filePath, 'utf8'));
     } catch {
       return undefined;
     }
   }
 
   private sweepIncomplete(): void {
-    ensurePrivateDirSync(this.publicationsDir, "Optsidian edition publications directory");
+    ensurePrivateDirSync(this.publicationsDir, 'Optsidian edition publications directory');
     for (const entry of safeReadDir(this.publicationsDir)) {
-      if (entry.endsWith(".tmp") || entry.endsWith(".partial")) {
+      if (entry.endsWith('.tmp') || entry.endsWith('.partial')) {
         fs.rmSync(path.join(this.publicationsDir, entry), { recursive: true, force: true });
       }
     }
@@ -317,20 +325,20 @@ export class VaultPublisher {
       frontierJournal: this.frontierJournal,
       tenancyFence: options.tenancyFence,
       now: this.now,
-      beforeAppendForTests: options.beforeAppendForTests
+      beforeAppendForTests: options.beforeAppendForTests,
     });
     this.reconciler = new LevelReconciler<PublisherWorld, PublisherFold, void, PublisherIntent>({
       enumerate: () => ({ pendingOperations: this.frontierJournal.pendingOperations() }),
       fold: (_world, batch) => ({ intents: batch.intents }),
       act: async (folded) => {
         for (const intent of folded.intents) {
-          if (intent.kind === "dirty") {
+          if (intent.kind === 'dirty') {
             for (const operation of intent.operations) this.frontierJournal.append(operation);
           } else {
             this.writeDiagnostic(intent.diagnostic);
           }
         }
-      }
+      },
     });
     this.reconciler.start();
   }
@@ -338,11 +346,11 @@ export class VaultPublisher {
   static pathsFor(rootDir: string): VaultPublisherPaths {
     return {
       ledgerRootDir: rootDir,
-      publicationsDir: path.join(rootDir, "publications"),
-      frontierDir: path.join(rootDir, "frontier"),
-      diagnosticsDir: path.join(rootDir, "diagnostics"),
-      reservationsDir: path.join(rootDir, "reservations"),
-      claimsDir: path.join(rootDir, "claims")
+      publicationsDir: path.join(rootDir, 'publications'),
+      frontierDir: path.join(rootDir, 'frontier'),
+      diagnosticsDir: path.join(rootDir, 'diagnostics'),
+      reservationsDir: path.join(rootDir, 'reservations'),
+      claimsDir: path.join(rootDir, 'claims'),
     };
   }
 
@@ -352,7 +360,7 @@ export class VaultPublisher {
 
   enqueueDirty(operation: FrontierAppendOperation): void {
     this.pendingDebounceOperations.push(operation);
-    this.reconciler.enqueueIntent({ kind: "dirty", operations: [operation] });
+    this.reconciler.enqueueIntent({ kind: 'dirty', operations: [operation] });
   }
 
   enqueueDirtyMarks(marks: readonly { docId: string; path: string; contentHash?: string }[]): FrontierDirtyOperation[] {
@@ -360,7 +368,8 @@ export class VaultPublisher {
   }
 
   enqueueDebouncedDirtyMarks(marks: readonly { docId: string; path: string; contentHash?: string }[]): void {
-    for (const mark of marks) this.pendingDebounceOperations.push(snapshotDirtyMarkToFrontierOperation(mark, this.now()));
+    for (const mark of marks)
+      this.pendingDebounceOperations.push(snapshotDirtyMarkToFrontierOperation(mark, this.now()));
   }
 
   flushPendingDebounce(): FrontierDirtyOperation[] {
@@ -375,7 +384,7 @@ export class VaultPublisher {
   commit(
     candidate: EditionCandidate,
     expectedHeadSeq: number | undefined,
-    writerToken: CurrentWriterToken
+    writerToken: CurrentWriterToken,
   ): Promise<EditionCommitResult> {
     return this.trackWork(this.ledger.commit(candidate, expectedHeadSeq, writerToken));
   }
@@ -394,7 +403,7 @@ export class VaultPublisher {
       ...errorCodeField(input.error),
       message: input.error instanceof Error ? input.error.message : String(input.error),
       failedAt: new Date(this.now()).toISOString(),
-      writerToken: input.writerToken
+      writerToken: input.writerToken,
     };
     this.writeDiagnostic(diagnostic);
     for (const journalSeq of diagnostic.journalSeqs) this.frontierJournal.fail(journalSeq, diagnostic.diagnosticId);
@@ -405,7 +414,10 @@ export class VaultPublisher {
     return safeReadDir(this.paths.diagnosticsDir)
       .map((entry) => readDiagnostic(path.join(this.paths.diagnosticsDir, entry)))
       .filter((record): record is SaveDiagnosticRecord => record !== undefined)
-      .sort((left, right) => left.failedAt.localeCompare(right.failedAt) || left.diagnosticId.localeCompare(right.diagnosticId));
+      .sort(
+        (left, right) =>
+          left.failedAt.localeCompare(right.failedAt) || left.diagnosticId.localeCompare(right.diagnosticId),
+      );
   }
 
   async drain(): Promise<void> {
@@ -429,9 +441,9 @@ export class VaultPublisher {
   }
 
   private writeDiagnostic(diagnostic: SaveDiagnosticRecord): void {
-    ensurePrivateDirSync(this.paths.diagnosticsDir, "Optsidian save diagnostics directory");
+    ensurePrivateDirSync(this.paths.diagnosticsDir, 'Optsidian save diagnostics directory');
     const target = path.join(this.paths.diagnosticsDir, `${safeStoreFileName(diagnostic.diagnosticId)}.json`);
-    writePrivateFileSync(target, `${JSON.stringify(diagnostic)}\n`, "Optsidian save diagnostic");
+    writePrivateFileSync(target, `${JSON.stringify(diagnostic)}\n`, 'Optsidian save diagnostic');
     fsyncFileSync(target);
     fsyncDirSync(this.paths.diagnosticsDir);
   }
@@ -477,7 +489,7 @@ export class VaultPublisherRegistry {
         } finally {
           if (this.publishers.get(key) === acquired) this.publishers.delete(key);
         }
-      }
+      },
     };
   }
 
@@ -540,11 +552,11 @@ export class SharedReclamationAuthority {
     const claimDir = buildReservationClaimDir(input.reservationsDir, input.manifestHash);
     return ExclusiveClaim.acquire(claimDir, {
       timeoutMs: input.timeoutMs ?? 30_000,
-      now: this.now
+      now: this.now,
     }).then((claim) => ({
       manifestHash: input.manifestHash,
       claim,
-      release: () => claim.release()
+      release: () => claim.release(),
     }));
   }
 
@@ -552,7 +564,7 @@ export class SharedReclamationAuthority {
     await this.runSerialized(input.sharedKey, async () => {
       const claim = await ExclusiveClaim.acquire(input.claimDir, { timeoutMs: 30_000, now: this.now });
       try {
-        ensurePrivateDirSync(input.generationsDir, "Optsidian vector generations directory");
+        ensurePrivateDirSync(input.generationsDir, 'Optsidian vector generations directory');
         for (const manifestHash of safeReadDir(input.generationsDir)) {
           const generationPath = path.join(input.generationsDir, manifestHash);
           if (!isDirectory(generationPath)) continue;
@@ -581,17 +593,16 @@ export class SharedReclamationAuthority {
     });
   }
 
-  liveVectorManifestHashes(input: Pick<
-    SweepVectorGenerationsInput,
-    "searchStoresDir" | "vaultStateHash" | "embeddingSetId"
-  >): Set<string> {
+  liveVectorManifestHashes(
+    input: Pick<SweepVectorGenerationsInput, 'searchStoresDir' | 'vaultStateHash' | 'embeddingSetId'>,
+  ): Set<string> {
     const live = new Set<string>();
     // Protect the latest fresh generation per ledger, not just the head's: after a lexical-only edit
     // the head is dense-unavailable, but readers still attach (and per-doc mask) the last fresh
     // generation until a new one is built, so it must survive the gap.
     for (const edition of latestFreshEditionsUnder(path.join(input.searchStoresDir, input.vaultStateHash))) {
       if (edition.identity.vaultStateHash !== input.vaultStateHash) continue;
-      if (edition.dense.state !== "fresh") continue;
+      if (edition.dense.state !== 'fresh') continue;
       if (edition.dense.embeddingSetId !== input.embeddingSetId) continue;
       live.add(edition.dense.manifestHash);
     }
@@ -620,17 +631,17 @@ export class SharedReclamationAuthority {
 }
 
 export function createLocalTenancyFenceProvider(
-  overrides: Partial<Omit<CurrentWriterToken, "processToken">> = {}
+  overrides: Partial<Omit<CurrentWriterToken, 'processToken'>> = {},
 ): TenancyFenceProvider & { readonly writerToken: CurrentWriterToken } {
   const writerToken: CurrentWriterToken = {
     epoch: overrides.epoch ?? 0,
     incarnationId: overrides.incarnationId ?? `local-${process.pid}`,
     claimId: overrides.claimId ?? `process-${process.pid}`,
-    processToken: createProcessToken()
+    processToken: createProcessToken(),
   };
   return {
     writerToken,
-    currentWriterToken: () => writerToken
+    currentWriterToken: () => writerToken,
   };
 }
 
@@ -640,7 +651,10 @@ export function editionCoverageFromCorpus(input: {
 }): FrontierCoverageCandidate {
   const committedHashBySubject = new Map<string, string>();
   for (const document of input.documents) {
-    committedHashBySubject.set(frontierSubjectKey({ docId: document.documentId, path: document.path }), document.contentHash);
+    committedHashBySubject.set(
+      frontierSubjectKey({ docId: document.documentId, path: document.path }),
+      document.contentHash,
+    );
   }
   const tombstoneProof = new Set<string>();
   for (const tombstone of input.tombstones ?? []) {
@@ -654,7 +668,7 @@ function readLedgerRecordsFromDir(publicationsDir: string): EditionRecord[] {
   for (const entry of safeReadDir(publicationsDir)) {
     if (!/^\d+$/.test(entry)) continue;
     try {
-      const record = decodeEditionRecord(fs.readFileSync(path.join(publicationsDir, entry), "utf8"));
+      const record = decodeEditionRecord(fs.readFileSync(path.join(publicationsDir, entry), 'utf8'));
       if (record && record.editionSeq === Number(entry)) records.push(record);
     } catch {
       // Ignore torn or unreadable ledger records; later valid records can still be used.
@@ -681,7 +695,7 @@ export function latestFreshEditionsUnder(rootDir: string): EditionRecord[] {
   for (const publicationsDir of findPublicationsDirs(rootDir)) {
     const latestFresh = [...readLedgerRecordsFromDir(publicationsDir)]
       .reverse()
-      .find((record) => record.dense.state === "fresh");
+      .find((record) => record.dense.state === 'fresh');
     if (latestFresh) editions.push(latestFresh);
   }
   return editions;
@@ -696,24 +710,24 @@ export function liveEditionsForGcUnder(rootDir: string): EditionRecord[] {
     const records = readLedgerRecordsFromDir(publicationsDir);
     const head = records.at(-1);
     if (head) editions.push(head);
-    const latestFresh = [...records].reverse().find((record) => record.dense.state === "fresh");
+    const latestFresh = [...records].reverse().find((record) => record.dense.state === 'fresh');
     if (latestFresh && latestFresh !== head) editions.push(latestFresh);
   }
   return editions;
 }
 
 function ensureVaultPublisherPaths(paths: VaultPublisherPaths): void {
-  ensurePrivateDirSync(paths.ledgerRootDir, "Optsidian publisher ledger directory");
-  ensurePrivateDirSync(paths.publicationsDir, "Optsidian edition publications directory");
-  ensurePrivateDirSync(paths.frontierDir, "Optsidian frontier journal directory");
-  ensurePrivateDirSync(paths.diagnosticsDir, "Optsidian save diagnostics directory");
-  ensurePrivateDirSync(paths.reservationsDir, "Optsidian build reservations directory");
-  ensurePrivateDirSync(paths.claimsDir, "Optsidian publisher claims directory");
+  ensurePrivateDirSync(paths.ledgerRootDir, 'Optsidian publisher ledger directory');
+  ensurePrivateDirSync(paths.publicationsDir, 'Optsidian edition publications directory');
+  ensurePrivateDirSync(paths.frontierDir, 'Optsidian frontier journal directory');
+  ensurePrivateDirSync(paths.diagnosticsDir, 'Optsidian save diagnostics directory');
+  ensurePrivateDirSync(paths.reservationsDir, 'Optsidian build reservations directory');
+  ensurePrivateDirSync(paths.claimsDir, 'Optsidian publisher claims directory');
 }
 
 function writeEditionRecordExclusive(filePath: string, record: EditionRecord): void {
-  ensurePrivateDirSync(path.dirname(filePath), "Optsidian edition publications directory");
-  const fd = fs.openSync(filePath, "wx", 0o600);
+  ensurePrivateDirSync(path.dirname(filePath), 'Optsidian edition publications directory');
+  const fd = fs.openSync(filePath, 'wx', 0o600);
   try {
     fs.writeFileSync(fd, encodeEditionRecord(record));
     fs.fsyncSync(fd);
@@ -723,56 +737,61 @@ function writeEditionRecordExclusive(filePath: string, record: EditionRecord): v
 }
 
 function headMismatchMessage(expected: number | undefined, actual: number | undefined): string {
-  return `expected head ${expected ?? "none"} but current head is ${actual ?? "none"}`;
+  return `expected head ${expected ?? 'none'} but current head is ${actual ?? 'none'}`;
 }
 
 function sameCorpus(left: EditionCorpusRecord, right: EditionCorpusRecord): boolean {
-  return left.snapshotId === right.snapshotId &&
+  return (
+    left.snapshotId === right.snapshotId &&
     left.corpusSnapshotId === right.corpusSnapshotId &&
-    left.canonicalManifestSha256 === right.canonicalManifestSha256;
+    left.canonicalManifestSha256 === right.canonicalManifestSha256
+  );
 }
 
 function sameStableIdentity(left: EditionIdentity, right: EditionIdentity): boolean {
-  return left.vaultStateHash === right.vaultStateHash &&
+  return (
+    left.vaultStateHash === right.vaultStateHash &&
     left.lexicalIdentityHash === right.lexicalIdentityHash &&
     left.embeddingSpaceId === right.embeddingSpaceId &&
     left.rankingFeatureVersion === right.rankingFeatureVersion &&
     JSON.stringify(left.retrievalIdentity) === JSON.stringify(right.retrievalIdentity) &&
-    JSON.stringify(left.analyzerIdentity) === JSON.stringify(right.analyzerIdentity);
+    JSON.stringify(left.analyzerIdentity) === JSON.stringify(right.analyzerIdentity)
+  );
 }
 
 function isDenseLifecycleTransition(_current: DenseEdition, candidate: DenseEdition): boolean {
-  if (candidate.state === "fresh") return candidate.manifestHash.length > 0;
-  if (candidate.state === "building") return candidate.buildId.length > 0;
-  if (candidate.state === "failed") return candidate.diagnosticId.length > 0;
+  if (candidate.state === 'fresh') return candidate.manifestHash.length > 0;
+  if (candidate.state === 'building') return candidate.buildId.length > 0;
+  if (candidate.state === 'failed') return candidate.diagnosticId.length > 0;
   return candidate.reason.length > 0;
 }
 
 function snapshotDirtyMarkToFrontierOperation(
   mark: { docId: string; path: string; contentHash?: string },
-  nowMs: number
+  nowMs: number,
 ): FrontierAppendOperation {
   if (mark.contentHash !== undefined) {
-    return { op: "upsert", docId: mark.docId, path: mark.path, contentHash: mark.contentHash };
+    return { op: 'upsert', docId: mark.docId, path: mark.path, contentHash: mark.contentHash };
   }
-  return { op: "delete", docId: mark.docId, path: mark.path, tombstoneSeq: nowMs };
+  return { op: 'delete', docId: mark.docId, path: mark.path, tombstoneSeq: nowMs };
 }
 
 function readDiagnostic(filePath: string): SaveDiagnosticRecord | undefined {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
     const record = parsed as Partial<SaveDiagnosticRecord>;
     if (
       record.schemaVersion !== 1 ||
-      typeof record.diagnosticId !== "string" ||
+      typeof record.diagnosticId !== 'string' ||
       !Array.isArray(record.journalSeqs) ||
       !record.journalSeqs.every((seq) => Number.isSafeInteger(seq)) ||
-      typeof record.vaultRoot !== "string" ||
-      typeof record.message !== "string" ||
-      typeof record.failedAt !== "string" ||
+      typeof record.vaultRoot !== 'string' ||
+      typeof record.message !== 'string' ||
+      typeof record.failedAt !== 'string' ||
       !record.writerToken
-    ) return undefined;
+    )
+      return undefined;
     return record as SaveDiagnosticRecord;
   } catch {
     return undefined;
@@ -785,7 +804,9 @@ function errorCodeField(error: unknown): { errorCode?: string } {
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
 }
 
 function safeReadDir(dirPath: string): string[] {
@@ -810,7 +831,7 @@ function findPublicationsDirs(rootDir: string): string[] {
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current || !isDirectory(current)) continue;
-    if (path.basename(current) === "publications") {
+    if (path.basename(current) === 'publications') {
       output.push(current);
       continue;
     }
@@ -824,5 +845,5 @@ function buildReservationClaimDir(reservationsDir: string, manifestHash: string)
 }
 
 export function denseFreshFromEdition(dense: DenseEdition): DenseEditionFresh | undefined {
-  return dense.state === "fresh" ? dense : undefined;
+  return dense.state === 'fresh' ? dense : undefined;
 }

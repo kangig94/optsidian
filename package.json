@@ -12,16 +12,18 @@
     "docs"
   ],
   "scripts": {
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "lint": "eslint src/ tests/",
+    "lint:fix": "eslint src/ tests/ --fix",
+    "format": "prettier --write 'src/**/*.ts' 'tests/**/*.mjs'",
+    "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.mjs'",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-bundle.mjs",
     "search:eval:ir-vault": "node scripts/generate-search-eval-ir-dataset.mjs",
     "search:eval": "node --import tsx scripts/search-eval.mjs",
     "retrieval:tune": "node scripts/retrieval-tuning-fixture.mjs",
     "package:release": "node scripts/package-release.mjs",
-    "test:slow": "node --import tsx --test test/*.slow.mjs",
-    "test": "npm run lint && npm run typecheck && npm run build && node --import tsx --test test/*.test.mjs"
+    "test:slow": "node --import tsx --test tests/*.slow.mjs",
+    "test": "npm run format:check && npm run lint && npm run typecheck && npm run build && node --import tsx --test tests/*.test.mjs"
   },
   "engines": {
     "node": ">=24.15.0"
@@ -32,6 +34,7 @@
     "esbuild": "^0.28.0",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.4",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.62.1"

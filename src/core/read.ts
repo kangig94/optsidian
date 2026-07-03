@@ -1,10 +1,10 @@
-import fs from "node:fs";
-import { UsageError } from "../errors.js";
-import { assertVaultFileWithinByteLimit } from "./file-size.js";
-import { resolveVaultPath } from "./path.js";
-import { decodeUtf8, lineNumbered, splitText } from "./text.js";
-import type { ReadParams, ReadResult } from "./types.js";
-import { assertLineRange, assertOptionalNonNegativeInteger, assertOptionalPositiveInteger } from "./validation.js";
+import fs from 'node:fs';
+import { UsageError } from '../errors.js';
+import { assertVaultFileWithinByteLimit } from './file-size.js';
+import { resolveVaultPath } from './path.js';
+import { decodeUtf8, lineNumbered, splitText } from './text.js';
+import type { ReadParams, ReadResult } from './types.js';
+import { assertLineRange, assertOptionalNonNegativeInteger, assertOptionalPositiveInteger } from './validation.js';
 
 export const DEFAULT_READ_MAX_LINES = 2_000;
 
@@ -17,9 +17,14 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
 
   let start = 1;
   let end = lines.length;
-  const selectors = [params.lines !== undefined, params.head !== undefined, params.tail !== undefined, params.around !== undefined].filter(Boolean).length;
+  const selectors = [
+    params.lines !== undefined,
+    params.head !== undefined,
+    params.tail !== undefined,
+    params.around !== undefined,
+  ].filter(Boolean).length;
   if (selectors > 1) {
-    throw new UsageError("Use only one of lines=, head=, tail=, or around=");
+    throw new UsageError('Use only one of lines=, head=, tail=, or around=');
   }
 
   if (params.lines) {
@@ -32,7 +37,7 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
     start = Math.max(1, lines.length - params.tail + 1);
     end = lines.length;
   } else if (params.around !== undefined) {
-    const index = lines.findIndex((line) => line.includes(params.around ?? ""));
+    const index = lines.findIndex((line) => line.includes(params.around ?? ''));
     if (index === -1) {
       throw new UsageError(`No line contains: ${params.around}`);
     }
@@ -56,18 +61,18 @@ export function readVaultFile(vaultRoot: string, params: ReadParams): ReadResult
 
   return {
     ok: true,
-    command: "read",
+    command: 'read',
     path: target.rel,
     range: { start, end: cappedEnd, total: lines.length },
     truncated,
-    numberedText
+    numberedText,
   };
 }
 
 function validateReadParams(params: ReadParams): void {
-  if (params.lines) assertLineRange(params.lines, "lines");
-  assertOptionalPositiveInteger(params.head, "head");
-  assertOptionalPositiveInteger(params.tail, "tail");
-  assertOptionalNonNegativeInteger(params.context, "context");
-  assertOptionalPositiveInteger(params.maxLines, "maxLines");
+  if (params.lines) assertLineRange(params.lines, 'lines');
+  assertOptionalPositiveInteger(params.head, 'head');
+  assertOptionalPositiveInteger(params.tail, 'tail');
+  assertOptionalNonNegativeInteger(params.context, 'context');
+  assertOptionalPositiveInteger(params.maxLines, 'maxLines');
 }

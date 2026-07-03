@@ -1,31 +1,36 @@
-import { spawnSync } from "node:child_process";
-import fs from "node:fs";
-import http from "node:http";
-import https from "node:https";
-import os from "node:os";
-import path from "node:path";
-import { PRIVATE_FILE_MODE, ensureExistingPrivateFileSync, ensurePrivateDirSync, writePrivateFileAtomicSync } from "../core/private-path.js";
-import { RuntimeError } from "../errors.js";
-import { DEFAULT_HTTP_RESPONSE_MAX_BYTES, formatByteSize } from "../limits.js";
-import { OPTSIDIAN_VERSION } from "../version.js";
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  PRIVATE_FILE_MODE,
+  ensureExistingPrivateFileSync,
+  ensurePrivateDirSync,
+  writePrivateFileAtomicSync,
+} from '../core/private-path.js';
+import { RuntimeError } from '../errors.js';
+import { DEFAULT_HTTP_RESPONSE_MAX_BYTES, formatByteSize } from '../limits.js';
+import { OPTSIDIAN_VERSION } from '../version.js';
 
 // Shared GitHub HTTP layer: a small GET that tolerates redirects and proxy environments
 // (curl fallback) and carries a GitHub Accept header. Callers opt into auth when they need
 // a token resolved from GITHUB_TOKEN or the user's local `gh`/`git` login.
 
-const JSON_ACCEPT = "application/vnd.github+json";
+const JSON_ACCEPT = 'application/vnd.github+json';
 // Release-asset bytes must be fetched from the API asset endpoint with an octet-stream Accept;
 // that is the only form that works for a PRIVATE repo (browser_download_url 404s there).
-const ASSET_ACCEPT = "application/octet-stream";
+const ASSET_ACCEPT = 'application/octet-stream';
 
 type FetchOptions = { accept?: string; redirects?: number; sendAuth?: boolean; timeoutMs?: number; maxBytes?: number };
 
 export async function fetchJson(url: string, env: NodeJS.ProcessEnv, options: FetchOptions = {}): Promise<unknown> {
   const response = await requestBuffer(url, env, options);
   try {
-    return JSON.parse(response.body.toString("utf8"));
+    return JSON.parse(response.body.toString('utf8'));
   } catch {
-    throw new RuntimeError("Release metadata payload is invalid");
+    throw new RuntimeError('Release metadata payload is invalid');
   }
 }
 
@@ -33,44 +38,50 @@ export async function downloadFile(
   url: string,
   targetPath: string,
   env: NodeJS.ProcessEnv,
-  options: Pick<FetchOptions, "sendAuth" | "timeoutMs" | "maxBytes"> = {}
+  options: Pick<FetchOptions, 'sendAuth' | 'timeoutMs' | 'maxBytes'> = {},
 ): Promise<void> {
   const response = await requestBuffer(url, env, { accept: ASSET_ACCEPT, ...options });
-  writePrivateFileAtomicSync(targetPath, response.body, "Optsidian download file");
+  writePrivateFileAtomicSync(targetPath, response.body, 'Optsidian download file');
 }
 
 export async function downloadFileStreaming(
   url: string,
   targetPath: string,
   env: NodeJS.ProcessEnv,
-  options: Pick<FetchOptions, "accept" | "sendAuth" | "timeoutMs" | "maxBytes" | "redirects"> = {}
+  options: Pick<FetchOptions, 'accept' | 'sendAuth' | 'timeoutMs' | 'maxBytes' | 'redirects'> = {},
 ): Promise<void> {
   const accept = options.accept ?? ASSET_ACCEPT;
   const redirects = options.redirects ?? 0;
   const sendAuth = options.sendAuth ?? true;
   const maxBytes = options.maxBytes ?? DEFAULT_HTTP_RESPONSE_MAX_BYTES;
   if (hasProxyEnv(env)) {
-    if (!hasCommand("curl", env)) {
-      throw new RuntimeError("Proxy environment detected, but curl is not available for optsidian network access.");
+    if (!hasCommand('curl', env)) {
+      throw new RuntimeError('Proxy environment detected, but curl is not available for optsidian network access.');
     }
     await downloadFileStreamingWithCurl(url, targetPath, env, accept, sendAuth, redirects, maxBytes, options.timeoutMs);
     return;
   }
-  await downloadFileStreamingDirect(url, targetPath, env, { accept, redirects, sendAuth, maxBytes, timeoutMs: options.timeoutMs });
+  await downloadFileStreamingDirect(url, targetPath, env, {
+    accept,
+    redirects,
+    sendAuth,
+    maxBytes,
+    timeoutMs: options.timeoutMs,
+  });
 }
 
 export async function requestBuffer(
   url: string,
   env: NodeJS.ProcessEnv,
-  options: FetchOptions = {}
+  options: FetchOptions = {},
 ): Promise<{ statusCode: number; body: Buffer }> {
   const accept = options.accept ?? JSON_ACCEPT;
   const redirects = options.redirects ?? 0;
   const sendAuth = options.sendAuth ?? true;
   const maxBytes = options.maxBytes ?? DEFAULT_HTTP_RESPONSE_MAX_BYTES;
   if (hasProxyEnv(env)) {
-    if (!hasCommand("curl", env)) {
-      throw new RuntimeError("Proxy environment detected, but curl is not available for optsidian network access.");
+    if (!hasCommand('curl', env)) {
+      throw new RuntimeError('Proxy environment detected, but curl is not available for optsidian network access.');
     }
     // curl -fsSL drops Authorization on a cross-host redirect by default, so an asset's
     // signed CDN URL is reached without our token.
@@ -82,7 +93,7 @@ export async function requestBuffer(
 async function requestBufferDirect(
   url: string,
   env: NodeJS.ProcessEnv,
-  options: Required<Omit<FetchOptions, "timeoutMs">> & { timeoutMs?: number }
+  options: Required<Omit<FetchOptions, 'timeoutMs'>> & { timeoutMs?: number },
 ): Promise<{ statusCode: number; body: Buffer }> {
   const { accept, redirects, sendAuth, maxBytes, timeoutMs } = options;
   if (redirects > 5) {
@@ -90,15 +101,15 @@ async function requestBufferDirect(
   }
 
   const target = new URL(url);
-  const requestImpl = target.protocol === "https:" ? https.request : http.request;
+  const requestImpl = target.protocol === 'https:' ? https.request : http.request;
   const response = await new Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }>(
     (resolve, reject) => {
       const request = requestImpl(
         target,
         {
-          method: "GET",
+          method: 'GET',
           headers: githubHeaders(env, accept, sendAuth, credentialHostForUrl(target)),
-          agent: false
+          agent: false,
         },
         (res) => {
           let settled = false;
@@ -113,7 +124,7 @@ async function requestBufferDirect(
             reject(error);
             return;
           }
-          res.on("data", (chunk) => {
+          res.on('data', (chunk) => {
             if (settled) return;
             const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             totalBytes += buffer.length;
@@ -127,36 +138,36 @@ async function requestBufferDirect(
             }
             chunks.push(buffer);
           });
-          res.on("end", () => {
+          res.on('end', () => {
             if (settled) return;
             settled = true;
             resolve({
               statusCode: res.statusCode ?? 0,
               headers: res.headers,
-              body: Buffer.concat(chunks)
+              body: Buffer.concat(chunks),
             });
           });
-          res.on("error", (error) => {
+          res.on('error', (error) => {
             if (settled) return;
             settled = true;
             reject(error);
           });
-        }
+        },
       );
       if (timeoutMs !== undefined) {
         request.setTimeout(timeoutMs, () => {
           request.destroy(new RuntimeError(`Timed out fetching ${url}`));
         });
       }
-      request.on("error", reject);
+      request.on('error', reject);
       request.end();
-    }
+    },
   );
 
   const statusCode = response.statusCode;
   if ([301, 302, 303, 307, 308].includes(statusCode)) {
     const location = response.headers.location;
-    if (typeof location !== "string" || location.length === 0) {
+    if (typeof location !== 'string' || location.length === 0) {
       throw new RuntimeError(`Redirect response from ${url} did not include a location header`);
     }
     const nextUrl = new URL(location, target);
@@ -167,7 +178,7 @@ async function requestBufferDirect(
       redirects: redirects + 1,
       sendAuth: sendAuth && nextUrl.host === target.host,
       maxBytes,
-      timeoutMs
+      timeoutMs,
     });
   }
 
@@ -177,7 +188,7 @@ async function requestBufferDirect(
 
   return {
     statusCode,
-    body: response.body
+    body: response.body,
   };
 }
 
@@ -185,7 +196,7 @@ async function downloadFileStreamingDirect(
   url: string,
   targetPath: string,
   env: NodeJS.ProcessEnv,
-  options: Required<Omit<FetchOptions, "timeoutMs">> & { timeoutMs?: number }
+  options: Required<Omit<FetchOptions, 'timeoutMs'>> & { timeoutMs?: number },
 ): Promise<void> {
   const { accept, redirects, sendAuth, maxBytes, timeoutMs } = options;
   if (redirects > 5) {
@@ -193,7 +204,7 @@ async function downloadFileStreamingDirect(
   }
 
   const target = new URL(url);
-  const requestImpl = target.protocol === "https:" ? https.request : http.request;
+  const requestImpl = target.protocol === 'https:' ? https.request : http.request;
   const output = prepareStreamingTarget(targetPath);
   let keepOutput = false;
   try {
@@ -201,16 +212,16 @@ async function downloadFileStreamingDirect(
       const request = requestImpl(
         target,
         {
-          method: "GET",
+          method: 'GET',
           headers: githubHeaders(env, accept, sendAuth, credentialHostForUrl(target)),
-          agent: false
+          agent: false,
         },
         (res) => {
           const statusCode = res.statusCode ?? 0;
           if ([301, 302, 303, 307, 308].includes(statusCode)) {
             const location = res.headers.location;
             res.resume();
-            if (typeof location !== "string" || location.length === 0) {
+            if (typeof location !== 'string' || location.length === 0) {
               reject(new RuntimeError(`Redirect response from ${url} did not include a location header`));
               return;
             }
@@ -233,7 +244,7 @@ async function downloadFileStreamingDirect(
           let totalBytes = 0;
           const stream = fs.createWriteStream(output.tmpPath, { fd: output.fd, autoClose: true });
           output.fd = undefined;
-          res.on("data", (chunk) => {
+          res.on('data', (chunk) => {
             if (settled) return;
             const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             totalBytes += buffer.length;
@@ -244,12 +255,12 @@ async function downloadFileStreamingDirect(
               stream.destroy(error);
             }
           });
-          res.on("error", (error) => {
+          res.on('error', (error) => {
             if (settled) return;
             settled = true;
             stream.destroy(error);
           });
-          stream.on("error", (error) => {
+          stream.on('error', (error) => {
             if (settled) {
               reject(error);
               return;
@@ -257,20 +268,20 @@ async function downloadFileStreamingDirect(
             settled = true;
             reject(error);
           });
-          stream.on("finish", () => {
+          stream.on('finish', () => {
             if (settled) return;
             settled = true;
             resolve(undefined);
           });
           res.pipe(stream);
-        }
+        },
       );
       if (timeoutMs !== undefined) {
         request.setTimeout(timeoutMs, () => {
           request.destroy(new RuntimeError(`Timed out fetching ${url}`));
         });
       }
-      request.on("error", reject);
+      request.on('error', reject);
       request.end();
     });
     if (redirect) {
@@ -281,7 +292,7 @@ async function downloadFileStreamingDirect(
         redirects: redirects + 1,
         sendAuth: sendAuth && nextUrl.host === target.host,
         maxBytes,
-        timeoutMs
+        timeoutMs,
       });
       return;
     }
@@ -301,39 +312,39 @@ async function requestBufferWithCurl(
   sendAuth: boolean,
   redirects: number,
   maxBytes: number,
-  timeoutMs?: number
+  timeoutMs?: number,
 ): Promise<{ statusCode: number; body: Buffer }> {
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
   }
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `optsidian-curl-${process.pid}-`));
-  ensurePrivateDirSync(tempDir, "Optsidian curl temp directory");
-  const headerPath = path.join(tempDir, "headers");
-  const bodyPath = path.join(tempDir, "body");
+  ensurePrivateDirSync(tempDir, 'Optsidian curl temp directory');
+  const headerPath = path.join(tempDir, 'headers');
+  const bodyPath = path.join(tempDir, 'body');
   try {
     const args = [
-      "-sS",
-      "-D",
+      '-sS',
+      '-D',
       headerPath,
-      "-o",
+      '-o',
       bodyPath,
-      "--max-filesize",
+      '--max-filesize',
       String(maxBytes),
-      "-H",
+      '-H',
       `Accept: ${accept}`,
-      "-H",
-      `User-Agent: optsidian/${OPTSIDIAN_VERSION}`
+      '-H',
+      `User-Agent: optsidian/${OPTSIDIAN_VERSION}`,
     ];
     if (timeoutMs !== undefined) {
-      args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
+      args.push('--max-time', String(Math.max(1, Math.ceil(timeoutMs / 1000))));
     }
     const target = new URL(url);
     const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(target)) : undefined;
     if (token) {
-      args.push("-H", `Authorization: Bearer ${token}`);
+      args.push('-H', `Authorization: Bearer ${token}`);
     }
     args.push(url);
-    const result = spawnSync("curl", args, { env });
+    const result = spawnSync('curl', args, { env });
     if (result.error) {
       throw new RuntimeError(`Failed to execute curl: ${result.error.message}`);
     }
@@ -341,11 +352,13 @@ async function requestBufferWithCurl(
       if (result.status === 63) {
         throw responseTooLargeError(url, maxBytes);
       }
-      const message = (result.stderr || result.stdout || Buffer.from("curl failed")).toString("utf8").trim();
+      const message = (result.stderr || result.stdout || Buffer.from('curl failed')).toString('utf8').trim();
       throw new RuntimeError(message || `Failed to fetch ${url}`);
     }
 
-    const headers = ensureExistingPrivateFileSync(headerPath, "Optsidian curl header file") ? fs.readFileSync(headerPath, "utf8") : "";
+    const headers = ensureExistingPrivateFileSync(headerPath, 'Optsidian curl header file')
+      ? fs.readFileSync(headerPath, 'utf8')
+      : '';
     const statusCode = curlStatusCode(headers);
     if ([301, 302, 303, 307, 308].includes(statusCode)) {
       const location = curlLocation(headers);
@@ -358,7 +371,7 @@ async function requestBufferWithCurl(
         redirects: redirects + 1,
         sendAuth: sendAuth && nextUrl.host === target.host,
         maxBytes,
-        timeoutMs
+        timeoutMs,
       });
     }
     if (statusCode < 200 || statusCode >= 300) {
@@ -366,7 +379,7 @@ async function requestBufferWithCurl(
     }
     return {
       statusCode,
-      body: readDownloadedBody(bodyPath, url, maxBytes)
+      body: readDownloadedBody(bodyPath, url, maxBytes),
     };
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -381,7 +394,7 @@ async function downloadFileStreamingWithCurl(
   sendAuth: boolean,
   redirects: number,
   maxBytes: number,
-  timeoutMs?: number
+  timeoutMs?: number,
 ): Promise<void> {
   if (redirects > 5) {
     throw new RuntimeError(`Too many redirects while fetching ${url}`);
@@ -392,28 +405,28 @@ async function downloadFileStreamingWithCurl(
   const headerPath = `${output.tmpPath}.headers`;
   try {
     const args = [
-      "-sS",
-      "-D",
+      '-sS',
+      '-D',
       headerPath,
-      "-o",
+      '-o',
       output.tmpPath,
-      "--max-filesize",
+      '--max-filesize',
       String(maxBytes),
-      "-H",
+      '-H',
       `Accept: ${accept}`,
-      "-H",
-      `User-Agent: optsidian/${OPTSIDIAN_VERSION}`
+      '-H',
+      `User-Agent: optsidian/${OPTSIDIAN_VERSION}`,
     ];
     if (timeoutMs !== undefined) {
-      args.push("--max-time", String(Math.max(1, Math.ceil(timeoutMs / 1000))));
+      args.push('--max-time', String(Math.max(1, Math.ceil(timeoutMs / 1000))));
     }
     const target = new URL(url);
     const token = sendAuth ? resolveGithubToken(env, credentialHostForUrl(target)) : undefined;
     if (token) {
-      args.push("-H", `Authorization: Bearer ${token}`);
+      args.push('-H', `Authorization: Bearer ${token}`);
     }
     args.push(url);
-    const result = spawnSync("curl", args, { env });
+    const result = spawnSync('curl', args, { env });
     if (result.error) {
       throw new RuntimeError(`Failed to execute curl: ${result.error.message}`);
     }
@@ -421,11 +434,13 @@ async function downloadFileStreamingWithCurl(
       if (result.status === 63) {
         throw responseTooLargeError(url, maxBytes);
       }
-      const message = (result.stderr || result.stdout || Buffer.from("curl failed")).toString("utf8").trim();
+      const message = (result.stderr || result.stdout || Buffer.from('curl failed')).toString('utf8').trim();
       throw new RuntimeError(message || `Failed to fetch ${url}`);
     }
 
-    const headers = ensureExistingPrivateFileSync(headerPath, "Optsidian curl header file") ? fs.readFileSync(headerPath, "utf8") : "";
+    const headers = ensureExistingPrivateFileSync(headerPath, 'Optsidian curl header file')
+      ? fs.readFileSync(headerPath, 'utf8')
+      : '';
     const statusCode = curlStatusCode(headers);
     if ([301, 302, 303, 307, 308].includes(statusCode)) {
       const location = curlLocation(headers);
@@ -442,7 +457,7 @@ async function downloadFileStreamingWithCurl(
         sendAuth && nextUrl.host === target.host,
         redirects + 1,
         maxBytes,
-        timeoutMs
+        timeoutMs,
       );
       return;
     }
@@ -462,14 +477,17 @@ async function downloadFileStreamingWithCurl(
 function prepareStreamingTarget(targetPath: string): { tmpPath: string; fd: number | undefined } {
   const target = path.resolve(targetPath);
   const dir = path.dirname(target);
-  ensurePrivateDirSync(dir, "Optsidian download file parent directory");
-  const tmpPath = path.join(dir, `.optsidian-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.download`);
-  const fd = fs.openSync(tmpPath, "wx", PRIVATE_FILE_MODE);
+  ensurePrivateDirSync(dir, 'Optsidian download file parent directory');
+  const tmpPath = path.join(
+    dir,
+    `.optsidian-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.download`,
+  );
+  const fd = fs.openSync(tmpPath, 'wx', PRIVATE_FILE_MODE);
   return { tmpPath, fd };
 }
 
 function readDownloadedBody(bodyPath: string, url: string, maxBytes: number): Buffer {
-  if (!ensureExistingPrivateFileSync(bodyPath, "Optsidian curl body file")) return Buffer.alloc(0);
+  if (!ensureExistingPrivateFileSync(bodyPath, 'Optsidian curl body file')) return Buffer.alloc(0);
   const stat = fs.statSync(bodyPath);
   if (stat.size > maxBytes) {
     throw responseTooLargeError(url, maxBytes, stat.size);
@@ -478,15 +496,15 @@ function readDownloadedBody(bodyPath: string, url: string, maxBytes: number): Bu
 }
 
 function parseContentLength(headers: http.IncomingHttpHeaders): number | undefined {
-  const raw = headers["content-length"];
+  const raw = headers['content-length'];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== "string" || value.trim() === "") return undefined;
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function responseTooLargeError(url: string, maxBytes: number, actualBytes?: number): RuntimeError {
-  const actual = actualBytes === undefined ? "" : ` (${formatByteSize(actualBytes)})`;
+  const actual = actualBytes === undefined ? '' : ` (${formatByteSize(actualBytes)})`;
   return new RuntimeError(`Response from ${url} exceeded ${formatByteSize(maxBytes)} limit${actual}`);
 }
 
@@ -503,11 +521,16 @@ function curlLocation(headers: string): string | undefined {
   return match?.[1]?.trim();
 }
 
-function githubHeaders(env: NodeJS.ProcessEnv, accept: string, sendAuth: boolean, credentialHost: string): Record<string, string> {
+function githubHeaders(
+  env: NodeJS.ProcessEnv,
+  accept: string,
+  sendAuth: boolean,
+  credentialHost: string,
+): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: accept,
-    "User-Agent": `optsidian/${OPTSIDIAN_VERSION}`,
-    Connection: "close"
+    'User-Agent': `optsidian/${OPTSIDIAN_VERSION}`,
+    Connection: 'close',
   };
   const token = sendAuth ? resolveGithubToken(env, credentialHost) : undefined;
   if (token) {
@@ -523,7 +546,7 @@ const cachedLocalTokens = new Map<string, string | null>();
 function resolveGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | undefined {
   const explicit = env.GITHUB_TOKEN?.trim();
   if (explicit) return explicit;
-  const host = credentialHost || "github.com";
+  const host = credentialHost || 'github.com';
   if (!cachedLocalTokens.has(host)) {
     cachedLocalTokens.set(host, readLocalGithubToken(env, host));
   }
@@ -532,19 +555,19 @@ function resolveGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): str
 
 function readLocalGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): string | null {
   const credentialEnv = nonInteractiveCredentialEnv(env);
-  const ghArgs = credentialHost === "github.com" ? ["auth", "token"] : ["auth", "token", "--hostname", credentialHost];
-  const gh = spawnSync("gh", ghArgs, { env: credentialEnv, encoding: "utf8" });
+  const ghArgs = credentialHost === 'github.com' ? ['auth', 'token'] : ['auth', 'token', '--hostname', credentialHost];
+  const gh = spawnSync('gh', ghArgs, { env: credentialEnv, encoding: 'utf8' });
   if (!gh.error && (gh.status ?? 1) === 0) {
-    const token = (gh.stdout ?? "").trim();
+    const token = (gh.stdout ?? '').trim();
     if (token) return token;
   }
-  const cred = spawnSync("git", ["credential", "fill"], {
+  const cred = spawnSync('git', ['credential', 'fill'], {
     env: credentialEnv,
-    encoding: "utf8",
-    input: `protocol=https\nhost=${credentialHost}\n\n`
+    encoding: 'utf8',
+    input: `protocol=https\nhost=${credentialHost}\n\n`,
   });
   if (!cred.error && (cred.status ?? 1) === 0) {
-    const match = /^password=(.+)$/m.exec(cred.stdout ?? "");
+    const match = /^password=(.+)$/m.exec(cred.stdout ?? '');
     const token = match?.[1]?.trim();
     if (token) return token;
   }
@@ -554,27 +577,27 @@ function readLocalGithubToken(env: NodeJS.ProcessEnv, credentialHost: string): s
 function nonInteractiveCredentialEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...env,
-    GH_PROMPT_DISABLED: "1",
-    GCM_INTERACTIVE: "Never",
-    GIT_TERMINAL_PROMPT: "0"
+    GH_PROMPT_DISABLED: '1',
+    GCM_INTERACTIVE: 'Never',
+    GIT_TERMINAL_PROMPT: '0',
   };
 }
 
 function credentialHostForUrl(url: URL): string {
-  if (url.hostname.toLowerCase() === "api.github.com") return "github.com";
+  if (url.hostname.toLowerCase() === 'api.github.com') return 'github.com';
   return url.host || url.hostname;
 }
 
 function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
-  const keys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+  const keys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];
   return keys.some((key) => {
     const value = env[key];
-    return typeof value === "string" && value.trim().length > 0;
+    return typeof value === 'string' && value.trim().length > 0;
   });
 }
 
 export function hasCommand(command: string, env: NodeJS.ProcessEnv): boolean {
-  const searchPath = env.PATH ? env.PATH : process.env.PATH ? process.env.PATH : "";
+  const searchPath = env.PATH ? env.PATH : process.env.PATH ? process.env.PATH : '';
   for (const entry of searchPath.split(path.delimiter)) {
     if (!entry) continue;
     const candidate = path.join(entry, command);

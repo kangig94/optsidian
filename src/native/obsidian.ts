@@ -1,10 +1,17 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { RuntimeError } from "../errors.js";
-import { runObsidianSync } from "./launcher.js";
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { RuntimeError } from '../errors.js';
+import { runObsidianSync } from './launcher.js';
 
-export { clearObsidianLaunchEnvCache, mergeObsidianLaunchEnv, obsidianBin, recoverLinuxGuiEnv, runObsidianSync, shouldRefreshObsidianLaunch } from "./launcher.js";
+export {
+  clearObsidianLaunchEnvCache,
+  mergeObsidianLaunchEnv,
+  obsidianBin,
+  recoverLinuxGuiEnv,
+  runObsidianSync,
+  shouldRefreshObsidianLaunch,
+} from './launcher.js';
 
 export type ObsidianCapture = {
   stdout: string;
@@ -14,7 +21,7 @@ export type ObsidianCapture = {
 
 export type ObsidianVaultDiscoveryEntry = {
   path: string;
-  source: "active" | "config";
+  source: 'active' | 'config';
   id?: string;
 };
 
@@ -23,8 +30,8 @@ export type ObsidianVaultDiscoveryResult = {
   warnings: string[];
 };
 
-const OBSIDIAN_CONFIG_PATH_ENV = "OBSIDIAN_CONFIG";
-const OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV = "OPTSIDIAN_OBSIDIAN_CONFIG_PATH";
+const OBSIDIAN_CONFIG_PATH_ENV = 'OBSIDIAN_CONFIG';
+const OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV = 'OPTSIDIAN_OBSIDIAN_CONFIG_PATH';
 
 export function captureObsidian(args: string[], env: NodeJS.ProcessEnv = process.env): ObsidianCapture {
   const result = runObsidianSync(args, { env });
@@ -32,17 +39,17 @@ export function captureObsidian(args: string[], env: NodeJS.ProcessEnv = process
     throw new RuntimeError(`Failed to run obsidian: ${result.error.message}`);
   }
   return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    status: result.status ?? 1
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+    status: result.status ?? 1,
   };
 }
 
 export function listObsidianCommands(env: NodeJS.ProcessEnv = process.env): string[] {
-  const result = captureObsidian(["help"], env);
+  const result = captureObsidian(['help'], env);
   if (result.status !== 0) {
     const details = (result.stderr || result.stdout).trim();
-    throw new RuntimeError(details || "Failed to list Obsidian commands");
+    throw new RuntimeError(details || 'Failed to list Obsidian commands');
   }
 
   const commands: string[] = [];
@@ -55,23 +62,25 @@ export function listObsidianCommands(env: NodeJS.ProcessEnv = process.env): stri
 }
 
 export function resolveObsidianVaultRoot(options: { vault?: string; env?: NodeJS.ProcessEnv } = {}): string {
-  const argv = ["vault", "info=path"];
+  const argv = ['vault', 'info=path'];
   if (options.vault) argv.push(`vault=${options.vault}`);
 
   const result = captureObsidian(argv, options.env);
   if (result.status !== 0) {
     const details = (result.stderr || result.stdout).trim();
-    throw new RuntimeError(details || "Failed to resolve Obsidian vault path");
+    throw new RuntimeError(details || 'Failed to resolve Obsidian vault path');
   }
 
   const root = result.stdout.trim();
   if (!root) {
-    throw new RuntimeError("Obsidian returned an empty vault path");
+    throw new RuntimeError('Obsidian returned an empty vault path');
   }
   return resolveVaultPathInput(root);
 }
 
-export function resolveObsidianVaultRootWithFallback(options: { vault?: string; fallbackPath?: string; env?: NodeJS.ProcessEnv } = {}): string {
+export function resolveObsidianVaultRootWithFallback(
+  options: { vault?: string; fallbackPath?: string; env?: NodeJS.ProcessEnv } = {},
+): string {
   try {
     return resolveObsidianVaultRoot({ vault: options.vault, env: options.env });
   } catch (error) {
@@ -94,7 +103,7 @@ export function discoverObsidianVaultRoots(options: { env?: NodeJS.ProcessEnv } 
 
   if (!explicitRegistry) {
     try {
-      vaults.push({ path: resolveObsidianVaultRoot({ env }), source: "active" });
+      vaults.push({ path: resolveObsidianVaultRoot({ env }), source: 'active' });
     } catch {
       // Active vault discovery depends on the Obsidian GUI/native CLI context.
       // Config-file discovery above is enough for non-interactive warm runs.
@@ -123,13 +132,13 @@ function obsidianConfigPaths(env: NodeJS.ProcessEnv): string[] {
 
   const home = os.homedir();
   const configured = env.XDG_CONFIG_HOME?.trim();
-  const configHome = configured ? configured : path.join(os.homedir(), ".config");
+  const configHome = configured ? configured : path.join(os.homedir(), '.config');
   const candidates = [
-    path.join(configHome, "obsidian", "obsidian.json"),
-    path.join(home, ".config", "obsidian", "obsidian.json"),
-    path.join(home, ".var", "app", "md.obsidian.Obsidian", "config", "obsidian", "obsidian.json"),
-    path.join(home, "Library", "Application Support", "obsidian", "obsidian.json"),
-    env.APPDATA?.trim() ? path.join(env.APPDATA.trim(), "obsidian", "obsidian.json") : undefined
+    path.join(configHome, 'obsidian', 'obsidian.json'),
+    path.join(home, '.config', 'obsidian', 'obsidian.json'),
+    path.join(home, '.var', 'app', 'md.obsidian.Obsidian', 'config', 'obsidian', 'obsidian.json'),
+    path.join(home, 'Library', 'Application Support', 'obsidian', 'obsidian.json'),
+    env.APPDATA?.trim() ? path.join(env.APPDATA.trim(), 'obsidian', 'obsidian.json') : undefined,
   ];
   const first = candidates.find((candidate) => candidate && fs.existsSync(candidate));
   return first ? [first] : [];
@@ -138,22 +147,24 @@ function obsidianConfigPaths(env: NodeJS.ProcessEnv): string[] {
 function readObsidianConfigVaults(configPath: string, warnings: string[]): ObsidianVaultDiscoveryEntry[] {
   if (!fs.existsSync(configPath)) return [];
   try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as unknown;
     const vaults = isRecord(parsed) && isRecord(parsed.vaults) ? parsed.vaults : undefined;
     if (!vaults) return [];
 
     const discovered: ObsidianVaultDiscoveryEntry[] = [];
     for (const [id, entry] of Object.entries(vaults)) {
-      if (!isRecord(entry) || typeof entry.path !== "string" || entry.path.trim() === "") continue;
+      if (!isRecord(entry) || typeof entry.path !== 'string' || entry.path.trim() === '') continue;
       try {
-        discovered.push({ path: resolveVaultPathInput(entry.path), source: "config", id });
+        discovered.push({ path: resolveVaultPathInput(entry.path), source: 'config', id });
       } catch (error) {
         warnings.push(`Skipping Obsidian vault ${id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     return discovered;
   } catch (error) {
-    warnings.push(`Cannot read Obsidian vault registry ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
+    warnings.push(
+      `Cannot read Obsidian vault registry ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return [];
   }
 }
@@ -176,5 +187,5 @@ function dedupeDiscoveredVaults(vaults: readonly ObsidianVaultDiscoveryEntry[]):
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

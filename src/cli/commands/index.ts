@@ -1,95 +1,95 @@
-import path from "node:path";
-import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from "../args.js";
-import { parseFormat, renderIndexResult } from "../render.js";
-import { createSearchDaemonClient, type SearchDaemonClient } from "../../daemon/client.js";
-import { discoverObsidianVaultRoots, resolveVaultPathInput } from "../../native/obsidian.js";
-import { UsageError } from "../../errors.js";
-import type { SearchIndexWarmResult, SearchIndexWarmVaultResult } from "../../core/types.js";
-import type { StatusResult } from "../../daemon/protocol.js";
-import { hasVaultPathArg, resolveVaultRoot, vaultArg } from "../vault.js";
+import path from 'node:path';
+import { getValue, hasFlag, parsePositiveInt, type ParsedArgs } from '../args.js';
+import { parseFormat, renderIndexResult } from '../render.js';
+import { createSearchDaemonClient, type SearchDaemonClient } from '../../daemon/client.js';
+import { discoverObsidianVaultRoots, resolveVaultPathInput } from '../../native/obsidian.js';
+import { UsageError } from '../../errors.js';
+import type { SearchIndexWarmResult, SearchIndexWarmVaultResult } from '../../core/types.js';
+import type { StatusResult } from '../../daemon/protocol.js';
+import { hasVaultPathArg, resolveVaultRoot, vaultArg } from '../vault.js';
 
 export async function runIndex(args: ParsedArgs, vaultRoot?: string): Promise<void> {
-  const action = args.positionals[0] ?? "status";
-  const format = parseFormat(getValue(args, "format"));
+  const action = args.positionals[0] ?? 'status';
+  const format = parseFormat(getValue(args, 'format'));
   const progress = { enabled: shouldRenderProgress(args, format) };
   const client = createSearchDaemonClient();
   switch (action) {
-    case "status":
+    case 'status':
       process.stdout.write(renderIndexResult(await client.status(), format));
       return;
-    case "rebuild":
-      if (!vaultRoot) throw new UsageError("index rebuild requires a vault");
-      process.stdout.write(renderIndexResult(await withVaultProgress(
-        client,
-        vaultRoot,
-        () => client.rebuild({ vault: vaultRoot }),
-        progress
-      ), format));
+    case 'rebuild':
+      if (!vaultRoot) throw new UsageError('index rebuild requires a vault');
+      process.stdout.write(
+        renderIndexResult(
+          await withVaultProgress(client, vaultRoot, () => client.rebuild({ vault: vaultRoot }), progress),
+          format,
+        ),
+      );
       return;
-    case "refresh":
-      if (!vaultRoot) throw new UsageError("index refresh requires a vault");
-      process.stdout.write(renderIndexResult(await withVaultProgress(
-        client,
-        vaultRoot,
-        () => client.refresh({ vault: vaultRoot }),
-        progress
-      ), format));
+    case 'refresh':
+      if (!vaultRoot) throw new UsageError('index refresh requires a vault');
+      process.stdout.write(
+        renderIndexResult(
+          await withVaultProgress(client, vaultRoot, () => client.refresh({ vault: vaultRoot }), progress),
+          format,
+        ),
+      );
       return;
-    case "warm": {
+    case 'warm': {
       const discovery = indexWarmVaultRoots(args);
       process.stdout.write(renderIndexResult(await loadDiscoveredVaults(client, discovery, progress), format));
       return;
     }
-    case "clear":
-      if (!vaultRoot) throw new UsageError("index clear requires a vault");
+    case 'clear':
+      if (!vaultRoot) throw new UsageError('index clear requires a vault');
       process.stdout.write(renderIndexResult(await client.clear({ vault: vaultRoot }), format));
       return;
-    case "prune": {
-      const unusedDays = parsePositiveInt(getValue(args, "unused-days"), "unused-days");
-      process.stdout.write(renderIndexResult(await client.prune({
-        ...(unusedDays === undefined ? {} : { unusedDays }),
-        dryRun: hasFlag(args, "dry-run")
-      }), format));
+    case 'prune': {
+      const unusedDays = parsePositiveInt(getValue(args, 'unused-days'), 'unused-days');
+      process.stdout.write(
+        renderIndexResult(
+          await client.prune({
+            ...(unusedDays === undefined ? {} : { unusedDays }),
+            dryRun: hasFlag(args, 'dry-run'),
+          }),
+          format,
+        ),
+      );
       return;
     }
     default:
-      throw new UsageError("index action must be status, rebuild, refresh, warm, clear, or prune");
+      throw new UsageError('index action must be status, rebuild, refresh, warm, clear, or prune');
   }
 }
 
 async function loadDiscoveredVaults(
   client: SearchDaemonClient,
   discovery: { vaultRoots: string[]; warnings: string[] },
-  progress: { enabled: boolean }
+  progress: { enabled: boolean },
 ): Promise<SearchIndexWarmResult> {
   const vaults: SearchIndexWarmVaultResult[] = [];
   const warnings = [...discovery.warnings];
 
   for (const vaultRoot of discovery.vaultRoots) {
     try {
-      const result = await withVaultProgress(
-        client,
-        vaultRoot,
-        () => client.loadVault({ vault: vaultRoot }),
-        progress
-      );
+      const result = await withVaultProgress(client, vaultRoot, () => client.loadVault({ vault: vaultRoot }), progress);
       vaults.push(...result.vaults);
       if (result.warnings) warnings.push(...result.warnings);
     } catch (error) {
       vaults.push({
         vaultRoot: path.resolve(vaultRoot),
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error)
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   return {
     ok: true,
-    command: "index",
-    action: "warm",
+    command: 'index',
+    action: 'warm',
     vaults,
-    ...(warnings.length > 0 ? { warnings } : {})
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
@@ -97,7 +97,7 @@ async function withVaultProgress<T>(
   client: SearchDaemonClient,
   vaultRoot: string,
   run: () => Promise<T>,
-  options: { enabled: boolean }
+  options: { enabled: boolean },
 ): Promise<T> {
   if (!options.enabled) return run();
 
@@ -109,7 +109,7 @@ async function withVaultProgress<T>(
     process.stderr.write(`\r${padded}`);
   };
   const clear = () => {
-    if (lastLength > 0) process.stderr.write(`\r${" ".repeat(lastLength)}\r`);
+    if (lastLength > 0) process.stderr.write(`\r${' '.repeat(lastLength)}\r`);
   };
   const poll = async () => {
     if (polling) return;
@@ -136,30 +136,35 @@ async function withVaultProgress<T>(
   }
 }
 
-function shouldRenderProgress(args: ParsedArgs, format: "text" | "json"): boolean {
-  return format === "text" && !hasFlag(args, "no-progress") && process.stderr.isTTY === true;
+function shouldRenderProgress(args: ParsedArgs, format: 'text' | 'json'): boolean {
+  return format === 'text' && !hasFlag(args, 'no-progress') && process.stderr.isTTY === true;
 }
 
 function renderVaultProgress(status: StatusResult, vaultRoot: string): string {
   const resolved = path.resolve(vaultRoot);
   const vault = status.vaults.find((candidate) => path.resolve(candidate.vault) === resolved);
-  if (!vault?.progress) return `index ${vault?.state ?? "loading"} ${vaultLabel(vaultRoot)}`;
+  if (!vault?.progress) return `index ${vault?.state ?? 'loading'} ${vaultLabel(vaultRoot)}`;
   const progress = vault.progress;
   const completed = progress.completed ?? 0;
   const total = progress.total;
   const ratio = total && total > 0 ? Math.max(0, Math.min(1, completed / total)) : 0;
-  const percent = total && total > 0 ? `${Math.floor(ratio * 100).toString().padStart(3)}%` : " --%";
+  const percent =
+    total && total > 0
+      ? `${Math.floor(ratio * 100)
+          .toString()
+          .padStart(3)}%`
+      : ' --%';
   const counts = total === undefined ? String(completed) : `${completed}/${total}`;
-  const current = progress.current ? ` ${truncateMiddle(progress.current, 36)}` : "";
-  const message = progress.message ? ` ${progress.message}` : "";
+  const current = progress.current ? ` ${truncateMiddle(progress.current, 36)}` : '';
+  const message = progress.message ? ` ${progress.message}` : '';
   return `index ${progress.phase} ${progressBar(ratio, total !== undefined)} ${percent} ${counts} ${vaultLabel(vaultRoot)}${current}${message}`;
 }
 
 function progressBar(ratio: number, knownTotal: boolean): string {
   const width = 20;
-  if (!knownTotal) return `[${".".repeat(width)}]`;
+  if (!knownTotal) return `[${'.'.repeat(width)}]`;
   const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
-  return `[${"#".repeat(filled)}${".".repeat(width - filled)}]`;
+  return `[${'#'.repeat(filled)}${'.'.repeat(width - filled)}]`;
 }
 
 function truncateMiddle(value: string, maxLength: number): string {

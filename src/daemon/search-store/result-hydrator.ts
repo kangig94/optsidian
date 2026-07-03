@@ -1,9 +1,9 @@
-import type { SearchTextAnalysis } from "../../core/search/analysis/index.js";
-import type { ExactDominanceBound } from "../../core/search/ranking/index.js";
-import type { NormalizedSearchParams } from "../../core/search/internal-types.js";
-import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import type { SearchMatch } from "../../core/types.js";
-import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/index.js";
+import type { SearchTextAnalysis } from '../../core/search/analysis/index.js';
+import type { ExactDominanceBound } from '../../core/search/ranking/index.js';
+import type { NormalizedSearchParams } from '../../core/search/internal-types.js';
+import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
+import type { SearchMatch } from '../../core/types.js';
+import { POSITIONAL_RETRIEVER_IDENTITY } from '../../core/search/retrieval/positional/index.js';
 import {
   documentsByPath,
   documentsFromHandle,
@@ -13,10 +13,10 @@ import {
   snippetsForDocument,
   type SearchExecutionResult,
   type SearchExecutionSnapshotHandle,
-  type SearchShardFinalist
-} from "./result-shaping.js";
-import type { PersistedDocumentRecord } from "./types.js";
-import { finalistsInBaseRankOrder } from "./finalist-order.js";
+  type SearchShardFinalist,
+} from './result-shaping.js';
+import type { PersistedDocumentRecord } from './types.js';
+import { finalistsInBaseRankOrder } from './finalist-order.js';
 
 export type ResultHydrationAggregation = {
   finalists: readonly SearchShardFinalist[];
@@ -46,7 +46,7 @@ export class ResultHydrator {
       input.analyzerIdentity,
       input.search,
       input.aggregation.scoredCount,
-      input.aggregation.analysis.channels
+      input.aggregation.analysis.channels,
     );
     if (input.explain) this.attachExplainTrace(result, input, rankedAll);
     return result;
@@ -55,7 +55,7 @@ export class ResultHydrator {
   private hydrateMatches(
     input: ResultHydratorInput,
     documents: ReadonlyMap<string, PersistedDocumentRecord>,
-    ranked: readonly SearchShardFinalist[]
+    ranked: readonly SearchShardFinalist[],
   ): SearchMatch[] {
     let documentsByRelPath: ReturnType<typeof documentsByPath> | undefined;
     return ranked.map((finalist): SearchMatch => {
@@ -75,10 +75,10 @@ export class ResultHydrator {
                 hit: finalist,
                 rank: finalist.rank,
                 snapshotId: input.snapshot.snapshotId,
-                analyzer: input.analyzerIdentity
-              })
+                analyzer: input.analyzerIdentity,
+              }),
             }
-          : {})
+          : {}),
       };
     });
   }
@@ -86,10 +86,10 @@ export class ResultHydrator {
   private attachExplainTrace(
     result: SearchExecutionResult,
     input: ResultHydratorInput,
-    rankedAll: readonly SearchShardFinalist[]
+    rankedAll: readonly SearchShardFinalist[],
   ): void {
     if (!input.aggregation.exactBound) {
-      throw Object.assign(new Error("explain requires shard exact-bound evidence"), { code: "INTERNAL" });
+      throw Object.assign(new Error('explain requires shard exact-bound evidence'), { code: 'INTERNAL' });
     }
     const traceFinalists = finalistsInBaseRankOrder(input.aggregation.finalists);
     result.explainTrace = explainTrace({
@@ -98,12 +98,12 @@ export class ResultHydrator {
         snapshotId: input.snapshot.snapshotId,
         retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
         complete: true,
-        candidates: traceFinalists.map((finalist) => finalist.candidate)
+        candidates: traceFinalists.map((finalist) => finalist.candidate),
       },
       exactBound: input.aggregation.exactBound,
       featurePayloads: traceFinalists.map((finalist) => finalist.feature),
       queryAnalysis: input.aggregation.analysis,
-      ranked: rankedAll.map((finalist) => finalist.rank)
+      ranked: rankedAll.map((finalist) => finalist.rank),
     });
   }
 }

@@ -1,11 +1,6 @@
-import type { SearchAnalyzer } from "../analyzer.js";
-import {
-  surfaceSearchTerms,
-  uniqueSearchTerms,
-  type SearchTextAnalysis,
-  type SearchTokenChannel
-} from "./channels.js";
-import { ngramSearchTerms } from "./korean.js";
+import type { SearchAnalyzer } from '../analyzer.js';
+import { surfaceSearchTerms, uniqueSearchTerms, type SearchTextAnalysis, type SearchTokenChannel } from './channels.js';
+import { ngramSearchTerms } from './korean.js';
 
 export type SearchTextAnalysisOptions = {
   ngram?: boolean;
@@ -14,7 +9,7 @@ export type SearchTextAnalysisOptions = {
 export async function analyzeSearchQuery(
   raw: string,
   analyzer: SearchAnalyzer,
-  options: SearchTextAnalysisOptions = {}
+  options: SearchTextAnalysisOptions = {},
 ): Promise<SearchTextAnalysis> {
   return analyzeSearchText(raw, await analyzer.tokenize(raw), options);
 }
@@ -22,7 +17,7 @@ export async function analyzeSearchQuery(
 export function analyzeSearchText(
   raw: string,
   morphTokens: readonly string[],
-  options: SearchTextAnalysisOptions = {}
+  options: SearchTextAnalysisOptions = {},
 ): SearchTextAnalysis {
   const morph = uniqueSearchTerms(morphTokens);
   const surface = surfaceSearchTerms(raw);
@@ -35,24 +30,21 @@ export function analyzeSearchText(
     channels: {
       morph,
       surface,
-      ngram
-    }
+      ngram,
+    },
   };
 }
 
 function primarySearchChannel(
   morph: readonly string[],
   surface: readonly string[],
-  ngram: readonly string[]
+  ngram: readonly string[],
 ): SearchTokenChannel {
-  if (morph.length > 0) return "morph";
-  if (surface.length > 0) return "surface";
-  return ngram.length > 0 ? "ngram" : "morph";
+  if (morph.length > 0) return 'morph';
+  if (surface.length > 0) return 'surface';
+  return ngram.length > 0 ? 'ngram' : 'morph';
 }
 
-function primaryTerms(
-  channel: SearchTokenChannel,
-  terms: Record<SearchTokenChannel, string[]>
-): string[] {
+function primaryTerms(channel: SearchTokenChannel, terms: Record<SearchTokenChannel, string[]>): string[] {
   return terms[channel];
 }

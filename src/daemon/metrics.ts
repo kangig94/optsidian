@@ -26,7 +26,7 @@ export class DaemonMetrics {
       requests: this.requests,
       failures: this.failures,
       activeRequests: this.activeRequests,
-      startedAt: this.startedAt
+      startedAt: this.startedAt,
     };
   }
 }

@@ -1,6 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
-import { UsageError } from "../errors.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { UsageError } from '../errors.js';
 
 export type ParsedArgs = {
   command: string | undefined;
@@ -17,10 +17,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
 
   for (const token of raw) {
-    const eq = token.indexOf("=");
+    const eq = token.indexOf('=');
     if (eq > 0) {
       values.set(token.slice(0, eq), token.slice(eq + 1));
-    } else if (token.startsWith("--")) {
+    } else if (token.startsWith('--')) {
       flags.add(token.slice(2));
     } else if (token.length > 0) {
       flags.add(token);
@@ -44,28 +44,28 @@ export function requireValue(args: ParsedArgs, key: string): string {
 }
 
 export function hasFlag(args: ParsedArgs, key: string): boolean {
-  return args.flags.has(key) || args.values.get(key) === "true";
+  return args.flags.has(key) || args.values.get(key) === 'true';
 }
 
 export function readValueOrFile(value: string, cwd = process.cwd()): string {
   const raw = readRawValueOrFile(value, cwd);
-  return value.startsWith("@") ? raw : decodeCliEscapes(raw);
+  return value.startsWith('@') ? raw : decodeCliEscapes(raw);
 }
 
 export function readRawValueOrFile(value: string, cwd = process.cwd()): string {
-  if (!value.startsWith("@")) {
+  if (!value.startsWith('@')) {
     return value;
   }
   const filePath = value.slice(1);
   if (!filePath) {
-    throw new UsageError("@file value must include a path");
+    throw new UsageError('@file value must include a path');
   }
   const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
-  return fs.readFileSync(resolved, "utf8");
+  return fs.readFileSync(resolved, 'utf8');
 }
 
 export function decodeCliEscapes(value: string): string {
-  return value.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+  return value.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
 }
 
 export function parsePositiveInt(value: string | undefined, name: string): number | undefined {
@@ -83,12 +83,12 @@ export function parsePositiveInt(value: string | undefined, name: string): numbe
 export function parseLineRange(value: string): { start: number; end: number } {
   const match = /^(\d+):(\d+)$/.exec(value);
   if (!match) {
-    throw new UsageError("range/lines must use the form a:b");
+    throw new UsageError('range/lines must use the form a:b');
   }
   const start = Number(match[1]);
   const end = Number(match[2]);
   if (start < 1 || end < start) {
-    throw new UsageError("range/lines must be 1-based and end must be >= start");
+    throw new UsageError('range/lines must be 1-based and end must be >= start');
   }
   return { start, end };
 }

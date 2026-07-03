@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { RuntimeError, isCliError } from "./errors.js";
-import { recordVaultAccess } from "./core/vault-access.js";
-import { createSearchDaemonClient } from "./daemon/client.js";
-import { mcpHelpText, parseMcpArgs } from "./mcp/config.js";
-import { createOptsidianMcpServer } from "./mcp/server.js";
-import { resolveObsidianVaultRoot, resolveVaultPathInput } from "./native/obsidian.js";
-import { OPTSIDIAN_VERSION } from "./version.js";
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { RuntimeError, isCliError } from './errors.js';
+import { recordVaultAccess } from './core/vault-access.js';
+import { createSearchDaemonClient } from './daemon/client.js';
+import { mcpHelpText, parseMcpArgs } from './mcp/config.js';
+import { createOptsidianMcpServer } from './mcp/server.js';
+import { resolveObsidianVaultRoot, resolveVaultPathInput } from './native/obsidian.js';
+import { OPTSIDIAN_VERSION } from './version.js';
 
 async function main(): Promise<void> {
   const config = parseMcpArgs(process.argv.slice(2));
@@ -34,7 +34,7 @@ function createMcpVaultResolver(config: ReturnType<typeof parseMcpArgs>): () => 
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new RuntimeError(
-        `Vault is not configured for this MCP session. Launch the Obsidian GUI, or configure optsidian-mcp with --vault-path <path> or OPTSIDIAN_VAULT_PATH=<path>. Native resolution failed: ${reason}`
+        `Vault is not configured for this MCP session. Launch the Obsidian GUI, or configure optsidian-mcp with --vault-path <path> or OPTSIDIAN_VAULT_PATH=<path>. Native resolution failed: ${reason}`,
       );
     }
   };

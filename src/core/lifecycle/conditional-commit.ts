@@ -1,4 +1,4 @@
-import { processTokenEquals, type ProcessToken } from "./process-token.js";
+import { processTokenEquals, type ProcessToken } from './process-token.js';
 
 export type MaybePromise<T> = T | Promise<T>;
 
@@ -14,10 +14,14 @@ export type TenancyFenceProvider<TToken extends CurrentWriterToken = CurrentWrit
 };
 
 export type ConditionalCommitResult<TResult> =
-  | { ok: true; value: TResult }
-  | { ok: false; reason: "not-current" | "not-head" | "rejected"; message?: string };
+  { ok: true; value: TResult } | { ok: false; reason: 'not-current' | 'not-head' | 'rejected'; message?: string };
 
-export type ConditionalCommit<TCandidate, TExpected, TResult, TToken extends CurrentWriterToken = CurrentWriterToken> = {
+export type ConditionalCommit<
+  TCandidate,
+  TExpected,
+  TResult,
+  TToken extends CurrentWriterToken = CurrentWriterToken,
+> = {
   commit(candidate: TCandidate, expected: TExpected, writerToken: TToken): Promise<ConditionalCommitResult<TResult>>;
 };
 
@@ -45,16 +49,16 @@ type Waiter<T> = {
 };
 
 export class AttemptCancelledError extends Error {
-  constructor(message = "Attempt was cancelled.") {
+  constructor(message = 'Attempt was cancelled.') {
     super(message);
-    this.name = "AttemptCancelledError";
+    this.name = 'AttemptCancelledError';
   }
 }
 
 export class AttemptSupersededError extends Error {
-  constructor(message = "Attempt was superseded before commit.") {
+  constructor(message = 'Attempt was superseded before commit.') {
     super(message);
-    this.name = "AttemptSupersededError";
+    this.name = 'AttemptSupersededError';
   }
 }
 
@@ -118,20 +122,23 @@ export class Attempt<T> {
         resolve,
         reject,
         cleanup() {
-          if (abortListener) options.signal?.removeEventListener("abort", abortListener);
+          if (abortListener) options.signal?.removeEventListener('abort', abortListener);
           abortListener = undefined;
-        }
+        },
       };
       this.waiters.set(waiterId, waiter);
 
       abortListener = () => {
-        this.leaveWaiter(waiterId, abortReason(options.signal) ?? new AttemptCancelledError("Attempt waiter was cancelled."));
+        this.leaveWaiter(
+          waiterId,
+          abortReason(options.signal) ?? new AttemptCancelledError('Attempt waiter was cancelled.'),
+        );
       };
       if (options.signal?.aborted) {
         abortListener();
         return;
       }
-      options.signal?.addEventListener("abort", abortListener, { once: true });
+      options.signal?.addEventListener('abort', abortListener, { once: true });
 
       this.resultPromise.then(
         (value) => {
@@ -147,13 +154,13 @@ export class Attempt<T> {
           waiter.cleanup();
           this.waiters.delete(waiterId);
           reject(error instanceof Error ? error : new Error(String(error)));
-        }
+        },
       );
     });
 
     return {
       promise,
-      leave: () => this.leaveWaiter(waiterId, new AttemptCancelledError("Attempt waiter left before completion."))
+      leave: () => this.leaveWaiter(waiterId, new AttemptCancelledError('Attempt waiter left before completion.')),
     };
   }
 
@@ -178,7 +185,7 @@ export class Attempt<T> {
   private async installIfCurrent(value: T): Promise<T> {
     if (this.abortController.signal.aborted) {
       await this.closeProducedValue(value);
-      throw new AttemptCancelledError("Attempt produced a value after cancellation.");
+      throw new AttemptCancelledError('Attempt produced a value after cancellation.');
     }
     if (this.owner.current !== this) {
       await this.closeProducedValue(value);
@@ -230,7 +237,7 @@ export class Attempt<T> {
 
 export async function isCurrentWriterToken<TToken extends CurrentWriterToken>(
   provider: TenancyFenceProvider<TToken>,
-  expected: TToken
+  expected: TToken,
 ): Promise<boolean> {
   const current = await provider.currentWriterToken();
   return current !== undefined && currentWriterTokensEqual(current, expected);
@@ -246,5 +253,5 @@ export function currentWriterTokensEqual(left: CurrentWriterToken, right: Curren
 }
 
 function abortReason(signal: AbortSignal | undefined): unknown {
-  return signal && "reason" in signal ? signal.reason : undefined;
+  return signal && 'reason' in signal ? signal.reason : undefined;
 }

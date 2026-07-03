@@ -1,9 +1,9 @@
-import fs from "node:fs";
-import path from "node:path";
-import { UsageError } from "../errors.js";
-import { optsidianCacheRoot } from "./cache-root.js";
-import { isPrivatePathError, writePrivateFileAtomicSync } from "./private-path.js";
-import type { SearchIndexWarmAccessStatus } from "./types.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { UsageError } from '../errors.js';
+import { optsidianCacheRoot } from './cache-root.js';
+import { isPrivatePathError, writePrivateFileAtomicSync } from './private-path.js';
+import type { SearchIndexWarmAccessStatus } from './types.js';
 
 export type VaultAccessEntry = {
   realpath: string;
@@ -22,8 +22,8 @@ type VaultAccessOptions = {
 };
 
 const VAULT_ACCESS_SCHEMA_VERSION = 1;
-const VAULT_ACCESS_FILE = "vault-access.json";
-const VAULT_ACCESS_MAX_AGE_DAYS_ENV = "OPTSIDIAN_SEARCH_VAULT_ACCESS_MAX_AGE_DAYS";
+const VAULT_ACCESS_FILE = 'vault-access.json';
+const VAULT_ACCESS_MAX_AGE_DAYS_ENV = 'OPTSIDIAN_SEARCH_VAULT_ACCESS_MAX_AGE_DAYS';
 const DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS = 7;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const VAULT_ACCESS_MAX_ENTRIES = 200;
@@ -43,7 +43,7 @@ export function recordVaultAccess(vaultRoot: string, options: VaultAccessOptions
     entries.set(realpath, {
       realpath,
       lastAccessAtMs: nowMs,
-      lastAccessAt: new Date(nowMs).toISOString()
+      lastAccessAt: new Date(nowMs).toISOString(),
     });
     writeVaultAccessFile(statePath, [...entries.values()], nowMs, maxAgeMs);
     return realpath;
@@ -87,7 +87,7 @@ export function vaultAccessStatus(vaultRoot: string, options: VaultAccessOptions
     return {
       path: statePath,
       recent: false,
-      maxAgeDays
+      maxAgeDays,
     };
   }
 
@@ -98,7 +98,7 @@ export function vaultAccessStatus(vaultRoot: string, options: VaultAccessOptions
     recent: ageMs <= maxAgeMs,
     maxAgeDays,
     lastAccessAt: entry.lastAccessAt,
-    expiresAt: new Date(expiresAtMs).toISOString()
+    expiresAt: new Date(expiresAtMs).toISOString(),
   };
 }
 
@@ -115,7 +115,7 @@ function recentVaultEntries(entries: readonly VaultAccessEntry[], nowMs: number,
 
 function readVaultAccessFile(filePath: string): VaultAccessFile | undefined {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
     if (!isVaultAccessFile(parsed)) return undefined;
     return parsed;
   } catch {
@@ -123,19 +123,32 @@ function readVaultAccessFile(filePath: string): VaultAccessFile | undefined {
   }
 }
 
-function writeVaultAccessFile(filePath: string, entries: readonly VaultAccessEntry[], nowMs: number, maxAgeMs: number): void {
+function writeVaultAccessFile(
+  filePath: string,
+  entries: readonly VaultAccessEntry[],
+  nowMs: number,
+  maxAgeMs: number,
+): void {
   const vaults = recentVaultEntries(entries, nowMs, maxAgeMs);
-  writePrivateFileAtomicSync(filePath, `${JSON.stringify({
-    schemaVersion: VAULT_ACCESS_SCHEMA_VERSION,
-    vaults
-  }, null, 2)}\n`, "Optsidian vault access file");
+  writePrivateFileAtomicSync(
+    filePath,
+    `${JSON.stringify(
+      {
+        schemaVersion: VAULT_ACCESS_SCHEMA_VERSION,
+        vaults,
+      },
+      null,
+      2,
+    )}\n`,
+    'Optsidian vault access file',
+  );
 }
 
 function vaultAccessMaxAgeDays(env: NodeJS.ProcessEnv): number {
   return parsePositiveInteger(
     env[VAULT_ACCESS_MAX_AGE_DAYS_ENV],
     DEFAULT_VAULT_ACCESS_MAX_AGE_DAYS,
-    VAULT_ACCESS_MAX_AGE_DAYS_ENV
+    VAULT_ACCESS_MAX_AGE_DAYS_ENV,
   );
 }
 
@@ -148,7 +161,7 @@ function maxAgeDaysToMs(days: number): number {
 }
 
 function parsePositiveInteger(raw: string | undefined, fallback: number, name: string): number {
-  if (raw === undefined || raw.trim() === "") return fallback;
+  if (raw === undefined || raw.trim() === '') return fallback;
   if (!/^\d+$/.test(raw)) throw new UsageError(`${name} must be a positive integer`);
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new UsageError(`${name} must be a positive integer`);
@@ -167,14 +180,14 @@ function isVaultAccessFile(value: unknown): value is VaultAccessFile {
 function isVaultAccessEntry(value: unknown): value is VaultAccessEntry {
   return (
     isRecord(value) &&
-    typeof value.realpath === "string" &&
+    typeof value.realpath === 'string' &&
     value.realpath.length > 0 &&
-    typeof value.lastAccessAtMs === "number" &&
+    typeof value.lastAccessAtMs === 'number' &&
     Number.isFinite(value.lastAccessAtMs) &&
-    typeof value.lastAccessAt === "string"
+    typeof value.lastAccessAt === 'string'
   );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

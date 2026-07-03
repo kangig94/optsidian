@@ -1,8 +1,8 @@
-import type { SearchTokenChannel } from "../../analysis/index.js";
-import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1, SEARCH_TOKEN_CHANNEL_WEIGHT } from "../../constants.js";
-import { SEARCH_FIELD_CHANNEL_BOOST } from "../../schema.js";
-import type { SearchField } from "../../../types.js";
-import { POSITIONAL_FIELD_BY_ID, POSITIONAL_FIELD_ID, type PositionalDocId, type PositionalFieldId } from "./types.js";
+import type { SearchTokenChannel } from '../../analysis/index.js';
+import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1, SEARCH_TOKEN_CHANNEL_WEIGHT } from '../../constants.js';
+import { SEARCH_FIELD_CHANNEL_BOOST } from '../../schema.js';
+import type { SearchField } from '../../../types.js';
+import { POSITIONAL_FIELD_BY_ID, POSITIONAL_FIELD_ID, type PositionalDocId, type PositionalFieldId } from './types.js';
 
 export type Bm25DocumentFieldInput = {
   fieldId?: PositionalFieldId;
@@ -43,7 +43,7 @@ type MutableFieldStats = {
 export function computeFieldBm25Stats(documents: readonly Bm25DocumentInput[]): Bm25Stats {
   const fields = new Map<PositionalFieldId, MutableFieldStats>();
   for (const document of documents) {
-    assertNonNegativeInteger(document.docId, "docId");
+    assertNonNegativeInteger(document.docId, 'docId');
     for (const inputField of document.fields) {
       const fieldId = fieldIdForInput(inputField);
       const fieldName = inputField.field ?? POSITIONAL_FIELD_BY_ID[fieldId];
@@ -54,9 +54,9 @@ export function computeFieldBm25Stats(documents: readonly Bm25DocumentInput[]): 
         totalFieldLength: 0,
         documentLengths: new Map<PositionalDocId, number>(),
         documentFrequency: new Map<string, number>(),
-        termFrequency: new Map<string, Map<PositionalDocId, number>>()
+        termFrequency: new Map<string, Map<PositionalDocId, number>>(),
       };
-      const terms = inputField.tokens.map((term) => term.normalize("NFC").trim()).filter(Boolean);
+      const terms = inputField.tokens.map((term) => term.normalize('NFC').trim()).filter(Boolean);
       stats.documentCount += 1;
       stats.totalFieldLength += terms.length;
       stats.documentLengths.set(document.docId, terms.length);
@@ -81,10 +81,10 @@ export function computeFieldBm25Stats(documents: readonly Bm25DocumentInput[]): 
           fieldId,
           freezeFieldStats({
             ...stats,
-            averageFieldLength: stats.documentCount > 0 ? stats.totalFieldLength / stats.documentCount : 0
-          })
-        ])
-    )
+            averageFieldLength: stats.documentCount > 0 ? stats.totalFieldLength / stats.documentCount : 0,
+          }),
+        ]),
+    ),
   };
 }
 
@@ -97,11 +97,11 @@ export function bm25TermScore(
     k1?: number;
     b?: number;
     d?: number;
-  } = {}
+  } = {},
 ): number {
   const field = stats.fields.get(fieldId);
   if (!field) return 0;
-  const normalizedTerm = term.normalize("NFC").trim();
+  const normalizedTerm = term.normalize('NFC').trim();
   const frequency = field.termFrequency.get(normalizedTerm)?.get(docId) ?? 0;
   if (frequency <= 0) return 0;
   const documentFrequency = field.documentFrequency.get(normalizedTerm) ?? 0;
@@ -125,7 +125,7 @@ export function bm25FieldScore(
     k1?: number;
     b?: number;
     d?: number;
-  } = {}
+  } = {},
 ): number {
   return terms.reduce((sum, term) => sum + bm25TermScore(stats, term, docId, fieldId, options), 0);
 }
@@ -135,7 +135,7 @@ export function boostedBm25FieldScore(
   terms: readonly string[],
   docId: PositionalDocId,
   field: SearchField,
-  channel: SearchTokenChannel
+  channel: SearchTokenChannel,
 ): number {
   const fieldId = POSITIONAL_FIELD_ID[field];
   return bm25FieldScore(stats, terms, docId, fieldId) * fieldChannelBm25Boost(channel, field);
@@ -152,7 +152,7 @@ export function tokenChannelFusionWeight(channel: SearchTokenChannel): number {
 export function bm25TermStats(
   stats: Bm25Stats,
   term: string,
-  fieldId: PositionalFieldId
+  fieldId: PositionalFieldId,
 ): {
   documentFrequency: number;
   documentCount: number;
@@ -160,16 +160,16 @@ export function bm25TermStats(
 } {
   const field = stats.fields.get(fieldId);
   return {
-    documentFrequency: field?.documentFrequency.get(term.normalize("NFC").trim()) ?? 0,
+    documentFrequency: field?.documentFrequency.get(term.normalize('NFC').trim()) ?? 0,
     documentCount: field?.documentCount ?? 0,
-    averageFieldLength: field?.averageFieldLength ?? 0
+    averageFieldLength: field?.averageFieldLength ?? 0,
   };
 }
 
 function fieldIdForInput(input: Bm25DocumentFieldInput): PositionalFieldId {
   if (input.field !== undefined) return POSITIONAL_FIELD_ID[input.field];
-  if (input.fieldId === undefined) throw new Error("BM25 field input needs field or fieldId");
-  assertNonNegativeInteger(input.fieldId, "fieldId");
+  if (input.fieldId === undefined) throw new Error('BM25 field input needs field or fieldId');
+  assertNonNegativeInteger(input.fieldId, 'fieldId');
   return input.fieldId;
 }
 
@@ -181,12 +181,17 @@ function freezeFieldStats(stats: MutableFieldStats & { averageFieldLength: numbe
     totalFieldLength: stats.totalFieldLength,
     averageFieldLength: stats.averageFieldLength,
     documentLengths: new Map([...stats.documentLengths.entries()].sort(([left], [right]) => left - right)),
-    documentFrequency: new Map([...stats.documentFrequency.entries()].sort(([left], [right]) => left.localeCompare(right))),
+    documentFrequency: new Map(
+      [...stats.documentFrequency.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    ),
     termFrequency: new Map(
       [...stats.termFrequency.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([term, frequencies]) => [term, new Map([...frequencies.entries()].sort(([left], [right]) => left - right))])
-    )
+        .map(([term, frequencies]) => [
+          term,
+          new Map([...frequencies.entries()].sort(([left], [right]) => left - right)),
+        ]),
+    ),
   };
 }
 

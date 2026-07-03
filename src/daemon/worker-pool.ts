@@ -1,11 +1,11 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { Worker, type TransferListItem } from "node:worker_threads";
-import type { SearchIndexProgressUpdate } from "./protocol.js";
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Worker, type TransferListItem } from 'node:worker_threads';
+import type { SearchIndexProgressUpdate } from './protocol.js';
 
-export type DaemonWorkerKind = "analyzer" | "search" | "embedding" | "vector";
+export type DaemonWorkerKind = 'analyzer' | 'search' | 'embedding' | 'vector';
 
 export type DaemonWorkerRequest = {
   type: string;
@@ -145,8 +145,8 @@ export class DaemonWorkerPool {
     const heapGuardBytes =
       options.heapGuardBytes ??
       options.memoryLimitBytes ??
-      envBytes(env, "OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB") ??
-      envBytes(env, "OPTSIDIAN_SEARCH_WORKER_MEMORY_MB") ??
+      envBytes(env, 'OPTSIDIAN_SEARCH_WORKER_HEAP_GUARD_MB') ??
+      envBytes(env, 'OPTSIDIAN_SEARCH_WORKER_MEMORY_MB') ??
       DEFAULT_WORKER_HEAP_GUARD_BYTES;
     this.options = {
       env,
@@ -158,10 +158,13 @@ export class DaemonWorkerPool {
       ...options,
       memoryLimitBytes: heapGuardBytes,
       heapGuardBytes,
-      rssGuardBytes: options.rssGuardBytes ?? envBytes(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB") ?? 0,
-      rssGuardStrikes: options.rssGuardStrikes ?? envNumber(env, "OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES") ?? DEFAULT_RSS_GUARD_STRIKES,
+      rssGuardBytes: options.rssGuardBytes ?? envBytes(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB') ?? 0,
+      rssGuardStrikes:
+        options.rssGuardStrikes ??
+        envNumber(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES') ??
+        DEFAULT_RSS_GUARD_STRIKES,
       rssGuardExempt: options.rssGuardExempt ?? false,
-      size
+      size,
     };
     for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(0));
   }
@@ -184,13 +187,14 @@ export class DaemonWorkerPool {
         .filter((slot) => !slot.readyState && !slot.restarting)
         .map((slot) => slot.ready.catch(() => undefined));
       if (pending.length === 0) {
-        if (this.slots.length < target) throw this.lastReadyError ?? poolError("INTERNAL", `${this.options.name} pool has no warmable workers`);
+        if (this.slots.length < target)
+          throw this.lastReadyError ?? poolError('INTERNAL', `${this.options.name} pool has no warmable workers`);
         await delay(10);
       } else {
         await Promise.race(pending);
       }
     }
-    throw poolError("INTERNAL", `${this.options.name} pool is closed`);
+    throw poolError('INTERNAL', `${this.options.name} pool is closed`);
   }
 
   cancel(cancellationId: string): void {
@@ -199,14 +203,14 @@ export class DaemonWorkerPool {
       const item = this.queue[index];
       if (item.options.cancellationId !== cancellationId) continue;
       this.queue.splice(index, 1);
-      this.rejectItem(item, "CANCELLED", "worker job was cancelled before execution");
+      this.rejectItem(item, 'CANCELLED', 'worker job was cancelled before execution');
     }
     for (const slot of this.slots) {
       const item = slot.busy;
       if (!item || item.options.cancellationId !== cancellationId) continue;
-      this.rejectItem(item, "CANCELLED", "worker job was cancelled during execution");
+      this.rejectItem(item, 'CANCELLED', 'worker job was cancelled during execution');
       slot.busy = undefined;
-      this.restartSlot(slot, undefined, undefined, "cancelled");
+      this.restartSlot(slot, undefined, undefined, 'cancelled');
     }
   }
 
@@ -255,20 +259,23 @@ export class DaemonWorkerPool {
   }
 
   private enqueue<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, targetSlotId?: number): Promise<T> {
-    if (this.closed) return Promise.reject(poolError("INTERNAL", `${this.options.name} pool is closed`));
+    if (this.closed) return Promise.reject(poolError('INTERNAL', `${this.options.name} pool is closed`));
     if (Date.now() >= options.deadline) {
-      return Promise.reject(poolError("DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before admission`));
+      return Promise.reject(
+        poolError('DEADLINE_EXCEEDED', `${this.options.name} queue deadline expired before admission`),
+      );
     }
     if (this.cancelled.has(options.cancellationId)) {
-      return Promise.reject(poolError("CANCELLED", `${this.options.name} request was cancelled before admission`));
+      return Promise.reject(poolError('CANCELLED', `${this.options.name} request was cancelled before admission`));
     }
     if (this.queue.length >= this.options.maxQueueSize && this.idleSlot() === undefined) {
-      return Promise.reject(poolError("BACKPRESSURE", `${this.options.name} queue is full`));
+      return Promise.reject(poolError('BACKPRESSURE', `${this.options.name} queue is full`));
     }
     let target: WorkerSlot | undefined;
     if (targetSlotId !== undefined) {
       target = this.slots.find((slot) => slot.id === targetSlotId);
-      if (!target) return Promise.reject(poolError("INTERNAL", `${this.options.name} target worker is no longer available`));
+      if (!target)
+        return Promise.reject(poolError('INTERNAL', `${this.options.name} target worker is no longer available`));
       this.startWarmup(target);
     } else {
       for (const slot of this.slots) this.startWarmup(slot);
@@ -282,7 +289,7 @@ export class DaemonWorkerPool {
         resolve,
         reject,
         crashAttempts: 0,
-        targetSlotId
+        targetSlotId,
       };
       this.armDeadline(item);
       if (target?.leased && target.readyState && !target.busy && !target.restarting) {
@@ -300,7 +307,7 @@ export class DaemonWorkerPool {
     this.closed = true;
     while (this.queue.length > 0) {
       const item = this.queue.shift();
-      if (item) this.rejectItem(item, "CANCELLED", `${this.options.name} pool is closing`);
+      if (item) this.rejectItem(item, 'CANCELLED', `${this.options.name} pool is closing`);
     }
     await Promise.all(this.slots.map((slot) => slot.worker.terminate().catch(() => 0)));
   }
@@ -334,8 +341,8 @@ export class DaemonWorkerPool {
         rssGuardStrikes: slot.rssGuardStrikes,
         lastMemory: slot.lastMemory,
         lastRestartReason: slot.lastRestartReason,
-        lastRestartAt: slot.lastRestartAt
-      }))
+        lastRestartAt: slot.lastRestartAt,
+      })),
     };
   }
 
@@ -353,10 +360,10 @@ export class DaemonWorkerPool {
         kind: this.options.kind,
         poolName: this.options.name,
         env: this.options.env,
-        microbatchSize: this.options.microbatchSize
+        microbatchSize: this.options.microbatchSize,
       },
       env: this.options.env,
-      execArgv: workerExecArgv()
+      execArgv: workerExecArgv(),
     });
     const slot: WorkerSlot = {
       id,
@@ -370,17 +377,19 @@ export class DaemonWorkerPool {
       warmupResult: undefined,
       restartAttempts,
       completedJobs: 0,
-      rssGuardStrikes: 0
+      rssGuardStrikes: 0,
     };
     const readyCallbacks: ReadyCallbacks = { resolveReady, rejectReady };
-    worker.on("message", (message: unknown) => this.handleMessage(slot, message as WorkerReply, readyCallbacks));
-    worker.on("error", (error) => {
+    worker.on('message', (message: unknown) => {
+      this.handleMessage(slot, message as WorkerReply, readyCallbacks);
+    });
+    worker.on('error', (error) => {
       const workerError = error instanceof Error ? error : new Error(String(error));
       this.handleWorkerFailure(slot, workerError, readyCallbacks);
     });
-    worker.on("exit", (code) => {
+    worker.on('exit', (code) => {
       if (this.closed || slot.restarting) return;
-      const error = poolError("INTERNAL", `${this.options.name} worker exited with code ${code}`);
+      const error = poolError('INTERNAL', `${this.options.name} worker exited with code ${code}`);
       this.handleWorkerFailure(slot, error, readyCallbacks);
     });
     if (this.options.autoWarmup) this.startWarmup(slot);
@@ -390,18 +399,18 @@ export class DaemonWorkerPool {
   private startWarmup(slot: WorkerSlot): void {
     if (slot.warmupStarted || slot.readyState || slot.restarting) return;
     slot.warmupStarted = true;
-    this.postToWorker(slot, { id: 0, request: { type: "warmup" } });
+    this.postToWorker(slot, { id: 0, request: { type: 'warmup' } });
   }
 
   private recordMemory(slot: WorkerSlot, message: WorkerReply): void {
     slot.lastMemory = message.memory ?? {
-      rss: message.memoryRss
+      rss: message.memoryRss,
     };
   }
 
   private handleMessage(slot: WorkerSlot, message: WorkerReply, readyCallbacks: ReadyCallbacks): void {
     this.recordMemory(slot, message);
-    if ("progress" in message) {
+    if ('progress' in message) {
       const item = slot.busy;
       if (item && item.id === message.id) item.options.onProgress?.(message.progress);
       return;
@@ -414,7 +423,11 @@ export class DaemonWorkerPool {
         readyCallbacks.resolveReady();
         this.drain();
       } else {
-        this.handleWarmupFailure(slot, poolError(message.error.code ?? "INTERNAL", message.error.message), readyCallbacks);
+        this.handleWarmupFailure(
+          slot,
+          poolError(message.error.code ?? 'INTERNAL', message.error.message),
+          readyCallbacks,
+        );
       }
       return;
     }
@@ -430,7 +443,7 @@ export class DaemonWorkerPool {
       const restartReason = memoryRestartReason(message, slot, this.options);
       if (restartReason) this.restartSlot(slot, undefined, undefined, restartReason);
     } else {
-      item.reject(poolError(message.error.code ?? "INTERNAL", message.error.message));
+      item.reject(poolError(message.error.code ?? 'INTERNAL', message.error.message));
     }
     this.drain();
   }
@@ -460,7 +473,9 @@ export class DaemonWorkerPool {
         this.armDeadline(item);
         this.queue.unshift(item);
       } else {
-        item.reject(poolError("INTERNAL", `${this.options.name} worker crash retry budget exhausted: ${error.message}`));
+        item.reject(
+          poolError('INTERNAL', `${this.options.name} worker crash retry budget exhausted: ${error.message}`),
+        );
       }
     }
     this.restartSlot(slot, error, readyCallbacks, error.message);
@@ -468,7 +483,7 @@ export class DaemonWorkerPool {
 
   private restartSlot(slot: WorkerSlot, error?: Error, readyCallbacks?: ReadyCallbacks, reason?: string): void {
     const previousSlotId = slot.id;
-    const restartError = error ?? poolError("INTERNAL", `${this.options.name} worker restart failed`);
+    const restartError = error ?? poolError('INTERNAL', `${this.options.name} worker restart failed`);
     if (this.closed) {
       readyCallbacks?.rejectReady(restartError);
       return;
@@ -477,7 +492,7 @@ export class DaemonWorkerPool {
     const plan = this.restartPlan(slot);
     slot.restarting = true;
     slot.leased = false;
-    const restartReason = reason ?? error?.message ?? "restart";
+    const restartReason = reason ?? error?.message ?? 'restart';
     const restartedAt = new Date().toISOString();
     slot.lastRestartReason = restartReason;
     slot.lastRestartAt = restartedAt;
@@ -486,32 +501,43 @@ export class DaemonWorkerPool {
     this.lastRestartAt = restartedAt;
     if (!plan) {
       this.retargetQueuedItems(previousSlotId);
-      void slot.worker.terminate().catch(() => 0).finally(() => {
-        const index = this.slots.indexOf(slot);
-        if (index >= 0) this.slots.splice(index, 1);
-      });
+      void slot.worker
+        .terminate()
+        .catch(() => 0)
+        .finally(() => {
+          const index = this.slots.indexOf(slot);
+          if (index >= 0) this.slots.splice(index, 1);
+        });
       readyCallbacks?.rejectReady(restartError);
       return;
     }
-    void slot.worker.terminate().catch(() => 0).finally(() => {
-      const index = this.slots.indexOf(slot);
-      if (index >= 0 && !this.closed) {
-        const timer = setTimeout(() => {
-          if (this.closed) {
-            readyCallbacks?.rejectReady(restartError);
-            return;
-          }
-          const replacement = this.createSlot(plan.restartAttempts);
-          this.slots[index] = replacement;
-          this.retargetQueuedItems(previousSlotId, replacement.id);
-          if (readyCallbacks) void replacement.ready.then(readyCallbacks.resolveReady, readyCallbacks.rejectReady);
-          void replacement.ready.then(() => this.drain(), () => {});
-        }, plan.delayMs);
-        timer.unref();
-      } else {
-        readyCallbacks?.rejectReady(restartError);
-      }
-    });
+    void slot.worker
+      .terminate()
+      .catch(() => 0)
+      .finally(() => {
+        const index = this.slots.indexOf(slot);
+        if (index >= 0 && !this.closed) {
+          const timer = setTimeout(() => {
+            if (this.closed) {
+              readyCallbacks?.rejectReady(restartError);
+              return;
+            }
+            const replacement = this.createSlot(plan.restartAttempts);
+            this.slots[index] = replacement;
+            this.retargetQueuedItems(previousSlotId, replacement.id);
+            if (readyCallbacks) void replacement.ready.then(readyCallbacks.resolveReady, readyCallbacks.rejectReady);
+            void replacement.ready.then(
+              () => {
+                this.drain();
+              },
+              () => {},
+            );
+          }, plan.delayMs);
+          timer.unref();
+        } else {
+          readyCallbacks?.rejectReady(restartError);
+        }
+      });
   }
 
   private retargetQueuedItems(previousSlotId: number, nextSlotId?: number): void {
@@ -534,11 +560,11 @@ export class DaemonWorkerPool {
 
   private dispatchItem(slot: WorkerSlot, item: QueueItem<unknown>): void {
     if (Date.now() >= item.options.deadline) {
-      this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} queue deadline expired before execution`);
+      this.rejectItem(item, 'DEADLINE_EXCEEDED', `${this.options.name} queue deadline expired before execution`);
       return;
     }
     if (this.cancelled.has(item.options.cancellationId)) {
-      this.rejectItem(item, "CANCELLED", `${this.options.name} request was cancelled before execution`);
+      this.rejectItem(item, 'CANCELLED', `${this.options.name} request was cancelled before execution`);
       return;
     }
     slot.busy = item;
@@ -556,11 +582,13 @@ export class DaemonWorkerPool {
     const targeted = this.dequeueTargetedRunnable(slot);
     if (targeted) return targeted;
     const runnable = this.queue.filter((item) => item.targetSlotId === undefined);
-    const vaults = [...new Set(runnable.map((item) => item.options.vault ?? ""))];
+    const vaults = [...new Set(runnable.map((item) => item.options.vault ?? ''))];
     const start = this.lastVault === undefined ? 0 : Math.max(0, vaults.indexOf(this.lastVault) + 1);
     const orderedVaults = [...vaults.slice(start), ...vaults.slice(0, start)];
     for (const vault of orderedVaults) {
-      const index = this.queue.findIndex((item) => item.targetSlotId === undefined && (item.options.vault ?? "") === vault);
+      const index = this.queue.findIndex(
+        (item) => item.targetSlotId === undefined && (item.options.vault ?? '') === vault,
+      );
       if (index < 0) continue;
       const [item] = this.queue.splice(index, 1);
       this.lastVault = vault;
@@ -598,16 +626,24 @@ export class DaemonWorkerPool {
   private armDeadline(item: QueueItem<unknown>): void {
     this.clearDeadline(item);
     const remaining = item.options.deadline - Date.now();
-    item.timer = setTimeout(() => {
-      const queuedIndex = this.queue.indexOf(item);
-      if (queuedIndex >= 0) this.queue.splice(queuedIndex, 1);
-      for (const slot of this.slots) {
-        if (slot.busy !== item) continue;
-        slot.busy = undefined;
-        this.restartSlot(slot, poolError("DEADLINE_EXCEEDED", `${this.options.name} deadline expired`), undefined, "deadline");
-      }
-      this.rejectItem(item, "DEADLINE_EXCEEDED", `${this.options.name} deadline expired`);
-    }, Math.max(1, remaining));
+    item.timer = setTimeout(
+      () => {
+        const queuedIndex = this.queue.indexOf(item);
+        if (queuedIndex >= 0) this.queue.splice(queuedIndex, 1);
+        for (const slot of this.slots) {
+          if (slot.busy !== item) continue;
+          slot.busy = undefined;
+          this.restartSlot(
+            slot,
+            poolError('DEADLINE_EXCEEDED', `${this.options.name} deadline expired`),
+            undefined,
+            'deadline',
+          );
+        }
+        this.rejectItem(item, 'DEADLINE_EXCEEDED', `${this.options.name} deadline expired`);
+      },
+      Math.max(1, remaining),
+    );
     item.timer.unref();
   }
 
@@ -637,7 +673,7 @@ export class DaemonWorkerPool {
       const restartAttempts = slot.restartAttempts + 1;
       return {
         restartAttempts,
-        delayMs: restartBackoffMs(restartAttempts)
+        delayMs: restartBackoffMs(restartAttempts),
       };
     }
     return undefined;
@@ -664,9 +700,9 @@ export function optionalWorkerCountFromEnv(env: NodeJS.ProcessEnv, key: string):
 }
 
 function defaultWorkerScript(): string {
-  const distCli = path.resolve(process.cwd(), "dist", "optsidian");
+  const distCli = path.resolve(process.cwd(), 'dist', 'optsidian');
   if (fs.existsSync(distCli)) return distCli;
-  const sourceCli = fileURLToPath(new URL("../cli.ts", import.meta.url));
+  const sourceCli = fileURLToPath(new URL('../cli.ts', import.meta.url));
   if (fs.existsSync(sourceCli)) return sourceCli;
   const bundled = process.argv[1];
   if (bundled && fs.existsSync(bundled)) return bundled;
@@ -674,7 +710,7 @@ function defaultWorkerScript(): string {
 }
 
 function workerExecArgv(): string[] {
-  return process.execArgv.filter((arg) => arg === "--import" || arg === "tsx" || arg.endsWith("/tsx"));
+  return process.execArgv.filter((arg) => arg === '--import' || arg === 'tsx' || arg.endsWith('/tsx'));
 }
 
 function envBytes(env: NodeJS.ProcessEnv, key: string): number | undefined {
@@ -692,10 +728,10 @@ function envNumber(env: NodeJS.ProcessEnv, key: string): number | undefined {
 function memoryRestartReason(
   message: WorkerReply,
   slot: WorkerSlot,
-  options: Required<WorkerPoolOptions>
+  options: Required<WorkerPoolOptions>,
 ): string | undefined {
   const heapUsed = message.memory?.heapUsed;
-  if (typeof heapUsed === "number" && heapUsed > options.heapGuardBytes) {
+  if (typeof heapUsed === 'number' && heapUsed > options.heapGuardBytes) {
     return `heap guard exceeded (${heapUsed} > ${options.heapGuardBytes})`;
   }
   const rss = message.memory?.rss ?? message.memoryRss;

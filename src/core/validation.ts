@@ -1,5 +1,5 @@
-import { UsageError } from "../errors.js";
-import type { LineRange } from "./types.js";
+import { UsageError } from '../errors.js';
+import type { LineRange } from './types.js';
 
 export function assertPositiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 1) {

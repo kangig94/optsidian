@@ -1,12 +1,12 @@
-import type { EmbeddingSetId } from "../../core/search/contracts.js";
-import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from "../../core/search/dense/index.js";
+import type { EmbeddingSetId } from '../../core/search/contracts.js';
+import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from '../../core/search/dense/index.js';
 
 export type VectorStoreKey = {
   vaultStateHash: string;
   embeddingSetId: EmbeddingSetId;
 };
 
-export type VectorStoreRole = "query" | "staging";
+export type VectorStoreRole = 'query' | 'staging';
 
 export type CoralEmbeddingSpec = {
   specId: string;
@@ -47,8 +47,11 @@ export interface CoralNeedleBinding {
   initStore(dbPath: string): void | Promise<void>;
   setActiveSpec(spec: CoralEmbeddingSpec): void | Promise<void>;
   upsertChunks(chunks: readonly CoralChunkRecord[]): void | Promise<void>;
-  buildIndex(engineName?: "auto" | string): void | Promise<void>;
-  searchVector(queryVector: readonly number[] | Float32Array, candidateK: number): CoralSearchResult[] | Promise<CoralSearchResult[]>;
+  buildIndex(engineName?: 'auto' | string): void | Promise<void>;
+  searchVector(
+    queryVector: readonly number[] | Float32Array,
+    candidateK: number,
+  ): CoralSearchResult[] | Promise<CoralSearchResult[]>;
   close(): void | Promise<void>;
   getStats?(): CoralStoreStats | Promise<CoralStoreStats>;
 }
@@ -77,7 +80,7 @@ export type VectorGenerationMetadata = {
   dbPath: string;
   spec: CoralEmbeddingSpec;
   chunkCount: number;
-  builtEngine: "auto" | string;
+  builtEngine: 'auto' | string;
   createdAt: string;
   embeddingSetId: EmbeddingSetId;
   embeddingSpaceId?: EmbeddingSpaceId;

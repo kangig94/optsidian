@@ -1,9 +1,9 @@
-import crypto from "node:crypto";
-import path from "node:path";
-import { optsidianCacheRoot } from "../../core/cache-root.js";
-import { vaultRealpath } from "../../core/path.js";
-import { safeStoreFileName } from "../search-store/cache-paths.js";
-import type { VectorStoreKey } from "./types.js";
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { optsidianCacheRoot } from '../../core/cache-root.js';
+import { vaultRealpath } from '../../core/path.js';
+import { safeStoreFileName } from '../search-store/cache-paths.js';
+import type { VectorStoreKey } from './types.js';
 
 export type VectorStoreCachePaths = {
   vaultRoot: string;
@@ -31,8 +31,8 @@ export function vectorStoreCachePaths(input: {
   const vaultStateHash = sha256(root).slice(0, 16);
   const embeddingSetId = safeStoreFileName(input.embeddingSetId);
   const cacheRootDir = optsidianCacheRoot(env);
-  const vectorsRootDir = path.join(cacheRootDir, "vectors");
-  const storesDir = path.join(vectorsRootDir, "stores");
+  const vectorsRootDir = path.join(cacheRootDir, 'vectors');
+  const storesDir = path.join(vectorsRootDir, 'stores');
   const vaultDir = path.join(storesDir, vaultStateHash);
   const rootDir = path.join(vaultDir, embeddingSetId);
   const key: VectorStoreKey = { vaultStateHash, embeddingSetId };
@@ -44,11 +44,11 @@ export function vectorStoreCachePaths(input: {
     storesDir,
     vaultDir,
     rootDir,
-    storeStatePath: path.join(rootDir, "store.json"),
-    generationsDir: path.join(rootDir, "generations"),
-    stagingDir: path.join(rootDir, "staging"),
-    reservationsDir: path.join(rootDir, "reservations"),
-    tmpDir: path.join(rootDir, "tmp")
+    storeStatePath: path.join(rootDir, 'store.json'),
+    generationsDir: path.join(rootDir, 'generations'),
+    stagingDir: path.join(rootDir, 'staging'),
+    reservationsDir: path.join(rootDir, 'reservations'),
+    tmpDir: path.join(rootDir, 'tmp'),
   };
 }
 
@@ -57,7 +57,7 @@ export function vectorGenerationDir(paths: VectorStoreCachePaths, manifestHash: 
 }
 
 export function vectorGenerationDbPath(paths: VectorStoreCachePaths, manifestHash: string): string {
-  return path.join(vectorGenerationDir(paths, manifestHash), "vectors.duckdb");
+  return path.join(vectorGenerationDir(paths, manifestHash), 'vectors.duckdb');
 }
 
 export function vectorStagingDir(paths: VectorStoreCachePaths, generationId: string): string {
@@ -65,9 +65,9 @@ export function vectorStagingDir(paths: VectorStoreCachePaths, generationId: str
 }
 
 export function vectorStagingDbPath(paths: VectorStoreCachePaths, generationId: string): string {
-  return path.join(vectorStagingDir(paths, generationId), "vectors.duckdb");
+  return path.join(vectorStagingDir(paths, generationId), 'vectors.duckdb');
 }
 
 function sha256(value: string): string {
-  return crypto.createHash("sha256").update(value).digest("hex");
+  return crypto.createHash('sha256').update(value).digest('hex');
 }

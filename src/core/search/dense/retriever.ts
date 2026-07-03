@@ -5,17 +5,17 @@ import type {
   RetrieverIdentity,
   RetrievalCandidate,
   RetrievalQuery,
-  ShardDocRef
-} from "../contracts.js";
+  ShardDocRef,
+} from '../contracts.js';
 import {
   cosineSimilarity,
   denseAgreementFromCosine,
   normalizeEmbeddingVector,
   type EmbeddingProvider,
-  type EmbeddingVector
-} from "./provider.js";
+  type EmbeddingVector,
+} from './provider.js';
 
-export type DenseMetric = "cosine";
+export type DenseMetric = 'cosine';
 
 export type DenseEmbeddingRecord = {
   candidateId?: string;
@@ -41,19 +41,19 @@ export type DenseRetrieverOptions = {
   limit?: number;
 };
 
-export const DENSE_RETRIEVER_VERSION = "1";
+export const DENSE_RETRIEVER_VERSION = '1';
 
 export function createDenseRetriever(options: DenseRetrieverOptions): Retriever {
-  const metric = options.metric ?? "cosine";
+  const metric = options.metric ?? 'cosine';
   const model = options.model ?? options.embeddingSet?.model ?? options.provider.identity.model;
   const retrieverIdentity: RetrieverIdentity = {
-    id: "dense",
+    id: 'dense',
     version: DENSE_RETRIEVER_VERSION,
-    parameters: { model, metric }
+    parameters: { model, metric },
   };
   return {
     retrieverIdentity,
-    retrieve: async (query) => retrieveDenseCandidates(query, retrieverIdentity, options, metric)
+    retrieve: async (query) => retrieveDenseCandidates(query, retrieverIdentity, options, metric),
   };
 }
 
@@ -61,15 +61,15 @@ async function retrieveDenseCandidates(
   query: RetrievalQuery,
   retrieverIdentity: RetrieverIdentity,
   options: DenseRetrieverOptions,
-  metric: DenseMetric
+  metric: DenseMetric,
 ): Promise<CandidateSet> {
   const embeddingSet = options.embeddingSet;
   if (!embeddingSet || embeddingSet.records.length === 0) return emptyDenseCandidateSet(query, retrieverIdentity);
-  if (metric !== "cosine") throw new Error(`unsupported dense metric: ${metric}`);
+  if (metric !== 'cosine') throw new Error(`unsupported dense metric: ${metric}`);
 
   const queryVector = normalizeEmbeddingVector(
-    query.queryVector ?? await options.provider.embed(query.rawQuery, { inputKind: "query" }),
-    options.provider.identity.dim
+    query.queryVector ?? (await options.provider.embed(query.rawQuery, { inputKind: 'query' })),
+    options.provider.identity.dim,
   );
   const candidates = embeddingSet.records
     .filter((record) => !embeddingSet.coveredDocumentIds || embeddingSet.coveredDocumentIds.has(record.documentId))
@@ -80,7 +80,7 @@ async function retrieveDenseCandidates(
       return {
         record,
         cosine,
-        denseAgreement
+        denseAgreement,
       };
     })
     .sort((left, right) => {
@@ -98,7 +98,7 @@ async function retrieveDenseCandidates(
       denseAgreement: entry.denseAgreement,
       channels: [],
       phraseMatches: [],
-      proximityMatches: []
+      proximityMatches: [],
     }));
 
   return {
@@ -106,7 +106,7 @@ async function retrieveDenseCandidates(
     snapshotId: query.snapshotId,
     retrieverIdentity,
     complete: true,
-    candidates
+    candidates,
   };
 }
 
@@ -116,7 +116,7 @@ function emptyDenseCandidateSet(query: RetrievalQuery, retrieverIdentity: Retrie
     snapshotId: query.snapshotId,
     retrieverIdentity,
     complete: true,
-    candidates: []
+    candidates: [],
   };
 }
 

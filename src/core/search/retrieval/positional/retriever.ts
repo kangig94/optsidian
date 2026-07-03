@@ -1,4 +1,4 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../analysis/index.js";
+import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../../analysis/index.js';
 import type {
   CandidateChannelRank,
   CandidateFieldScore,
@@ -9,31 +9,27 @@ import type {
   RetrieverIdentity,
   RetrievalCandidate,
   RetrievalQuery,
-  ShardDocRef
-} from "../../contracts.js";
-import type { SearchField } from "../../../types.js";
+  ShardDocRef,
+} from '../../contracts.js';
+import type { SearchField } from '../../../types.js';
 import {
   bm25TermScoreFromGlobalStats,
   bm25TermScoreFromStatsLookup,
-  type PositionalBm25StatsLookup
-} from "./snapshot.js";
-import { fieldChannelBm25Boost, tokenChannelFusionWeight } from "./bm25.js";
-import type { SearchSnapshot, SearchSnapshotSegment } from "./engine.js";
-import { normalizeTerm, phraseStartPositions } from "./postings.js";
-import { minimumTermWindow } from "./proximity.js";
-import {
-  POSITIONAL_FIELD_BY_ID,
-  POSITIONAL_FIELD_ID,
-  POSITIONAL_SEARCH_FIELDS
-} from "./types.js";
-import type { CanonicalPosting } from "../../segments/index.js";
+  type PositionalBm25StatsLookup,
+} from './snapshot.js';
+import { fieldChannelBm25Boost, tokenChannelFusionWeight } from './bm25.js';
+import type { SearchSnapshot, SearchSnapshotSegment } from './engine.js';
+import { normalizeTerm, phraseStartPositions } from './postings.js';
+import { minimumTermWindow } from './proximity.js';
+import { POSITIONAL_FIELD_BY_ID, POSITIONAL_FIELD_ID, POSITIONAL_SEARCH_FIELDS } from './types.js';
+import type { CanonicalPosting } from '../../segments/index.js';
 
 export const POSITIONAL_RETRIEVER_IDENTITY: RetrieverIdentity = {
-  id: "positional-lexical",
-  version: "3",
+  id: 'positional-lexical',
+  version: '3',
   parameters: {
-    hangulFallback: "ngram-to-morph-surface-when-empty"
-  }
+    hangulFallback: 'ngram-to-morph-surface-when-empty',
+  },
 };
 
 type CandidateBuilder = {
@@ -79,16 +75,19 @@ type SegmentProximityMatch = {
   };
 };
 
-export type QueryPostingsLookup = (segment: SearchSnapshotSegment, canonicalTerm: string) => readonly CanonicalPosting[];
+export type QueryPostingsLookup = (
+  segment: SearchSnapshotSegment,
+  canonicalTerm: string,
+) => readonly CanonicalPosting[];
 
 export function createPositionalRetriever(
   snapshot: SearchSnapshot,
   postingsLookup?: QueryPostingsLookup,
-  bm25StatsLookup?: PositionalBm25StatsLookup
+  bm25StatsLookup?: PositionalBm25StatsLookup,
 ): Retriever {
   return {
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
-    retrieve: (query) => retrievePositionalCandidates(snapshot, query, postingsLookup, bm25StatsLookup)
+    retrieve: (query) => retrievePositionalCandidates(snapshot, query, postingsLookup, bm25StatsLookup),
   };
 }
 
@@ -96,7 +95,7 @@ export function retrievePositionalCandidates(
   snapshot: SearchSnapshot,
   query: RetrievalQuery,
   postingsLookup = createQueryPostingsLookup(),
-  bm25StatsLookup?: PositionalBm25StatsLookup
+  bm25StatsLookup?: PositionalBm25StatsLookup,
 ): CandidateSet {
   const fields = allowedFields(query.fields);
   const candidateBuilders = new Map<string, CandidateBuilder>();
@@ -106,7 +105,7 @@ export function retrievePositionalCandidates(
 
   const searchChannel = (channel: SearchTokenChannel) => {
     searchedChannels.add(channel);
-    const terms = query.analysis.channels[channel].map((term) => term.normalize("NFC").trim()).filter(Boolean);
+    const terms = query.analysis.channels[channel].map((term) => term.normalize('NFC').trim()).filter(Boolean);
     if (terms.length === 0) return;
     const channelScores = scoreChannel(snapshot, channel, terms, fields, postingsLookup, bm25StatsLookup);
     channelScores.forEach((scored, index) => {
@@ -120,7 +119,7 @@ export function retrievePositionalCandidates(
         score: scored.score,
         weightedScore,
         matchedTerms: scored.matchedTerms,
-        fieldScores: scored.fieldScores
+        fieldScores: scored.fieldScores,
       });
     });
 
@@ -130,17 +129,24 @@ export function retrievePositionalCandidates(
         channel,
         field: POSITIONAL_FIELD_BY_ID[phraseMatch.fieldId],
         fieldId: phraseMatch.fieldId,
-        starts: phraseMatch.starts
+        starts: phraseMatch.starts,
       });
     }
-    for (const proximityMatch of findSegmentProximityMatches(snapshot, channel, terms, fields, query.proximityWindow, postingsLookup)) {
+    for (const proximityMatch of findSegmentProximityMatches(
+      snapshot,
+      channel,
+      terms,
+      fields,
+      query.proximityWindow,
+      postingsLookup,
+    )) {
       const segment = segmentForRef(snapshot, proximityMatch.ref);
       candidateBuilder(segment, candidateBuilders, proximityMatch.ref).proximityMatches.push({
         channel,
         field: POSITIONAL_FIELD_BY_ID[proximityMatch.fieldId],
         fieldId: proximityMatch.fieldId,
         score: proximityMatch.score,
-        window: proximityMatch.window
+        window: proximityMatch.window,
       });
     }
   };
@@ -149,7 +155,7 @@ export function retrievePositionalCandidates(
 
   if (!explicitChannels && shouldRunHangulFallback(query, channels, candidateBuilders.size, snapshot.documentCount)) {
     for (const channel of SEARCH_TOKEN_CHANNELS) {
-      if (searchedChannels.has(channel) || channel === "ngram") continue;
+      if (searchedChannels.has(channel) || channel === 'ngram') continue;
       searchChannel(channel);
     }
   }
@@ -175,9 +181,11 @@ export function retrievePositionalCandidates(
       path: candidate.path,
       rank: index + 1,
       retrievalScore: candidate.retrievalScore,
-      channels: candidate.channels.sort((left, right) => left.rank - right.rank || left.channel.localeCompare(right.channel)),
+      channels: candidate.channels.sort(
+        (left, right) => left.rank - right.rank || left.channel.localeCompare(right.channel),
+      ),
       phraseMatches: candidate.phraseMatches.sort(comparePhraseMatches),
-      proximityMatches: candidate.proximityMatches.sort(compareProximityMatches)
+      proximityMatches: candidate.proximityMatches.sort(compareProximityMatches),
     }));
 
   return {
@@ -185,7 +193,7 @@ export function retrievePositionalCandidates(
     snapshotId: snapshot.snapshotId,
     retrieverIdentity: POSITIONAL_RETRIEVER_IDENTITY,
     complete: true,
-    candidates
+    candidates,
   };
 }
 
@@ -195,7 +203,7 @@ function scoreChannel(
   terms: readonly string[],
   fields: readonly SearchField[],
   postingsLookup: QueryPostingsLookup,
-  bm25StatsLookup?: PositionalBm25StatsLookup
+  bm25StatsLookup?: PositionalBm25StatsLookup,
 ): ChannelScoredDocument[] {
   const matchedByDocument = new Map<string, MatchedDocumentFields>();
   const allowedFieldIds = new Set(fields.map((field) => POSITIONAL_FIELD_ID[field]));
@@ -208,7 +216,7 @@ function scoreChannel(
         const entry = matchedByDocument.get(key) ?? {
           ref,
           segment,
-          fieldsById: new Map<number, Map<string, number>>()
+          fieldsById: new Map<number, Map<string, number>>(),
         };
         const termFrequencies = entry.fieldsById.get(posting.fieldId) ?? new Map<string, number>();
         termFrequencies.set(term, posting.positions.length);
@@ -238,14 +246,16 @@ function scoreChannel(
     const score = fieldScores.reduce((sum, fieldScore) => sum + fieldScore.score, 0);
     if (score > 0) {
       const matchedTerms = terms.filter((term) =>
-        [...entry.fieldsById.values()].some((fieldMatched) => fieldMatched.has(term))
+        [...entry.fieldsById.values()].some((fieldMatched) => fieldMatched.has(term)),
       );
       scored.push({ ref: entry.ref, segment: entry.segment, score, matchedTerms, fieldScores });
     }
   }
   return scored.sort((left, right) => {
     if (right.score !== left.score) return right.score - left.score;
-    return documentKey(left.segment, left.ref.localDocId).localeCompare(documentKey(right.segment, right.ref.localDocId));
+    return documentKey(left.segment, left.ref.localDocId).localeCompare(
+      documentKey(right.segment, right.ref.localDocId),
+    );
   });
 }
 
@@ -256,7 +266,7 @@ function bm25TermScore(
   term: string,
   fieldId: number,
   frequency: number,
-  fieldLength: number
+  fieldLength: number,
 ): number {
   return bm25StatsLookup
     ? bm25TermScoreFromStatsLookup(bm25StatsLookup, channel, term, fieldId, frequency, fieldLength)
@@ -268,7 +278,7 @@ function findSegmentPhraseMatches(
   channel: SearchTokenChannel,
   terms: readonly string[],
   fields: readonly SearchField[],
-  postingsLookup: QueryPostingsLookup
+  postingsLookup: QueryPostingsLookup,
 ): SegmentPhraseMatch[] {
   const normalizedTerms = terms.map(normalizeTerm).filter(Boolean);
   if (normalizedTerms.length === 0) return [];
@@ -279,13 +289,15 @@ function findSegmentPhraseMatches(
     const firstPostings = postingsByTerm.get(normalizedTerms[0]) ?? [];
     for (const firstPosting of firstPostings) {
       if (!allowedFieldIds.has(firstPosting.fieldId)) continue;
-      const positionLists = normalizedTerms.map((term) => positionsFromPostings(postingsByTerm.get(term) ?? [], firstPosting.docId, firstPosting.fieldId));
+      const positionLists = normalizedTerms.map((term) =>
+        positionsFromPostings(postingsByTerm.get(term) ?? [], firstPosting.docId, firstPosting.fieldId),
+      );
       const starts = phraseStartPositions(positionLists);
       if (starts.length === 0) continue;
       matches.push({
         ref: shardDocRef(segment, firstPosting.docId),
         fieldId: firstPosting.fieldId,
-        starts
+        starts,
       });
     }
   }
@@ -298,7 +310,7 @@ function findSegmentProximityMatches(
   terms: readonly string[],
   fields: readonly SearchField[],
   maxWindow: number | undefined,
-  postingsLookup: QueryPostingsLookup
+  postingsLookup: QueryPostingsLookup,
 ): SegmentProximityMatch[] {
   const normalizedTerms = [...new Set(terms.map(normalizeTerm).filter(Boolean))];
   if (normalizedTerms.length === 0) return [];
@@ -308,7 +320,9 @@ function findSegmentProximityMatches(
     const postingsByTerm = postingsByTermForSegment(segment, channel, normalizedTerms, postingsLookup);
     for (const key of postingKeysForTermPostings(postingsByTerm, normalizedTerms)) {
       if (!allowedFieldIds.has(key.fieldId)) continue;
-      const positionLists = normalizedTerms.map((term) => positionsFromPostings(postingsByTerm.get(term) ?? [], key.localDocId, key.fieldId));
+      const positionLists = normalizedTerms.map((term) =>
+        positionsFromPostings(postingsByTerm.get(term) ?? [], key.localDocId, key.fieldId),
+      );
       const window = minimumTermWindow(positionLists);
       if (!window) continue;
       if (maxWindow !== undefined && window.width > maxWindow) continue;
@@ -316,7 +330,7 @@ function findSegmentProximityMatches(
         ref: shardDocRef(segment, key.localDocId),
         fieldId: key.fieldId,
         score: normalizedTerms.length / window.width,
-        window
+        window,
       });
     }
   }
@@ -327,7 +341,7 @@ function postingsByTermForSegment(
   segment: SearchSnapshotSegment,
   channel: SearchTokenChannel,
   terms: readonly string[],
-  postingsLookup: QueryPostingsLookup
+  postingsLookup: QueryPostingsLookup,
 ): ReadonlyMap<string, readonly CanonicalPosting[]> {
   const postings = new Map<string, readonly CanonicalPosting[]>();
   for (const term of terms) postings.set(term, postingsLookup(segment, canonicalTerm(channel, term)));
@@ -350,13 +364,17 @@ export function createQueryPostingsLookup(): QueryPostingsLookup {
   };
 }
 
-function positionsFromPostings(postings: readonly CanonicalPosting[], localDocId: number, fieldId: number): readonly number[] {
+function positionsFromPostings(
+  postings: readonly CanonicalPosting[],
+  localDocId: number,
+  fieldId: number,
+): readonly number[] {
   return postings.find((posting) => posting.docId === localDocId && posting.fieldId === fieldId)?.positions ?? [];
 }
 
 function postingKeysForTermPostings(
   postingsByTerm: ReadonlyMap<string, readonly CanonicalPosting[]>,
-  terms: readonly string[]
+  terms: readonly string[],
 ): Array<{ localDocId: number; fieldId: number }> {
   const seen = new Set<string>();
   const keys: Array<{ localDocId: number; fieldId: number }> = [];
@@ -374,7 +392,7 @@ function postingKeysForTermPostings(
 function candidateBuilder(
   segment: SearchSnapshotSegment,
   builders: Map<string, CandidateBuilder>,
-  ref: ShardDocRef
+  ref: ShardDocRef,
 ): CandidateBuilder {
   const key = shardKey(ref);
   const existing = builders.get(key);
@@ -389,7 +407,7 @@ function candidateBuilder(
     retrievalScore: 0,
     channels: [],
     phraseMatches: [],
-    proximityMatches: []
+    proximityMatches: [],
   };
   builders.set(key, builder);
   return builder;
@@ -401,12 +419,14 @@ function shardDocRef(segment: SearchSnapshotSegment, localDocId: number): ShardD
     segmentId: segment.segmentId,
     partitionId: segment.partitionId,
     localDocId,
-    documentId: document.documentId
+    documentId: document.documentId,
   };
 }
 
 function segmentForRef(snapshot: SearchSnapshot, ref: ShardDocRef): SearchSnapshotSegment {
-  const segment = snapshot.segments.find((entry) => entry.segmentId === ref.segmentId && entry.partitionId === ref.partitionId);
+  const segment = snapshot.segments.find(
+    (entry) => entry.segmentId === ref.segmentId && entry.partitionId === ref.partitionId,
+  );
   if (!segment) throw new Error(`unknown search segment ${ref.segmentId}`);
   return segment;
 }
@@ -427,7 +447,7 @@ function documentKey(segment: SearchSnapshotSegment, localDocId: number): string
 }
 
 function canonicalTerm(channel: SearchTokenChannel, term: string): string {
-  return `${channel}\u0000${term.normalize("NFC").trim()}`;
+  return `${channel}\u0000${term.normalize('NFC').trim()}`;
 }
 
 function allowedFields(fields: readonly SearchField[] | undefined): SearchField[] {
@@ -436,7 +456,7 @@ function allowedFields(fields: readonly SearchField[] | undefined): SearchField[
 
 function positionalSearchChannels(query: RetrievalQuery): readonly SearchTokenChannel[] {
   if (query.channels) return query.channels;
-  if (query.analysis.channels.ngram.length > 0 && hangulTerms(query.analysis.channels.ngram)) return ["ngram"];
+  if (query.analysis.channels.ngram.length > 0 && hangulTerms(query.analysis.channels.ngram)) return ['ngram'];
   return SEARCH_TOKEN_CHANNELS;
 }
 
@@ -444,9 +464,9 @@ function shouldRunHangulFallback(
   query: RetrievalQuery,
   channels: readonly SearchTokenChannel[],
   candidateCount: number,
-  documentCount: number
+  documentCount: number,
 ): boolean {
-  if (channels.length !== 1 || channels[0] !== "ngram") return false;
+  if (channels.length !== 1 || channels[0] !== 'ngram') return false;
   if (!hangulTerms(query.analysis.channels.ngram)) return false;
   const desired = Math.min(documentCount, query.limit ?? documentCount);
   return desired > 0 && candidateCount === 0;

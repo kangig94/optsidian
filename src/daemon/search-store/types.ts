@@ -1,71 +1,86 @@
-import crypto from "node:crypto";
-import type { SearchAnalyzerIdentity } from "../../core/search/analyzer.js";
-import type { SearchTokenChannelTerms, UnresolvedNoteLink } from "../../core/search/analysis/index.js";
-import type { CorpusSnapshotId, EmbeddingSetId, LinkGraphEdge, LinkGraphId, RetrieverPlanIdentity, RetrievalSnapshotId } from "../../core/search/contracts.js";
+import crypto from 'node:crypto';
+import type { SearchAnalyzerIdentity } from '../../core/search/analyzer.js';
+import type { SearchTokenChannelTerms, UnresolvedNoteLink } from '../../core/search/analysis/index.js';
+import type {
+  CorpusSnapshotId,
+  EmbeddingSetId,
+  LinkGraphEdge,
+  LinkGraphId,
+  RetrieverPlanIdentity,
+  RetrievalSnapshotId,
+} from '../../core/search/contracts.js';
 import type {
   EmbeddingRecipeFreshnessId,
   EmbeddingRecipeIdentity,
   EmbeddingSetRecord,
-  EmbeddingSpaceId
-} from "../../core/search/dense/index.js";
-import type { VectorStoreKey } from "../vector-store/types.js";
+  EmbeddingSpaceId,
+} from '../../core/search/dense/index.js';
+import type { VectorStoreKey } from '../vector-store/types.js';
 import {
   canonicalValueBytes,
   type CanonicalBm25FieldStats,
   type CanonicalDocumentRecord,
   type CanonicalSnapshotManifest,
-  type SnapshotIdentityTuple
-} from "../../core/search/segments/index.js";
-import type { SearchBuildDocument } from "../../core/search/markdown.js";
-import type { SearchField, SearchSnippet } from "../../core/types.js";
+  type SnapshotIdentityTuple,
+} from '../../core/search/segments/index.js';
+import type { SearchBuildDocument } from '../../core/search/markdown.js';
+import type { SearchField, SearchSnippet } from '../../core/types.js';
 
 export const SNAPSHOT_PERSISTENCE_SCHEMA = {
-  name: "optsidian.search-store.persistence",
+  name: 'optsidian.search-store.persistence',
   snapshotEnvelope: {
     fields: [
-      "schemaHash",
-      "snapshotId",
-      "corpusSnapshotId?",
-      "linkGraphId",
-      "baseReuseImplementationIdentity?",
-      "manifest",
-      "canonicalManifestSha256",
-      "documents",
-      "diagnostics"
+      'schemaHash',
+      'snapshotId',
+      'corpusSnapshotId?',
+      'linkGraphId',
+      'baseReuseImplementationIdentity?',
+      'manifest',
+      'canonicalManifestSha256',
+      'documents',
+      'diagnostics',
     ],
-    diagnostics: ["schemaHash", "analyzer", "warnings?"],
-    document: ["documentId", "path", "contentHash", "partitionId", "title", "tags", "snippetCorpus"],
-    snippetCorpus: ["bodyStartLine", "lines", "fallback"],
-    snippetFallback: ["kind", "snippetId?", "line?"],
-    snippetLine: ["snippetId", "segmentId", "documentId", "byteStart", "byteEnd", "line", "text", "channels"]
+    diagnostics: ['schemaHash', 'analyzer', 'warnings?'],
+    document: ['documentId', 'path', 'contentHash', 'partitionId', 'title', 'tags', 'snippetCorpus'],
+    snippetCorpus: ['bodyStartLine', 'lines', 'fallback'],
+    snippetFallback: ['kind', 'snippetId?', 'line?'],
+    snippetLine: ['snippetId', 'segmentId', 'documentId', 'byteStart', 'byteEnd', 'line', 'text', 'channels'],
   },
   retrievalEmbeddingSetEnvelope: {
-    fields: ["schemaHash", "embeddingSetId", "recipe", "model", "dim", "records"],
-    record: ["documentId", "path?", "text", "contentHash", "vector", "vectorProjectionHash"]
+    fields: ['schemaHash', 'embeddingSetId', 'recipe', 'model', 'dim', 'records'],
+    record: ['documentId', 'path?', 'text', 'contentHash', 'vector', 'vectorProjectionHash'],
   },
-  retrievalVectorSpecEnvelope: ["embeddingSetId", "generationId", "specId", "dbPath", "manifestHash", "metadataSha256", "key?"],
+  retrievalVectorSpecEnvelope: [
+    'embeddingSetId',
+    'generationId',
+    'specId',
+    'dbPath',
+    'manifestHash',
+    'metadataSha256',
+    'key?',
+  ],
   retrievalSnapshotEnvelope: [
-    "schemaHash",
-    "retrievalSnapshotId",
-    "snapshotId",
-    "corpusSnapshotId",
-    "linkGraphId",
-    "embeddingSetId",
-    "embeddingSpaceId",
-    "embeddingRecipeFreshnessId",
-    "retrieverPlanIdentity",
-    "rankingFeatureVersion",
-    "canonicalManifestSha256",
-    "embeddingSet",
-    "vector",
-    "freshness"
-  ]
+    'schemaHash',
+    'retrievalSnapshotId',
+    'snapshotId',
+    'corpusSnapshotId',
+    'linkGraphId',
+    'embeddingSetId',
+    'embeddingSpaceId',
+    'embeddingRecipeFreshnessId',
+    'retrieverPlanIdentity',
+    'rankingFeatureVersion',
+    'canonicalManifestSha256',
+    'embeddingSet',
+    'vector',
+    'freshness',
+  ],
 } as const;
 
 export const SNAPSHOT_PERSISTENCE_SCHEMA_HASH = crypto
-  .createHash("sha256")
+  .createHash('sha256')
   .update(canonicalValueBytes(SNAPSHOT_PERSISTENCE_SCHEMA))
-  .digest("hex");
+  .digest('hex');
 
 export type PersistedDocumentRecord = {
   documentId: string;
@@ -101,7 +116,7 @@ export type RetrievalEmbeddingSetEnvelope = {
   recipe: EmbeddingRecipeIdentity;
   model: string;
   dim: number;
-  records: readonly Omit<EmbeddingSetRecord, "shardDocRef">[];
+  records: readonly Omit<EmbeddingSetRecord, 'shardDocRef'>[];
 };
 
 export type RetrievalVectorSpecEnvelope = {
@@ -129,7 +144,7 @@ export type RetrievalSnapshotEnvelope = {
   embeddingSet: RetrievalEmbeddingSetEnvelope;
   vector: RetrievalVectorSpecEnvelope;
   freshness: {
-    state: "fresh";
+    state: 'fresh';
     corpusRevision: string;
   };
 };
@@ -150,7 +165,7 @@ export type ParsedBuildDocument = {
   contentHash: string;
   unresolvedLinks: readonly UnresolvedNoteLink[];
   searchDocument: SearchBuildDocument;
-  positionTokens: Record<"morph" | "surface" | "ngram", Record<SearchField, readonly string[]>>;
+  positionTokens: Record<'morph' | 'surface' | 'ngram', Record<SearchField, readonly string[]>>;
   canonicalRecord: CanonicalDocumentRecord;
   snippetCorpus: ParsedSnippetCorpus;
   partitionId: number;
@@ -179,9 +194,7 @@ export type SnapshotSnippetLine = SearchSnippet & {
   channels: SearchTokenChannelTerms;
 };
 
-export type SnapshotSnippetFallback =
-  | { kind: "line"; snippetId: string }
-  | { kind: "title"; line: 1 };
+export type SnapshotSnippetFallback = { kind: 'line'; snippetId: string } | { kind: 'title'; line: 1 };
 
 export type SnapshotSnippetCorpus = {
   bodyStartLine: number;
@@ -189,6 +202,6 @@ export type SnapshotSnippetCorpus = {
   fallback: SnapshotSnippetFallback;
 };
 
-export type ParsedSnippetCorpus = Omit<SnapshotSnippetCorpus, "lines"> & {
-  lines: Omit<SnapshotSnippetLine, "segmentId">[];
+export type ParsedSnippetCorpus = Omit<SnapshotSnippetCorpus, 'lines'> & {
+  lines: Omit<SnapshotSnippetLine, 'segmentId'>[];
 };

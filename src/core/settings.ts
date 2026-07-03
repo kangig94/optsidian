@@ -1,11 +1,11 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { UsageError } from "../errors.js";
-import { writePrivateFileSync } from "./private-path.js";
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { UsageError } from '../errors.js';
+import { writePrivateFileSync } from './private-path.js';
 
 export type SearchSettings = {
-  analyzer?: "intl" | "kiwi";
+  analyzer?: 'intl' | 'kiwi';
   extraLangs?: string[];
   ngram?: boolean;
   partitionBits?: number;
@@ -17,7 +17,7 @@ export type SearchSettings = {
   memoryBudgetCount?: number;
   memoryBudgetBytes?: number;
   daemonIdleMs?: number;
-  embeddingModel?: "bge-m3" | "multilingual-e5-small";
+  embeddingModel?: 'bge-m3' | 'multilingual-e5-small';
   denseLambda?: number;
   linkLambda?: number;
   rrfK?: number;
@@ -29,8 +29,8 @@ export type OptsidianSettings = {
 
 export type ConfigReadResult = {
   ok: true;
-  command: "config";
-  action: "get" | "list" | "path";
+  command: 'config';
+  action: 'get' | 'list' | 'path';
   path: string;
   key?: string;
   value: unknown;
@@ -38,18 +38,18 @@ export type ConfigReadResult = {
 
 export type ConfigMutationResult = {
   ok: true;
-  command: "config";
-  action: "set" | "unset";
+  command: 'config';
+  action: 'set' | 'unset';
   path: string;
   key: string;
   value?: unknown;
   config: OptsidianSettings;
 };
 
-const SETTINGS_DIR = ".optsidian";
-const SETTINGS_FILE = "settings.json";
-const SETTINGS_PATH_ENV = "OPTSIDIAN_SETTINGS_PATH";
-const SEARCH_NGRAM_ENV = "OPTSIDIAN_SEARCH_NGRAM";
+const SETTINGS_DIR = '.optsidian';
+const SETTINGS_FILE = 'settings.json';
+const SETTINGS_PATH_ENV = 'OPTSIDIAN_SETTINGS_PATH';
+const SEARCH_NGRAM_ENV = 'OPTSIDIAN_SEARCH_NGRAM';
 
 export function readOptsidianSettings(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): OptsidianSettings {
   return mergeSettings(readGlobalSettings(cwd, env), readLocalOverrideSettings(cwd));
@@ -66,11 +66,11 @@ export function getConfigValue(cwd: string, key: string, env: NodeJS.ProcessEnv 
   const settings = readOptsidianSettings(cwd, env);
   return {
     ok: true,
-    command: "config",
-    action: "get",
+    command: 'config',
+    action: 'get',
     path,
     key,
-    value: getKnownSetting(settings, key)
+    value: getKnownSetting(settings, key),
   };
 }
 
@@ -78,10 +78,10 @@ export function listConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
   const path = resolveSettingsPath(cwd, env);
   return {
     ok: true,
-    command: "config",
-    action: "list",
+    command: 'config',
+    action: 'list',
     path,
-    value: readOptsidianSettings(cwd, env)
+    value: readOptsidianSettings(cwd, env),
   };
 }
 
@@ -89,10 +89,10 @@ export function configPathResult(cwd: string, env: NodeJS.ProcessEnv = process.e
   const path = resolveSettingsPath(cwd, env);
   return {
     ok: true,
-    command: "config",
-    action: "path",
+    command: 'config',
+    action: 'path',
     path,
-    value: path
+    value: path,
   };
 }
 
@@ -100,13 +100,21 @@ export function setConfigValue(
   cwd: string,
   key: string,
   value: unknown,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): ConfigMutationResult {
   const path = resolveSettingsPath(cwd, env);
   const settings = readGlobalSettings(cwd, env);
   setKnownSetting(settings, key, value);
   writeSettingsFile(path, settings);
-  return { ok: true, command: "config", action: "set", path, key, value: getKnownSetting(settings, key), config: settings };
+  return {
+    ok: true,
+    command: 'config',
+    action: 'set',
+    path,
+    key,
+    value: getKnownSetting(settings, key),
+    config: settings,
+  };
 }
 
 export function unsetConfigValue(cwd: string, key: string, env: NodeJS.ProcessEnv = process.env): ConfigMutationResult {
@@ -115,15 +123,15 @@ export function unsetConfigValue(cwd: string, key: string, env: NodeJS.ProcessEn
   unsetKnownSetting(settings, key);
   pruneEmptyObjects(settings);
   writeSettingsFile(path, settings);
-  return { ok: true, command: "config", action: "unset", path, key, config: settings };
+  return { ok: true, command: 'config', action: 'unset', path, key, config: settings };
 }
 
 export function resolveSettingsPath(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
   const override = env[SETTINGS_PATH_ENV]?.trim();
   if (override) return path.resolve(cwd, override);
   const configured = env.XDG_CONFIG_HOME?.trim();
-  const configHome = configured ? configured : path.join(os.homedir(), ".config");
-  return path.join(configHome, "optsidian", SETTINGS_FILE);
+  const configHome = configured ? configured : path.join(os.homedir(), '.config');
+  return path.join(configHome, 'optsidian', SETTINGS_FILE);
 }
 
 function readGlobalSettings(cwd: string, env: NodeJS.ProcessEnv): OptsidianSettings {
@@ -138,11 +146,13 @@ function readLocalOverrideSettings(cwd: string): OptsidianSettings {
 function readSettingsFile(file: string): OptsidianSettings {
   if (!fs.existsSync(file)) return {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
     return normalizeSettings(parsed);
   } catch (error) {
     if (error instanceof UsageError) throw error;
-    throw new UsageError(`Cannot read settings file ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new UsageError(
+      `Cannot read settings file ${file}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -162,7 +172,7 @@ function mergeSettings(global: OptsidianSettings, local: OptsidianSettings): Opt
   if (global.search || local.search) {
     merged.search = {
       ...(global.search ?? {}),
-      ...(local.search ?? {})
+      ...(local.search ?? {}),
     };
     pruneEmptyObjects(merged);
   }
@@ -170,52 +180,68 @@ function mergeSettings(global: OptsidianSettings, local: OptsidianSettings): Opt
 }
 
 function normalizeSettings(value: unknown): OptsidianSettings {
-  if (!isRecord(value)) throw new UsageError("settings file must contain a JSON object");
+  if (!isRecord(value)) throw new UsageError('settings file must contain a JSON object');
   const settings: OptsidianSettings = {};
   if (value.search !== undefined) {
-    if (!isRecord(value.search)) throw new UsageError("settings.search must be an object");
+    if (!isRecord(value.search)) throw new UsageError('settings.search must be an object');
     settings.search = {};
     if (value.search.analyzer !== undefined) settings.search.analyzer = normalizeAnalyzer(value.search.analyzer);
-    if (value.search.extraLangs !== undefined) settings.search.extraLangs = normalizeStringList(value.search.extraLangs, "search.extraLangs");
-    if (value.search.ngram !== undefined) settings.search.ngram = normalizeBoolean(value.search.ngram, "search.ngram");
+    if (value.search.extraLangs !== undefined)
+      settings.search.extraLangs = normalizeStringList(value.search.extraLangs, 'search.extraLangs');
+    if (value.search.ngram !== undefined) settings.search.ngram = normalizeBoolean(value.search.ngram, 'search.ngram');
     if (value.search.partitionBits !== undefined) {
-      settings.search.partitionBits = normalizePositiveInteger(value.search.partitionBits, "search.partitionBits");
+      settings.search.partitionBits = normalizePositiveInteger(value.search.partitionBits, 'search.partitionBits');
     }
     if (value.search.queryWorkers !== undefined) {
-      settings.search.queryWorkers = normalizePositiveInteger(value.search.queryWorkers, "search.queryWorkers");
+      settings.search.queryWorkers = normalizePositiveInteger(value.search.queryWorkers, 'search.queryWorkers');
     }
     if (value.search.indexWorkers !== undefined) {
-      settings.search.indexWorkers = normalizePositiveInteger(value.search.indexWorkers, "search.indexWorkers");
+      settings.search.indexWorkers = normalizePositiveInteger(value.search.indexWorkers, 'search.indexWorkers');
     }
     if (value.search.executionWorkers !== undefined) {
-      settings.search.executionWorkers = normalizePositiveInteger(value.search.executionWorkers, "search.executionWorkers");
+      settings.search.executionWorkers = normalizePositiveInteger(
+        value.search.executionWorkers,
+        'search.executionWorkers',
+      );
     }
     if (value.search.snapshotRetentionCount !== undefined) {
-      settings.search.snapshotRetentionCount = normalizePositiveInteger(value.search.snapshotRetentionCount, "search.snapshotRetentionCount");
+      settings.search.snapshotRetentionCount = normalizePositiveInteger(
+        value.search.snapshotRetentionCount,
+        'search.snapshotRetentionCount',
+      );
     }
     if (value.search.queryCacheSize !== undefined) {
-      settings.search.queryCacheSize = normalizeNonNegativeInteger(value.search.queryCacheSize, "search.queryCacheSize");
+      settings.search.queryCacheSize = normalizeNonNegativeInteger(
+        value.search.queryCacheSize,
+        'search.queryCacheSize',
+      );
     }
     if (value.search.memoryBudgetCount !== undefined) {
-      settings.search.memoryBudgetCount = normalizePositiveInteger(value.search.memoryBudgetCount, "search.memoryBudgetCount");
+      settings.search.memoryBudgetCount = normalizePositiveInteger(
+        value.search.memoryBudgetCount,
+        'search.memoryBudgetCount',
+      );
     }
     if (value.search.memoryBudgetBytes !== undefined) {
-      settings.search.memoryBudgetBytes = normalizePositiveInteger(value.search.memoryBudgetBytes, "search.memoryBudgetBytes");
+      settings.search.memoryBudgetBytes = normalizePositiveInteger(
+        value.search.memoryBudgetBytes,
+        'search.memoryBudgetBytes',
+      );
     }
     if (value.search.daemonIdleMs !== undefined) {
-      settings.search.daemonIdleMs = normalizeNonNegativeInteger(value.search.daemonIdleMs, "search.daemonIdleMs");
+      settings.search.daemonIdleMs = normalizeNonNegativeInteger(value.search.daemonIdleMs, 'search.daemonIdleMs');
     }
     if (value.search.embeddingModel !== undefined) {
       settings.search.embeddingModel = normalizeEmbeddingModel(value.search.embeddingModel);
     }
     if (value.search.denseLambda !== undefined) {
-      settings.search.denseLambda = normalizeNonNegativeNumber(value.search.denseLambda, "search.denseLambda");
+      settings.search.denseLambda = normalizeNonNegativeNumber(value.search.denseLambda, 'search.denseLambda');
     }
     if (value.search.linkLambda !== undefined) {
-      settings.search.linkLambda = normalizeNonNegativeNumber(value.search.linkLambda, "search.linkLambda");
+      settings.search.linkLambda = normalizeNonNegativeNumber(value.search.linkLambda, 'search.linkLambda');
     }
     if (value.search.rrfK !== undefined) {
-      settings.search.rrfK = normalizePositiveInteger(value.search.rrfK, "search.rrfK");
+      settings.search.rrfK = normalizePositiveInteger(value.search.rrfK, 'search.rrfK');
     }
   }
   return settings;
@@ -223,37 +249,37 @@ function normalizeSettings(value: unknown): OptsidianSettings {
 
 function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
   switch (key) {
-    case "search.analyzer":
+    case 'search.analyzer':
       return settings.search?.analyzer;
-    case "search.extraLangs":
+    case 'search.extraLangs':
       return settings.search?.extraLangs ?? [];
-    case "search.ngram":
+    case 'search.ngram':
       return settings.search?.ngram;
-    case "search.partitionBits":
+    case 'search.partitionBits':
       return settings.search?.partitionBits;
-    case "search.queryWorkers":
+    case 'search.queryWorkers':
       return settings.search?.queryWorkers;
-    case "search.indexWorkers":
+    case 'search.indexWorkers':
       return settings.search?.indexWorkers;
-    case "search.executionWorkers":
+    case 'search.executionWorkers':
       return settings.search?.executionWorkers;
-    case "search.snapshotRetentionCount":
+    case 'search.snapshotRetentionCount':
       return settings.search?.snapshotRetentionCount;
-    case "search.queryCacheSize":
+    case 'search.queryCacheSize':
       return settings.search?.queryCacheSize;
-    case "search.memoryBudgetCount":
+    case 'search.memoryBudgetCount':
       return settings.search?.memoryBudgetCount;
-    case "search.memoryBudgetBytes":
+    case 'search.memoryBudgetBytes':
       return settings.search?.memoryBudgetBytes;
-    case "search.daemonIdleMs":
+    case 'search.daemonIdleMs':
       return settings.search?.daemonIdleMs;
-    case "search.embeddingModel":
-      return settings.search?.embeddingModel ?? "bge-m3";
-    case "search.denseLambda":
+    case 'search.embeddingModel':
+      return settings.search?.embeddingModel ?? 'bge-m3';
+    case 'search.denseLambda':
       return settings.search?.denseLambda;
-    case "search.linkLambda":
+    case 'search.linkLambda':
       return settings.search?.linkLambda;
-    case "search.rrfK":
+    case 'search.rrfK':
       return settings.search?.rrfK;
     default:
       throw new UsageError(knownSettingMessage());
@@ -263,52 +289,52 @@ function getKnownSetting(settings: OptsidianSettings, key: string): unknown {
 function setKnownSetting(settings: OptsidianSettings, key: string, value: unknown): void {
   settings.search ??= {};
   switch (key) {
-    case "search.analyzer":
+    case 'search.analyzer':
       settings.search.analyzer = normalizeAnalyzer(value);
       return;
-    case "search.extraLangs":
+    case 'search.extraLangs':
       settings.search.extraLangs = normalizeStringList(value, key);
       return;
-    case "search.ngram":
+    case 'search.ngram':
       settings.search.ngram = normalizeBoolean(value, key);
       return;
-    case "search.partitionBits":
+    case 'search.partitionBits':
       settings.search.partitionBits = normalizePositiveInteger(value, key);
       return;
-    case "search.queryWorkers":
+    case 'search.queryWorkers':
       settings.search.queryWorkers = normalizePositiveInteger(value, key);
       return;
-    case "search.indexWorkers":
+    case 'search.indexWorkers':
       settings.search.indexWorkers = normalizePositiveInteger(value, key);
       return;
-    case "search.executionWorkers":
+    case 'search.executionWorkers':
       settings.search.executionWorkers = normalizePositiveInteger(value, key);
       return;
-    case "search.snapshotRetentionCount":
+    case 'search.snapshotRetentionCount':
       settings.search.snapshotRetentionCount = normalizePositiveInteger(value, key);
       return;
-    case "search.queryCacheSize":
+    case 'search.queryCacheSize':
       settings.search.queryCacheSize = normalizeNonNegativeInteger(value, key);
       return;
-    case "search.memoryBudgetCount":
+    case 'search.memoryBudgetCount':
       settings.search.memoryBudgetCount = normalizePositiveInteger(value, key);
       return;
-    case "search.memoryBudgetBytes":
+    case 'search.memoryBudgetBytes':
       settings.search.memoryBudgetBytes = normalizePositiveInteger(value, key);
       return;
-    case "search.daemonIdleMs":
+    case 'search.daemonIdleMs':
       settings.search.daemonIdleMs = normalizeNonNegativeInteger(value, key);
       return;
-    case "search.embeddingModel":
+    case 'search.embeddingModel':
       settings.search.embeddingModel = normalizeEmbeddingModel(value);
       return;
-    case "search.denseLambda":
+    case 'search.denseLambda':
       settings.search.denseLambda = normalizeNonNegativeNumber(value, key);
       return;
-    case "search.linkLambda":
+    case 'search.linkLambda':
       settings.search.linkLambda = normalizeNonNegativeNumber(value, key);
       return;
-    case "search.rrfK":
+    case 'search.rrfK':
       settings.search.rrfK = normalizePositiveInteger(value, key);
       return;
     default:
@@ -318,52 +344,52 @@ function setKnownSetting(settings: OptsidianSettings, key: string, value: unknow
 
 function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
   switch (key) {
-    case "search.analyzer":
+    case 'search.analyzer':
       if (settings.search) delete settings.search.analyzer;
       return;
-    case "search.extraLangs":
+    case 'search.extraLangs':
       if (settings.search) delete settings.search.extraLangs;
       return;
-    case "search.ngram":
+    case 'search.ngram':
       if (settings.search) delete settings.search.ngram;
       return;
-    case "search.partitionBits":
+    case 'search.partitionBits':
       if (settings.search) delete settings.search.partitionBits;
       return;
-    case "search.queryWorkers":
+    case 'search.queryWorkers':
       if (settings.search) delete settings.search.queryWorkers;
       return;
-    case "search.indexWorkers":
+    case 'search.indexWorkers':
       if (settings.search) delete settings.search.indexWorkers;
       return;
-    case "search.executionWorkers":
+    case 'search.executionWorkers':
       if (settings.search) delete settings.search.executionWorkers;
       return;
-    case "search.snapshotRetentionCount":
+    case 'search.snapshotRetentionCount':
       if (settings.search) delete settings.search.snapshotRetentionCount;
       return;
-    case "search.queryCacheSize":
+    case 'search.queryCacheSize':
       if (settings.search) delete settings.search.queryCacheSize;
       return;
-    case "search.memoryBudgetCount":
+    case 'search.memoryBudgetCount':
       if (settings.search) delete settings.search.memoryBudgetCount;
       return;
-    case "search.memoryBudgetBytes":
+    case 'search.memoryBudgetBytes':
       if (settings.search) delete settings.search.memoryBudgetBytes;
       return;
-    case "search.daemonIdleMs":
+    case 'search.daemonIdleMs':
       if (settings.search) delete settings.search.daemonIdleMs;
       return;
-    case "search.embeddingModel":
+    case 'search.embeddingModel':
       if (settings.search) delete settings.search.embeddingModel;
       return;
-    case "search.denseLambda":
+    case 'search.denseLambda':
       if (settings.search) delete settings.search.denseLambda;
       return;
-    case "search.linkLambda":
+    case 'search.linkLambda':
       if (settings.search) delete settings.search.linkLambda;
       return;
-    case "search.rrfK":
+    case 'search.rrfK':
       if (settings.search) delete settings.search.rrfK;
       return;
     default:
@@ -371,75 +397,73 @@ function unsetKnownSetting(settings: OptsidianSettings, key: string): void {
   }
 }
 
-function normalizeAnalyzer(value: unknown): "intl" | "kiwi" {
-  if (typeof value !== "string") throw new UsageError("search.analyzer must be intl or kiwi");
+function normalizeAnalyzer(value: unknown): 'intl' | 'kiwi' {
+  if (typeof value !== 'string') throw new UsageError('search.analyzer must be intl or kiwi');
   const normalized = value.trim().toLowerCase();
-  if (normalized === "intl" || normalized === "kiwi") return normalized;
-  throw new UsageError("search.analyzer must be intl or kiwi");
+  if (normalized === 'intl' || normalized === 'kiwi') return normalized;
+  throw new UsageError('search.analyzer must be intl or kiwi');
 }
 
 function normalizeStringList(value: unknown, key: string): string[] {
-  const raw =
-    typeof value === "string"
-      ? value.split(",")
-      : Array.isArray(value)
-        ? value
-        : undefined;
+  const raw = typeof value === 'string' ? value.split(',') : Array.isArray(value) ? value : undefined;
   if (!raw) throw new UsageError(`${key} must be a comma-separated string or string array`);
   return [...new Set(raw.map((item) => String(item).trim().toLowerCase()).filter(Boolean))].sort((left, right) =>
-    left.localeCompare(right)
+    left.localeCompare(right),
   );
 }
 
-function normalizeEmbeddingModel(value: unknown): "bge-m3" | "multilingual-e5-small" {
-  if (typeof value !== "string") throw new UsageError("search.embeddingModel must be bge-m3 or multilingual-e5-small");
+function normalizeEmbeddingModel(value: unknown): 'bge-m3' | 'multilingual-e5-small' {
+  if (typeof value !== 'string') throw new UsageError('search.embeddingModel must be bge-m3 or multilingual-e5-small');
   const normalized = value.trim().toLowerCase();
-  if (normalized === "bge" || normalized === "bge-m3" || normalized === "baai/bge-m3") return "bge-m3";
+  if (normalized === 'bge' || normalized === 'bge-m3' || normalized === 'baai/bge-m3') return 'bge-m3';
   if (
-    normalized === "e5" ||
-    normalized === "e5-small" ||
-    normalized === "multilingual-e5-small" ||
-    normalized === "intfloat/multilingual-e5-small"
+    normalized === 'e5' ||
+    normalized === 'e5-small' ||
+    normalized === 'multilingual-e5-small' ||
+    normalized === 'intfloat/multilingual-e5-small'
   ) {
-    return "multilingual-e5-small";
+    return 'multilingual-e5-small';
   }
-  throw new UsageError("search.embeddingModel must be bge-m3 or multilingual-e5-small");
+  throw new UsageError('search.embeddingModel must be bge-m3 or multilingual-e5-small');
 }
 
 function normalizeBoolean(value: unknown, key: string): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
     if (value === 1) return true;
     if (value === 0) return false;
   }
-  if (typeof value === "string") {
+  if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
-    if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
-    if (["0", "false", "no", "off", "disabled", ""].includes(normalized)) return false;
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off', 'disabled', ''].includes(normalized)) return false;
   }
   throw new UsageError(`${key} must be true or false`);
 }
 
 function normalizePositiveInteger(value: unknown, key: string): number {
-  const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new UsageError(`${key} must be a positive integer`);
   return parsed;
 }
 
 function normalizeNonNegativeInteger(value: unknown, key: string): number {
-  const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new UsageError(`${key} must be a non-negative integer`);
   return parsed;
 }
 
 function normalizeNonNegativeNumber(value: unknown, key: string): number {
-  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
   if (!Number.isFinite(parsed) || parsed < 0) throw new UsageError(`${key} must be a non-negative number`);
   return parsed;
 }
 
 function writeSettingsFile(file: string, settings: OptsidianSettings): void {
-  writePrivateFileSync(file, `${JSON.stringify(settings, null, 2)}\n`, "Optsidian settings file");
+  writePrivateFileSync(file, `${JSON.stringify(settings, null, 2)}\n`, 'Optsidian settings file');
 }
 
 function pruneEmptyObjects(settings: OptsidianSettings): void {
@@ -449,28 +473,28 @@ function pruneEmptyObjects(settings: OptsidianSettings): void {
 // Canonical list of settable config keys — the single source for both the core get/set/unset
 // validation and the CLI's own key allowlist/help, so the two cannot drift.
 export const KNOWN_SETTING_KEYS = [
-  "search.analyzer",
-  "search.extraLangs",
-  "search.ngram",
-  "search.partitionBits",
-  "search.queryWorkers",
-  "search.indexWorkers",
-  "search.executionWorkers",
-  "search.snapshotRetentionCount",
-  "search.queryCacheSize",
-  "search.memoryBudgetCount",
-  "search.memoryBudgetBytes",
-  "search.daemonIdleMs",
-  "search.embeddingModel",
-  "search.denseLambda",
-  "search.linkLambda",
-  "search.rrfK"
+  'search.analyzer',
+  'search.extraLangs',
+  'search.ngram',
+  'search.partitionBits',
+  'search.queryWorkers',
+  'search.indexWorkers',
+  'search.executionWorkers',
+  'search.snapshotRetentionCount',
+  'search.queryCacheSize',
+  'search.memoryBudgetCount',
+  'search.memoryBudgetBytes',
+  'search.daemonIdleMs',
+  'search.embeddingModel',
+  'search.denseLambda',
+  'search.linkLambda',
+  'search.rrfK',
 ] as const;
 
 function knownSettingMessage(): string {
-  return `setting key must be one of: ${KNOWN_SETTING_KEYS.join(", ")}`;
+  return `setting key must be one of: ${KNOWN_SETTING_KEYS.join(', ')}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

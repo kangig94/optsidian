@@ -1,23 +1,19 @@
-import { isMainThread, parentPort, workerData, type TransferListItem } from "node:worker_threads";
-import { analyzeSearchQuery, type SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
-import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from "../core/search/analyzer.js";
-import { DeterministicHashProvider, LocalOnnxProvider, type EmbeddingProvider } from "../core/search/dense/index.js";
-import { ModelSessionLifecycle, type ModelDevice, type ModelSession } from "./model-session/index.js";
-import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
-import { readOptsidianSettings } from "../core/settings.js";
+import { isMainThread, parentPort, workerData, type TransferListItem } from 'node:worker_threads';
+import { analyzeSearchQuery, type SearchTextAnalysisOptions } from '../core/search/analysis/index.js';
+import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from '../core/search/analyzer.js';
+import { DeterministicHashProvider, LocalOnnxProvider, type EmbeddingProvider } from '../core/search/dense/index.js';
+import { ModelSessionLifecycle, type ModelDevice, type ModelSession } from './model-session/index.js';
+import type { IndexAffectingSearchSettings } from '../core/search/index-settings.js';
+import { readOptsidianSettings } from '../core/settings.js';
 import type {
   ModelProviderPayload,
   ModelEncodeWorkerPayload,
   SearchIndexProgressUpdate,
   VectorBuildWorkerPayload,
   VectorPrewarmWorkerPayload,
-  VectorUpsertWorkerPayload
-} from "./protocol.js";
-import {
-  buildCanonicalSearchSnapshot,
-  parseBuildDocumentBatch,
-  reduceBuildSegment
-} from "./search-store/builder.js";
+  VectorUpsertWorkerPayload,
+} from './protocol.js';
+import { buildCanonicalSearchSnapshot, parseBuildDocumentBatch, reduceBuildSegment } from './search-store/builder.js';
 import {
   executeSearchJob,
   executeSearchShardJob,
@@ -25,10 +21,10 @@ import {
   searchExecutionCacheStats,
   type SearchExecutionJob,
   type SearchExecutionSnapshotHandle,
-  type SearchShardExecutionJob
-} from "./search-execution.js";
-import { createCoralNeedleProcessInstanceFactory } from "./vector-store/process-instance.js";
-import type { CoralNeedleInstance } from "./vector-store/types.js";
+  type SearchShardExecutionJob,
+} from './search-execution.js';
+import { createCoralNeedleProcessInstanceFactory } from './vector-store/process-instance.js';
+import type { CoralNeedleInstance } from './vector-store/types.js';
 
 type WorkerEnvelope = {
   id: number;
@@ -40,14 +36,14 @@ type WorkerEnvelope = {
 
 type WorkerContext = {
   optsidianSearchWorker?: boolean;
-  kind?: "analyzer" | "search" | "embedding" | "vector";
+  kind?: 'analyzer' | 'search' | 'embedding' | 'vector';
   env?: NodeJS.ProcessEnv;
 };
 
 let analyzer: SearchAnalyzer | undefined;
 let embeddingLifecycle: ModelSessionLifecycle | undefined;
 let embeddingLifecycleKey: string | undefined;
-let embeddingProviderIdentity: EmbeddingProvider["identity"] | undefined;
+let embeddingProviderIdentity: EmbeddingProvider['identity'] | undefined;
 let searchDaemonWorkerProcessErrorHandlersInstalled = false;
 
 export async function runSearchDaemonWorker(): Promise<void> {
@@ -56,7 +52,7 @@ export async function runSearchDaemonWorker(): Promise<void> {
   if (context.optsidianSearchWorker !== true) return;
   installSearchDaemonWorkerProcessErrorHandlers();
   const env = context.env ?? process.env;
-  parentPort.on("message", (message: WorkerEnvelope) => {
+  parentPort.on('message', (message: WorkerEnvelope) => {
     void handleMessage(message, context, env);
   });
 }
@@ -69,7 +65,7 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
         id: message.id,
         progress,
         memory,
-        memoryRss: memory.rss
+        memoryRss: memory.rss,
       });
     });
     const memory = workerLocalMemoryUsage();
@@ -78,7 +74,7 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
       ok: true,
       result,
       memory,
-      memoryRss: memory.rss
+      memoryRss: memory.rss,
     };
     parentPort?.postMessage(response, transferListForWorkerResult(result));
   } catch (error) {
@@ -88,10 +84,10 @@ async function handleMessage(message: WorkerEnvelope, context: WorkerContext, en
       ok: false,
       error: {
         code: (error as { code?: unknown } | undefined)?.code,
-        message: error instanceof Error ? error.message : String(error)
+        message: error instanceof Error ? error.message : String(error),
       },
       memory,
-      memoryRss: memory.rss
+      memoryRss: memory.rss,
     });
   }
 }
@@ -103,7 +99,7 @@ function workerLocalMemoryUsage(): NodeJS.MemoryUsage {
     heapTotal: memory.heapTotal,
     heapUsed: memory.heapUsed,
     external: memory.external,
-    arrayBuffers: memory.arrayBuffers
+    arrayBuffers: memory.arrayBuffers,
   };
 }
 
@@ -112,110 +108,133 @@ async function dispatch(
   payload: unknown,
   context: WorkerContext,
   env: NodeJS.ProcessEnv,
-  progress: (progress: SearchIndexProgressUpdate) => void
+  progress: (progress: SearchIndexProgressUpdate) => void,
 ): Promise<unknown> {
-  if (type === "warmup") {
-    if (context.kind === "analyzer") {
+  if (type === 'warmup') {
+    if (context.kind === 'analyzer') {
       const activeAnalyzer = analyzerForWorker(env);
-      return withSearchAnalyzerLease(activeAnalyzer, async (leased) => {
-        await leased.tokenizeBatch(["warmup latin", "한국어"]);
-        return { analyzerIdentity: leased.identity };
-      }, undefined, {
-        wait: true,
-        installIfMissing: true
-      });
+      return withSearchAnalyzerLease(
+        activeAnalyzer,
+        async (leased) => {
+          await leased.tokenizeBatch(['warmup latin', '한국어']);
+          return { analyzerIdentity: leased.identity };
+        },
+        undefined,
+        {
+          wait: true,
+          installIfMissing: true,
+        },
+      );
     }
     return { ready: true };
   }
-  if (context.kind === "search") {
-    if (type === "search") return executeSearchJob(payload as SearchExecutionJob);
-    if (type === "searchShard") return executeSearchShardJob(payload as SearchShardExecutionJob);
-    if (type === "preloadSnapshot") return preloadSearchExecutionSnapshot(payload as SearchExecutionSnapshotHandle);
-    if (type === "searchExecutionStats") return searchExecutionCacheStats();
-    throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: "BAD_REQUEST" });
+  if (context.kind === 'search') {
+    if (type === 'search') return executeSearchJob(payload as SearchExecutionJob);
+    if (type === 'searchShard') return executeSearchShardJob(payload as SearchShardExecutionJob);
+    if (type === 'preloadSnapshot') return preloadSearchExecutionSnapshot(payload as SearchExecutionSnapshotHandle);
+    if (type === 'searchExecutionStats') return searchExecutionCacheStats();
+    throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: 'BAD_REQUEST' });
   }
-  if (context.kind === "embedding") {
-    if (type === "modelEncode") return modelEncode(payload as ModelEncodeWorkerPayload);
-    if (type === "modelUnload") {
+  if (context.kind === 'embedding') {
+    if (type === 'modelEncode') return modelEncode(payload as ModelEncodeWorkerPayload);
+    if (type === 'modelUnload') {
       await embeddingLifecycle?.unload();
       embeddingLifecycle = undefined;
       embeddingLifecycleKey = undefined;
       embeddingProviderIdentity = undefined;
       return { unloaded: true };
     }
-    if (type === "modelStats") return { loaded: embeddingLifecycle?.stats().loaded === true };
-    throw Object.assign(new Error(`unsupported embedding worker job: ${type}`), { code: "BAD_REQUEST" });
+    if (type === 'modelStats') return { loaded: embeddingLifecycle?.stats().loaded === true };
+    throw Object.assign(new Error(`unsupported embedding worker job: ${type}`), { code: 'BAD_REQUEST' });
   }
-  if (context.kind === "vector") {
-    if (type === "vectorUpsert") return vectorUpsert(payload as VectorUpsertWorkerPayload);
-    if (type === "vectorBuild") return vectorBuild(payload as VectorBuildWorkerPayload);
-    if (type === "vectorPrewarm") return vectorPrewarm(payload as VectorPrewarmWorkerPayload);
-    if (type === "vectorClose") return { ok: true, generationId: (payload as { generationId?: string } | undefined)?.generationId ?? "" };
-    if (type === "vectorStats") return {};
-    throw Object.assign(new Error(`unsupported vector worker job: ${type}`), { code: "BAD_REQUEST" });
+  if (context.kind === 'vector') {
+    if (type === 'vectorUpsert') return vectorUpsert(payload as VectorUpsertWorkerPayload);
+    if (type === 'vectorBuild') return vectorBuild(payload as VectorBuildWorkerPayload);
+    if (type === 'vectorPrewarm') return vectorPrewarm(payload as VectorPrewarmWorkerPayload);
+    if (type === 'vectorClose')
+      return { ok: true, generationId: (payload as { generationId?: string } | undefined)?.generationId ?? '' };
+    if (type === 'vectorStats') return {};
+    throw Object.assign(new Error(`unsupported vector worker job: ${type}`), { code: 'BAD_REQUEST' });
   }
-  if (context.kind !== "analyzer") {
-    throw Object.assign(new Error(`unsupported worker kind: ${String(context.kind)}`), { code: "BAD_REQUEST" });
+  if (context.kind !== 'analyzer') {
+    throw Object.assign(new Error(`unsupported worker kind: ${String(context.kind)}`), { code: 'BAD_REQUEST' });
   }
   const activeAnalyzer = analyzerForWorker(env);
-  if (type === "analyzeQuery") {
+  if (type === 'analyzeQuery') {
     const input = payload as { rawQuery: string; options?: SearchTextAnalysisOptions };
-    return withSearchAnalyzerLease(activeAnalyzer, async (leased) => ({
-      analyzerIdentity: leased.identity,
-      analysis: await analyzeSearchQuery(input.rawQuery, leased, input.options)
-    }), undefined, { wait: true, installIfMissing: true });
+    return withSearchAnalyzerLease(
+      activeAnalyzer,
+      async (leased) => ({
+        analyzerIdentity: leased.identity,
+        analysis: await analyzeSearchQuery(input.rawQuery, leased, input.options),
+      }),
+      undefined,
+      { wait: true, installIfMissing: true },
+    );
   }
-  if (type === "tokenizeBatch") {
+  if (type === 'tokenizeBatch') {
     const input = payload as { texts: string[] };
-    return withSearchAnalyzerLease(activeAnalyzer, async (leased) => ({
-      analyzerIdentity: leased.identity,
-      tokens: await leased.tokenizeBatch(input.texts)
-    }), undefined, { wait: true, installIfMissing: true });
+    return withSearchAnalyzerLease(
+      activeAnalyzer,
+      async (leased) => ({
+        analyzerIdentity: leased.identity,
+        tokens: await leased.tokenizeBatch(input.texts),
+      }),
+      undefined,
+      { wait: true, installIfMissing: true },
+    );
   }
-  if (type === "buildSnapshot") {
+  if (type === 'buildSnapshot') {
     const input = payload as {
       vaultRoot: string;
       partitionBits?: number;
       searchSettings?: Partial<IndexAffectingSearchSettings>;
     };
-    return withSearchAnalyzerLease(activeAnalyzer, (leased) =>
-      buildCanonicalSearchSnapshot({
-        vaultRoot: input.vaultRoot,
-        analyzer: leased,
-        searchSettings: input.searchSettings,
-        partitionBits: input.partitionBits,
-        progress
-      }), undefined, { wait: true, installIfMissing: true });
+    return withSearchAnalyzerLease(
+      activeAnalyzer,
+      (leased) =>
+        buildCanonicalSearchSnapshot({
+          vaultRoot: input.vaultRoot,
+          analyzer: leased,
+          searchSettings: input.searchSettings,
+          partitionBits: input.partitionBits,
+          progress,
+        }),
+      undefined,
+      { wait: true, installIfMissing: true },
+    );
   }
-  if (type === "parseBuildDocuments") {
+  if (type === 'parseBuildDocuments') {
     const input = payload as {
       vaultRoot: string;
       relPaths: readonly string[];
       partitionBits: number;
       searchSettings: IndexAffectingSearchSettings;
     };
-    return withSearchAnalyzerLease(activeAnalyzer, (leased) =>
-      parseBuildDocumentBatch(input, leased), undefined, { wait: true, installIfMissing: true });
+    return withSearchAnalyzerLease(activeAnalyzer, (leased) => parseBuildDocumentBatch(input, leased), undefined, {
+      wait: true,
+      installIfMissing: true,
+    });
   }
-  if (type === "reduceBuildSegment") {
+  if (type === 'reduceBuildSegment') {
     const input = payload as Parameters<typeof reduceBuildSegment>[0];
     return reduceBuildSegment(input);
   }
-  throw Object.assign(new Error(`unsupported analyzer worker job: ${type}`), { code: "BAD_REQUEST" });
+  throw Object.assign(new Error(`unsupported analyzer worker job: ${type}`), { code: 'BAD_REQUEST' });
 }
 
 async function modelEncode(input: ModelEncodeWorkerPayload) {
   const lifecycle = lifecycleForPayload(input.provider);
   const vectors = await lifecycle.encode(input.texts, {
     deadline: Date.now() + modelEncodeDeadlineMs(),
-    origin: input.inputKind === "query" ? "query-text" : "document-embed",
-    suppressCpuPromotion: input.suppressCpuPromotion
+    origin: input.inputKind === 'query' ? 'query-text' : 'document-embed',
+    suppressCpuPromotion: input.suppressCpuPromotion,
   });
   const provider = embeddingProviderIdentity;
-  if (!provider) throw Object.assign(new Error("embedding provider identity is unavailable"), { code: "INTERNAL" });
+  if (!provider) throw Object.assign(new Error('embedding provider identity is unavailable'), { code: 'INTERNAL' });
   return {
     provider,
-    vectors
+    vectors,
   };
 }
 
@@ -230,7 +249,7 @@ function lifecycleForPayload(payload: ModelProviderPayload): ModelSessionLifecyc
     probeVram: probeWorkerVram,
     loadSession: async (device) => providerSessionForPayload(payload, device),
     terminateLoad: async () => undefined,
-    idleMs: modelIdleMs()
+    idleMs: modelIdleMs(),
   });
   return embeddingLifecycle;
 }
@@ -241,42 +260,49 @@ async function providerSessionForPayload(payload: ModelProviderPayload, device: 
   return {
     device,
     async encode(texts, options) {
-      return Promise.all(texts.map(async (text) => provider.embed(text, {
-        inputKind: options?.inputKind
-      })));
+      return Promise.all(
+        texts.map(async (text) =>
+          provider.embed(text, {
+            inputKind: options?.inputKind,
+          }),
+        ),
+      );
     },
     async close() {
       const close = (provider as EmbeddingProvider & { close?: () => void | Promise<void> }).close;
       if (close) await close.call(provider);
-    }
+    },
   };
 }
 
-function providerForPayload(payload: ModelProviderPayload, device: ModelDevice = "cpu"): EmbeddingProvider {
-  if (payload.kind === "deterministic-hash") {
+function providerForPayload(payload: ModelProviderPayload, device: ModelDevice = 'cpu'): EmbeddingProvider {
+  if (payload.kind === 'deterministic-hash') {
     return new DeterministicHashProvider({
       model: payload.model,
       dim: payload.dim,
-      fixtures: payload.fixtures ? new Map(payload.fixtures) : undefined
+      fixtures: payload.fixtures ? new Map(payload.fixtures) : undefined,
     });
   }
-  if (payload.kind === "local-onnx") {
+  if (payload.kind === 'local-onnx') {
     return new LocalOnnxProvider({
       model: payload.model,
-      executionProvider: payload.executionProvider ?? executionProviderForDevice(device)
+      executionProvider: payload.executionProvider ?? executionProviderForDevice(device),
     });
   }
-  throw Object.assign(new Error(`unsupported embedding provider kind: ${String((payload as { kind?: unknown }).kind)}`), { code: "BAD_REQUEST" });
+  throw Object.assign(
+    new Error(`unsupported embedding provider kind: ${String((payload as { kind?: unknown }).kind)}`),
+    { code: 'BAD_REQUEST' },
+  );
 }
 
 function executionProviderForDevice(device: ModelDevice) {
-  if (device === "cpu") return "cpu";
-  if (process.platform === "darwin") return "coreml";
-  return "cuda";
+  if (device === 'cpu') return 'cpu';
+  if (process.platform === 'darwin') return 'coreml';
+  return 'cuda';
 }
 
 function stableProviderKey(payload: ModelProviderPayload): string {
-  return JSON.stringify(payload, (_key, value) => value instanceof Map ? [...value.entries()] : value);
+  return JSON.stringify(payload, (_key, value) => (value instanceof Map ? [...value.entries()] : value));
 }
 
 function modelRequiredVramBytes(): number {
@@ -297,7 +323,7 @@ function modelEncodeDeadlineMs(): number {
 
 function probeWorkerVram() {
   return {
-    freeBytes: envBytes(process.env.OPTSIDIAN_SEARCH_MODEL_FREE_VRAM_MB) ?? 0
+    freeBytes: envBytes(process.env.OPTSIDIAN_SEARCH_MODEL_FREE_VRAM_MB) ?? 0,
   };
 }
 
@@ -320,7 +346,7 @@ async function vectorBuild(input: VectorBuildWorkerPayload) {
     await instance.initStore(input.dbPath);
     await instance.setActiveSpec(input.spec);
     if (input.chunks && input.chunks.length > 0) await instance.upsertChunks(input.chunks);
-    await instance.buildIndex(input.engineName ?? "auto");
+    await instance.buildIndex(input.engineName ?? 'auto');
     return { ok: true, generationId: input.generationId };
   });
 }
@@ -329,20 +355,20 @@ async function vectorPrewarm(input: VectorPrewarmWorkerPayload) {
   return withVectorInstance(input, async (instance) => {
     await instance.initStore(input.dbPath);
     await instance.setActiveSpec(input.spec);
-    await instance.buildIndex(input.engineName ?? "auto");
+    await instance.buildIndex(input.engineName ?? 'auto');
     return { ok: true, generationId: input.generationId };
   });
 }
 
 async function withVectorInstance<T>(
   input: VectorUpsertWorkerPayload | VectorBuildWorkerPayload | VectorPrewarmWorkerPayload,
-  fn: (instance: CoralNeedleInstance) => Promise<T>
+  fn: (instance: CoralNeedleInstance) => Promise<T>,
 ): Promise<T> {
   const instance = await createCoralNeedleProcessInstanceFactory().create({
-    role: "staging",
+    role: 'staging',
     key: input.key,
     generationId: input.generationId,
-    dbPath: input.dbPath
+    dbPath: input.dbPath,
   });
   try {
     return await fn(instance);
@@ -354,7 +380,7 @@ async function withVectorInstance<T>(
 function analyzerForWorker(env: NodeJS.ProcessEnv): SearchAnalyzer {
   analyzer ??= resolveSearchAnalyzer(env, readOptsidianSettings(process.cwd(), env), {
     node: process.versions.node,
-    ...(process.versions.icu ? { icu: process.versions.icu } : {})
+    ...(process.versions.icu ? { icu: process.versions.icu } : {}),
   });
   return analyzer;
 }
@@ -362,12 +388,12 @@ function analyzerForWorker(env: NodeJS.ProcessEnv): SearchAnalyzer {
 function installSearchDaemonWorkerProcessErrorHandlers(): void {
   if (searchDaemonWorkerProcessErrorHandlersInstalled) return;
   searchDaemonWorkerProcessErrorHandlersInstalled = true;
-  process.on("uncaughtException", (error) => {
-    logSearchDaemonWorkerProcessError("uncaughtException", error);
+  process.on('uncaughtException', (error) => {
+    logSearchDaemonWorkerProcessError('uncaughtException', error);
     process.exit(1);
   });
-  process.on("unhandledRejection", (reason) => {
-    logSearchDaemonWorkerProcessError("unhandledRejection", reason);
+  process.on('unhandledRejection', (reason) => {
+    logSearchDaemonWorkerProcessError('unhandledRejection', reason);
     process.exit(1);
   });
 }
@@ -403,5 +429,5 @@ function addUint8ArrayTransfer(buffers: Set<ArrayBuffer>, value: unknown): void 
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === 'object' && value !== null;
 }

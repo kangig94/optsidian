@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from "../private-path.js";
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from '../private-path.js';
 import {
   createProcessToken,
   defaultProcessStartIdentityProvider,
@@ -9,8 +9,8 @@ import {
   processStartIdIsAuthoritative,
   processTokenEquals,
   type ProcessStartIdentityProvider,
-  type ProcessToken
-} from "./process-token.js";
+  type ProcessToken,
+} from './process-token.js';
 
 export type ExclusiveClaimOwner = {
   token: ProcessToken;
@@ -39,8 +39,12 @@ export class ExclusiveClaimBusyError extends Error {
   readonly owner: ExclusiveClaimOwner | undefined;
 
   constructor(claimDir: string, owner: ExclusiveClaimOwner | undefined) {
-    super(owner ? `Exclusive claim is held by live pid ${owner.token.pid}: ${claimDir}` : `Exclusive claim is busy: ${claimDir}`);
-    this.name = "ExclusiveClaimBusyError";
+    super(
+      owner
+        ? `Exclusive claim is held by live pid ${owner.token.pid}: ${claimDir}`
+        : `Exclusive claim is busy: ${claimDir}`,
+    );
+    this.name = 'ExclusiveClaimBusyError';
     this.owner = owner;
   }
 }
@@ -64,11 +68,13 @@ export class ExclusiveClaim {
     const now = options.now ?? Date.now;
     const pollMs = options.pollMs ?? 50;
     const timeoutMs = options.timeoutMs ?? 30_000;
-    const token = options.token ?? createProcessToken(process.pid, options.startIdentityProvider ?? defaultProcessStartIdentityProvider);
+    const token =
+      options.token ??
+      createProcessToken(process.pid, options.startIdentityProvider ?? defaultProcessStartIdentityProvider);
     const owner: ExclusiveClaimOwner = {
       token,
       claimId: options.claimId ?? crypto.randomUUID(),
-      acquiredAtMs: now()
+      acquiredAtMs: now(),
     };
     const startedAt = now();
 
@@ -77,7 +83,7 @@ export class ExclusiveClaim {
       const reclaimed = reclaimExclusiveClaim(claimDir, {
         backstopTtlMs: options.backstopTtlMs,
         now,
-        isAlive: options.isAlive
+        isAlive: options.isAlive,
       });
       if (reclaimed) continue;
 
@@ -92,7 +98,7 @@ export class ExclusiveClaim {
     return {
       token: this.token,
       claimId: this.claimId,
-      acquiredAtMs: this.acquiredAtMs
+      acquiredAtMs: this.acquiredAtMs,
     };
   }
 
@@ -142,12 +148,12 @@ function reclaimByTtl(claimDir: string, now: () => number, backstopTtlMs = 60_00
 }
 
 export function readExclusiveClaimOwner(claimDir: string): ExclusiveClaimOwner | undefined {
-  const ownerPath = path.join(claimDir, "owner.json");
+  const ownerPath = path.join(claimDir, 'owner.json');
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+    parsed = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return undefined;
+    if (errorCode(error) === 'ENOENT') return undefined;
     return undefined;
   }
   if (!isExclusiveClaimOwner(parsed)) return undefined;
@@ -155,16 +161,16 @@ export function readExclusiveClaimOwner(claimDir: string): ExclusiveClaimOwner |
 }
 
 function tryCreateClaim(claimDir: string, owner: ExclusiveClaimOwner): boolean {
-  ensurePrivateDirSync(path.dirname(claimDir), "Exclusive claim parent directory");
+  ensurePrivateDirSync(path.dirname(claimDir), 'Exclusive claim parent directory');
   try {
     fs.mkdirSync(claimDir, { recursive: false, mode: 0o700 });
   } catch (error) {
-    if (errorCode(error) === "EEXIST") return false;
+    if (errorCode(error) === 'EEXIST') return false;
     throw error;
   }
 
   try {
-    ensurePrivateDirSync(claimDir, "Exclusive claim directory");
+    ensurePrivateDirSync(claimDir, 'Exclusive claim directory');
     writeOwner(claimDir, owner);
     fsyncDirSync(path.dirname(claimDir));
     return true;
@@ -175,8 +181,8 @@ function tryCreateClaim(claimDir: string, owner: ExclusiveClaimOwner): boolean {
 }
 
 function writeOwner(claimDir: string, owner: ExclusiveClaimOwner): void {
-  const ownerPath = path.join(claimDir, "owner.json");
-  writePrivateFileSync(ownerPath, `${JSON.stringify(owner)}\n`, "Exclusive claim owner file");
+  const ownerPath = path.join(claimDir, 'owner.json');
+  writePrivateFileSync(ownerPath, `${JSON.stringify(owner)}\n`, 'Exclusive claim owner file');
   fsyncFileSync(ownerPath);
   fsyncDirSync(claimDir);
 }
@@ -187,19 +193,15 @@ function removeClaimDir(claimDir: string): void {
 }
 
 function isExclusiveClaimOwner(value: unknown): value is ExclusiveClaimOwner {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== 'object') return false;
   const owner = value as Partial<ExclusiveClaimOwner>;
-  return (
-    typeof owner.claimId === "string" &&
-    Number.isFinite(owner.acquiredAtMs) &&
-    isProcessToken(owner.token)
-  );
+  return typeof owner.claimId === 'string' && Number.isFinite(owner.acquiredAtMs) && isProcessToken(owner.token);
 }
 
 function isProcessToken(value: unknown): value is ProcessToken {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== 'object') return false;
   const token = value as Partial<ProcessToken>;
-  return Number.isSafeInteger(token.pid) && typeof token.startId === "string" && token.startId.length > 0;
+  return Number.isSafeInteger(token.pid) && typeof token.startId === 'string' && token.startId.length > 0;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -207,5 +209,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
 }

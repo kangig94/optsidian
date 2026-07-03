@@ -505,7 +505,7 @@ Each `CoralNeedleInstance` runs as a **forked subprocess** (`process-instance.ts
 `binding.ts:30-53`), isolating a native crash from the daemon. Roles are `staging` (build) and `query`
 (promoted generation). Native `searchVector` is the production dense search. Production always uses
 the subprocess factory that lazy-downloads the managed coral-needle binding; test-only in-memory
-doubles live under `test/` and are injected directly through `VectorGenerationPool({ factory })`.
+doubles live under `tests/` and are injected directly through `VectorGenerationPool({ factory })`.
 
 ---
 

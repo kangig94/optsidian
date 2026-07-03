@@ -1,6 +1,6 @@
-export const SEARCH_TOKEN_CHANNELS = ["morph", "surface", "ngram"] as const;
+export const SEARCH_TOKEN_CHANNELS = ['morph', 'surface', 'ngram'] as const;
 
-export type SearchTokenChannel = typeof SEARCH_TOKEN_CHANNELS[number];
+export type SearchTokenChannel = (typeof SEARCH_TOKEN_CHANNELS)[number];
 export type SearchTokenChannelTerms = Record<SearchTokenChannel, string[]>;
 
 export type SearchTextAnalysis = {
@@ -22,7 +22,7 @@ export function emptySearchTokenChannels(): SearchTokenChannelTerms {
   return {
     morph: [],
     surface: [],
-    ngram: []
+    ngram: [],
   };
 }
 
@@ -35,7 +35,7 @@ export function surfaceSearchTerms(text: string): string[] {
 }
 
 export function termsToSearchText(terms: readonly string[]): string {
-  return uniqueSearchTerms(terms).join(" ");
+  return uniqueSearchTerms(terms).join(' ');
 }
 
 export function uniqueSearchTerms(terms: readonly string[]): string[] {
@@ -51,7 +51,7 @@ export function tokenChannelsOverlap(left: SearchTokenChannelTerms, right: Searc
 }
 
 function normalizeSurfaceTerm(term: string): string {
-  return term.normalize("NFKC").toLowerCase().trim();
+  return term.normalize('NFKC').toLowerCase().trim();
 }
 
 function surfaceTermVariants(raw: string): string[] {
@@ -69,11 +69,11 @@ function surfaceTermVariants(raw: string): string[] {
 
 function expandSurfaceCompound(raw: string): string {
   return raw
-    .normalize("NFKC")
-    .replace(ACRONYM_WORD_BOUNDARY, "$1 $2")
-    .replace(LOWER_UPPER_BOUNDARY, "$1 $2")
-    .replace(LETTER_NUMBER_BOUNDARY, "$1 $2")
-    .replace(NUMBER_LETTER_BOUNDARY, "$1 $2");
+    .normalize('NFKC')
+    .replace(ACRONYM_WORD_BOUNDARY, '$1 $2')
+    .replace(LOWER_UPPER_BOUNDARY, '$1 $2')
+    .replace(LETTER_NUMBER_BOUNDARY, '$1 $2')
+    .replace(NUMBER_LETTER_BOUNDARY, '$1 $2');
 }
 
 function isUsefulSurfaceVariant(term: string, original: string): boolean {

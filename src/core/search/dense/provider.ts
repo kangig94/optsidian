@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
+import crypto from 'node:crypto';
 
 export type EmbeddingVector = readonly number[];
-export type EmbeddingInputKind = "query" | "document";
+export type EmbeddingInputKind = 'query' | 'document';
 
 export type EmbeddingProviderIdentity = {
   id: string;
@@ -28,12 +28,13 @@ export class DeterministicHashProvider implements EmbeddingProvider {
   constructor(options: DeterministicHashProviderOptions = {}) {
     const firstFixture = options.fixtures?.values().next().value;
     const dim = options.dim ?? (Array.isArray(firstFixture) ? firstFixture.length : undefined) ?? 8;
-    if (!Number.isSafeInteger(dim) || dim <= 0) throw new Error("DeterministicHashProvider dim must be a positive integer");
+    if (!Number.isSafeInteger(dim) || dim <= 0)
+      throw new Error('DeterministicHashProvider dim must be a positive integer');
     this.identity = {
-      id: "deterministic-hash",
-      model: options.model ?? "content-hash-v1",
+      id: 'deterministic-hash',
+      model: options.model ?? 'content-hash-v1',
       dim,
-      version: "1"
+      version: '1',
     };
     this.fixtures = options.fixtures ?? new Map();
   }
@@ -49,19 +50,19 @@ export function normalizeEmbeddingVector(vector: EmbeddingVector, expectedDim?: 
   if (expectedDim !== undefined && vector.length !== expectedDim) {
     throw new Error(`embedding vector dimension ${vector.length} does not match expected dimension ${expectedDim}`);
   }
-  if (vector.length === 0) throw new Error("embedding vector must not be empty");
+  if (vector.length === 0) throw new Error('embedding vector must not be empty');
   let normSquared = 0;
   for (const value of vector) {
-    if (!Number.isFinite(value)) throw new Error("embedding vector must contain only finite numbers");
+    if (!Number.isFinite(value)) throw new Error('embedding vector must contain only finite numbers');
     normSquared += value * value;
   }
-  if (normSquared <= 0) throw new Error("embedding vector must not be all zero");
+  if (normSquared <= 0) throw new Error('embedding vector must not be all zero');
   const norm = Math.sqrt(normSquared);
   return vector.map((value) => value / norm);
 }
 
 export function cosineSimilarity(left: EmbeddingVector, right: EmbeddingVector): number {
-  if (left.length !== right.length) throw new Error("embedding vectors must have the same dimension");
+  if (left.length !== right.length) throw new Error('embedding vectors must have the same dimension');
   let sum = 0;
   for (let index = 0; index < left.length; index += 1) sum += left[index] * right[index];
   return Math.max(-1, Math.min(1, sum));
@@ -76,10 +77,11 @@ function contentHashUnitVector(text: string, dim: number): number[] {
   const values: number[] = [];
   let counter = 0;
   while (values.length < dim) {
-    const hash = crypto.createHash("sha256")
-      .update("optsidian-deterministic-hash-embedding-v1\0")
-      .update(text.normalize("NFC"))
-      .update("\0")
+    const hash = crypto
+      .createHash('sha256')
+      .update('optsidian-deterministic-hash-embedding-v1\0')
+      .update(text.normalize('NFC'))
+      .update('\0')
       .update(String(counter))
       .digest();
     counter += 1;

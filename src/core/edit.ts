@@ -1,20 +1,20 @@
-import fs from "node:fs";
-import { UsageError } from "../errors.js";
-import { assertVaultFileWithinByteLimit } from "./file-size.js";
-import { resolveVaultPath } from "./path.js";
-import { joinText, simpleDiff, splitText } from "./text.js";
-import { atomicWriteFile } from "./write-file.js";
-import type { EditParams, MutationResult } from "./types.js";
-import { collectRegexMatches, compileUserRegex, ensureUserRegexRuntime } from "./user-regex.js";
-import { assertLineRange, assertPositiveInteger } from "./validation.js";
+import fs from 'node:fs';
+import { UsageError } from '../errors.js';
+import { assertVaultFileWithinByteLimit } from './file-size.js';
+import { resolveVaultPath } from './path.js';
+import { joinText, simpleDiff, splitText } from './text.js';
+import { atomicWriteFile } from './write-file.js';
+import type { EditParams, MutationResult } from './types.js';
+import { collectRegexMatches, compileUserRegex, ensureUserRegexRuntime } from './user-regex.js';
+import { assertLineRange, assertPositiveInteger } from './validation.js';
 
 export async function editVaultFile(
   vaultRoot: string,
   params: EditParams,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<MutationResult> {
   validateEditParams(params);
-  if (params.selector.kind === "regex") {
+  if (params.selector.kind === 'regex') {
     await ensureUserRegexRuntime(env);
   }
   return editVaultFileValidated(vaultRoot, params, env);
@@ -23,72 +23,81 @@ export async function editVaultFile(
 function editVaultFileValidated(
   vaultRoot: string,
   params: EditParams,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): MutationResult {
   const target = resolveVaultPath(vaultRoot, params.path, { mustExist: true });
   assertVaultFileWithinByteLimit(target.abs, target.rel);
-  const before = fs.readFileSync(target.abs, "utf8");
+  const before = fs.readFileSync(target.abs, 'utf8');
   const after = applyEdit(before, params, env);
   if (before === after) {
-    throw new UsageError("Edit produced no changes");
+    throw new UsageError('Edit produced no changes');
   }
   if (!params.dryRun) {
     atomicWriteFile(target.abs, after);
   }
   return {
     ok: true,
-    command: "edit",
+    command: 'edit',
     dryRun: Boolean(params.dryRun),
-    changes: [{ code: "M", path: target.rel, before, after, diff: simpleDiff(target.rel, before, after) }]
+    changes: [{ code: 'M', path: target.rel, before, after, diff: simpleDiff(target.rel, before, after) }],
   };
 }
 
 function validateEditParams(params: EditParams): void {
-  if (params.selector.kind === "line") {
-    assertPositiveInteger(params.selector.value, "line");
-  } else if (params.selector.kind === "range") {
-    assertLineRange(params.selector.value, "range");
+  if (params.selector.kind === 'line') {
+    assertPositiveInteger(params.selector.value, 'line');
+  } else if (params.selector.kind === 'range') {
+    assertLineRange(params.selector.value, 'range');
   }
 }
 
 function applyEdit(before: string, params: EditParams, env: NodeJS.ProcessEnv): string {
   switch (params.selector.kind) {
-    case "replace": {
+    case 'replace': {
       const needle = params.selector.value;
       const count = occurrences(before, needle);
-      if (count === 0) throw new UsageError("replace text was not found");
-      if (count > 1 && !params.all) throw new UsageError(`replace text matched ${count} times; pass all to replace all`);
-      return params.all ? before.split(needle).join(params.replacement) : replaceFirstLiteral(before, needle, params.replacement);
+      if (count === 0) throw new UsageError('replace text was not found');
+      if (count > 1 && !params.all)
+        throw new UsageError(`replace text matched ${count} times; pass all to replace all`);
+      return params.all
+        ? before.split(needle).join(params.replacement)
+        : replaceFirstLiteral(before, needle, params.replacement);
     }
-    case "regex": {
-      const regex = compileUserRegex(params.selector.value, "g", "regex", env);
+    case 'regex': {
+      const regex = compileUserRegex(params.selector.value, 'g', 'regex', env);
       const matches = collectRegexMatches(regex, before);
-      if (matches.length === 0) throw new UsageError("regex did not match");
-      if (matches.length > 1 && !params.all) throw new UsageError(`regex matched ${matches.length} times; pass all to replace all`);
+      if (matches.length === 0) throw new UsageError('regex did not match');
+      if (matches.length > 1 && !params.all)
+        throw new UsageError(`regex matched ${matches.length} times; pass all to replace all`);
       if (params.all) return replaceRegexMatches(before, matches, params.replacement);
       const first = matches[0];
       return `${before.slice(0, first.index)}${params.replacement}${before.slice(first.index + first.text.length)}`;
     }
-    case "line": {
+    case 'line': {
       const line = params.selector.value;
-      if (!Number.isSafeInteger(line) || line < 1) throw new UsageError("line must be a positive integer");
+      if (!Number.isSafeInteger(line) || line < 1) throw new UsageError('line must be a positive integer');
       const parts = splitText(before);
       if (line > parts.lines.length) throw new UsageError(`line ${line} is beyond end of file (${parts.lines.length})`);
       parts.lines[line - 1] = params.replacement;
       return joinText(parts);
     }
-    case "range": {
+    case 'range': {
       const range = params.selector.value;
       const parts = splitText(before);
-      if (range.end > parts.lines.length) throw new UsageError(`range end ${range.end} is beyond end of file (${parts.lines.length})`);
+      if (range.end > parts.lines.length)
+        throw new UsageError(`range end ${range.end} is beyond end of file (${parts.lines.length})`);
       parts.lines.splice(range.start - 1, range.end - range.start + 1, ...splitText(params.replacement).lines);
       return joinText(parts);
     }
   }
 }
 
-function replaceRegexMatches(text: string, matches: Array<{ index: number; text: string }>, replacement: string): string {
-  let result = "";
+function replaceRegexMatches(
+  text: string,
+  matches: Array<{ index: number; text: string }>,
+  replacement: string,
+): string {
+  let result = '';
   let cursor = 0;
   for (const match of matches) {
     result += text.slice(cursor, match.index);
@@ -105,7 +114,7 @@ function replaceFirstLiteral(text: string, needle: string, replacement: string):
 }
 
 function occurrences(text: string, needle: string): number {
-  if (needle === "") throw new UsageError("replace text must not be empty");
+  if (needle === '') throw new UsageError('replace text must not be empty');
   let count = 0;
   let index = 0;
   while (true) {

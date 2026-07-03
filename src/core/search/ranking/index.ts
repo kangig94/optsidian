@@ -8,12 +8,7 @@ export {
   nullableRankPriority,
   rankBucketName,
   rerankCandidatesWithSignals,
-  rerankScore
-} from "./score.js";
+  rerankScore,
+} from './score.js';
 
-export type {
-  CandidateRankSignals,
-  ExactDominanceBound,
-  ExactDominanceBoundInput,
-  RankDocument
-} from "./score.js";
+export type { CandidateRankSignals, ExactDominanceBound, ExactDominanceBoundInput, RankDocument } from './score.js';

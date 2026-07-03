@@ -1,4 +1,4 @@
-import initKiwiModule from "kiwi-nlp/dist/build/kiwi-wasm.js";
+import initKiwiModule from 'kiwi-nlp/dist/build/kiwi-wasm.js';
 import {
   KIWI_MODEL_TYPE,
   KIWI_MODEL_VERSION,
@@ -7,11 +7,11 @@ import {
   ensureKiwiWasmArtifact,
   readVerifiedKiwiModelFiles,
   readVerifiedKiwiWasmBinary,
-  type KiwiModelFileName
-} from "./artifact.js";
+  type KiwiModelFileName,
+} from './artifact.js';
 
 export type KiwiAnalyzerIdentity = {
-  engine: "kiwi";
+  engine: 'kiwi';
   kiwiNlpVersion: string;
   modelVersion: string;
   modelType: typeof KIWI_MODEL_TYPE;
@@ -47,7 +47,7 @@ type KiwiWasmInitializer = (moduleArg?: Record<string, unknown>) => Promise<Kiwi
 type KiwiWasmInitializerImport = KiwiWasmInitializer | { default?: KiwiWasmInitializer };
 
 type KiwiApi = {
-  cmd<T = unknown>(command: Record<string, unknown>): T;
+  cmd(command: Record<string, unknown>): unknown;
   loadModelFiles(files: Record<KiwiModelFileName, Uint8Array>): Promise<{
     modelPath: string;
     unload(): Promise<void>;
@@ -56,39 +56,39 @@ type KiwiApi = {
 
 const initKiwi = resolveKiwiWasmInitializer(initKiwiModule as unknown as KiwiWasmInitializerImport);
 const KIWI_MATCH_ALL_WITH_NORMALIZING = 8_454_207;
-const KIWI_DROPPED_TAG_PREFIXES = ["E", "J", "S"] as const;
-const KIWI_DROPPED_TAGS = new Set(["VCP", "VCN", "VX", "XPN", "XSA", "XSN", "XSV", "Z_CODA"]);
-const KIWI_CONTENT_TAG_PREFIXES = ["N", "M", "V"] as const;
-const KIWI_CONTENT_TAGS = new Set(["IC", "SL", "SH", "SN", "W_URL", "W_EMAIL", "XR"]);
+const KIWI_DROPPED_TAG_PREFIXES = ['E', 'J', 'S'] as const;
+const KIWI_DROPPED_TAGS = new Set(['VCP', 'VCN', 'VX', 'XPN', 'XSA', 'XSN', 'XSV', 'Z_CODA']);
+const KIWI_CONTENT_TAG_PREFIXES = ['N', 'M', 'V'] as const;
+const KIWI_CONTENT_TAGS = new Set(['IC', 'SL', 'SH', 'SN', 'W_URL', 'W_EMAIL', 'XR']);
 const KIWI_STOPWORDS = new Set([
-  "것",
-  "곳",
-  "수",
-  "등",
-  "및",
-  "또",
-  "더",
-  "그",
-  "이",
-  "저",
-  "하",
-  "되",
-  "있",
-  "없",
-  "같",
-  "않",
-  "위하",
-  "대하",
-  "통하",
-  "따르",
-  "의하",
-  "대한",
-  "위한",
-  "통해",
-  "그리고",
-  "그러나",
-  "하지만",
-  "또는"
+  '것',
+  '곳',
+  '수',
+  '등',
+  '및',
+  '또',
+  '더',
+  '그',
+  '이',
+  '저',
+  '하',
+  '되',
+  '있',
+  '없',
+  '같',
+  '않',
+  '위하',
+  '대하',
+  '통하',
+  '따르',
+  '의하',
+  '대한',
+  '위한',
+  '통해',
+  '그리고',
+  '그러나',
+  '하지만',
+  '또는',
 ]);
 
 export function __resolveKiwiWasmInitializerForTests(imported: unknown): KiwiWasmInitializer {
@@ -100,9 +100,9 @@ export function __filterKiwiTokensForTests(tokens: readonly KiwiTokenInfo[]): st
 }
 
 function resolveKiwiWasmInitializer(imported: KiwiWasmInitializerImport): KiwiWasmInitializer {
-  const initializer = typeof imported === "function" ? imported : imported.default;
-  if (typeof initializer !== "function") {
-    throw new Error("Kiwi wasm initializer is not available");
+  const initializer = typeof imported === 'function' ? imported : imported.default;
+  if (typeof initializer !== 'function') {
+    throw new Error('Kiwi wasm initializer is not available');
   }
   return initializer;
 }
@@ -110,8 +110,8 @@ function resolveKiwiWasmInitializer(imported: KiwiWasmInitializerImport): KiwiWa
 export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): Promise<KiwiAnalyzer> {
   const env = options.env ?? process.env;
   if (options.installIfMissing === true) {
-    const installed = await ensureKiwiModelArtifact(env, { verifyFiles: "metadata" });
-    if (installed.status === "error") throw new Error(installed.message);
+    const installed = await ensureKiwiModelArtifact(env, { verifyFiles: 'metadata' });
+    if (installed.status === 'error') throw new Error(installed.message);
   }
 
   const modelFiles = await readLoadableModelFiles(env, options.installIfMissing === true);
@@ -119,21 +119,21 @@ export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): P
   const loaded = await buildDisposableKiwi(modelFiles, env);
   if (!loaded.ready()) {
     await loaded.dispose();
-    throw new Error("Kiwi analyzer was constructed but is not ready");
+    throw new Error('Kiwi analyzer was constructed but is not ready');
   }
 
   let disposed = false;
   return {
     identity: kiwiAnalyzerIdentity(),
     tokens(text: string): string[] {
-      if (disposed) throw new Error("Kiwi analyzer has been disposed");
+      if (disposed) throw new Error('Kiwi analyzer has been disposed');
       return filteredKiwiTokenStrings(loaded.tokenize(text));
     },
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
       await loaded.dispose();
-    }
+    },
   };
 }
 
@@ -162,26 +162,29 @@ function isSearchableKiwiToken(token: KiwiTokenInfo): boolean {
 
 export function kiwiAnalyzerIdentity(): KiwiAnalyzerIdentity {
   return {
-    engine: "kiwi",
+    engine: 'kiwi',
     kiwiNlpVersion: KIWI_NLP_VERSION,
     modelVersion: KIWI_MODEL_VERSION,
-    modelType: KIWI_MODEL_TYPE
+    modelType: KIWI_MODEL_TYPE,
   };
 }
 
 export async function loadKiwiWasmBinary(env: NodeJS.ProcessEnv = process.env): Promise<Uint8Array> {
-  const installed = await ensureKiwiWasmArtifact(env, { verifyFile: "metadata" });
-  if (installed.status === "error") throw new Error(installed.message);
+  const installed = await ensureKiwiWasmArtifact(env, { verifyFile: 'metadata' });
+  if (installed.status === 'error') throw new Error(installed.message);
   return readLoadableWasmBinary(env);
 }
 
-async function readLoadableModelFiles(env: NodeJS.ProcessEnv, repairIfInvalid: boolean): Promise<Record<KiwiModelFileName, Uint8Array>> {
+async function readLoadableModelFiles(
+  env: NodeJS.ProcessEnv,
+  repairIfInvalid: boolean,
+): Promise<Record<KiwiModelFileName, Uint8Array>> {
   try {
     return readVerifiedKiwiModelFiles(env);
   } catch (error) {
-    if (!repairIfInvalid) throw new Error("Kiwi model artifact is not installed", { cause: error });
+    if (!repairIfInvalid) throw new Error('Kiwi model artifact is not installed', { cause: error });
     const installed = await ensureKiwiModelArtifact(env, { forceInstall: true });
-    if (installed.status === "error") throw new Error(installed.message, { cause: error });
+    if (installed.status === 'error') throw new Error(installed.message, { cause: error });
     return readVerifiedKiwiModelFiles(env);
   }
 }
@@ -191,12 +194,15 @@ async function readLoadableWasmBinary(env: NodeJS.ProcessEnv): Promise<Uint8Arra
     return readVerifiedKiwiWasmBinary(env);
   } catch {
     const installed = await ensureKiwiWasmArtifact(env, { forceInstall: true });
-    if (installed.status === "error") throw new Error(installed.message);
+    if (installed.status === 'error') throw new Error(installed.message);
     return readVerifiedKiwiWasmBinary(env);
   }
 }
 
-async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Array>, env: NodeJS.ProcessEnv): Promise<{
+async function buildDisposableKiwi(
+  modelFiles: Record<KiwiModelFileName, Uint8Array>,
+  env: NodeJS.ProcessEnv,
+): Promise<{
   ready(): boolean;
   tokenize(text: string): KiwiTokenInfo[];
   dispose(): Promise<void>;
@@ -205,29 +211,31 @@ async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Ar
   const loadedModel = await api.loadModelFiles(modelFiles);
   let disposed = false;
   try {
-    const id = api.cmd<number>({
-      method: "build",
-      args: [{
-        modelType: KIWI_MODEL_TYPE,
-        modelPath: loadedModel.modelPath
-      }]
-    });
+    const id = api.cmd({
+      method: 'build',
+      args: [
+        {
+          modelType: KIWI_MODEL_TYPE,
+          modelPath: loadedModel.modelPath,
+        },
+      ],
+    }) as number;
     return {
       ready(): boolean {
-        return api.cmd<boolean>({ method: "ready", id, args: [] });
+        return api.cmd({ method: 'ready', id, args: [] }) as boolean;
       },
       tokenize(text: string): KiwiTokenInfo[] {
-        return api.cmd<KiwiTokenInfo[]>({
-          method: "tokenize",
+        return api.cmd({
+          method: 'tokenize',
           id,
-          args: [text, KIWI_MATCH_ALL_WITH_NORMALIZING]
-        });
+          args: [text, KIWI_MATCH_ALL_WITH_NORMALIZING],
+        }) as KiwiTokenInfo[];
       },
       async dispose(): Promise<void> {
         if (disposed) return;
         disposed = true;
         await loadedModel.unload();
-      }
+      },
     };
   } catch (error) {
     await loadedModel.unload();
@@ -237,11 +245,11 @@ async function buildDisposableKiwi(modelFiles: Record<KiwiModelFileName, Uint8Ar
 
 async function createKiwiApi(env: NodeJS.ProcessEnv): Promise<KiwiApi> {
   const kiwi = await initKiwi({
-    wasmBinary: await loadKiwiWasmBinary(env)
+    wasmBinary: await loadKiwiWasmBinary(env),
   });
   return {
-    cmd<T = unknown>(command: Record<string, unknown>): T {
-      return JSON.parse(kiwi.api(JSON.stringify(command))) as T;
+    cmd(command: Record<string, unknown>): unknown {
+      return JSON.parse(kiwi.api(JSON.stringify(command))) as unknown;
     },
     async loadModelFiles(files: Record<KiwiModelFileName, Uint8Array>) {
       const modelPath = `kiwi-model-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -262,9 +270,9 @@ async function createKiwiApi(env: NodeJS.ProcessEnv): Promise<KiwiApi> {
         modelPath,
         async unload(): Promise<void> {
           cleanupLoadedFiles(kiwi, modelPath, loadedFiles);
-        }
+        },
       };
-    }
+    },
   };
 }
 

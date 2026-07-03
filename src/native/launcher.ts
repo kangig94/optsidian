@@ -1,8 +1,14 @@
-import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const GUI_ENV_KEYS = ["DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XAUTHORITY"] as const;
+const GUI_ENV_KEYS = [
+  'DISPLAY',
+  'WAYLAND_DISPLAY',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'XDG_RUNTIME_DIR',
+  'XAUTHORITY',
+] as const;
 
 type GuiEnvKey = (typeof GUI_ENV_KEYS)[number];
 type GuiEnvSnapshot = Partial<Record<GuiEnvKey, string>>;
@@ -16,8 +22,8 @@ export type ObsidianProcessReader = {
 
 export type RunObsidianOptions = {
   env?: NodeJS.ProcessEnv;
-  input?: SpawnSyncOptionsWithStringEncoding["input"];
-  stdio?: SpawnSyncOptionsWithStringEncoding["stdio"];
+  input?: SpawnSyncOptionsWithStringEncoding['input'];
+  stdio?: SpawnSyncOptionsWithStringEncoding['stdio'];
   procReader?: ObsidianProcessReader;
   currentPid?: number;
 };
@@ -26,7 +32,7 @@ let cachedLinuxGuiEnv: GuiEnvSnapshot | undefined;
 let hasCachedLinuxGuiEnv = false;
 
 export function obsidianBin(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OPTSIDIAN_OBSIDIAN_BIN ? env.OPTSIDIAN_OBSIDIAN_BIN : "obsidian";
+  return env.OPTSIDIAN_OBSIDIAN_BIN ? env.OPTSIDIAN_OBSIDIAN_BIN : 'obsidian';
 }
 
 export function clearObsidianLaunchEnvCache(): void {
@@ -47,14 +53,14 @@ export function mergeObsidianLaunchEnv(baseEnv: NodeJS.ProcessEnv, recoveredEnv:
     }
   }
   if (!merged.DBUS_SESSION_BUS_ADDRESS && merged.XDG_RUNTIME_DIR) {
-    merged.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(merged.XDG_RUNTIME_DIR, "bus")}`;
+    merged.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(merged.XDG_RUNTIME_DIR, 'bus')}`;
   }
   return merged;
 }
 
 export function recoverLinuxGuiEnv(
   baseEnv: NodeJS.ProcessEnv,
-  options: { procReader?: ObsidianProcessReader; currentPid?: number } = {}
+  options: { procReader?: ObsidianProcessReader; currentPid?: number } = {},
 ): GuiEnvSnapshot {
   if (hasLocalGuiContext(baseEnv)) {
     return {};
@@ -69,9 +75,7 @@ export function recoverLinuxGuiEnv(
   return finalizeGuiEnvSnapshot(recovered, baseEnv);
 }
 
-export type ObsidianAppLaunch =
-  | { kind: "darwin-bundle"; appBundle: string }
-  | { kind: "binary"; binary: string };
+export type ObsidianAppLaunch = { kind: 'darwin-bundle'; appBundle: string } | { kind: 'binary'; binary: string };
 
 export type FindObsidianAppLaunchOptions = {
   platform?: NodeJS.Platform;
@@ -80,34 +84,31 @@ export type FindObsidianAppLaunchOptions = {
 
 export function findObsidianAppLaunch(
   env: NodeJS.ProcessEnv = process.env,
-  options: FindObsidianAppLaunchOptions = {}
+  options: FindObsidianAppLaunchOptions = {},
 ): ObsidianAppLaunch | undefined {
   const override = env.OPTSIDIAN_OBSIDIAN_APP_BIN;
   if (override) {
-    return { kind: "binary", binary: override };
+    return { kind: 'binary', binary: override };
   }
 
   const platform = options.platform ?? process.platform;
   const exists = options.existsSync ?? ((candidate: string) => fs.existsSync(candidate));
 
-  if (platform === "darwin") {
+  if (platform === 'darwin') {
     const home = env.HOME;
-    const candidates = [
-      ...(home ? [path.join(home, "Applications/Obsidian.app")] : []),
-      "/Applications/Obsidian.app"
-    ];
+    const candidates = [...(home ? [path.join(home, 'Applications/Obsidian.app')] : []), '/Applications/Obsidian.app'];
     for (const bundle of candidates) {
       if (exists(bundle)) {
-        return { kind: "darwin-bundle", appBundle: bundle };
+        return { kind: 'darwin-bundle', appBundle: bundle };
       }
     }
     return undefined;
   }
 
-  if (platform === "linux") {
-    const bundled = "/opt/Obsidian/obsidian";
+  if (platform === 'linux') {
+    const bundled = '/opt/Obsidian/obsidian';
     if (exists(bundled)) {
-      return { kind: "binary", binary: bundled };
+      return { kind: 'binary', binary: bundled };
     }
     return undefined;
   }
@@ -125,8 +126,11 @@ export function runObsidianSync(args: string[], options: RunObsidianOptions = {}
   return result;
 }
 
-function buildLaunchEnv(baseEnv: NodeJS.ProcessEnv, options: RunObsidianOptions & { refreshCache?: boolean }): NodeJS.ProcessEnv {
-  if (process.platform !== "linux") {
+function buildLaunchEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  options: RunObsidianOptions & { refreshCache?: boolean },
+): NodeJS.ProcessEnv {
+  if (process.platform !== 'linux') {
     return baseEnv;
   }
   if (!options.refreshCache && hasCachedLinuxGuiEnv) {
@@ -138,33 +142,39 @@ function buildLaunchEnv(baseEnv: NodeJS.ProcessEnv, options: RunObsidianOptions 
   return mergeObsidianLaunchEnv(baseEnv, recovered);
 }
 
-function spawnObsidian(args: string[], options: RunObsidianOptions & { env: NodeJS.ProcessEnv }): SpawnSyncReturns<string> {
+function spawnObsidian(
+  args: string[],
+  options: RunObsidianOptions & { env: NodeJS.ProcessEnv },
+): SpawnSyncReturns<string> {
   return spawnSync(obsidianBin(options.env), args, {
-    encoding: "utf8",
+    encoding: 'utf8',
     input: options.input,
-    shell: process.platform === "win32",
-    stdio: options.stdio ?? ["ignore", "pipe", "pipe"],
-    env: options.env
+    shell: process.platform === 'win32',
+    stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'],
+    env: options.env,
   });
 }
 
-function shouldRetryObsidianRun(result: SpawnSyncReturns<string>, stdio: RunObsidianOptions["stdio"]): boolean {
-  if (process.platform !== "linux" || stdio === "inherit" || result.error || result.status === 0) {
+function shouldRetryObsidianRun(result: SpawnSyncReturns<string>, stdio: RunObsidianOptions['stdio']): boolean {
+  if (process.platform !== 'linux' || stdio === 'inherit' || result.error || result.status === 0) {
     return false;
   }
-  const message = `${result.stderr ?? ""}\n${result.stdout ?? ""}`.trim();
+  const message = `${result.stderr ?? ''}\n${result.stdout ?? ''}`.trim();
   return shouldRefreshObsidianLaunch(message);
 }
 
 function hasLocalGuiContext(env: NodeJS.ProcessEnv): boolean {
-  return Boolean((env.DISPLAY ? env.DISPLAY : env.WAYLAND_DISPLAY) && (env.DBUS_SESSION_BUS_ADDRESS ? env.DBUS_SESSION_BUS_ADDRESS : env.XDG_RUNTIME_DIR));
+  return Boolean(
+    (env.DISPLAY ? env.DISPLAY : env.WAYLAND_DISPLAY) &&
+    (env.DBUS_SESSION_BUS_ADDRESS ? env.DBUS_SESSION_BUS_ADDRESS : env.XDG_RUNTIME_DIR),
+  );
 }
 
 function collectParentChainGuiEnv(
   recovered: GuiEnvSnapshot,
   baseEnv: NodeJS.ProcessEnv,
   reader: ObsidianProcessReader,
-  currentPid: number
+  currentPid: number,
 ): void {
   const seen = new Set<number>();
   let pid = reader.readParentPid(currentPid);
@@ -186,7 +196,7 @@ function collectObsidianProcessGuiEnv(
   recovered: GuiEnvSnapshot,
   baseEnv: NodeJS.ProcessEnv,
   reader: ObsidianProcessReader,
-  currentPid: number
+  currentPid: number,
 ): void {
   const candidates = reader
     .listPids()
@@ -212,13 +222,17 @@ function finalizeGuiEnvSnapshot(recovered: GuiEnvSnapshot, baseEnv: NodeJS.Proce
   if (!baseEnv.DBUS_SESSION_BUS_ADDRESS && !finalized.DBUS_SESSION_BUS_ADDRESS) {
     const runtimeDir = finalized.XDG_RUNTIME_DIR ? finalized.XDG_RUNTIME_DIR : baseEnv.XDG_RUNTIME_DIR;
     if (runtimeDir) {
-      finalized.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(runtimeDir, "bus")}`;
+      finalized.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(runtimeDir, 'bus')}`;
     }
   }
   return finalized;
 }
 
-function fillMissingGuiEnv(recovered: GuiEnvSnapshot, baseEnv: NodeJS.ProcessEnv, sourceEnv: NodeJS.ProcessEnv | undefined): void {
+function fillMissingGuiEnv(
+  recovered: GuiEnvSnapshot,
+  baseEnv: NodeJS.ProcessEnv,
+  sourceEnv: NodeJS.ProcessEnv | undefined,
+): void {
   if (!sourceEnv) {
     return;
   }
@@ -232,7 +246,7 @@ function fillMissingGuiEnv(recovered: GuiEnvSnapshot, baseEnv: NodeJS.ProcessEnv
 
 function compareObsidianCandidates(
   left: { pid: number; argv: string[]; env: NodeJS.ProcessEnv },
-  right: { pid: number; argv: string[]; env: NodeJS.ProcessEnv }
+  right: { pid: number; argv: string[]; env: NodeJS.ProcessEnv },
 ): number {
   const mainDelta = Number(isObsidianMainProcess(right.argv)) - Number(isObsidianMainProcess(left.argv));
   if (mainDelta !== 0) {
@@ -250,7 +264,7 @@ function guiEnvScore(env: NodeJS.ProcessEnv): number {
 }
 
 function isObsidianMainProcess(argv: string[]): boolean {
-  return !argv.some((arg) => arg.startsWith("--type="));
+  return !argv.some((arg) => arg.startsWith('--type='));
 }
 
 function looksLikeObsidianProcess(argv: string[]): boolean {
@@ -260,10 +274,10 @@ function looksLikeObsidianProcess(argv: string[]): boolean {
     if (!token) {
       continue;
     }
-    if (token === "optsidian" || token.startsWith("optsidian-") || token.startsWith("optsidian_")) {
+    if (token === 'optsidian' || token.startsWith('optsidian-') || token.startsWith('optsidian_')) {
       return false;
     }
-    if (token === "obsidian" || token.startsWith("obsidian-") || token.startsWith("obsidian_")) {
+    if (token === 'obsidian' || token.startsWith('obsidian-') || token.startsWith('obsidian_')) {
       hasObsidianToken = true;
     }
   }
@@ -271,10 +285,13 @@ function looksLikeObsidianProcess(argv: string[]): boolean {
 }
 
 function normalizeProcessToken(token: string): string {
-  return path.basename(token).replace(/\.(cjs|mjs|js|exe)$/i, "").toLowerCase();
+  return path
+    .basename(token)
+    .replace(/\.(cjs|mjs|js|exe)$/i, '')
+    .toLowerCase();
 }
 
-function createProcReader(root = "/proc"): ObsidianProcessReader {
+function createProcReader(root = '/proc'): ObsidianProcessReader {
   return {
     listPids(): number[] {
       try {
@@ -289,8 +306,8 @@ function createProcReader(root = "/proc"): ObsidianProcessReader {
     readCmdline(pid: number): string[] | undefined {
       try {
         return fs
-          .readFileSync(path.join(root, String(pid), "cmdline"), "utf8")
-          .split("\0")
+          .readFileSync(path.join(root, String(pid), 'cmdline'), 'utf8')
+          .split('\0')
           .filter(Boolean);
       } catch {
         return undefined;
@@ -298,30 +315,30 @@ function createProcReader(root = "/proc"): ObsidianProcessReader {
     },
     readEnviron(pid: number): NodeJS.ProcessEnv | undefined {
       try {
-        return parseEnvPairs(fs.readFileSync(path.join(root, String(pid), "environ"), "utf8"));
+        return parseEnvPairs(fs.readFileSync(path.join(root, String(pid), 'environ'), 'utf8'));
       } catch {
         return undefined;
       }
     },
     readParentPid(pid: number): number | undefined {
       try {
-        const status = fs.readFileSync(path.join(root, String(pid), "status"), "utf8");
+        const status = fs.readFileSync(path.join(root, String(pid), 'status'), 'utf8');
         const match = /^PPid:\s+(\d+)$/m.exec(status);
         return match ? Number(match[1]) : undefined;
       } catch {
         return undefined;
       }
-    }
+    },
   };
 }
 
 function parseEnvPairs(raw: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const pair of raw.split("\0")) {
+  for (const pair of raw.split('\0')) {
     if (!pair) {
       continue;
     }
-    const separator = pair.indexOf("=");
+    const separator = pair.indexOf('=');
     if (separator <= 0) {
       continue;
     }

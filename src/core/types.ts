@@ -1,4 +1,4 @@
-import type { ExplainTrace } from "./search/contracts.js";
+import type { ExplainTrace } from './search/contracts.js';
 
 export type LineRange = {
   start: number;
@@ -17,7 +17,7 @@ export type ReadParams = {
 
 export type ReadResult = {
   ok: true;
-  command: "read";
+  command: 'read';
   path: string;
   range: {
     start: number;
@@ -54,15 +54,15 @@ export type GrepMatch = {
 
 export type GrepResult = {
   ok: true;
-  command: "grep";
+  command: 'grep';
   query: string;
   matches: GrepMatch[];
   count: number;
 };
 
-export type SearchRetrievalMode = "lexical" | "vector" | "hybrid";
+export type SearchRetrievalMode = 'lexical' | 'vector' | 'hybrid';
 
-export type SearchCoverageMode = "full" | "bounded";
+export type SearchCoverageMode = 'full' | 'bounded';
 
 export type SearchCoverageBudget = {
   work?: number;
@@ -82,7 +82,7 @@ export type SearchParams = {
   budget?: SearchCoverageBudget;
 };
 
-export type SearchField = "title" | "aliases" | "tags" | "headings" | "path" | "body";
+export type SearchField = 'title' | 'aliases' | 'tags' | 'headings' | 'path' | 'body';
 
 export type SearchSnippet = {
   line: number;
@@ -99,7 +99,7 @@ export type SearchAnalyzerDebug = {
 };
 
 export type SearchMatchDebug = {
-  source: "persisted";
+  source: 'persisted';
   queryTerms: string[];
   queryChannels?: Record<string, string[]>;
   matchedChannels?: string[];
@@ -109,7 +109,7 @@ export type SearchMatchDebug = {
   retrievalScore?: number;
   rerankScore?: number;
   baseRank?: number;
-  bucket?: "exact" | "phrase" | "coverage" | "base";
+  bucket?: 'exact' | 'phrase' | 'coverage' | 'base';
   exactPriority?: number | null;
   phrasePriority?: number | null;
   coverageTerms?: number;
@@ -142,23 +142,23 @@ export type SearchDebugInfo = {
     channels?: Record<string, string[]>;
   };
   projection: {
-    source: "persisted" | "none";
-    tokenizerTier: "intl" | "kiwi";
+    source: 'persisted' | 'none';
+    tokenizerTier: 'intl' | 'kiwi';
     documents: number;
     files: number;
   };
   analyzer: SearchAnalyzerDebug;
   candidates: number;
   snapshotId?: string;
-  reranker?: "unified-scalar-ac4-v1";
+  reranker?: 'unified-scalar-ac4-v1';
 };
 
 export type SearchResult = {
   ok: true;
-  command: "search";
+  command: 'search';
   schemaVersion?: 1;
   available?: boolean;
-  status?: "ready" | "index-not-ready";
+  status?: 'ready' | 'index-not-ready';
   origin?: RetrieveOrigin;
   results?: RetrieveRankedResult[];
   matches: SearchMatch[];
@@ -169,9 +169,9 @@ export type SearchResult = {
   warnings?: string[];
 };
 
-export type RetrieveOrigin = "text" | "note" | "pair" | "global";
+export type RetrieveOrigin = 'text' | 'note' | 'pair' | 'global';
 
-export type RetrieveDenseSignalState = "fresh" | "stale" | "rebuilding" | "cold";
+export type RetrieveDenseSignalState = 'fresh' | 'stale' | 'rebuilding' | 'cold';
 
 export type RetrieveDenseSignal = {
   state: RetrieveDenseSignalState;
@@ -190,10 +190,10 @@ export type RetrieveRankedResult = {
 
 export type RetrieveReadyResult = {
   ok: true;
-  command: "retrieve";
+  command: 'retrieve';
   schemaVersion: 1;
   available: true;
-  status: "ready";
+  status: 'ready';
   origin: RetrieveOrigin;
   snapshotId: string;
   retrievalSnapshotId?: string;
@@ -207,10 +207,10 @@ export type RetrieveReadyResult = {
 
 export type RetrieveIndexNotReadyResult = {
   ok: true;
-  command: "retrieve";
+  command: 'retrieve';
   schemaVersion: 1;
   available: false;
-  status: "index-not-ready";
+  status: 'index-not-ready';
   origin: RetrieveOrigin;
   reason: string;
   dense: RetrieveDenseSignal;
@@ -221,17 +221,17 @@ export type RetrieveIndexNotReadyResult = {
 
 export type RetrieveResult = RetrieveReadyResult | RetrieveIndexNotReadyResult;
 
-export type SimilarityMode = "global" | "left" | "pair";
+export type SimilarityMode = 'global' | 'left' | 'pair';
 
-export type SimilarityProjectionField = "title" | "body" | "aliases" | "headings" | "tags";
+export type SimilarityProjectionField = 'title' | 'body' | 'aliases' | 'headings' | 'tags';
 
-export type SimilarityMarkdownProjection = "plain" | "raw";
+export type SimilarityMarkdownProjection = 'plain' | 'raw';
 
 export type SimilarityFilterValue = null | string | number | boolean;
 
 export type SimilarityFrontmatterFilter = {
   key: string;
-  op: "eq";
+  op: 'eq';
   value: SimilarityFilterValue;
 };
 
@@ -303,10 +303,10 @@ export type SimilarityPairResult = {
 
 export type SimilarityResult = {
   ok: true;
-  command: "similarity";
+  command: 'similarity';
   schemaVersion: 1;
   available: boolean;
-  status: "ready" | "index-not-ready";
+  status: 'ready' | 'index-not-ready';
   origin: RetrieveOrigin;
   request: NormalizedSimilarityParams;
   snapshotId?: string;
@@ -320,9 +320,9 @@ export type SimilarityResult = {
 
 export type SearchIndexProjectionStatus = {
   key: string;
-  tier: "intl" | "kiwi";
-  roles: Array<"active" | "baseline" | "cached">;
-  state: "missing" | "ready" | "unreadable";
+  tier: 'intl' | 'kiwi';
+  roles: Array<'active' | 'baseline' | 'cached'>;
+  state: 'missing' | 'ready' | 'unreadable';
   compatible: boolean;
   staleTier?: boolean;
   documents?: number;
@@ -331,14 +331,14 @@ export type SearchIndexProjectionStatus = {
 };
 
 export type SearchAnalyzerRuntimeStatus = {
-  targetTier: "intl" | "kiwi";
+  targetTier: 'intl' | 'kiwi';
   declaredAnalyzers: string[];
   activeAnalyzers: string[];
   kiwi?: {
-    modelState: "missing" | "installed";
+    modelState: 'missing' | 'installed';
     modelPath: string;
     missingFiles: string[];
-    analyzerState: "unloaded" | "loading" | "loaded" | "daemon";
+    analyzerState: 'unloaded' | 'loading' | 'loaded' | 'daemon';
     leaseCount: number;
     reason?: string;
   };
@@ -362,8 +362,8 @@ export type SearchIndexWarmScheduleStatus = {
 
 export type SearchIndexStatusResult = {
   ok: true;
-  command: "index";
-  action: "status";
+  command: 'index';
+  action: 'status';
   ready: boolean;
   staleTier?: boolean;
   analyzer: SearchAnalyzerRuntimeStatus;
@@ -374,14 +374,14 @@ export type SearchIndexStatusResult = {
 
 export type SearchIndexWarmVaultResult = {
   vaultRoot: string;
-  status: "ready" | "failed";
+  status: 'ready' | 'failed';
   error?: string;
 };
 
 export type SearchIndexWarmResult = {
   ok: true;
-  command: "index";
-  action: "warm";
+  command: 'index';
+  action: 'warm';
   vaults: SearchIndexWarmVaultResult[];
   warnings?: string[];
   snapshotId?: string;
@@ -389,8 +389,8 @@ export type SearchIndexWarmResult = {
 
 export type SearchIndexMutationResult = {
   ok: true;
-  command: "index";
-  action: "rebuild" | "clear";
+  command: 'index';
+  action: 'rebuild' | 'clear';
   snapshotId?: string;
 };
 
@@ -408,8 +408,8 @@ export type SearchIndexPruneSkippedStore = {
 
 export type SearchIndexPruneResult = {
   ok: true;
-  command: "index";
-  action: "prune";
+  command: 'index';
+  action: 'prune';
   dryRun: boolean;
   unusedDays: number;
   cutoffAt: string;
@@ -418,7 +418,8 @@ export type SearchIndexPruneResult = {
   removedBytes: number;
 };
 
-export type FrontmatterValue = null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };
+export type FrontmatterValue =
+  null | string | number | boolean | FrontmatterValue[] | { [key: string]: FrontmatterValue };
 
 export type FrontmatterReadParams = {
   path: string;
@@ -433,14 +434,14 @@ export type FrontmatterMutationParams = {
 
 export type FrontmatterReadResult = {
   ok: true;
-  command: "frontmatter";
-  action: "read";
+  command: 'frontmatter';
+  action: 'read';
   path: string;
   hasFrontmatter: boolean;
   frontmatter: Record<string, FrontmatterValue>;
 };
 
-export type ChangeCode = "A" | "M" | "D";
+export type ChangeCode = 'A' | 'M' | 'D';
 
 export type FileChange = {
   code: ChangeCode;
@@ -453,17 +454,17 @@ export type FileChange = {
 
 export type MutationResult = {
   ok: true;
-  command: "edit" | "write" | "copy" | "mkdir" | "apply_patch" | "frontmatter";
+  command: 'edit' | 'write' | 'copy' | 'mkdir' | 'apply_patch' | 'frontmatter';
   dryRun: boolean;
   changes: FileChange[];
   message?: string;
 };
 
 export type EditSelector =
-  | { kind: "replace"; value: string }
-  | { kind: "regex"; value: string }
-  | { kind: "line"; value: number }
-  | { kind: "range"; value: LineRange };
+  | { kind: 'replace'; value: string }
+  | { kind: 'regex'; value: string }
+  | { kind: 'line'; value: number }
+  | { kind: 'range'; value: LineRange };
 
 export type EditParams = {
   path: string;

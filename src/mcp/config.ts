@@ -1,6 +1,6 @@
-import { UsageError } from "../errors.js";
-import { OPTSIDIAN_VERSION } from "../version.js";
-import { MCP_TOOL_NAMES } from "../cli/help.js";
+import { UsageError } from '../errors.js';
+import { OPTSIDIAN_VERSION } from '../version.js';
+import { MCP_TOOL_NAMES } from '../cli/help.js';
 
 export type McpConfig = {
   help: boolean;
@@ -15,24 +15,24 @@ export function parseMcpArgs(argv: string[], env: NodeJS.ProcessEnv = process.en
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
-    if (token === "--help" || token === "-h") {
+    if (token === '--help' || token === '-h') {
       help = true;
       continue;
     }
-    if (token === "--version") {
+    if (token === '--version') {
       version = true;
       continue;
     }
-    if (token === "--vault-path") {
+    if (token === '--vault-path') {
       const value = argv[index + 1];
-      if (!value) throw new UsageError("--vault-path requires a value");
+      if (!value) throw new UsageError('--vault-path requires a value');
       vaultPath = value;
       index += 1;
       continue;
     }
-    if (token.startsWith("--vault-path=")) {
-      const value = token.slice("--vault-path=".length);
-      if (!value) throw new UsageError("--vault-path requires a value");
+    if (token.startsWith('--vault-path=')) {
+      const value = token.slice('--vault-path='.length);
+      if (!value) throw new UsageError('--vault-path requires a value');
       vaultPath = value;
       continue;
     }
@@ -55,7 +55,7 @@ Vault resolution:
   OPTSIDIAN_OBSIDIAN_BIN Override native obsidian binary path
 
 Tools:
-  ${MCP_TOOL_NAMES.join(", ")}
+  ${MCP_TOOL_NAMES.join(', ')}
 
 Detailed CLI help:
   optsidian --help

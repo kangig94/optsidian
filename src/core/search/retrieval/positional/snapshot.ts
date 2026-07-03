@@ -1,10 +1,10 @@
-import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from "../../analysis/index.js";
-import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1 } from "../../constants.js";
-import { CanonicalSegmentPostingsReader } from "./segment-postings-reader.js";
-import { ProjectionReader } from "./segment-projection-reader.js";
-import type { LinkGraphView } from "../../contracts.js";
-import type { SearchSnapshot, SearchSnapshotSegment } from "./engine.js";
-import { POSITIONAL_SEARCH_FIELDS } from "./types.js";
+import { SEARCH_TOKEN_CHANNELS, type SearchTokenChannel } from '../../analysis/index.js';
+import { SEARCH_BM25_B, SEARCH_BM25_D, SEARCH_BM25_K1 } from '../../constants.js';
+import { CanonicalSegmentPostingsReader } from './segment-postings-reader.js';
+import { ProjectionReader } from './segment-projection-reader.js';
+import type { LinkGraphView } from '../../contracts.js';
+import type { SearchSnapshot, SearchSnapshotSegment } from './engine.js';
+import { POSITIONAL_SEARCH_FIELDS } from './types.js';
 
 export type PositionalSnapshotSegmentInput = {
   segmentId: string;
@@ -30,7 +30,7 @@ export type PositionalBm25GlobalStats = {
   hash: string;
 };
 
-export type PositionalBm25CorpusStats = PositionalBm25GlobalStats["corpusStats"][number];
+export type PositionalBm25CorpusStats = PositionalBm25GlobalStats['corpusStats'][number];
 
 export type Bm25TermScoreOptions = {
   k1?: number;
@@ -47,7 +47,7 @@ export type SearchFieldLengthLookup = (
   segment: SearchSnapshotSegment,
   localDocId: number,
   channel: SearchTokenChannel,
-  fieldId: number
+  fieldId: number,
 ) => number;
 
 type SearchFieldLengthDocCache = number[];
@@ -66,7 +66,7 @@ export function buildSearchSnapshotFromSegments(input: {
       partitionId: segment.partitionId,
       bytes: segment.bytes,
       postings: new CanonicalSegmentPostingsReader(segment.bytes),
-      projection
+      projection,
     };
   });
   return {
@@ -74,12 +74,12 @@ export function buildSearchSnapshotFromSegments(input: {
     documentCount: segments.reduce((sum, segment) => sum + segment.projection.documentCount(), 0),
     segments,
     bm25Stats: input.bm25Stats,
-    ...(input.linkGraph ? { linkGraph: input.linkGraph } : {})
+    ...(input.linkGraph ? { linkGraph: input.linkGraph } : {}),
   };
 }
 
 export function splitCanonicalPostingTerm(value: string): { channel: SearchTokenChannel; term: string } | undefined {
-  const separator = value.indexOf("\u0000");
+  const separator = value.indexOf('\u0000');
   if (separator < 1) return undefined;
   const channel = value.slice(0, separator);
   if (!SEARCH_TOKEN_CHANNELS.includes(channel as SearchTokenChannel)) return undefined;
@@ -89,8 +89,8 @@ export function splitCanonicalPostingTerm(value: string): { channel: SearchToken
 export function bm25CorpusStats(
   globalStats: PositionalBm25GlobalStats,
   channel: SearchTokenChannel,
-  fieldId: number
-): PositionalBm25GlobalStats["corpusStats"][number] | undefined {
+  fieldId: number,
+): PositionalBm25GlobalStats['corpusStats'][number] | undefined {
   return globalStats.corpusStats.find((entry) => entry.channel === channel && entry.fieldId === fieldId);
 }
 
@@ -98,14 +98,14 @@ export function bm25DocumentFrequency(
   globalStats: PositionalBm25GlobalStats,
   channel: SearchTokenChannel,
   term: string,
-  fieldId: number
+  fieldId: number,
 ): number {
-  const normalized = term.normalize("NFC").trim();
-  return globalStats.rows.find((entry) =>
-    entry.channel === channel &&
-    entry.fieldId === fieldId &&
-    entry.term === normalized
-  )?.documentFrequency ?? 0;
+  const normalized = term.normalize('NFC').trim();
+  return (
+    globalStats.rows.find(
+      (entry) => entry.channel === channel && entry.fieldId === fieldId && entry.term === normalized,
+    )?.documentFrequency ?? 0
+  );
 }
 
 export function createPositionalBm25StatsLookup(globalStats: PositionalBm25GlobalStats): PositionalBm25StatsLookup {
@@ -122,7 +122,7 @@ export function createPositionalBm25StatsLookup(globalStats: PositionalBm25Globa
   return {
     corpusStats: (channel, fieldId) => corpusByKey.get(bm25CorpusStatsKey(channel, fieldId)),
     documentFrequency: (channel, term, fieldId) =>
-      documentFrequencyByKey.get(bm25DocumentFrequencyKey(channel, term, fieldId)) ?? 0
+      documentFrequencyByKey.get(bm25DocumentFrequencyKey(channel, term, fieldId)) ?? 0,
   };
 }
 
@@ -140,7 +140,7 @@ export function createSearchFieldLengthLookup(): SearchFieldLengthLookup {
       byDoc.set(localDocId, lengths);
     }
     const index = searchFieldLengthIndex(channel, fieldId);
-    return index >= 0 ? lengths[index] ?? 0 : 0;
+    return index >= 0 ? (lengths[index] ?? 0) : 0;
   };
 }
 
@@ -151,7 +151,7 @@ export function bm25TermScoreFromStatsLookup(
   fieldId: number,
   frequency: number,
   fieldLength: number,
-  options: Bm25TermScoreOptions = {}
+  options: Bm25TermScoreOptions = {},
 ): number {
   if (frequency <= 0 || fieldLength <= 0) return 0;
   const corpus = lookup.corpusStats(channel, fieldId);
@@ -172,7 +172,7 @@ export function bm25TermScoreFromGlobalStats(
     k1?: number;
     b?: number;
     d?: number;
-  } = {}
+  } = {},
 ): number {
   if (frequency <= 0 || fieldLength <= 0) return 0;
   const corpus = bm25CorpusStats(globalStats, channel, fieldId);
@@ -187,7 +187,7 @@ function bm25TermScoreFromObservedStats(
   documentFrequency: number,
   frequency: number,
   fieldLength: number,
-  options: Bm25TermScoreOptions = {}
+  options: Bm25TermScoreOptions = {},
 ): number {
   const k1 = options.k1 ?? SEARCH_BM25_K1;
   const b = options.b ?? SEARCH_BM25_B;
@@ -203,7 +203,7 @@ function bm25CorpusStatsKey(channel: SearchTokenChannel, fieldId: number): strin
 
 const SEARCH_FIELD_LENGTH_STRIDE = POSITIONAL_SEARCH_FIELDS.length;
 const SEARCH_FIELD_LENGTH_CHANNEL_INDEX = Object.fromEntries(
-  SEARCH_TOKEN_CHANNELS.map((channel, index) => [channel, index])
+  SEARCH_TOKEN_CHANNELS.map((channel, index) => [channel, index]),
 ) as Record<SearchTokenChannel, number>;
 
 function searchFieldLengthDocCache(segment: SearchSnapshotSegment, localDocId: number): SearchFieldLengthDocCache {
@@ -224,5 +224,5 @@ function searchFieldLengthIndex(channel: SearchTokenChannel, fieldId: number): n
 }
 
 function bm25DocumentFrequencyKey(channel: SearchTokenChannel, term: string, fieldId: number): string {
-  return `${channel}\u0000${fieldId}\u0000${term.normalize("NFC").trim()}`;
+  return `${channel}\u0000${fieldId}\u0000${term.normalize('NFC').trim()}`;
 }

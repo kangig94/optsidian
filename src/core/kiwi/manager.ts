@@ -1,30 +1,30 @@
-import { threadId } from "node:worker_threads";
-import { Attempt, type AttemptOwner } from "../lifecycle/conditional-commit.js";
+import { threadId } from 'node:worker_threads';
+import { Attempt, type AttemptOwner } from '../lifecycle/conditional-commit.js';
 import {
   inspectKiwiModelArtifact,
   inspectKiwiWasmArtifact,
   kiwiDataDir,
   type KiwiModelArtifactInspectOptions,
   type KiwiModelArtifactState,
-  type KiwiWasmArtifactState
-} from "./artifact.js";
-import type { KiwiAnalyzer, KiwiAnalyzerIdentity } from "./loader.js";
+  type KiwiWasmArtifactState,
+} from './artifact.js';
+import type { KiwiAnalyzer, KiwiAnalyzerIdentity } from './loader.js';
 
-export type KiwiDeclaredAnalyzer = "ko";
+export type KiwiDeclaredAnalyzer = 'ko';
 
 export type KiwiManagerStatus =
   | {
-      state: "unloaded";
+      state: 'unloaded';
       leaseCount: 0;
       model: KiwiModelArtifactState;
     }
   | {
-      state: "loading";
+      state: 'loading';
       leaseCount: number;
       model: KiwiModelArtifactState;
     }
   | {
-      state: "loaded";
+      state: 'loaded';
       leaseCount: number;
       model: KiwiModelArtifactState;
       identity: KiwiAnalyzerIdentity;
@@ -58,7 +58,7 @@ export class KiwiAnalyzerTerminalLoadError extends Error {
 
   constructor(message: string, cause?: unknown) {
     super(message);
-    this.name = "KiwiAnalyzerTerminalLoadError";
+    this.name = 'KiwiAnalyzerTerminalLoadError';
     this.cause = cause;
     Object.setPrototypeOf(this, KiwiAnalyzerTerminalLoadError.prototype);
   }
@@ -66,8 +66,14 @@ export class KiwiAnalyzerTerminalLoadError extends Error {
 
 export class KiwiAnalyzerManager {
   private readonly idleTtlMs: number;
-  private readonly loadAnalyzer: (options: { env: NodeJS.ProcessEnv; installIfMissing: boolean }) => Promise<KiwiAnalyzer>;
-  private readonly inspectModelArtifact: (env: NodeJS.ProcessEnv, options?: KiwiModelArtifactInspectOptions) => KiwiModelArtifactState;
+  private readonly loadAnalyzer: (options: {
+    env: NodeJS.ProcessEnv;
+    installIfMissing: boolean;
+  }) => Promise<KiwiAnalyzer>;
+  private readonly inspectModelArtifact: (
+    env: NodeJS.ProcessEnv,
+    options?: KiwiModelArtifactInspectOptions,
+  ) => KiwiModelArtifactState;
   private readonly inspectWasmArtifact: (env: NodeJS.ProcessEnv) => KiwiWasmArtifactState;
   private readonly loadAttemptOwner: AttemptOwner<ActiveKiwiHandle> = { current: undefined };
   private activeHandle: ActiveKiwiHandle | null = null;
@@ -79,29 +85,31 @@ export class KiwiAnalyzerManager {
 
   constructor(options: KiwiManagerOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? KIWI_IDLE_TTL_MS;
-    this.loadAnalyzer = options.loadAnalyzer ?? (async (loadOptions) => {
-      const { loadKiwiAnalyzer } = await import("./loader.js");
-      return loadKiwiAnalyzer(loadOptions);
-    });
+    this.loadAnalyzer =
+      options.loadAnalyzer ??
+      (async (loadOptions) => {
+        const { loadKiwiAnalyzer } = await import('./loader.js');
+        return loadKiwiAnalyzer(loadOptions);
+      });
     this.inspectModelArtifact = options.inspectModelArtifact ?? inspectKiwiModelArtifact;
     this.inspectWasmArtifact = options.inspectWasmArtifact ?? inspectKiwiWasmArtifact;
   }
 
   status(env: NodeJS.ProcessEnv = process.env): KiwiManagerStatus {
     const key = envKey(env);
-    const model = this.inspectModelArtifact(env, { verifyFiles: "metadata" });
+    const model = this.inspectModelArtifact(env, { verifyFiles: 'metadata' });
     if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return {
-        state: "loaded",
+        state: 'loaded',
         leaseCount: this.activeHandle.leaseCount,
         model,
-        identity: this.activeHandle.analyzer.identity
+        identity: this.activeHandle.analyzer.identity,
       };
     }
     if (this.loadAttempt && this.loadAttemptKey === key) {
-      return { state: "loading", leaseCount: 0, model };
+      return { state: 'loading', leaseCount: 0, model };
     }
-    return { state: "unloaded", leaseCount: 0, model };
+    return { state: 'unloaded', leaseCount: 0, model };
   }
 
   isTerminalLoadError(error: unknown): boolean {
@@ -112,7 +120,7 @@ export class KiwiAnalyzerManager {
     env: NodeJS.ProcessEnv,
     declaredAnalyzers: readonly KiwiDeclaredAnalyzer[],
     options: { wait: boolean; installIfMissing: boolean },
-    run: (lease: { analyzer: KiwiAnalyzer | null; activeAnalyzers: KiwiDeclaredAnalyzer[] }) => T | Promise<T>
+    run: (lease: { analyzer: KiwiAnalyzer | null; activeAnalyzers: KiwiDeclaredAnalyzer[] }) => T | Promise<T>,
   ): Promise<T> {
     const lease = await this.acquire(env, declaredAnalyzers, options);
     try {
@@ -141,13 +149,13 @@ export class KiwiAnalyzerManager {
   private async acquire(
     env: NodeJS.ProcessEnv,
     declaredAnalyzers: readonly KiwiDeclaredAnalyzer[],
-    options: { wait: boolean; installIfMissing: boolean }
+    options: { wait: boolean; installIfMissing: boolean },
   ): Promise<KiwiLease> {
     if (this.closed) {
-      throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+      throw Object.assign(new Error('Kiwi analyzer manager is closed'), { code: 'CLOSED' });
     }
     const normalized = normalizeDeclaredAnalyzers(declaredAnalyzers);
-    if (!normalized.includes("ko")) return noopLease(normalized);
+    if (!normalized.includes('ko')) return noopLease(normalized);
     const key = envKey(env);
 
     const existing = this.activeHandle;
@@ -164,7 +172,7 @@ export class KiwiAnalyzerManager {
   private async ensureLoaded(env: NodeJS.ProcessEnv, installIfMissing: boolean): Promise<ActiveKiwiHandle> {
     const key = envKey(env);
     if (this.closed) {
-      throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+      throw Object.assign(new Error('Kiwi analyzer manager is closed'), { code: 'CLOSED' });
     }
     if (this.activeHandle && !this.activeHandle.closed && this.activeHandle.envKey === key) {
       return this.activeHandle;
@@ -187,21 +195,23 @@ export class KiwiAnalyzerManager {
     this.clearIdleTimer();
     const attempt = Attempt.start(this.loadAttemptOwner, () => this.loadFresh(env, installIfMissing), {
       install: async (handle) => {
-        if (this.closed) throw Object.assign(new Error("Kiwi analyzer manager is closed"), { code: "CLOSED" });
+        if (this.closed) throw Object.assign(new Error('Kiwi analyzer manager is closed'), { code: 'CLOSED' });
         await this.replaceActiveHandle(handle);
       },
-      close: (handle) => this.disposeHandle(handle)
+      close: (handle) => this.disposeHandle(handle),
     });
     this.loadAttempt = attempt;
     this.loadAttemptKey = key;
     this.loadAttemptInstallsIfMissing = installIfMissing;
-    attempt.result.finally(() => {
-      if (this.loadAttempt !== attempt) return;
-      this.loadAttempt = undefined;
-      this.loadAttemptKey = null;
-      this.loadAttemptInstallsIfMissing = false;
-      if (this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
-    }).catch(() => undefined);
+    attempt.result
+      .finally(() => {
+        if (this.loadAttempt !== attempt) return;
+        this.loadAttempt = undefined;
+        this.loadAttemptKey = null;
+        this.loadAttemptInstallsIfMissing = false;
+        if (this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
+      })
+      .catch(() => undefined);
     return attempt.wait();
   }
 
@@ -213,7 +223,7 @@ export class KiwiAnalyzerManager {
         envKey: envKey(env),
         leaseCount: 0,
         closed: false,
-        disposed: false
+        disposed: false,
       };
       return handle;
     } catch (error) {
@@ -244,7 +254,7 @@ export class KiwiAnalyzerManager {
             this.scheduleIdleEviction(handle);
           }
         }
-      }
+      },
     };
   }
 
@@ -287,7 +297,7 @@ function noopLease(activeAnalyzers: KiwiDeclaredAnalyzer[]): KiwiLease {
   return {
     analyzer: null,
     activeAnalyzers,
-    async release(): Promise<void> {}
+    async release(): Promise<void> {},
   };
 }
 
@@ -296,7 +306,7 @@ function normalizeDeclaredAnalyzers(values: readonly KiwiDeclaredAnalyzer[]): Ki
 }
 
 function withoutKiwi(values: readonly KiwiDeclaredAnalyzer[]): KiwiDeclaredAnalyzer[] {
-  return normalizeDeclaredAnalyzers(values).filter((value) => value !== "ko");
+  return normalizeDeclaredAnalyzers(values).filter((value) => value !== 'ko');
 }
 
 function envKey(env: NodeJS.ProcessEnv): string {

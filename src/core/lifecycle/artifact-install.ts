@@ -1,16 +1,16 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from "../private-path.js";
-import { ExclusiveClaim, type ExclusiveClaimAcquireOptions } from "./exclusive-claim.js";
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from '../private-path.js';
+import { ExclusiveClaim, type ExclusiveClaimAcquireOptions } from './exclusive-claim.js';
 import {
   createProcessToken,
   isAlive as defaultIsAlive,
   type ProcessStartIdentityProvider,
-  type ProcessToken
-} from "./process-token.js";
+  type ProcessToken,
+} from './process-token.js';
 
-export type ArtifactVerifyDepth = "metadata" | "digest" | (string & {});
+export type ArtifactVerifyDepth = 'metadata' | 'digest' | (string & {});
 
 export type ArtifactInstallContext<TDepth extends ArtifactVerifyDepth> = {
   claim: ExclusiveClaim;
@@ -58,7 +58,7 @@ type StagingOwner = {
 };
 
 export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDepth = ArtifactVerifyDepth>(
-  options: InstallArtifactOptions<TArtifact, TDepth>
+  options: InstallArtifactOptions<TArtifact, TDepth>,
 ): Promise<InstallArtifactResult<TArtifact, TDepth>> {
   const existing = await options.verifyInstalled(options.artifactDir, options.verifyDepth);
   if (existing !== undefined) return { artifact: existing, activated: false, verifyDepth: options.verifyDepth };
@@ -71,17 +71,17 @@ export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDe
     pollMs: options.pollMs,
     backstopTtlMs: options.backstopTtlMs,
     startIdentityProvider: options.startIdentityProvider,
-    isAlive: options.isAlive
+    isAlive: options.isAlive,
   };
   const claim = await ExclusiveClaim.acquire(options.claimDir, claimOptions);
-  const stagingRoot = options.stagingRoot ?? path.join(path.dirname(options.artifactDir), "staging");
+  const stagingRoot = options.stagingRoot ?? path.join(path.dirname(options.artifactDir), 'staging');
   const stagingNamespace = path.join(stagingRoot, stagingNamespaceName(token));
   const stagingDir = path.join(stagingNamespace, claim.claimId);
 
   try {
     await sweepDeadArtifactStaging(stagingRoot, {
       isAlive: options.isAlive,
-      backstopTtlMs: options.backstopTtlMs
+      backstopTtlMs: options.backstopTtlMs,
     });
 
     const existingAfterClaim = await options.verifyInstalled(options.artifactDir, options.verifyDepth);
@@ -92,16 +92,16 @@ export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDe
     prepareStagingNamespace(stagingNamespace, {
       token,
       claimId: claim.claimId,
-      createdAtMs: Date.now()
+      createdAtMs: Date.now(),
     });
     fs.rmSync(stagingDir, { recursive: true, force: true });
-    ensurePrivateDirSync(stagingDir, "Artifact staging directory");
+    ensurePrivateDirSync(stagingDir, 'Artifact staging directory');
 
     const context: ArtifactInstallContext<TDepth> = {
       claim,
       stagingDir,
       verifyDepth: options.verifyDepth,
-      expectedSha256: options.expectedSha256
+      expectedSha256: options.expectedSha256,
     };
     await options.stage(stagingDir, context);
     const checksum = await options.computeChecksum(stagingDir, context);
@@ -111,7 +111,8 @@ export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDe
 
     await (options.activate ?? defaultActivate)(stagingDir, options.artifactDir, context);
     const installed = await options.verifyInstalled(options.artifactDir, options.verifyDepth);
-    if (installed === undefined) throw new Error(`Artifact failed verification after activation: ${options.artifactDir}`);
+    if (installed === undefined)
+      throw new Error(`Artifact failed verification after activation: ${options.artifactDir}`);
     return { artifact: installed, activated: true, checksum, verifyDepth: options.verifyDepth };
   } finally {
     fs.rmSync(stagingDir, { recursive: true, force: true });
@@ -120,7 +121,10 @@ export async function installArtifact<TArtifact, TDepth extends ArtifactVerifyDe
   }
 }
 
-export async function sweepDeadArtifactStaging(stagingRoot: string, options: SweepArtifactStagingOptions = {}): Promise<void> {
+export async function sweepDeadArtifactStaging(
+  stagingRoot: string,
+  options: SweepArtifactStagingOptions = {},
+): Promise<void> {
   if (!fs.existsSync(stagingRoot)) return;
   const now = options.now ?? Date.now;
   const isAlive = options.isAlive ?? defaultIsAlive;
@@ -145,32 +149,36 @@ export async function sweepDeadArtifactStaging(stagingRoot: string, options: Swe
 }
 
 export function stagingNamespaceName(token: ProcessToken): string {
-  const digest = crypto.createHash("sha256").update(token.startId).digest("hex").slice(0, 16);
+  const digest = crypto.createHash('sha256').update(token.startId).digest('hex').slice(0, 16);
   return `${token.pid}-${digest}`;
 }
 
 async function defaultActivate<TDepth extends ArtifactVerifyDepth>(
   stagingDir: string,
   artifactDir: string,
-  _context: ArtifactInstallContext<TDepth>
+  _context: ArtifactInstallContext<TDepth>,
 ): Promise<void> {
-  ensurePrivateDirSync(path.dirname(artifactDir), "Artifact parent directory");
+  ensurePrivateDirSync(path.dirname(artifactDir), 'Artifact parent directory');
   if (fs.existsSync(artifactDir)) return;
   fs.renameSync(stagingDir, artifactDir);
   fsyncDirSync(path.dirname(artifactDir));
 }
 
 function prepareStagingNamespace(namespaceDir: string, owner: StagingOwner): void {
-  ensurePrivateDirSync(namespaceDir, "Artifact staging owner namespace");
-  writePrivateFileSync(path.join(namespaceDir, "owner.json"), `${JSON.stringify(owner)}\n`, "Artifact staging owner file");
-  fsyncFileSync(path.join(namespaceDir, "owner.json"));
+  ensurePrivateDirSync(namespaceDir, 'Artifact staging owner namespace');
+  writePrivateFileSync(
+    path.join(namespaceDir, 'owner.json'),
+    `${JSON.stringify(owner)}\n`,
+    'Artifact staging owner file',
+  );
+  fsyncFileSync(path.join(namespaceDir, 'owner.json'));
   fsyncDirSync(namespaceDir);
   fsyncDirSync(path.dirname(namespaceDir));
 }
 
 function readStagingOwner(namespaceDir: string): StagingOwner | undefined {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(namespaceDir, "owner.json"), "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(path.join(namespaceDir, 'owner.json'), 'utf8')) as unknown;
     if (isStagingOwner(parsed)) return parsed;
   } catch {
     return undefined;
@@ -179,15 +187,15 @@ function readStagingOwner(namespaceDir: string): StagingOwner | undefined {
 }
 
 function isStagingOwner(value: unknown): value is StagingOwner {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== 'object') return false;
   const owner = value as Partial<StagingOwner>;
   const token = owner.token as Partial<ProcessToken> | undefined;
   return (
-    typeof owner.claimId === "string" &&
+    typeof owner.claimId === 'string' &&
     Number.isFinite(owner.createdAtMs) &&
-    !!token &&
+    token !== undefined &&
     Number.isSafeInteger(token.pid) &&
-    typeof token.startId === "string" &&
+    typeof token.startId === 'string' &&
     token.startId.length > 0
   );
 }
@@ -197,11 +205,13 @@ function removeEmptyDir(dirPath: string): void {
     fs.rmdirSync(dirPath);
     fsyncDirSync(path.dirname(dirPath));
   } catch (error) {
-    if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTEMPTY") return;
+    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTEMPTY') return;
     throw error;
   }
 }
 
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
 }

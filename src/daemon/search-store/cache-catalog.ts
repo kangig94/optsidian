@@ -1,28 +1,24 @@
-import fs from "node:fs";
-import path from "node:path";
-import { optsidianCacheRoot } from "../../core/cache-root.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { optsidianCacheRoot } from '../../core/cache-root.js';
 import {
   ensureExistingPrivateFileSync,
   ensurePrivateDirSync,
-  writePrivateFileAtomicSync
-} from "../../core/private-path.js";
-import type {
-  SearchIndexPruneResult,
-  SearchIndexPruneSkippedStore,
-  SearchIndexPrunedStore
-} from "../../core/types.js";
-import type { SearchStoreCachePaths } from "./cache-paths.js";
+  writePrivateFileAtomicSync,
+} from '../../core/private-path.js';
+import type { SearchIndexPruneResult, SearchIndexPruneSkippedStore, SearchIndexPrunedStore } from '../../core/types.js';
+import type { SearchStoreCachePaths } from './cache-paths.js';
 
 export const SEARCH_CACHE_CATALOG_SCHEMA_VERSION = 1;
 export const DEFAULT_SEARCH_CACHE_UNUSED_DAYS = 30;
 export const SEARCH_CACHE_TOUCH_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
-type SearchCacheState = "active" | "cold" | "pruning" | "corrupt";
+type SearchCacheState = 'active' | 'cold' | 'pruning' | 'corrupt';
 
 export type SearchCacheRecord = {
   schemaVersion: typeof SEARCH_CACHE_CATALOG_SCHEMA_VERSION;
   storeId: string;
-  kind: "search-store";
+  kind: 'search-store';
   createdAtMs: number;
   lastUsedAtMs: number;
   lastIndexedAtMs?: number;
@@ -87,7 +83,7 @@ export class SearchCacheCatalog {
       }
       this.recentTouches.set(paths.storeId, {
         lastUsedAtMs: existing.lastUsedAtMs,
-        ...(existing.activeSnapshotId ? { activeSnapshotId: existing.activeSnapshotId } : {})
+        ...(existing.activeSnapshotId ? { activeSnapshotId: existing.activeSnapshotId } : {}),
       });
       return;
     }
@@ -96,7 +92,7 @@ export class SearchCacheCatalog {
       ...baseRecord(paths.storeId, existing, nowMs),
       lastUsedAtMs: nowMs,
       ...(options.snapshotId ? { activeSnapshotId: options.snapshotId } : {}),
-      state: "active"
+      state: 'active',
     });
   }
 
@@ -109,16 +105,20 @@ export class SearchCacheCatalog {
       lastIndexedAtMs: nowMs,
       activeSnapshotId: options.snapshotId,
       ...(options.documentCount === undefined ? {} : { documentCount: options.documentCount }),
-      state: "active"
+      state: 'active',
     });
   }
 
   recordCleared(paths: SearchStoreCachePaths, nowMs = Date.now()): void {
     const existing = this.readRecordForPaths(paths);
-    const { activeSnapshotId: _activeSnapshotId, documentCount: _documentCount, ...record } = {
+    const {
+      activeSnapshotId: _activeSnapshotId,
+      documentCount: _documentCount,
+      ...record
+    } = {
       ...baseRecord(paths.storeId, existing, nowMs),
       lastUsedAtMs: nowMs,
-      state: "cold" as const
+      state: 'cold' as const,
     };
     this.upsert(paths, record);
   }
@@ -140,11 +140,11 @@ export class SearchCacheCatalog {
 
     for (const storeId of storeIds) {
       if (!isStoreId(storeId)) {
-        skippedStores.push({ storeId, reason: "invalid-store-id" });
+        skippedStores.push({ storeId, reason: 'invalid-store-id' });
         continue;
       }
       if (protectedStoreIds.has(storeId)) {
-        skippedStores.push({ storeId, reason: "protected" });
+        skippedStores.push({ storeId, reason: 'protected' });
         continue;
       }
       const rootDir = this.storeRootDir(storeId);
@@ -154,18 +154,18 @@ export class SearchCacheCatalog {
         continue;
       }
       if (rootStat.isSymbolicLink()) {
-        skippedStores.push({ storeId, reason: "unsafe-symlink" });
+        skippedStores.push({ storeId, reason: 'unsafe-symlink' });
         continue;
       }
       if (!rootStat.isDirectory()) {
-        skippedStores.push({ storeId, reason: "not-a-directory" });
+        skippedStores.push({ storeId, reason: 'not-a-directory' });
         continue;
       }
 
       const record = this.readStoreRecord(rootDir, storeId) ?? catalogRecords.get(storeId);
       const lastUsedAtMs = record?.lastUsedAtMs ?? fallbackLastUsedAtMs(rootDir, storeId);
       if (!isUsableTimestamp(lastUsedAtMs)) {
-        skippedStores.push({ storeId, reason: "unknown-last-used" });
+        skippedStores.push({ storeId, reason: 'unknown-last-used' });
         continue;
       }
       if (lastUsedAtMs >= cutoffMs) continue;
@@ -174,7 +174,7 @@ export class SearchCacheCatalog {
         storeId,
         lastUsedAtMs,
         ...(record?.lastIndexedAtMs === undefined ? {} : { lastIndexedAtMs: record.lastIndexedAtMs }),
-        bytes: directorySizeSync(rootDir)
+        bytes: directorySizeSync(rootDir),
       };
       removedStores.push(removed);
       removedIds.add(storeId);
@@ -192,24 +192,28 @@ export class SearchCacheCatalog {
 
     return {
       ok: true,
-      command: "index",
-      action: "prune",
+      command: 'index',
+      action: 'prune',
       dryRun,
       unusedDays,
       cutoffAt: new Date(cutoffMs).toISOString(),
       removedStores,
       skippedStores,
-      removedBytes: removedStores.reduce((sum, store) => sum + store.bytes, 0)
+      removedBytes: removedStores.reduce((sum, store) => sum + store.bytes, 0),
     };
   }
 
   private upsert(paths: SearchStoreCachePaths, record: SearchCacheRecord): void {
     this.ensureStoreDirs(paths);
     const normalized = normalizeRecord(record);
-    writePrivateFileAtomicSync(paths.storeStatePath, `${JSON.stringify(normalized)}\n`, "Optsidian search cache store metadata");
+    writePrivateFileAtomicSync(
+      paths.storeStatePath,
+      `${JSON.stringify(normalized)}\n`,
+      'Optsidian search cache store metadata',
+    );
     this.recentTouches.set(normalized.storeId, {
       lastUsedAtMs: normalized.lastUsedAtMs,
-      ...(normalized.activeSnapshotId ? { activeSnapshotId: normalized.activeSnapshotId } : {})
+      ...(normalized.activeSnapshotId ? { activeSnapshotId: normalized.activeSnapshotId } : {}),
     });
 
     const catalog = this.readCatalog();
@@ -218,13 +222,15 @@ export class SearchCacheCatalog {
     this.writeCatalog({
       schemaVersion: SEARCH_CACHE_CATALOG_SCHEMA_VERSION,
       updatedAtMs: Date.now(),
-      records: [...records.values()].sort(compareRecordStoreId)
+      records: [...records.values()].sort(compareRecordStoreId),
     });
   }
 
   private readRecordForPaths(paths: SearchStoreCachePaths): SearchCacheRecord | undefined {
-    return this.readStoreRecord(paths.rootDir, paths.storeId) ??
-      this.readCatalog().records.find((record) => record.storeId === paths.storeId);
+    return (
+      this.readStoreRecord(paths.rootDir, paths.storeId) ??
+      this.readCatalog().records.find((record) => record.storeId === paths.storeId)
+    );
   }
 
   private catalogHasRecord(storeId: string): boolean {
@@ -235,12 +241,12 @@ export class SearchCacheCatalog {
     this.ensureCatalogDirs();
     const catalogPath = this.catalogPath();
     try {
-      ensureExistingPrivateFileSync(catalogPath, "Optsidian search cache catalog");
-      const parsed = JSON.parse(fs.readFileSync(catalogPath, "utf8")) as unknown;
+      ensureExistingPrivateFileSync(catalogPath, 'Optsidian search cache catalog');
+      const parsed = JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as unknown;
       if (!isCatalog(parsed)) return emptyCatalog();
       return {
         ...parsed,
-        records: dedupeRecords(parsed.records.filter(isRecord))
+        records: dedupeRecords(parsed.records.filter(isRecord)),
       };
     } catch (error) {
       if (isNoEntryError(error)) return emptyCatalog();
@@ -251,14 +257,14 @@ export class SearchCacheCatalog {
 
   private writeCatalog(catalog: SearchCacheCatalogFile): void {
     this.ensureCatalogDirs();
-    writePrivateFileAtomicSync(this.catalogPath(), `${JSON.stringify(catalog)}\n`, "Optsidian search cache catalog");
+    writePrivateFileAtomicSync(this.catalogPath(), `${JSON.stringify(catalog)}\n`, 'Optsidian search cache catalog');
   }
 
   private readStoreRecord(rootDir: string, storeId: string): SearchCacheRecord | undefined {
-    const storePath = path.join(rootDir, "store.json");
+    const storePath = path.join(rootDir, 'store.json');
     try {
-      ensureExistingPrivateFileSync(storePath, "Optsidian search cache store metadata");
-      const parsed = JSON.parse(fs.readFileSync(storePath, "utf8")) as unknown;
+      ensureExistingPrivateFileSync(storePath, 'Optsidian search cache store metadata');
+      const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8')) as unknown;
       if (!isRecord(parsed) || parsed.storeId !== storeId) return undefined;
       return parsed;
     } catch (error) {
@@ -280,14 +286,14 @@ export class SearchCacheCatalog {
   }
 
   private ensureCatalogDirs(): void {
-    ensurePrivateDirSync(this.cacheRootDir(), "Optsidian cache directory");
-    ensurePrivateDirSync(this.searchRootDir(), "Optsidian search cache directory");
-    ensurePrivateDirSync(this.storesRootDir(), "Optsidian search cache stores directory");
+    ensurePrivateDirSync(this.cacheRootDir(), 'Optsidian cache directory');
+    ensurePrivateDirSync(this.searchRootDir(), 'Optsidian search cache directory');
+    ensurePrivateDirSync(this.storesRootDir(), 'Optsidian search cache stores directory');
   }
 
   private ensureStoreDirs(paths: SearchStoreCachePaths): void {
     this.ensureCatalogDirs();
-    ensurePrivateDirSync(paths.rootDir, "Optsidian search cache store directory");
+    ensurePrivateDirSync(paths.rootDir, 'Optsidian search cache store directory');
   }
 
   private cacheRootDir(): string {
@@ -295,15 +301,15 @@ export class SearchCacheCatalog {
   }
 
   private searchRootDir(): string {
-    return path.join(this.cacheRootDir(), "search");
+    return path.join(this.cacheRootDir(), 'search');
   }
 
   private storesRootDir(): string {
-    return path.join(this.searchRootDir(), "stores");
+    return path.join(this.searchRootDir(), 'stores');
   }
 
   private storeRootDir(storeId: string): string {
-    const [vaultStateHash, lexicalIdentityHash] = storeId.split(":");
+    const [vaultStateHash, lexicalIdentityHash] = storeId.split(':');
     if (vaultStateHash && lexicalIdentityHash) {
       return path.join(this.storesRootDir(), vaultStateHash, lexicalIdentityHash);
     }
@@ -311,7 +317,7 @@ export class SearchCacheCatalog {
   }
 
   private catalogPath(): string {
-    return path.join(this.searchRootDir(), "catalog.json");
+    return path.join(this.searchRootDir(), 'catalog.json');
   }
 }
 
@@ -319,7 +325,7 @@ function baseRecord(storeId: string, existing: SearchCacheRecord | undefined, no
   return {
     schemaVersion: SEARCH_CACHE_CATALOG_SCHEMA_VERSION,
     storeId,
-    kind: "search-store",
+    kind: 'search-store',
     createdAtMs: existing?.createdAtMs ?? nowMs,
     lastUsedAtMs: existing?.lastUsedAtMs ?? nowMs,
     ...(existing?.lastIndexedAtMs === undefined ? {} : { lastIndexedAtMs: existing.lastIndexedAtMs }),
@@ -327,7 +333,7 @@ function baseRecord(storeId: string, existing: SearchCacheRecord | undefined, no
     ...(existing?.activeSnapshotId === undefined ? {} : { activeSnapshotId: existing.activeSnapshotId }),
     ...(existing?.bytes === undefined ? {} : { bytes: existing.bytes }),
     ...(existing?.documentCount === undefined ? {} : { documentCount: existing.documentCount }),
-    state: existing?.state ?? "active"
+    state: existing?.state ?? 'active',
   };
 }
 
@@ -335,8 +341,8 @@ function normalizeRecord(record: SearchCacheRecord): SearchCacheRecord {
   return {
     ...record,
     schemaVersion: SEARCH_CACHE_CATALOG_SCHEMA_VERSION,
-    kind: "search-store",
-    state: record.state
+    kind: 'search-store',
+    state: record.state,
   };
 }
 
@@ -344,33 +350,37 @@ function emptyCatalog(): SearchCacheCatalogFile {
   return {
     schemaVersion: SEARCH_CACHE_CATALOG_SCHEMA_VERSION,
     updatedAtMs: 0,
-    records: []
+    records: [],
   };
 }
 
 function isCatalog(value: unknown): value is SearchCacheCatalogFile {
-  return !!value &&
-    typeof value === "object" &&
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
     !Array.isArray(value) &&
     (value as { schemaVersion?: unknown }).schemaVersion === SEARCH_CACHE_CATALOG_SCHEMA_VERSION &&
     Number.isFinite((value as { updatedAtMs?: unknown }).updatedAtMs) &&
-    Array.isArray((value as { records?: unknown }).records);
+    Array.isArray((value as { records?: unknown }).records)
+  );
 }
 
 function isRecord(value: unknown): value is SearchCacheRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as SearchCacheRecord;
-  return record.schemaVersion === SEARCH_CACHE_CATALOG_SCHEMA_VERSION &&
-    record.kind === "search-store" &&
+  return (
+    record.schemaVersion === SEARCH_CACHE_CATALOG_SCHEMA_VERSION &&
+    record.kind === 'search-store' &&
     isStoreId(record.storeId) &&
     isUsableTimestamp(record.createdAtMs) &&
     isUsableTimestamp(record.lastUsedAtMs) &&
     (record.lastIndexedAtMs === undefined || isUsableTimestamp(record.lastIndexedAtMs)) &&
     (record.lastVerifiedAtMs === undefined || isUsableTimestamp(record.lastVerifiedAtMs)) &&
-    (record.activeSnapshotId === undefined || typeof record.activeSnapshotId === "string") &&
+    (record.activeSnapshotId === undefined || typeof record.activeSnapshotId === 'string') &&
     (record.bytes === undefined || isNonNegativeSafeInteger(record.bytes)) &&
     (record.documentCount === undefined || isNonNegativeSafeInteger(record.documentCount)) &&
-    (record.state === "active" || record.state === "cold" || record.state === "pruning" || record.state === "corrupt");
+    (record.state === 'active' || record.state === 'cold' || record.state === 'pruning' || record.state === 'corrupt')
+  );
 }
 
 function dedupeRecords(records: SearchCacheRecord[]): SearchCacheRecord[] {
@@ -386,15 +396,15 @@ function compareRecordStoreId(left: SearchCacheRecord, right: SearchCacheRecord)
 function normalizeUnusedDays(value: number | undefined): number {
   if (value === undefined) return DEFAULT_SEARCH_CACHE_UNUSED_DAYS;
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw Object.assign(new Error("unusedDays must be a positive integer"), { code: "BAD_REQUEST" });
+    throw Object.assign(new Error('unusedDays must be a positive integer'), { code: 'BAD_REQUEST' });
   }
   return value;
 }
 
 function normalizeDryRun(value: boolean | undefined): boolean {
   if (value === undefined) return false;
-  if (typeof value !== "boolean") {
-    throw Object.assign(new Error("dryRun must be a boolean"), { code: "BAD_REQUEST" });
+  if (typeof value !== 'boolean') {
+    throw Object.assign(new Error('dryRun must be a boolean'), { code: 'BAD_REQUEST' });
   }
   return value;
 }
@@ -402,13 +412,13 @@ function normalizeDryRun(value: boolean | undefined): boolean {
 function normalizeNowMs(value: number | undefined): number {
   const nowMs = value ?? Date.now();
   if (!Number.isFinite(nowMs) || nowMs < 0) {
-    throw Object.assign(new Error("nowMs must be a non-negative finite number"), { code: "BAD_REQUEST" });
+    throw Object.assign(new Error('nowMs must be a non-negative finite number'), { code: 'BAD_REQUEST' });
   }
   return nowMs;
 }
 
 function fallbackLastUsedAtMs(rootDir: string, storeId: string): number | undefined {
-  const activePointer = path.join(rootDir, "active", storeId);
+  const activePointer = path.join(rootDir, 'active', storeId);
   const activeStat = lstatIfExists(activePointer);
   if (activeStat?.isFile()) return activeStat.mtimeMs;
   const rootStat = lstatIfExists(rootDir);
@@ -445,19 +455,19 @@ function lstatIfExists(target: string): fs.Stats | undefined {
 }
 
 function isStoreId(value: unknown): value is string {
-  return typeof value === "string" && /^[a-f0-9]{16}:[A-Za-z0-9_.-]+$/.test(value);
+  return typeof value === 'string' && /^[a-f0-9]{16}:[A-Za-z0-9_.-]+$/.test(value);
 }
 
 function isUsableTimestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isNoEntryError(error: unknown): boolean {
-  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
+  return error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
 }
 
 function isJsonParseError(error: unknown): boolean {
