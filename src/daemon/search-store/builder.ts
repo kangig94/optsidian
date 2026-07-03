@@ -58,6 +58,7 @@ import { POSITIONAL_FIELD_ID } from "../../core/search/retrieval/positional/inde
 import { POSITIONAL_RETRIEVER_IDENTITY } from "../../core/search/retrieval/positional/retriever.js";
 import type { SearchIndexProgressUpdate } from "../protocol.js";
 import { buildLinkGraphSidecar } from "./link-graph.js";
+import { safeSegmentPath } from "./content-hash.js";
 import {
   SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
   type BuiltSegment,
@@ -91,6 +92,7 @@ type BuildInput = {
   searchSettings?: Partial<IndexAffectingSearchSettings>;
   partitionBits?: number;
   base?: BuildSnapshotBase;
+  reduceSegments?: ReduceBuildSegmentInputs;
   progress?: (progress: SearchIndexProgressUpdate) => void;
 };
 
@@ -107,6 +109,7 @@ export type BuildDocumentScan = {
 };
 
 export type BuildDocumentScanRecord = {
+  relPath: string;
   path: string;
   contentHash: string;
   unresolvedLinks: readonly UnresolvedNoteLink[];
@@ -124,11 +127,22 @@ export type ParseBuildDocumentBatchResult = {
   documents: ParsedBuildDocument[];
 };
 
-export type ReduceBuildSegmentInput = {
+export type ReduceBuildSegmentInput = ReduceBuildSegmentFullInput | ReduceBuildSegmentBaseVariantInput;
+
+export type ReduceBuildSegmentFullInput = {
+  mode: "full";
   partitionId: number;
-  documents?: readonly ParsedBuildDocument[];
-  freshDocuments?: readonly ParsedBuildDocument[];
-  base?: ReduceBuildSegmentBaseInput;
+  documents: readonly ParsedBuildDocument[];
+  freshDocuments?: never;
+  base?: never;
+};
+
+export type ReduceBuildSegmentBaseVariantInput = {
+  mode: "base";
+  partitionId: number;
+  freshDocuments: readonly ParsedBuildDocument[];
+  base: ReduceBuildSegmentBaseInput;
+  documents?: never;
 };
 
 export type ReduceBuildSegmentBaseInput = {
@@ -192,6 +206,11 @@ export type DocumentSegmentContribution = {
   fieldTexts: readonly DocumentSegmentFieldTextContribution[];
 };
 
+export type ReduceBuildSegmentInputs = (
+  inputs: readonly ReduceBuildSegmentInput[],
+  progress?: (progress: SearchIndexProgressUpdate) => void
+) => BuiltSegment[] | Promise<BuiltSegment[]>;
+
 export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<BuiltSnapshot> {
   const partitionBits = input.partitionBits ?? DEFAULT_PARTITION_BITS;
   const searchSettings = normalizeIndexAffectingSearchSettings(input.searchSettings);
@@ -207,7 +226,7 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
   }
   const documents = await parseVaultDocuments(scan, input.analyzer, partitionBits, searchSettings, input.progress);
   const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
-  const builtSegments = reduceBuildSegments(partitionEntries, input.progress);
+  const builtSegments = await reduceBuildSegments(partitionEntries, input.progress, input.reduceSegments);
   return buildCanonicalSearchSnapshotFromSegments({
     vaultRoot: scan.root,
     scannedPaths: scan.files,
@@ -244,15 +263,16 @@ async function buildCanonicalSearchSnapshotIncremental(
   const affectedScan: BuildDocumentScan = {
     root: scan.root,
     files: freshPaths,
-    documents: scan.documents.filter((record) => freshPathSet.has(record.path))
+    documents: scan.documents.filter((record) => freshPathSet.has(record.relPath))
   };
   const affectedDocuments = await parseVaultDocuments(affectedScan, input.analyzer, partitionBits, searchSettings, input.progress);
-  const affectedSegments = reduceBuildSegmentPlans(
+  const affectedSegments = await reduceBuildSegmentPlans(
     affectedPlans,
     affectedDocuments,
     base,
     basePartitions,
-    input.progress
+    input.progress,
+    input.reduceSegments
   );
   const retainedDocumentIds = retainedDocumentIdsForProjection(liveRecords, reusedPartitionIds, affectedPlans);
   const documents = sortBuildSnapshotDocumentProjections([
@@ -464,6 +484,7 @@ function scanBuildDocument(vaultRoot: string, relPath: string): BuildDocumentSca
   }
   const { parsedLinks } = parseMarkdownNoteLinks(relPath, text);
   return {
+    relPath,
     path: normalizeVaultRelativePath(relPath),
     contentHash: sha256(bytes),
     unresolvedLinks: parsedLinks.unresolvedLinks
@@ -558,18 +579,28 @@ export function shuffleParsedBuildDocumentsByPartition(
 }
 
 export function reduceBuildSegment(input: ReduceBuildSegmentInput): BuiltSegment {
-  if (input.base) {
-    return reduceBuildSegmentWithBase(input.partitionId, input.freshDocuments ?? [], input.base);
+  if (input.mode === "base") {
+    if ("documents" in input) {
+      throw new Error("reduceBuildSegment base input must not include documents");
+    }
+    return reduceBuildSegmentWithBase(input.partitionId, input.freshDocuments, input.base);
   }
-  return buildSegment(input.partitionId, input.documents ?? input.freshDocuments ?? []);
+  if (input.mode !== "full") {
+    throw new Error("reduceBuildSegment input mode must be full or base");
+  }
+  if ("freshDocuments" in input || "base" in input) {
+    throw new Error("reduceBuildSegment full input must not include freshDocuments or base");
+  }
+  return buildSegment(input.partitionId, input.documents);
 }
 
-function reduceBuildSegments(
+async function reduceBuildSegments(
   partitionEntries: readonly (readonly [partitionId: number, documents: readonly ParsedBuildDocument[]])[],
-  progress?: (progress: SearchIndexProgressUpdate) => void
-): BuiltSegment[] {
-  return reduceBuildSegmentInputs(
-    partitionEntries.map(([partitionId, documents]) => ({ partitionId, documents })),
+  progress?: (progress: SearchIndexProgressUpdate) => void,
+  reducer: ReduceBuildSegmentInputs = reduceBuildSegmentInputs
+): Promise<BuiltSegment[]> {
+  return reducer(
+    partitionEntries.map(([partitionId, documents]) => ({ mode: "full", partitionId, documents })),
     progress
   );
 }
@@ -598,7 +629,7 @@ function reduceBuildSegmentWithBase(
   freshDocuments: readonly ParsedBuildDocument[],
   base: ReduceBuildSegmentBaseInput
 ): BuiltSegment {
-  const bytes = fs.readFileSync(path.join(base.segmentsDir, base.segmentHash));
+  const bytes = fs.readFileSync(safeSegmentPath(base.segmentsDir, base.segmentHash));
   const actualHash = sha256(bytes);
   if (actualHash !== base.segmentHash) {
     throw new Error(`incremental build base segment hash mismatch for ${base.segmentHash}`);
@@ -895,7 +926,7 @@ function affectedPartitionPlansForBase(
     if (liveRecordCanReuseBaseContribution(record, baseDocuments, basePartitions)) {
       plan.retainedDocumentIds.push(record.documentId);
     } else {
-      plan.freshPaths.push(record.path);
+      plan.freshPaths.push(record.relPath);
     }
     plans.set(record.partitionId, plan);
   }
@@ -921,13 +952,14 @@ function liveRecordCanReuseBaseContribution(
     basePartitions.has(record.partitionId);
 }
 
-function reduceBuildSegmentPlans(
+async function reduceBuildSegmentPlans(
   plans: readonly AffectedPartitionPlan[],
   freshDocuments: readonly ParsedBuildDocument[],
   base: BuildSnapshotBase,
   basePartitions: ReadonlyMap<number, CanonicalPartitionDescriptor>,
-  progress?: (progress: SearchIndexProgressUpdate) => void
-): BuiltSegment[] {
+  progress?: (progress: SearchIndexProgressUpdate) => void,
+  reducer: ReduceBuildSegmentInputs = reduceBuildSegmentInputs
+): Promise<BuiltSegment[]> {
   const freshByPartition = new Map<number, ParsedBuildDocument[]>();
   for (const document of freshDocuments) {
     const partition = freshByPartition.get(document.partitionId) ?? [];
@@ -940,17 +972,25 @@ function reduceBuildSegmentPlans(
     if (plan.retainedDocumentIds.length > 0 && !descriptor) {
       throw new Error(`incremental build base is missing affected partition ${plan.partitionId}`);
     }
+    if (plan.retainedDocumentIds.length > 0 && descriptor) {
+      return {
+        mode: "base",
+        partitionId: plan.partitionId,
+        freshDocuments: documents,
+        base: {
+          segmentsDir: base.segmentsDir,
+          segmentHash: descriptor.segmentHash,
+          retainedDocumentIds: plan.retainedDocumentIds
+        }
+      };
+    }
     return {
+      mode: "full",
       partitionId: plan.partitionId,
-      freshDocuments: documents,
-      base: plan.retainedDocumentIds.length > 0 && descriptor ? {
-        segmentsDir: base.segmentsDir,
-        segmentHash: descriptor.segmentHash,
-        retainedDocumentIds: plan.retainedDocumentIds
-      } : undefined
+      documents
     };
   });
-  return reduceBuildSegmentInputs(inputs, progress);
+  return reducer(inputs, progress);
 }
 
 function retainedDocumentIdsForProjection(
@@ -982,7 +1022,7 @@ function readReusableBasePartitions(
   for (const partitionId of partitionIds) {
     const descriptor = byPartition.get(partitionId);
     if (!descriptor) throw new Error(`incremental build base is missing partition ${partitionId}`);
-    const bytes = fs.readFileSync(path.join(base.segmentsDir, descriptor.segmentHash));
+    const bytes = fs.readFileSync(safeSegmentPath(base.segmentsDir, descriptor.segmentHash));
     const actualHash = sha256(bytes);
     if (actualHash !== descriptor.segmentHash) {
       throw new Error(`incremental build base segment hash mismatch for ${descriptor.segmentHash}`);

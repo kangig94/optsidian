@@ -12,7 +12,8 @@ import {
   scanBuildDocuments,
   shuffleParsedBuildDocumentsByPartition,
   sortParsedBuildDocuments,
-  type BuildSnapshotBase
+  type BuildSnapshotBase,
+  type ReduceBuildSegmentInput
 } from "./search-store/builder.js";
 import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
 import {
@@ -38,6 +39,7 @@ import type {
   ModelUnloadWorkerResult,
   ParseBuildDocumentsWorkerResult,
   ReduceBuildSegmentWorkerResult,
+  SearchIndexProgressUpdate,
   VectorBuildWorkerPayload,
   VectorCloseWorkerPayload,
   VectorPrewarmWorkerPayload,
@@ -143,6 +145,7 @@ export class AnalyzerWorkerPool {
         partitionBits,
         searchSettings,
         base,
+        reduceSegments: (inputs, progress) => this.reduceBuildSegmentInputs(inputs, options, progress),
         progress: options.onProgress
       });
       this.analyzerIdentityValue = built.diagnostics.analyzer;
@@ -251,7 +254,7 @@ export class AnalyzerWorkerPool {
     const segments = await Promise.all(partitionEntries.map(async ([partitionId, documents]) => {
       const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>({
         type: "reduceBuildSegment",
-        payload: { partitionId, documents }
+        payload: { mode: "full", partitionId, documents }
       }, workerOptions);
       completed += 1;
       options.onProgress?.({
@@ -259,6 +262,31 @@ export class AnalyzerWorkerPool {
         total: partitionEntries.length,
         completed,
         current: String(partitionId)
+      });
+      return segment;
+    }));
+    return segments;
+  }
+
+  private async reduceBuildSegmentInputs(
+    inputs: readonly ReduceBuildSegmentInput[],
+    options: WorkerPoolRunOptions,
+    progress?: (progress: SearchIndexProgressUpdate) => void
+  ): Promise<BuiltSegment[]> {
+    progress?.({ phase: "segmenting", total: inputs.length, completed: 0 });
+    let completed = 0;
+    const workerOptions = withoutProgress(options);
+    const segments = await Promise.all(inputs.map(async (input) => {
+      const segment = await this.pool.run<ReduceBuildSegmentWorkerResult>({
+        type: "reduceBuildSegment",
+        payload: input
+      }, workerOptions);
+      completed += 1;
+      progress?.({
+        phase: "segmenting",
+        total: inputs.length,
+        completed,
+        current: String(input.partitionId)
       });
       return segment;
     }));

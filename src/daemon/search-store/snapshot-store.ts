@@ -80,6 +80,7 @@ import {
   computeBaseReuseImplementationIdentity,
   type BaseReuseImplementationIdentity
 } from "./base-reuse-identity.js";
+import { assertValidContentHash, safeSegmentPath } from "./content-hash.js";
 import {
   safeStoreFileName,
   searchStoreCachePaths,
@@ -1411,7 +1412,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
       );
 
       for (const [index, segment] of built.segments.entries()) {
-        const target = path.join(paths.segmentsDir, segment.hash);
+        assertValidContentHash(segment.hash, "segment hash");
+        const target = safeSegmentPath(paths.segmentsDir, segment.hash);
         let published = false;
         if (fs.existsSync(target)) {
           const existingHash = sha256(fs.readFileSync(target));
@@ -1750,7 +1752,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     byteLength += documentBytes.byteLength;
 
     for (const partition of envelope.manifest.partitions) {
-      const segmentPath = path.join(paths.segmentsDir, partition.segmentHash);
+      const segmentPath = safeSegmentPath(paths.segmentsDir, partition.segmentHash);
       const bytes = fs.readFileSync(segmentPath);
       const actualHash = sha256(bytes);
       if (actualHash !== partition.segmentHash) throw new Error(`segment hash mismatch for ${partition.segmentHash}`);
@@ -2125,7 +2127,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (actual !== parsed.snapshotId || parsed.snapshotId !== snapshotId) return undefined;
       if (!linkGraphSidecarExists(paths, parsed.linkGraphId)) return undefined;
       for (const partition of parsed.manifest.partitions) {
-        if (!fs.existsSync(path.join(paths.segmentsDir, partition.segmentHash))) return undefined;
+        if (!fs.existsSync(safeSegmentPath(paths.segmentsDir, partition.segmentHash))) return undefined;
       }
       return parsed;
     } catch {
@@ -3215,7 +3217,7 @@ function decodedCanonicalDocumentsByDocumentId(
 ): Map<string, CanonicalDocumentRecord> {
   const byDocumentId = new Map<string, CanonicalDocumentRecord>();
   for (const partition of envelope.manifest.partitions) {
-    const segmentPath = path.join(paths.segmentsDir, partition.segmentHash);
+    const segmentPath = safeSegmentPath(paths.segmentsDir, partition.segmentHash);
     if (!fs.existsSync(segmentPath)) throw new Error(`base segment ${partition.segmentHash} is missing`);
     const bytes = fs.readFileSync(segmentPath);
     if (bytes.length !== partition.byteLength) throw new Error(`base segment ${partition.segmentHash} byte length mismatch`);

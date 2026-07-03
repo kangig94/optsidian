@@ -272,6 +272,7 @@ test("AC2 reduceBuildSegment base variant rejects unusable base contributions", 
   fs.writeFileSync(path.join(segmentsDir, folded.hash), Buffer.from(folded.bytes));
 
   const retainedOnly = reduceBuildSegment({
+    mode: "base",
     partitionId,
     freshDocuments: [],
     base: {
@@ -285,6 +286,7 @@ test("AC2 reduceBuildSegment base variant rejects unusable base contributions", 
   fs.writeFileSync(path.join(segmentsDir, folded.hash), Buffer.from("corrupt"));
   assert.throws(
     () => reduceBuildSegment({
+      mode: "base",
       partitionId,
       freshDocuments: [],
       base: {
@@ -299,6 +301,7 @@ test("AC2 reduceBuildSegment base variant rejects unusable base contributions", 
   fs.writeFileSync(path.join(segmentsDir, folded.hash), Buffer.from(folded.bytes));
   assert.throws(
     () => reduceBuildSegment({
+      mode: "base",
       partitionId,
       freshDocuments: [],
       base: {
@@ -308,5 +311,27 @@ test("AC2 reduceBuildSegment base variant rejects unusable base contributions", 
       }
     }),
     /missing retained document/u
+  );
+});
+
+test("AC2 reduceBuildSegment rejects mixed full and base payloads", () => {
+  const [[partitionId, [retained]]] = fixtureContributions();
+  const folded = foldSegment(partitionId, [retained]);
+  const segmentsDir = tempRoot();
+  fs.writeFileSync(path.join(segmentsDir, folded.hash), Buffer.from(folded.bytes));
+
+  assert.throws(
+    () => reduceBuildSegment({
+      mode: "base",
+      partitionId,
+      documents: [],
+      freshDocuments: [],
+      base: {
+        segmentsDir,
+        segmentHash: folded.hash,
+        retainedDocumentIds: [retained.documentId]
+      }
+    }),
+    /must not include documents/u
   );
 });

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { buildCanonicalSearchSnapshot } from "../src/daemon/search-store/builder.ts";
+import { createDaemonPools } from "../src/daemon/pools.ts";
 import { computeRetrievalSnapshotId } from "../src/daemon/search-store/snapshot-store.ts";
 import { SNAPSHOT_PERSISTENCE_SCHEMA_HASH } from "../src/daemon/search-store/types.ts";
 import {
@@ -28,8 +29,12 @@ const AC3_REQUIRED_CASES = [
   "wikilinks",
   "markdown-links",
   "embeds",
-  "non-utf8-md"
+  "non-utf8-md",
+  "decomposed-unicode-filename-add-modify"
 ];
+
+const DECOMPOSED_UNICODE_FILENAME = "Unicode/Cafe\u0301.md";
+const COMPOSED_UNICODE_FILENAME = "Unicode/Caf\u00e9.md";
 
 function testAnalyzer(stats) {
   const tokenize = (text) =>
@@ -124,6 +129,20 @@ function collisionIndexContent() {
     "# Collision Index",
     "",
     "This basename-only link resolves only while [[Twin]] is unique."
+  ].join("\n");
+}
+
+function decomposedFilenameContent(revision) {
+  return [
+    "---",
+    `title: Decomposed filename ${revision}`,
+    "tags: [unicode-path]",
+    "---",
+    "# Unicode path",
+    "",
+    `Revision ${revision} for the decomposed Unicode filename links to [[Doc-00]].`,
+    "Hangul 가나다 decomposed 한 compatibility ① ㎏.",
+    ""
   ].join("\n");
 }
 
@@ -361,6 +380,22 @@ function applyScriptedAc3Mutation(vault, documents, step, coverage) {
     coverage.add("delete");
     return "delete-empty-file";
   }
+  if (step === 5) {
+    const content = decomposedFilenameContent(step);
+    documents.set(DECOMPOSED_UNICODE_FILENAME, content);
+    writeVaultFile(vault, DECOMPOSED_UNICODE_FILENAME, content);
+    coverage.add("add");
+    coverage.add("decomposed-unicode-filename-add-modify");
+    return "add-decomposed-unicode-filename";
+  }
+  if (step === 6) {
+    const content = decomposedFilenameContent(step);
+    documents.set(DECOMPOSED_UNICODE_FILENAME, content);
+    writeVaultFile(vault, DECOMPOSED_UNICODE_FILENAME, content);
+    coverage.add("modify");
+    coverage.add("decomposed-unicode-filename-add-modify");
+    return "modify-decomposed-unicode-filename";
+  }
   return undefined;
 }
 
@@ -387,6 +422,13 @@ function assertCollisionEdgeState(built, expected, label) {
   assert.equal(edgeExists(built, "Collision/Index.md", "Collision/A/Twin.md"), expected, label);
 }
 
+function assertDecomposedFilenameState(built, label) {
+  assert.ok(
+    built.documents.some((document) => document.path === COMPOSED_UNICODE_FILENAME),
+    `${label}: decomposed filename indexed under normalized identity path`
+  );
+}
+
 async function withDeterministicEmbeddingProvider(callback) {
   const previous = process.env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER;
   process.env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER = "deterministic-hash";
@@ -401,7 +443,7 @@ async function withDeterministicEmbeddingProvider(callback) {
 test("AC3 incremental builder is byte-identical to full over explicit and randomized mutation sequences", async (t) => {
   const partitionBits = 3;
   const seeds = [0x5eed, 0xac10];
-  const scriptedOperationByStep = ["modify", "add", "add", "rename", "delete"];
+  const scriptedOperationByStep = ["modify", "add", "add", "rename", "delete", "add", "modify"];
   await withDeterministicEmbeddingProvider(async () => {
     const coverage = new Set();
     for (const seed of seeds) {
@@ -441,6 +483,9 @@ test("AC3 incremental builder is byte-identical to full over explicit and random
         }
         if (applied === "destroy-basename-collision-by-rename") {
           assertCollisionEdgeState(incremental, true, "basename collision destruction restores basename link");
+        }
+        if (applied === "add-decomposed-unicode-filename" || applied === "modify-decomposed-unicode-filename") {
+          assertDecomposedFilenameState(incremental, `seed ${seed} step ${step} ${applied}`);
         }
         previous = incremental;
         base = baseFromBuilt(previous, segmentsDir);
@@ -525,5 +570,48 @@ test("AC3 performance gate reparses O(changed docs) on a large link-dense fixtur
     t.diagnostic(
       `AC3 performance parse work: incremental=${incrementalStats.documentParses}, full=${fullStats.documentParses}, linkEdges=${incremental.linkEdges.length}`
     );
+  });
+});
+
+test("AnalyzerWorkerPool incremental base build exercises worker reduce pipeline and equals full", { timeout: 180_000 }, async () => {
+  await withDeterministicEmbeddingProvider(async () => {
+    const partitionBits = 3;
+    const { vault } = createVault(40);
+    const env = {
+      ...process.env,
+      OPTSIDIAN_SEARCH_ANALYZER: "intl",
+      OPTSIDIAN_SEARCH_EXTRA_LANGS: "",
+      OPTSIDIAN_SEARCH_QUERY_WORKERS: "1",
+      OPTSIDIAN_SEARCH_INDEX_WORKERS: "2",
+      OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1",
+      OPTSIDIAN_SEARCH_INDEX_MICROBATCH: "4"
+    };
+    const pools = await createDaemonPools(env, {});
+    try {
+      await pools.throughputAnalyzer.warmup(2);
+      const options = (suffix) => ({
+        deadline: Date.now() + 120_000,
+        cancellationId: `worker-base-${suffix}`,
+        vault
+      });
+      const previous = await pools.throughputAnalyzer.buildSnapshot(vault, partitionBits, options("base"), { ngram: false });
+      const segmentsDir = path.join(tempRoot("optsidian-search-worker-base-segments-"), "segments");
+      const base = baseFromBuilt(previous, segmentsDir);
+      for (let index = 0; index < 12; index += 1) {
+        const rel = `Doc-${String(index).padStart(2, "0")}.md`;
+        writeVaultFile(vault, rel, noteContent(`Worker Base ${index}`, 7000 + index, "Doc-39.md"));
+      }
+
+      const incremental = await pools.throughputAnalyzer.buildSnapshot(vault, partitionBits, options("incremental"), { ngram: false }, base);
+      const full = await pools.throughputAnalyzer.buildSnapshot(vault, partitionBits, options("full"), { ngram: false });
+
+      await assertIncrementalEqualsFull(incremental, full, "AnalyzerWorkerPool worker-base build");
+      assert.ok(
+        incremental.documents.filter((document) => document.title.startsWith("Worker Base ")).length >= 12,
+        "many changed docs are present in the worker-base result"
+      );
+    } finally {
+      await pools.close();
+    }
   });
 });

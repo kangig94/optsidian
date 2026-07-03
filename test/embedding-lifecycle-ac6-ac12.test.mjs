@@ -126,6 +126,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// Load-headroom timeout for heavy embedding work under full-suite parallelism.
 async function waitFor(predicate, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
