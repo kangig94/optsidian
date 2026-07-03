@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-path.js";
 import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from "../../core/search/dense/index.js";
-import { durableRename, fsyncDirSync, fsyncFileSync, type DurableRename } from "../search-store/publication.js";
+import { durableRename, fsyncDirSync, fsyncFileSync } from "../search-store/publication.js";
 import {
   vectorGenerationDbPath,
   vectorGenerationDir,
@@ -29,7 +29,6 @@ import type { SearchIndexProgressUpdate } from "../protocol.js";
 export type VectorGenerationPoolOptions = {
   factory?: CoralNeedleInstanceFactory;
   catalog?: VectorCacheCatalog;
-  durableRenameActivePointer?: DurableRename;
   now?: () => number;
 };
 
@@ -90,7 +89,6 @@ type VectorPin = {
 export class VectorGenerationPool {
   private readonly factory: CoralNeedleInstanceFactory;
   private readonly catalog: VectorCacheCatalog;
-  private readonly renameActive: DurableRename;
   private readonly now: () => number;
   private readonly activeByKey = new Map<string, GenerationHandle>();
   private readonly generations = new Map<string, GenerationHandle>();
@@ -100,7 +98,6 @@ export class VectorGenerationPool {
   constructor(options: VectorGenerationPoolOptions = {}) {
     this.factory = options.factory ?? createCoralNeedleProcessInstanceFactory();
     this.catalog = options.catalog ?? new VectorCacheCatalog();
-    this.renameActive = options.durableRenameActivePointer ?? durableRename;
     this.now = options.now ?? Date.now;
   }
 

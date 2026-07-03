@@ -21,8 +21,6 @@ export type SearchStoreCachePaths = {
   ledgersDir: string;
   activeDir: string;
   tmpDir: string;
-  activePointerPath: string;
-  retrievalActivePointerPath: string;
 };
 
 export function searchStoreCachePaths(
@@ -57,9 +55,7 @@ export function searchStoreCachePaths(
     linkGraphsDir: path.join(rootDir, "link-graphs"),
     ledgersDir: path.join(rootDir, "ledgers"),
     activeDir,
-    tmpDir: path.join(rootDir, "tmp"),
-    activePointerPath: path.join(activeDir, lexicalIdentityHash),
-    retrievalActivePointerPath: path.join(activeDir, `${lexicalIdentityHash}.retrieval`)
+    tmpDir: path.join(rootDir, "tmp")
   };
 }
 

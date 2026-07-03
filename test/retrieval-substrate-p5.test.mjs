@@ -1282,7 +1282,6 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   assert.deepEqual(absentPin, { status: "index-not-ready", reason: "no-active-retrieval-snapshot" });
   assert.equal(absent.embedding.calls.encode, 0);
   assert.equal(absent.buildCount(), 0);
-  const absentPaths = searchStoreCachePaths(absent.vault, absent.env);
 
   const absentResult = await absent.service.retrieve({
     vault: absent.vault,
@@ -1296,7 +1295,6 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   assert.ok(absentResult.results.length > 0);
   assert.equal(absent.embedding.calls.encode, 0);
   assert.equal(absent.buildCount(), 1);
-  assert.equal(fs.existsSync(absentPaths.retrievalActivePointerPath), false);
   assert.equal(absentResult.retrievalSnapshotId, undefined);
 
   const absentVectorResult = await absent.service.retrieve({
@@ -1311,7 +1309,6 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   assert.equal(absentVectorResult.available, true);
   assert.ok(absentVectorResult.results.length > 0);
   assert.equal(absent.embedding.calls.encode, 0);
-  assert.equal(fs.existsSync(absentPaths.retrievalActivePointerPath), false);
 
   await assertLexicalReadyAfterFreshnessChange("dirty", async (harness, envelope) => {
     await new RetrievalFreshnessStore({

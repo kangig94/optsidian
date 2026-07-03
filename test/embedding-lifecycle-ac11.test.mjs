@@ -180,16 +180,6 @@ function fakeWatchFactory() {
   };
 }
 
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 async function waitFor(predicate, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -270,11 +260,6 @@ async function createHarness() {
     factory: createMemoryCoralNeedleInstanceFactory()
   });
   const segmentRenames = [];
-  const retrievalRenameGate = {
-    armed: false,
-    reached: deferred(),
-    release: deferred()
-  };
   const store = new DaemonSnapshotStore({
     env,
     analyzerIdentity: analyzer.identity,
@@ -300,14 +285,6 @@ async function createHarness() {
     durableRenameSegment: async (tmp, target) => {
       segmentRenames.push(path.basename(target));
       await durableRename(tmp, target);
-    },
-    durableRenameRetrievalPointer: async (tmp, target) => {
-      if (retrievalRenameGate.armed) {
-        retrievalRenameGate.armed = false;
-        retrievalRenameGate.reached.resolve();
-        await retrievalRenameGate.release.promise;
-      }
-      await durableRename(tmp, target);
     }
   });
   const service = new DaemonSearchStoreService(
@@ -326,7 +303,6 @@ async function createHarness() {
     scheduler,
     vectorPool,
     segmentRenames,
-    retrievalRenameGate,
     async close() {
       await scheduler.close();
       await vectorPool.close();

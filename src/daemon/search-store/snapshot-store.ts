@@ -127,10 +127,8 @@ import {
 import type { CoralChunkRecord, VectorStoreKey } from "../vector-store/types.js";
 import {
   SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
-  type ActivePointer,
   type BuiltSnapshot,
   type PersistedDocumentRecord,
-  type RetrievalActivePointer,
   type RetrievalEmbeddingSetEnvelope,
   type RetrievalSnapshotEnvelope,
   type SnapshotEnvelope
@@ -152,8 +150,6 @@ export type DaemonSnapshotStoreOptions = {
   cacheCatalog?: SearchCacheCatalog;
   durableRenameSegment?: DurableRename;
   durableRenameManifest?: DurableRename;
-  durableRenameActivePointer?: DurableRename;
-  durableRenameRetrievalPointer?: DurableRename;
   durableRenameLinkGraph?: DurableRename;
   vectorPool?: VectorGenerationPool;
   embeddingSetBuilder?: RetrievalEmbeddingSetBuilder;
@@ -248,7 +244,6 @@ type RetrievalSnapshotSource = Pick<
 
 type RetrievalSnapshotPublication = {
   envelope: RetrievalSnapshotEnvelope;
-  active: RetrievalActivePointer;
   vectorPaths: VectorStoreCachePaths;
   dense: Extract<DenseEdition, { state: "fresh" }>;
   // Held from before the generation dir becomes sweeper-visible until the naming edition commits, so
@@ -414,8 +409,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly cacheCatalog: SearchCacheCatalog;
   private readonly renameSegment: DurableRename;
   private readonly renameManifest: DurableRename;
-  private readonly renameActive: DurableRename;
-  private readonly renameRetrieval: DurableRename;
   private readonly renameLinkGraph: DurableRename;
   private readonly vectorPool: VectorGenerationPool | undefined;
   private readonly embeddingSetBuilder: RetrievalEmbeddingSetBuilder;
@@ -468,8 +461,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.cacheCatalog = options.cacheCatalog ?? new SearchCacheCatalog({ env: this.env });
     this.renameSegment = options.durableRenameSegment ?? durableRename;
     this.renameManifest = options.durableRenameManifest ?? durableRename;
-    this.renameActive = options.durableRenameActivePointer ?? durableRename;
-    this.renameRetrieval = options.durableRenameRetrievalPointer ?? durableRename;
     this.renameLinkGraph = options.durableRenameLinkGraph ?? durableRename;
     this.vectorPool = options.vectorPool;
     this.embeddingSetBuilder = options.embeddingSetBuilder ??
@@ -635,10 +626,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const paths = this.paths(vaultRoot);
     await this.withLifecycleStore(paths, async () => {
       await this.recoverVault(paths);
-      fs.rmSync(paths.activePointerPath, { force: true });
-      fs.rmSync(paths.retrievalActivePointerPath, { force: true });
       fs.rmSync(paths.ledgersDir, { recursive: true, force: true });
-      fsyncDirSync(paths.activeDir);
+      fsyncDirSync(paths.rootDir);
       this.activeByVault.delete(paths.storeId);
       this.markSweepGc(paths);
       this.cacheCatalog.recordCleared(paths);
@@ -1566,18 +1555,8 @@ export class DaemonSnapshotStore implements SnapshotStore {
           corpusRevision: source.corpusSnapshotId
         }
       };
-      const active: RetrievalActivePointer = {
-        schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
-        retrievalSnapshotId,
-        snapshotId: source.snapshotId,
-        corpusSnapshotId: source.corpusSnapshotId,
-        linkGraphId: source.linkGraphId,
-        embeddingSetId: embeddingSet.embeddingSetId,
-        vectorGenerationId: generationId
-      };
       return {
         envelope: retrievalEnvelope,
-        active,
         vectorPaths,
         reservation,
         dense: {
@@ -1796,22 +1775,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (edition.identity.retrievalSnapshotId) {
         const retrieval = await this.readRetrievalSnapshotEnvelopeAsync(paths, edition.identity.retrievalSnapshotId);
         if (retrieval) await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
-      }
-    }
-    const activeRetrieval = await this.readRetrievalActivePointerAsync(paths);
-    if (activeRetrieval) {
-      retrievalSnapshotIds.add(activeRetrieval.retrievalSnapshotId);
-      const retrieval = await this.readRetrievalSnapshotEnvelopeAsync(paths, activeRetrieval.retrievalSnapshotId);
-      if (retrieval) {
-        await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
-      }
-    }
-    const active = await this.readActivePointerAsync(paths);
-    if (active) {
-      snapshotIds.add(active.snapshotId);
-      const envelope = await this.readSnapshotEnvelopeAsync(paths, active.snapshotId);
-      if (envelope) {
-        addSnapshotEnvelopeGcRoots(roots, envelope);
       }
     }
     for (const [snapshotId, envelope] of this.inFlightPublishManifests) {
@@ -2033,54 +1996,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
     this.ensureDirs(paths);
-    const active = this.readActivePointer(paths);
-    if (active && !this.readSnapshotEnvelope(paths, active.snapshotId)) {
-      fs.rmSync(paths.activePointerPath, { force: true });
-      fsyncDirSync(paths.activeDir);
-    }
     this.markSweepGc(paths);
-  }
-
-  private readActivePointer(paths: SearchStoreCachePaths): ActivePointer | undefined {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8")) as unknown;
-      if (!isActivePointer(parsed)) return undefined;
-      if (!this.readSnapshotEnvelope(paths, parsed.snapshotId)) return undefined;
-      return parsed;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async readActivePointerAsync(paths: SearchStoreCachePaths): Promise<ActivePointer | undefined> {
-    try {
-      const parsed = JSON.parse(await fs.promises.readFile(paths.activePointerPath, "utf8")) as unknown;
-      if (!isActivePointer(parsed)) return undefined;
-      if (!await this.readSnapshotEnvelopeAsync(paths, parsed.snapshotId)) return undefined;
-      return parsed;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private readRetrievalActivePointer(paths: SearchStoreCachePaths): RetrievalActivePointer | undefined {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(paths.retrievalActivePointerPath, "utf8")) as unknown;
-      if (!isRetrievalActivePointer(parsed)) return undefined;
-      return parsed;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async readRetrievalActivePointerAsync(paths: SearchStoreCachePaths): Promise<RetrievalActivePointer | undefined> {
-    try {
-      const parsed = JSON.parse(await fs.promises.readFile(paths.retrievalActivePointerPath, "utf8")) as unknown;
-      if (!isRetrievalActivePointer(parsed)) return undefined;
-      return parsed;
-    } catch {
-      return undefined;
-    }
   }
 
   private readSnapshotEnvelope(paths: SearchStoreCachePaths, snapshotId: string): SnapshotEnvelope | undefined {
@@ -3162,27 +3078,6 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
   );
 }
 
-function isActivePointer(value: unknown): value is ActivePointer {
-  return (
-    isRecord(value) &&
-    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
-    typeof value.snapshotId === "string" &&
-    typeof value.canonicalManifestSha256 === "string"
-  );
-}
-
-function isRetrievalActivePointer(value: unknown): value is RetrievalActivePointer {
-  return (
-    isRecord(value) &&
-    value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
-    typeof value.retrievalSnapshotId === "string" &&
-    typeof value.snapshotId === "string" &&
-    typeof value.corpusSnapshotId === "string" &&
-    typeof value.linkGraphId === "string" &&
-    typeof value.embeddingSetId === "string" &&
-    typeof value.vectorGenerationId === "string"
-  );
-}
 
 function isRetrievalSnapshotEnvelope(value: unknown): value is RetrievalSnapshotEnvelope {
   return (
@@ -3219,18 +3114,6 @@ function retrievalEnvelopeMatchesEdition(
     envelope.embeddingSetId === edition.dense.embeddingSetId &&
     envelope.vector.generationId === edition.dense.generationId &&
     envelope.vector.manifestHash === edition.dense.manifestHash;
-}
-
-function retrievalEnvelopeMatchesPointer(
-  envelope: RetrievalSnapshotEnvelope,
-  pointer: RetrievalActivePointer
-): boolean {
-  return envelope.retrievalSnapshotId === pointer.retrievalSnapshotId &&
-    envelope.snapshotId === pointer.snapshotId &&
-    envelope.corpusSnapshotId === pointer.corpusSnapshotId &&
-    envelope.linkGraphId === pointer.linkGraphId &&
-    envelope.embeddingSetId === pointer.embeddingSetId &&
-    envelope.vector.generationId === pointer.vectorGenerationId;
 }
 
 function denseEditionNotReadyReason(dense: DenseEdition): RetrievalPinNotReadyReason {

@@ -38,7 +38,6 @@ export const SNAPSHOT_PERSISTENCE_SCHEMA = {
     snippetFallback: ["kind", "snippetId?", "line?"],
     snippetLine: ["snippetId", "segmentId", "documentId", "byteStart", "byteEnd", "line", "text", "channels"]
   },
-  activePointer: ["schemaHash", "snapshotId", "canonicalManifestSha256"],
   retrievalEmbeddingSetEnvelope: {
     fields: ["schemaHash", "embeddingSetId", "recipe", "model", "dim", "records"],
     record: ["documentId", "path?", "text", "contentHash", "vector", "vectorProjectionHash"]
@@ -59,15 +58,6 @@ export const SNAPSHOT_PERSISTENCE_SCHEMA = {
     "embeddingSet",
     "vector",
     "freshness"
-  ],
-  retrievalActivePointer: [
-    "schemaHash",
-    "retrievalSnapshotId",
-    "snapshotId",
-    "corpusSnapshotId",
-    "linkGraphId",
-    "embeddingSetId",
-    "vectorGenerationId"
   ]
 } as const;
 
@@ -101,12 +91,6 @@ export type SnapshotEnvelope = {
   canonicalManifestSha256: string;
   documents: readonly PersistedDocumentRecord[];
   diagnostics: SnapshotDiagnostics;
-};
-
-export type ActivePointer = {
-  schemaHash: string;
-  snapshotId: string;
-  canonicalManifestSha256: string;
 };
 
 export type RetrievalEmbeddingSetEnvelope = {
@@ -146,16 +130,6 @@ export type RetrievalSnapshotEnvelope = {
     state: "fresh";
     corpusRevision: string;
   };
-};
-
-export type RetrievalActivePointer = {
-  schemaHash: string;
-  retrievalSnapshotId: RetrievalSnapshotId;
-  snapshotId: string;
-  corpusSnapshotId: CorpusSnapshotId;
-  linkGraphId: LinkGraphId;
-  embeddingSetId: EmbeddingSetId;
-  vectorGenerationId: string;
 };
 
 export type BuiltSegment = {
