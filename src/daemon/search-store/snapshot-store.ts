@@ -93,7 +93,7 @@ import {
 import {
   createLocalTenancyFenceProvider,
   editionCoverageFromCorpus,
-  liveEditionHeadsUnder,
+  liveEditionsForGcUnder,
   SharedReclamationAuthority,
   VaultPublisher,
   VaultPublisherRegistry,
@@ -821,10 +821,18 @@ export class DaemonSnapshotStore implements SnapshotStore {
     readContext: PinnedRetrievalReadContext,
     paths: SearchStoreCachePaths
   ): Promise<{ status: "ready"; retrieval: RetrievalSnapshotEnvelope } | DenseUnavailableResult> {
-    const edition = this.currentEdition(paths);
-    if (!edition) return this.denseUnavailable(readContext, "unavailable", "no-active-retrieval-snapshot");
-    if (edition.dense.state !== "fresh" || !edition.identity.retrievalSnapshotId) {
-      return this.denseUnavailable(readContext, edition.dense.state === "failed" ? "unreadable" : "unavailable", denseEditionUnavailableMessage(edition.dense));
+    // Attach the head edition's dense generation when it is fresh; otherwise fall back to the most
+    // recent fresh edition in the ledger. After a lexical-only rebuild the head is dense-unavailable,
+    // but the last fresh generation is still attachable — attachDenseGenerationLease masks per-doc by
+    // contentHash, so documents unchanged since that generation stay dense-enriched while edited/new
+    // docs ride lexical-only. The generation is kept servable by GC (latestFreshEditionsUnder root).
+    const head = this.currentEdition(paths);
+    const edition = head && head.dense.state === "fresh" && head.identity.retrievalSnapshotId
+      ? head
+      : this.latestFreshEdition(paths);
+    if (!edition || edition.dense.state !== "fresh" || !edition.identity.retrievalSnapshotId) {
+      if (!head) return this.denseUnavailable(readContext, "unavailable", "no-active-retrieval-snapshot");
+      return this.denseUnavailable(readContext, head.dense.state === "failed" ? "unreadable" : "unavailable", denseEditionUnavailableMessage(head.dense));
     }
     const retrieval = this.readRetrievalSnapshotEnvelope(paths, edition.identity.retrievalSnapshotId);
     if (!retrieval) return this.denseUnavailable(readContext, "unreadable", "retrieval-envelope-missing");
@@ -1776,7 +1784,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const retrievalSnapshotIds = new Set<RetrievalSnapshotId>();
     const vectorGenerationKeys = new Set<string>();
     const roots: GcRoots = { snapshotIds, segmentHashes, linkGraphIds, retrievalSnapshotIds, vectorGenerationKeys };
-    for (const edition of liveEditionHeadsUnder(paths.rootDir)) {
+    // Root each ledger's head edition AND its latest fresh edition. The latest-fresh may be an
+    // ancestor of the head after a lexical-only rebuild; it must stay fully servable (lexical
+    // snapshot + link graph + retrieval envelope + vector generation) because readers attach it for
+    // per-doc dense masking until a new dense generation is built.
+    for (const edition of liveEditionsForGcUnder(paths.rootDir)) {
       snapshotIds.add(edition.corpus.snapshotId);
       linkGraphIds.add(edition.linkGraphId);
       const envelope = await this.readSnapshotEnvelopeAsync(paths, edition.corpus.snapshotId);
@@ -2207,6 +2219,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private currentEdition(paths: SearchStoreCachePaths, embeddingSpaceId: EmbeddingSpaceId = this.currentEmbeddingSpaceId()): EditionRecord | undefined {
     return this.publisherFor(paths, embeddingSpaceId).ledger.current();
+  }
+
+  private latestFreshEdition(paths: SearchStoreCachePaths, embeddingSpaceId: EmbeddingSpaceId = this.currentEmbeddingSpaceId()): EditionRecord | undefined {
+    return this.publisherFor(paths, embeddingSpaceId).ledger.latestFresh();
   }
 
   private currentWriterToken(): CurrentWriterToken {

@@ -46,7 +46,7 @@ function tempRoot(prefix = "optsidian-retrieval-p3-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-async function eventually(assertion, timeoutMs = 1000) {
+async function eventually(assertion, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {

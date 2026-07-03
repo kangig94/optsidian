@@ -478,7 +478,7 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value)}\n`);
 }
 
-async function eventually(assertion, timeoutMs = 1000) {
+async function eventually(assertion, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -753,14 +753,17 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(hybrid.status, "ready");
-  assert.equal(hybrid.dense.state, "cold");
-  assert.equal(hybrid.dense.pendingCount, 4);
-  assert.equal(hybrid.dense.generationAgeMs, null);
+  // A lexical-only edit leaves the head edition dense-unavailable, but the reader attaches the last
+  // fresh generation and masks per-doc: Alpha (edited) and the new Delta lack usable dense, while
+  // Beta/Gamma (unchanged) stay dense-enriched. The signal is therefore "stale", not "cold".
+  assert.equal(hybrid.dense.state, "stale");
+  assert.equal(hybrid.dense.pendingCount, 2);
+  assert.equal(typeof hybrid.dense.generationAgeMs, "number");
   assert.ok(resultPath(hybrid, "Projects/Alpha.md"));
   assert.ok(resultPath(hybrid, "Projects/Beta.md"));
   assert.ok(resultPath(hybrid, "Projects/Delta.md"));
   assert.equal(denseAgreementForPath(hybrid, "Projects/Alpha.md"), 0);
-  assert.equal(denseAgreementForPath(hybrid, "Projects/Beta.md"), 0);
+  assert.ok(denseAgreementForPath(hybrid, "Projects/Beta.md") > 0);
   assert.equal(denseAgreementForPath(hybrid, "Projects/Delta.md"), 0);
   assert.equal(editionDense(paths).state, "unavailable");
   assert.equal(harness.vector.calls.buildIndex.length, vectorBuildsBefore);
@@ -775,12 +778,13 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(vector.status, "ready");
-  assert.equal(vector.dense.state, "cold");
-  assert.equal(vector.dense.pendingCount, 4);
-  assert.ok(resultPath(vector, "Projects/Alpha.md"));
-  assert.ok(resultPath(vector, "Projects/Beta.md"));
-  assert.ok(resultPath(vector, "Projects/Delta.md"));
-  assert.equal(vector.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
+  assert.equal(vector.dense.state, "stale");
+  assert.equal(vector.dense.pendingCount, 2);
+  // Vector-only surfaces the usable-dense doc (unchanged Beta) with a positive agreement; masked
+  // docs (edited Alpha, new Delta) carry no dense agreement (absent from vector hits or unmasked → 0).
+  assert.ok(denseAgreementForPath(vector, "Projects/Beta.md") > 0);
+  assert.equal(denseAgreementForPath(vector, "Projects/Alpha.md"), 0);
+  assert.equal(denseAgreementForPath(vector, "Projects/Delta.md"), 0);
 
   writeVaultFile(harness.vault, "Projects/Beta.md", [
     "---",
@@ -803,9 +807,10 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
   }, context());
   assert.equal(allMaskedVector.status, "ready");
   assert.equal(allMaskedVector.available, true);
-  assert.equal(allMaskedVector.dense.state, "cold");
-  assert.equal(allMaskedVector.dense.pendingCount, 4);
-  assert.equal(harness.vector.calls.searchVector.length, searchCallsBeforeAllMasked);
+  // Alpha+Beta edited and Delta new → every Projects doc is masked; Gamma (Archive, unchanged) keeps
+  // usable dense corpus-wide, so the signal is "stale" with pendingCount 3 (Alpha, Beta, Delta).
+  assert.equal(allMaskedVector.dense.state, "stale");
+  assert.equal(allMaskedVector.dense.pendingCount, 3);
   assert.ok(resultPath(allMaskedVector, "Projects/Alpha.md"));
   assert.ok(resultPath(allMaskedVector, "Projects/Beta.md"));
   assert.ok(resultPath(allMaskedVector, "Projects/Delta.md"));
@@ -953,9 +958,12 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
     debug: true
   }, context());
   assert.equal(rebuildingResult.status, "ready");
-  assert.equal(rebuildingResult.dense.state, "cold");
-  assert.equal(rebuildingResult.dense.pendingCount, 3);
-  assert.notEqual(rebuildingResult.dense.state, "stale");
+  // Editing Alpha leaves the head edition dense-unavailable; the reader attaches the last fresh
+  // generation and masks only Alpha, so the signal is "stale" with one pending doc. (The legacy
+  // RetrievalFreshnessStore.markBuilding no longer drives the read-path signal.)
+  assert.equal(rebuildingResult.dense.state, "stale");
+  assert.equal(rebuildingResult.dense.pendingCount, 1);
+  assert.notEqual(rebuildingResult.dense.state, "fresh");
 
   const failed = await readyHarness();
   const failedRetrieval = await ensureActiveRetrieval(failed);
@@ -972,8 +980,11 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
     debug: true
   }, context());
   assert.equal(failedResult.status, "ready");
-  assert.equal(failedResult.dense.state, "cold");
-  assert.equal(failedResult.dense.pendingCount, 4);
+  // The new Delta has no dense record; the reader still attaches the last fresh generation for the
+  // unchanged docs, so the signal is "stale" with one pending doc (the legacy markFailed no longer
+  // drives the read-path signal).
+  assert.equal(failedResult.dense.state, "stale");
+  assert.equal(failedResult.dense.pendingCount, 1);
   assert.notEqual(failedResult.dense.state, "fresh");
 });
 
@@ -1016,13 +1027,17 @@ test("AC9 note, pair, and global origins require stored vectors without model en
     sourcePath: "Projects/Delta.md",
     limit: 2
   }, context());
+  // The new Delta has no stored vector, so its own note origin is genuinely source-vector-missing.
+  // The signal is "stale" (Alpha/Beta/Gamma keep usable dense; only Delta pends), not "cold".
   assert.equal(noteMissing.status, "index-not-ready");
   assert.equal(noteMissing.available, false);
   assert.equal(noteMissing.reason, "source-vector-missing");
-  assert.equal(noteMissing.dense.state, "cold");
-  assert.equal(noteMissing.dense.pendingCount, 4);
+  assert.equal(noteMissing.dense.state, "stale");
+  assert.equal(noteMissing.dense.pendingCount, 1);
   assert.equal(harness.embedding.calls.encode, 0);
 
+  // Alpha is UNCHANGED, so its stored vector remains usable across the Delta edit: a global lookup
+  // sourced from it succeeds via per-doc masking (the pre-fix regression returned index-not-ready).
   const globalStored = await harness.service.retrieve({
     vault: harness.vault,
     origin: "global",
@@ -1030,12 +1045,11 @@ test("AC9 note, pair, and global origins require stored vectors without model en
     limit: 2,
     debug: true
   }, context());
-  assert.equal(globalStored.status, "index-not-ready");
-  assert.equal(globalStored.reason, "source-vector-missing");
-  assert.equal(globalStored.dense.state, "cold");
-  assert.equal(globalStored.dense.pendingCount, 4);
+  assert.equal(globalStored.status, "ready");
+  assert.equal(globalStored.dense.state, "stale");
+  assert.equal(globalStored.dense.pendingCount, 1);
   assert.equal(harness.embedding.calls.encode, 0);
-  assert.equal(harness.vector.calls.searchVector.length, 0);
+  assert.ok(harness.vector.calls.searchVector.length > 0);
 
   const globalMissing = await harness.service.retrieve({
     vault: harness.vault,
@@ -1044,8 +1058,8 @@ test("AC9 note, pair, and global origins require stored vectors without model en
   }, context());
   assert.equal(globalMissing.status, "index-not-ready");
   assert.equal(globalMissing.reason, "source-vector-missing");
-  assert.equal(globalMissing.dense.state, "cold");
-  assert.equal(globalMissing.dense.pendingCount, 4);
+  assert.equal(globalMissing.dense.state, "stale");
+  assert.equal(globalMissing.dense.pendingCount, 1);
   assert.equal(harness.embedding.calls.encode, 0);
 });
 

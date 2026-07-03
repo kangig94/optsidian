@@ -124,6 +124,19 @@ export class EditionLedger {
     return records.at(-1);
   }
 
+  // The most recent edition whose dense arm is `fresh` (and names a retrieval snapshot). After a
+  // lexical-only rebuild the head edition is dense-`unavailable`/`building`, but a reader can still
+  // attach this edition's committed dense generation and mask per-doc by contentHash — so documents
+  // unchanged since it stay dense-enriched while only edited/new docs ride lexical-only.
+  latestFresh(): EditionRecord | undefined {
+    const records = this.history();
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index];
+      if (record.dense.state === "fresh" && record.identity.retrievalSnapshotId) return record;
+    }
+    return undefined;
+  }
+
   history(): EditionRecord[] {
     ensurePrivateDirSync(this.publicationsDir, "Optsidian edition publications directory");
     const records: EditionRecord[] = [];
@@ -573,7 +586,10 @@ export class SharedReclamationAuthority {
     "searchStoresDir" | "vaultStateHash" | "embeddingSetId"
   >): Set<string> {
     const live = new Set<string>();
-    for (const edition of liveEditionHeadsUnder(path.join(input.searchStoresDir, input.vaultStateHash))) {
+    // Protect the latest fresh generation per ledger, not just the head's: after a lexical-only edit
+    // the head is dense-unavailable, but readers still attach (and per-doc mask) the last fresh
+    // generation until a new one is built, so it must survive the gap.
+    for (const edition of latestFreshEditionsUnder(path.join(input.searchStoresDir, input.vaultStateHash))) {
       if (edition.identity.vaultStateHash !== input.vaultStateHash) continue;
       if (edition.dense.state !== "fresh") continue;
       if (edition.dense.embeddingSetId !== input.embeddingSetId) continue;
@@ -633,21 +649,55 @@ export function editionCoverageFromCorpus(input: {
   return { committedHashBySubject, tombstoneProof };
 }
 
+function readLedgerRecordsFromDir(publicationsDir: string): EditionRecord[] {
+  const records: EditionRecord[] = [];
+  for (const entry of safeReadDir(publicationsDir)) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const record = decodeEditionRecord(fs.readFileSync(path.join(publicationsDir, entry), "utf8"));
+      if (record && record.editionSeq === Number(entry)) records.push(record);
+    } catch {}
+  }
+  return records.sort((left, right) => left.editionSeq - right.editionSeq);
+}
+
 export function liveEditionHeadsUnder(rootDir: string): EditionRecord[] {
   const heads: EditionRecord[] = [];
   for (const publicationsDir of findPublicationsDirs(rootDir)) {
-    const records: EditionRecord[] = [];
-    for (const entry of safeReadDir(publicationsDir)) {
-      if (!/^\d+$/.test(entry)) continue;
-      try {
-        const record = decodeEditionRecord(fs.readFileSync(path.join(publicationsDir, entry), "utf8"));
-        if (record && record.editionSeq === Number(entry)) records.push(record);
-      } catch {}
-    }
-    const head = records.sort((left, right) => left.editionSeq - right.editionSeq).at(-1);
+    const head = readLedgerRecordsFromDir(publicationsDir).at(-1);
     if (head) heads.push(head);
   }
   return heads;
+}
+
+// The most recent `fresh` edition per ledger under `rootDir`. These must stay servable even when a
+// ledger's head has advanced to a dense-`unavailable`/`building` edition (post lexical-only edit),
+// so a reader can attach the last fresh dense generation and per-doc mask. GC roots both these and
+// the heads; the reader's dense attach path uses the same lookback.
+export function latestFreshEditionsUnder(rootDir: string): EditionRecord[] {
+  const editions: EditionRecord[] = [];
+  for (const publicationsDir of findPublicationsDirs(rootDir)) {
+    const latestFresh = [...readLedgerRecordsFromDir(publicationsDir)]
+      .reverse()
+      .find((record) => record.dense.state === "fresh");
+    if (latestFresh) editions.push(latestFresh);
+  }
+  return editions;
+}
+
+// Head + latest-fresh edition per ledger, computed in ONE scan of each publications dir — the exact
+// set GC must root (heads for the current corpus; latest-fresh so per-doc dense masking survives the
+// lexical-edit→dense-rebuild gap). Combining the two avoids scanning every ledger twice per GC pass.
+export function liveEditionsForGcUnder(rootDir: string): EditionRecord[] {
+  const editions: EditionRecord[] = [];
+  for (const publicationsDir of findPublicationsDirs(rootDir)) {
+    const records = readLedgerRecordsFromDir(publicationsDir);
+    const head = records.at(-1);
+    if (head) editions.push(head);
+    const latestFresh = [...records].reverse().find((record) => record.dense.state === "fresh");
+    if (latestFresh && latestFresh !== head) editions.push(latestFresh);
+  }
+  return editions;
 }
 
 function ensureVaultPublisherPaths(paths: VaultPublisherPaths): void {
