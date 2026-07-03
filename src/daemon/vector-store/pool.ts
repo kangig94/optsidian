@@ -20,7 +20,6 @@ import type {
   CoralNeedleInstanceFactory,
   CoralSearchResult,
   VectorGenerationMetadata,
-  VectorSearchResult,
   VectorStoreKey
 } from "./types.js";
 import { vectorStoreKeyString } from "./types.js";
@@ -231,29 +230,6 @@ export class VectorGenerationPool {
       promoted = true;
     } finally {
       if (!promoted) await Promise.resolve(instance.close()).catch(() => undefined);
-    }
-  }
-
-  async searchActiveBuiltIndex(input: {
-    key: VectorStoreKey;
-    queryVector: readonly number[] | Float32Array;
-    candidateK: number;
-    expectedGenerationId?: string;
-  }): Promise<VectorSearchResult> {
-    const pin = this.acquireActive(input.key);
-    if (!pin) return { status: "index-not-ready", reason: "no-active-built-spec" };
-    try {
-      if (input.expectedGenerationId && pin.handle.generationId !== input.expectedGenerationId) {
-        return { status: "index-not-ready", reason: "active-generation-mismatched" };
-      }
-      const results = await pin.handle.instance.searchVector(input.queryVector, input.candidateK);
-      return {
-        status: "ready",
-        generationId: pin.handle.generationId,
-        results
-      };
-    } finally {
-      this.release(pin);
     }
   }
 

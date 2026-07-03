@@ -36,7 +36,7 @@ import {
   snapshotIdentityTupleForAnalyzerIdentity
 } from "../src/daemon/search-store/builder.ts";
 import { executeSearchShardJob } from "../src/daemon/search-execution.ts";
-import { RetrievalFreshnessStore, VectorGenerationPool, vectorStoreCachePaths } from "../src/daemon/vector-store/index.ts";
+import { VectorGenerationPool, vectorStoreCachePaths } from "../src/daemon/vector-store/index.ts";
 import {
   createOwnerRecord,
   createOwnerRegistry,
@@ -937,7 +937,7 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
   assert.equal(coldResult.dense.generationAgeMs, null);
 
   const building = await readyHarness();
-  const buildingRetrieval = await ensureActiveRetrieval(building);
+  await ensureActiveRetrieval(building);
   writeVaultFile(building.vault, "Projects/Alpha.md", [
     "---",
     "tags: [project, alpha]",
@@ -946,9 +946,6 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
     "",
     "alpha project semantic handle edited while building"
   ].join("\n"));
-  await new RetrievalFreshnessStore({
-    paths: retrievalVectorPaths(building, buildingRetrieval.envelope.embeddingSetId)
-  }).markBuilding(buildingRetrieval.envelope.corpusSnapshotId);
   const rebuildingResult = await building.service.retrieve({
     vault: building.vault,
     origin: "text",
@@ -959,18 +956,14 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
   }, context());
   assert.equal(rebuildingResult.status, "ready");
   // Editing Alpha leaves the head edition dense-unavailable; the reader attaches the last fresh
-  // generation and masks only Alpha, so the signal is "stale" with one pending doc. (The legacy
-  // RetrievalFreshnessStore.markBuilding no longer drives the read-path signal.)
+  // generation and masks only Alpha, so the signal is "stale" with one pending doc.
   assert.equal(rebuildingResult.dense.state, "stale");
   assert.equal(rebuildingResult.dense.pendingCount, 1);
   assert.notEqual(rebuildingResult.dense.state, "fresh");
 
   const failed = await readyHarness();
-  const failedRetrieval = await ensureActiveRetrieval(failed);
+  await ensureActiveRetrieval(failed);
   writeVaultFile(failed.vault, "Projects/Delta.md", "# Delta\n\nalpha project failed pending source\n");
-  await new RetrievalFreshnessStore({
-    paths: retrievalVectorPaths(failed, failedRetrieval.envelope.embeddingSetId)
-  }).markFailed(failedRetrieval.envelope.corpusSnapshotId, new Error("stuck build"));
   const failedResult = await failed.service.retrieve({
     vault: failed.vault,
     origin: "text",
@@ -981,8 +974,7 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
   }, context());
   assert.equal(failedResult.status, "ready");
   // The new Delta has no dense record; the reader still attaches the last fresh generation for the
-  // unchanged docs, so the signal is "stale" with one pending doc (the legacy markFailed no longer
-  // drives the read-path signal).
+  // unchanged docs, so the signal is "stale" with one pending doc.
   assert.equal(failedResult.dense.state, "stale");
   assert.equal(failedResult.dense.pendingCount, 1);
   assert.notEqual(failedResult.dense.state, "fresh");
@@ -1310,33 +1302,7 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   assert.ok(absentVectorResult.results.length > 0);
   assert.equal(absent.embedding.calls.encode, 0);
 
-  await assertLexicalReadyAfterFreshnessChange("dirty", async (harness, envelope) => {
-    await new RetrievalFreshnessStore({
-      paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
-    }).markDirty(envelope.corpusSnapshotId);
-  });
-  await assertLexicalReadyAfterFreshnessChange("building", async (harness, envelope) => {
-    await new RetrievalFreshnessStore({
-      paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
-    }).markBuilding(envelope.corpusSnapshotId);
-  });
-  await assertLexicalReadyAfterFreshnessChange("failed", async (harness, envelope) => {
-    await new RetrievalFreshnessStore({
-      paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
-    }).markFailed(envelope.corpusSnapshotId, new Error("boom"));
-  });
-  await assertLexicalReadyAfterFreshnessChange("stale", async (harness, envelope) => {
-    await new RetrievalFreshnessStore({
-      paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
-    }).markFresh({
-      corpusRevision: envelope.corpusSnapshotId,
-      corpusSnapshotId: envelope.corpusSnapshotId,
-      linkGraphId: envelope.linkGraphId,
-      embeddingSetId: envelope.embeddingSetId,
-      retrievalSnapshotId: `${envelope.retrievalSnapshotId.slice(0, -1)}0`,
-      vectorGenerationId: envelope.vector.generationId
-    });
-  });
+  await assertLexicalReadyAfterEditionEdit("edited-corpus-stale");
 
   await assertNotReadyAfter("retrieval-snapshot-mismatched", async (harness, envelope, paths) => {
     writeJson(path.join(paths.retrievalsDir, envelope.retrievalSnapshotId), {
@@ -1653,33 +1619,40 @@ async function assertNotReadyAfter(expectedReason, mutate) {
   assert.equal(harness.buildCount(), buildsBefore);
 }
 
-async function assertLexicalReadyAfterFreshnessChange(label, mutate, options = {}) {
+async function assertLexicalReadyAfterEditionEdit(label) {
   const harness = await readyHarness();
-  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
+  const { paths, active } = await ensureActiveRetrieval(harness);
   const buildsBefore = harness.buildCount();
   const encodeBefore = harness.embedding.calls.encode;
   const vectorBuildBefore = harness.vector.calls.buildIndex.length;
-  await mutate(harness, envelope, paths);
-
-  const pin = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
-  assert.equal(pin.status, "ready", label);
-  harness.store.release(pin.pin);
+  writeVaultFile(harness.vault, "Projects/Alpha.md", [
+    "---",
+    "tags: [project, alpha]",
+    "---",
+    "# Alpha",
+    "",
+    "alpha project semantic handle edited through edition state"
+  ].join("\n"));
 
   const result = await harness.service.retrieve({
     vault: harness.vault,
     origin: "text",
     text: "alpha project",
     query: "alpha project",
+    retrieval: "lexical",
     limit: 3,
     debug: true
   }, context());
   assert.equal(result.status, "ready", label);
   assert.equal(result.available, true, label);
+  assert.equal(result.dense.state, "stale", label);
+  assert.equal(result.dense.pendingCount, 1, label);
   assert.ok(result.results.length > 0, label);
+  assert.equal(editionDense(paths).state, "unavailable", label);
   assert.deepEqual(activeRetrieval(paths), active, label);
-  assert.equal(harness.buildCount(), buildsBefore, label);
+  assert.equal(harness.buildCount(), buildsBefore + 1, label);
   assert.equal(harness.vector.calls.buildIndex.length, vectorBuildBefore, label);
-  if (options.expectNoEncode) assert.equal(harness.embedding.calls.encode, encodeBefore, label);
+  assert.equal(harness.embedding.calls.encode, encodeBefore, label);
 }
 
 function embeddingModel(id, dim = 3) {

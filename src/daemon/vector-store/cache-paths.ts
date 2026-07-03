@@ -19,7 +19,6 @@ export type VectorStoreCachePaths = {
   reservationsDir: string;
   activeDir: string;
   tmpDir: string;
-  freshnessStatePath: string;
   activePointerPath: string;
 };
 
@@ -54,7 +53,6 @@ export function vectorStoreCachePaths(input: {
     reservationsDir: path.join(rootDir, "reservations"),
     activeDir,
     tmpDir: path.join(rootDir, "tmp"),
-    freshnessStatePath: path.join(vaultDir, "retrieval-freshness.json"),
     activePointerPath: path.join(activeDir, embeddingSetId)
   };
 }

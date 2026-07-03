@@ -39,7 +39,6 @@ import { SearchQueryScheduler } from "./query-scheduler.js";
 import { applySearchWarnings } from "./result-shaping.js";
 import { readOptsidianSettings, type OptsidianSettings } from "../../core/settings.js";
 import type { DenseVectorSearchHit } from "../search-execution.js";
-import type { VectorGenerationPool } from "../vector-store/index.js";
 import { snippetsForDocument } from "./result-shaping.js";
 
 const MAX_SEARCH_QUERY_TERMS_PER_CHANNEL = 2048;
@@ -93,7 +92,6 @@ export class DaemonSearchStoreService {
   private readonly latencyAnalyzer: AnalyzerWorkerPool;
   private readonly embedding: ScheduledEmbeddingEncoder;
   private readonly searchExecution: SearchExecutionWorkerPool;
-  private readonly vectorPool: Pick<VectorGenerationPool, "searchActiveBuiltIndex"> | undefined;
   private readonly queryScheduler: SearchQueryScheduler;
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly searchSettingsHash: string;
@@ -110,14 +108,12 @@ export class DaemonSearchStoreService {
       rankingTuning?: Partial<SearchRankingTuning>;
       settings?: OptsidianSettings;
       env?: NodeJS.ProcessEnv;
-      vectorPool?: Pick<VectorGenerationPool, "searchActiveBuiltIndex">;
     } = {}
   ) {
     this.store = store;
     this.latencyAnalyzer = latencyAnalyzer;
     this.embedding = embedding;
     this.searchExecution = searchExecution;
-    this.vectorPool = options.vectorPool;
     this.queryScheduler = new SearchQueryScheduler(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);

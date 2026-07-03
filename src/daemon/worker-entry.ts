@@ -11,7 +11,6 @@ import type {
   SearchIndexProgressUpdate,
   VectorBuildWorkerPayload,
   VectorPrewarmWorkerPayload,
-  VectorSearchActiveBuiltIndexWorkerPayload,
   VectorUpsertWorkerPayload
 } from "./protocol.js";
 import {
@@ -151,9 +150,6 @@ async function dispatch(
     if (type === "vectorUpsert") return vectorUpsert(payload as VectorUpsertWorkerPayload);
     if (type === "vectorBuild") return vectorBuild(payload as VectorBuildWorkerPayload);
     if (type === "vectorPrewarm") return vectorPrewarm(payload as VectorPrewarmWorkerPayload);
-    if (type === "vectorSearchActiveBuiltIndex") {
-      return vectorSearchActiveBuiltIndex(payload as VectorSearchActiveBuiltIndexWorkerPayload);
-    }
     if (type === "vectorClose") return { ok: true, generationId: (payload as { generationId?: string } | undefined)?.generationId ?? "" };
     if (type === "vectorStats") return {};
     throw Object.assign(new Error(`unsupported vector worker job: ${type}`), { code: "BAD_REQUEST" });
@@ -338,20 +334,8 @@ async function vectorPrewarm(input: VectorPrewarmWorkerPayload) {
   });
 }
 
-async function vectorSearchActiveBuiltIndex(input: VectorSearchActiveBuiltIndexWorkerPayload) {
-  return withVectorInstance(input, async (instance) => {
-    await instance.initStore(input.dbPath);
-    await instance.setActiveSpec(input.spec);
-    const results = await instance.searchVector(input.queryVector, input.candidateK);
-    return {
-      generationId: input.generationId,
-      results
-    };
-  });
-}
-
 async function withVectorInstance<T>(
-  input: VectorUpsertWorkerPayload | VectorBuildWorkerPayload | VectorPrewarmWorkerPayload | VectorSearchActiveBuiltIndexWorkerPayload,
+  input: VectorUpsertWorkerPayload | VectorBuildWorkerPayload | VectorPrewarmWorkerPayload,
   fn: (instance: CoralNeedleInstance) => Promise<T>
 ): Promise<T> {
   const instance = await createCoralNeedleProcessInstanceFactory().create({

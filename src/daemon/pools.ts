@@ -38,8 +38,6 @@ import type {
   VectorBuildWorkerPayload,
   VectorCloseWorkerPayload,
   VectorPrewarmWorkerPayload,
-  VectorSearchActiveBuiltIndexWorkerPayload,
-  VectorSearchActiveBuiltIndexWorkerResult,
   VectorUpsertWorkerPayload,
   VectorWorkerResult
 } from "./protocol.js";
@@ -390,13 +388,6 @@ export class VectorWorkerPool {
 
   prewarm(payload: VectorPrewarmWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {
     return this.pool.run<VectorWorkerResult>({ type: "vectorPrewarm", payload }, options);
-  }
-
-  searchActiveBuiltIndex(
-    payload: VectorSearchActiveBuiltIndexWorkerPayload,
-    options: WorkerPoolRunOptions
-  ): Promise<VectorSearchActiveBuiltIndexWorkerResult> {
-    return this.pool.run<VectorSearchActiveBuiltIndexWorkerResult>({ type: "vectorSearchActiveBuiltIndex", payload }, options);
   }
 
   closeInstance(payload: VectorCloseWorkerPayload, options: WorkerPoolRunOptions): Promise<VectorWorkerResult> {

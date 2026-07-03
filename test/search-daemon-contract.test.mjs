@@ -3031,11 +3031,11 @@ test("daemon idle shutdown uses configured timeout and next client call auto-boo
   }
 });
 
-test("daemon boot recovery resets building retrieval freshness and sweeps staging", async () => {
+test("daemon boot recovery sweeps orphan vector and search staging tmp", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await futureImport("src/daemon/runtime-profile.ts");
   const { searchStoreCachePaths } = await futureImport("src/daemon/search-store/cache-paths.ts");
-  const { RetrievalFreshnessStore, vectorStoreCachePaths } = await futureImport("src/daemon/vector-store/index.ts");
+  const { vectorStoreCachePaths } = await futureImport("src/daemon/vector-store/index.ts");
   const runtimeDir = tempRoot();
   const cacheRoot = tempRoot("optsidian-boot-recovery-cache-");
   const vault = tempRoot("optsidian-boot-recovery-vault-");
@@ -3057,18 +3057,6 @@ test("daemon boot recovery resets building retrieval freshness and sweeps stagin
     env
   });
   const searchPaths = searchStoreCachePaths(vault, env);
-  const freshness = new RetrievalFreshnessStore({ paths: vectorPaths });
-  await freshness.write({
-    schemaVersion: 1,
-    state: "building",
-    corpusRevision: "rev-boot",
-    published: {
-      corpusRevision: "rev-prev",
-      embeddingSetId: vectorPaths.key.embeddingSetId,
-      vectorGenerationId: "gen-prev"
-    },
-    updatedAt: new Date().toISOString()
-  });
   fs.mkdirSync(vectorPaths.stagingDir, { recursive: true });
   fs.writeFileSync(path.join(vectorPaths.stagingDir, "orphan.vector"), "x");
   fs.mkdirSync(searchPaths.tmpDir, { recursive: true });
@@ -3085,16 +3073,11 @@ test("daemon boot recovery resets building retrieval freshness and sweeps stagin
     const status = await client.status({ deadlineMs: 5000 });
     assert.equal(status.ready, true);
     await waitFor(() => {
-      const current = new RetrievalFreshnessStore({ paths: vectorPaths }).read();
-      return current.state === "dirty" &&
-        fs.existsSync(vectorPaths.stagingDir) &&
+      return fs.existsSync(vectorPaths.stagingDir) &&
         fs.readdirSync(vectorPaths.stagingDir).length === 0 &&
         fs.existsSync(searchPaths.tmpDir) &&
         fs.readdirSync(searchPaths.tmpDir).length === 0;
     }, 5000);
-    const recovered = new RetrievalFreshnessStore({ paths: vectorPaths }).read();
-    assert.equal(recovered.state, "dirty");
-    assert.equal(recovered.corpusRevision, "rev-boot");
   } finally {
     await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
   }

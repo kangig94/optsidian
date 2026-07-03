@@ -181,8 +181,7 @@ export class ProfileRuntime {
       queryCacheSize: normalized.cache.queryAnalysisEntries,
       searchSettings: normalized.index,
       settings,
-      env,
-      vectorPool
+      env
     });
     return new ProfileRuntime(normalized, pools, vectorPool, snapshotStore, searchStore, embedScheduler, options);
   }

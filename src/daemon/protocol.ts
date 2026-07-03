@@ -27,7 +27,6 @@ import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-
 import type {
   CoralChunkRecord,
   CoralEmbeddingSpec,
-  CoralSearchResult,
   CoralStoreStats,
   VectorStoreKey
 } from "./vector-store/types.js";
@@ -216,22 +215,11 @@ export type VectorPrewarmWorkerPayload = VectorWorkerBasePayload & {
   engineName?: "auto" | string;
 };
 
-export type VectorSearchActiveBuiltIndexWorkerPayload = VectorWorkerBasePayload & {
-  spec: CoralEmbeddingSpec;
-  queryVector: EmbeddingVector;
-  candidateK: number;
-};
-
 export type VectorCloseWorkerPayload = Partial<VectorWorkerBasePayload>;
 
 export type VectorWorkerResult = {
   ok: true;
   generationId: string;
-};
-
-export type VectorSearchActiveBuiltIndexWorkerResult = {
-  generationId: string;
-  results: CoralSearchResult[];
 };
 
 export type SearchDaemonWorkerJob =
@@ -251,7 +239,6 @@ export type SearchDaemonWorkerJob =
   | { type: "vectorUpsert"; payload: VectorUpsertWorkerPayload }
   | { type: "vectorBuild"; payload: VectorBuildWorkerPayload }
   | { type: "vectorPrewarm"; payload: VectorPrewarmWorkerPayload }
-  | { type: "vectorSearchActiveBuiltIndex"; payload: VectorSearchActiveBuiltIndexWorkerPayload }
   | { type: "vectorClose"; payload?: VectorCloseWorkerPayload }
   | { type: "vectorStats"; payload?: VectorCloseWorkerPayload };
 
@@ -272,7 +259,6 @@ export type SearchDaemonWorkerResultByType = {
   vectorUpsert: VectorWorkerResult;
   vectorBuild: VectorWorkerResult;
   vectorPrewarm: VectorWorkerResult;
-  vectorSearchActiveBuiltIndex: VectorSearchActiveBuiltIndexWorkerResult;
   vectorClose: VectorWorkerResult;
   vectorStats: CoralStoreStats;
 };

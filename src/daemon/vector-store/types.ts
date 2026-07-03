@@ -85,19 +85,6 @@ export type VectorGenerationMetadata = {
   manifestHash?: string;
 };
 
-export type VectorSearchReadyResult = {
-  status: "ready";
-  generationId: string;
-  results: CoralSearchResult[];
-};
-
-export type VectorSearchNotReadyResult = {
-  status: "index-not-ready";
-  reason: "no-active-built-spec" | "active-generation-mismatched";
-};
-
-export type VectorSearchResult = VectorSearchReadyResult | VectorSearchNotReadyResult;
-
 export function vectorStoreKeyString(key: VectorStoreKey): string {
   return `${key.vaultStateHash}:${key.embeddingSetId}`;
 }

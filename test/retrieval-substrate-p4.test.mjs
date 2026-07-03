@@ -5,13 +5,24 @@ import path from "node:path";
 import test from "node:test";
 
 import { ModelSessionLifecycle } from "../src/daemon/model-session/index.ts";
+import { executeSearchShardJob } from "../src/daemon/search-execution.ts";
+import { buildCanonicalSearchSnapshot } from "../src/daemon/search-store/builder.ts";
+import { searchStoreCachePaths } from "../src/daemon/search-store/cache-paths.ts";
+import { DaemonSearchStoreService } from "../src/daemon/search-store/service.ts";
+import { DaemonSnapshotStore } from "../src/daemon/search-store/snapshot-store.ts";
 import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
 import {
-  RetrievalFreshnessStore,
+  createDeterministicEmbeddingSetBuilder,
+  DeterministicHashProvider
+} from "./helpers/deterministic-embedding.mjs";
+import { editionDense } from "./helpers/edition-ledger.mjs";
+import {
   VectorGenerationPool,
   recoverRetrievalStaging,
   vectorStoreCachePaths
 } from "../src/daemon/vector-store/index.ts";
+
+const RETRIEVAL_PROFILE_HASH = "retrieval-p4-profile";
 
 function tempRoot(prefix = "optsidian-retrieval-p4-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -177,6 +188,17 @@ async function publishGeneration(pool, paths, spec, generationId, chunks) {
   return built;
 }
 
+function pinCommittedFreshGeneration(pool, paths, metadata) {
+  return pool.pinReadableGeneration({
+    paths,
+    key: paths.key,
+    expectedGenerationId: metadata.generationId,
+    expectedManifestHash: metadata.manifestHash,
+    expectedDbPath: metadata.dbPath,
+    expectedSpec: metadata.spec
+  });
+}
+
 function makeVectorPaths(vault, key = makeKey()) {
   return vectorStoreCachePaths({
     vaultRoot: vault,
@@ -190,14 +212,217 @@ function vectorHandleKey(paths, generationId) {
   return `${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:${generationId}`;
 }
 
-test("AC7 Test A P4 active built vector spec serves search while staging buildIndex is held", async () => {
+function retrievalContext(ms = 5000) {
+  return {
+    deadline: Date.now() + ms,
+    cancellationId: `p4-${Math.random().toString(16).slice(2)}`,
+    requestId: `p4-${Math.random().toString(16).slice(2)}`
+  };
+}
+
+function testAnalyzer() {
+  const tokenize = (text) =>
+    [...text.normalize("NFKC").toLowerCase().matchAll(/[\p{Letter}\p{Mark}\p{Number}]+/gu)].map((match) => match[0]);
+  return {
+    identity: {
+      name: "test-analyzer",
+      version: "retrieval-substrate-p4",
+      node: "test"
+    },
+    tokenize: async (text) => tokenize(text),
+    tokenizeBatch: async (texts) => texts.map(tokenize)
+  };
+}
+
+function queryAnalysis(raw) {
+  const terms = [...raw.normalize("NFKC").toLowerCase().matchAll(/[\p{Letter}\p{Mark}\p{Number}]+/gu)].map((match) => match[0]);
+  return {
+    raw,
+    primaryChannel: "morph",
+    primaryTerms: terms,
+    channels: { morph: terms, surface: terms, ngram: [] }
+  };
+}
+
+function createAnalyzerPool(analyzer) {
+  return {
+    analyzerIdentity: analyzer.identity,
+    async warmup() {},
+    async analyzeQuery(rawQuery) {
+      return {
+        analyzerIdentity: analyzer.identity,
+        analysis: queryAnalysis(rawQuery)
+      };
+    },
+    cancel() {},
+    async close() {},
+    stats() {
+      return {};
+    }
+  };
+}
+
+function createEmbeddingPool() {
+  const provider = new DeterministicHashProvider();
+  const calls = { encode: 0 };
+  return {
+    calls,
+    async encode(payload) {
+      calls.encode += 1;
+      return {
+        provider: provider.identity,
+        vectors: await Promise.all(payload.texts.map((text) => provider.embed(text, { inputKind: payload.inputKind })))
+      };
+    },
+    async unload() {
+      return { unloaded: true };
+    },
+    async modelStats() {
+      return { loaded: calls.encode > 0 };
+    },
+    async warmup() {},
+    cancel() {},
+    async close() {},
+    stats() {
+      return { encodeCalls: calls.encode };
+    }
+  };
+}
+
+function createSearchExecutionPool() {
+  let leased = false;
+  let busy = false;
+  return {
+    idleReadySlotIds() {
+      return leased || busy ? [] : [0];
+    },
+    leaseIdleSlot() {
+      if (leased || busy) return undefined;
+      leased = true;
+      return 0;
+    },
+    releaseIdleSlot(slotId) {
+      assert.equal(slotId, 0);
+      if (!leased || busy) return false;
+      leased = false;
+      return true;
+    },
+    async runOnSlot(job) {
+      assert.equal(leased, true);
+      leased = false;
+      busy = true;
+      try {
+        return executeSearchShardJob(job);
+      } finally {
+        busy = false;
+      }
+    },
+    async preloadSnapshot() {
+      return [];
+    },
+    cancel() {},
+    async close() {},
+    stats() {
+      return {};
+    }
+  };
+}
+
+function createRetrievalHarness(options = {}) {
+  const root = options.root ?? tempRoot("optsidian-retrieval-p4-ledger-");
+  const vault = options.vault ?? path.join(root, "vault");
+  fs.mkdirSync(vault, { recursive: true });
+  const env = options.env ?? {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(root, "cache"),
+    XDG_CONFIG_HOME: path.join(root, "config")
+  };
+  const analyzer = testAnalyzer();
+  const vectorPool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
+  const store = new DaemonSnapshotStore({
+    env,
+    analyzerIdentity: analyzer.identity,
+    partitionBits: 1,
+    profileHash: RETRIEVAL_PROFILE_HASH,
+    vectorPool,
+    embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
+    snapshotBuilder: async (input) => buildCanonicalSearchSnapshot({
+      vaultRoot: input.vaultRoot,
+      analyzer,
+      partitionBits: input.partitionBits,
+      searchSettings: input.searchSettings,
+      progress: input.progress
+    })
+  });
+  const service = new DaemonSearchStoreService(
+    store,
+    createAnalyzerPool(analyzer),
+    createEmbeddingPool(),
+    createSearchExecutionPool(),
+    { queryCacheSize: 8, searchSettings: { ngram: false }, env }
+  );
+  return { root, vault, env, store, service, vectorPool };
+}
+
+async function closeRetrievalHarness(harness) {
+  await harness.store.close();
+  await harness.vectorPool.close();
+}
+
+function writeRetrievalVaultFile(vault, rel, content) {
+  const file = path.join(vault, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+}
+
+function writeRetrievalSampleVault(vault) {
+  writeRetrievalVaultFile(vault, "Projects/Alpha.md", [
+    "---",
+    "tags: [project, alpha]",
+    "---",
+    "# Alpha",
+    "",
+    "alpha project semantic handle",
+    "links to [[Projects/Beta]]"
+  ].join("\n"));
+  writeRetrievalVaultFile(vault, "Projects/Beta.md", [
+    "---",
+    "tags: [project, beta]",
+    "---",
+    "# Beta",
+    "",
+    "alpha project semantic neighbor",
+    "links back to [[Projects/Alpha]]"
+  ].join("\n"));
+  writeRetrievalVaultFile(vault, "Archive/Gamma.md", "# Gamma\n\nunrelated archive material\n");
+}
+
+async function buildFreshRetrieval(harness) {
+  const loaded = await harness.service.loadVault(harness.vault, retrievalContext(), {
+    preload: false,
+    warmupQueryAnalyzer: false
+  });
+  assert.equal(loaded.vaults[0].status, "ready");
+  const retrieval = await harness.store.ensureActiveRetrievalSnapshot(harness.vault, retrievalContext());
+  assert.equal(retrieval.status, "ready");
+  harness.store.release(retrieval.pin);
+  const paths = searchStoreCachePaths(harness.vault, harness.env);
+  assert.equal(editionDense(paths).state, "fresh");
+  return paths;
+}
+
+function denseAgreementForPath(result, relPath) {
+  return result.results.find((entry) => entry.path === relPath)?.debug?.denseAgreement ?? 0;
+}
+
+test("AC7 Test A P4 committed fresh generation serves search while staging buildIndex is held", async () => {
   const vault = tempRoot();
   fs.writeFileSync(path.join(vault, "A.md"), "alpha\n");
   const paths = makeVectorPaths(vault);
   const spec = makeSpec();
   const fake = createFakeCoralFactory();
   const pool = new VectorGenerationPool({ factory: fake.factory });
-  await publishGeneration(pool, paths, spec, "gen-active", [makeChunk("active", [1, 0, 0], spec)]);
+  const active = await publishGeneration(pool, paths, spec, "gen-active", [makeChunk("active", [1, 0, 0], spec)]);
 
   const heldBuild = fake.holdBuild("gen-staging");
   const staging = pool.buildStagingGeneration({
@@ -210,28 +435,31 @@ test("AC7 Test A P4 active built vector spec serves search while staging buildIn
   while (!fake.events.some((event) => event[0] === "build" && event[2] === "gen-staging")) {
     await delay(1);
   }
-  const result = await pool.searchActiveBuiltIndex({
-    key: paths.key,
-    queryVector: queryVector([1, 0, 0]),
-    candidateK: 1
-  });
+  const result = await pinCommittedFreshGeneration(pool, paths, active.metadata);
   assert.equal(result.status, "ready");
-  assert.equal(result.generationId, "gen-active");
-  assert.deepEqual(result.results.map((entry) => entry.entryId), ["active"]);
+  assert.equal(result.lease.generationId, "gen-active");
+  const hits = await result.lease.searchVector(queryVector([1, 0, 0]), 1);
+  assert.deepEqual(hits.map((entry) => entry.entryId), ["active"]);
+  result.lease.release();
   heldBuild.resolve();
   await staging;
   await pool.close();
 });
 
-test("AC7 Test B P4 no active built vector spec returns index-not-ready without query-side build", async () => {
+test("AC7 Test B P4 missing committed fresh generation returns index-not-ready without query-side build", async () => {
+  const vault = tempRoot();
+  fs.writeFileSync(path.join(vault, "Missing.md"), "missing vector\n");
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
   const fake = createFakeCoralFactory();
   const pool = new VectorGenerationPool({ factory: fake.factory });
-  const result = await pool.searchActiveBuiltIndex({
-    key: makeKey(),
-    queryVector: [1, 0, 0],
-    candidateK: 1
+  const result = await pool.pinReadableGeneration({
+    paths,
+    key: paths.key,
+    expectedGenerationId: "gen-missing",
+    expectedSpec: spec
   });
-  assert.deepEqual(result, { status: "index-not-ready", reason: "no-active-built-spec" });
+  assert.deepEqual(result, { status: "index-not-ready", reason: "active-generation-unreadable" });
   assert.equal(fake.calls.searchVector.length, 0);
   assert.equal(fake.calls.buildIndex.length, 0);
   await pool.close();
@@ -243,17 +471,15 @@ test("P4 test-only memory coral double is injected through VectorGenerationPool"
   const paths = makeVectorPaths(vault);
   const spec = makeSpec();
   const pool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
-  await publishGeneration(pool, paths, spec, "gen-memory", [
+  const built = await publishGeneration(pool, paths, spec, "gen-memory", [
     makeChunk("near", [1, 0, 0], spec),
     makeChunk("far", [0, 1, 0], spec)
   ]);
-  const result = await pool.searchActiveBuiltIndex({
-    key: paths.key,
-    queryVector: [1, 0, 0],
-    candidateK: 2
-  });
+  const result = await pinCommittedFreshGeneration(pool, paths, built.metadata);
   assert.equal(result.status, "ready");
-  assert.deepEqual(result.results.map((entry) => entry.entryId), ["near", "far"]);
+  const hits = await result.lease.searchVector([1, 0, 0], 2);
+  assert.deepEqual(hits.map((entry) => entry.entryId), ["near", "far"]);
+  result.lease.release();
   await pool.close();
 });
 
@@ -349,17 +575,23 @@ test("AC7 Test C P4 multi-vault queries use distinct active query instances with
   const pathsA = makeVectorPaths(vaultA, makeKey({ vaultStateHash: "vault-a", embeddingSetId: "embedding-a" }));
   const pathsB = makeVectorPaths(vaultB, makeKey({ vaultStateHash: "vault-b", embeddingSetId: "embedding-b" }));
 
-  await publishGeneration(pool, pathsA, spec, "gen-a", [makeChunk("A", [1, 0, 0], spec)]);
-  await publishGeneration(pool, pathsB, spec, "gen-b", [makeChunk("B", [0, 1, 0], spec)]);
+  const builtA = await publishGeneration(pool, pathsA, spec, "gen-a", [makeChunk("A", [1, 0, 0], spec)]);
+  const builtB = await publishGeneration(pool, pathsB, spec, "gen-b", [makeChunk("B", [0, 1, 0], spec)]);
 
   const [resultA, resultB] = await Promise.all([
-    pool.searchActiveBuiltIndex({ key: pathsA.key, queryVector: [1, 0, 0], candidateK: 1 }),
-    pool.searchActiveBuiltIndex({ key: pathsB.key, queryVector: [0, 1, 0], candidateK: 1 })
+    pinCommittedFreshGeneration(pool, pathsA, builtA.metadata),
+    pinCommittedFreshGeneration(pool, pathsB, builtB.metadata)
   ]);
   assert.equal(resultA.status, "ready");
   assert.equal(resultB.status, "ready");
-  assert.deepEqual(resultA.results.map((entry) => entry.entryId), ["A"]);
-  assert.deepEqual(resultB.results.map((entry) => entry.entryId), ["B"]);
+  const [hitsA, hitsB] = await Promise.all([
+    resultA.lease.searchVector([1, 0, 0], 1),
+    resultB.lease.searchVector([0, 1, 0], 1)
+  ]);
+  assert.deepEqual(hitsA.map((entry) => entry.entryId), ["A"]);
+  assert.deepEqual(hitsB.map((entry) => entry.entryId), ["B"]);
+  resultA.lease.release();
+  resultB.lease.release();
   assert.equal(fake.calls.init.filter((call) => call.generationId === "gen-a" && call.role === "query").length, 1);
   assert.equal(fake.calls.init.filter((call) => call.generationId === "gen-b" && call.role === "query").length, 1);
   assert.equal(fake.calls.close.filter((call) => call.generationId === "gen-a" && call.role === "query").length, 0);
@@ -374,14 +606,12 @@ test("AC7 Test D P4 generation swap drains in-flight readers before closing old 
   const spec = makeSpec();
   const fake = createFakeCoralFactory();
   const pool = new VectorGenerationPool({ factory: fake.factory });
-  await publishGeneration(pool, paths, spec, "gen-n", [makeChunk("old", [1, 0, 0], spec)]);
+  const old = await publishGeneration(pool, paths, spec, "gen-n", [makeChunk("old", [1, 0, 0], spec)]);
 
   const heldSearch = fake.holdSearch("gen-n");
-  const inFlight = pool.searchActiveBuiltIndex({
-    key: paths.key,
-    queryVector: [1, 0, 0],
-    candidateK: 1
-  });
+  const oldPin = await pinCommittedFreshGeneration(pool, paths, old.metadata);
+  assert.equal(oldPin.status, "ready");
+  const inFlight = oldPin.lease.searchVector([1, 0, 0], 1);
   while (!fake.events.some((event) => event[0] === "search-start" && event[2] === "gen-n")) {
     await delay(1);
   }
@@ -396,10 +626,10 @@ test("AC7 Test D P4 generation swap drains in-flight readers before closing old 
   assert.equal(fake.calls.close.some((call) => call.generationId === "gen-n" && call.role === "query"), false);
 
   heldSearch.resolve();
-  const result = await inFlight;
-  assert.equal(result.status, "ready");
-  assert.equal(result.generationId, "gen-n");
-  assert.deepEqual(result.results.map((entry) => entry.entryId), ["old"]);
+  const hits = await inFlight;
+  assert.equal(oldPin.lease.generationId, "gen-n");
+  assert.deepEqual(hits.map((entry) => entry.entryId), ["old"]);
+  oldPin.lease.release();
 
   await waitFor(() => fake.calls.close.some((call) => call.generationId === "gen-n" && call.role === "query"));
   assert.equal(pool.statsForTests().refCounts[vectorHandleKey(paths, "gen-n")], undefined);
@@ -619,65 +849,32 @@ test("AC10 P4 model session lifecycle handles device pick idle unload promotion 
   }
 });
 
-test("AC11 P4 freshness persists dirty/building/fresh states across startup recovery", async () => {
-  const vault = tempRoot();
-  fs.writeFileSync(path.join(vault, "A.md"), "alpha\n");
-  fs.writeFileSync(path.join(vault, "B.md"), "beta\n");
-  const paths = makeVectorPaths(vault);
-  const spec = makeSpec();
-  const fake = createFakeCoralFactory();
-  const pool = new VectorGenerationPool({ factory: fake.factory });
-  const freshness = new RetrievalFreshnessStore({ paths });
-  const initialChunks = [
-    makeChunk("doc-a", [1, 0, 0], spec),
-    makeChunk("doc-b", [0, 1, 0], spec)
-  ];
-  await publishGeneration(pool, paths, spec, "gen-initial", initialChunks);
-  await freshness.markFresh({
-    corpusRevision: "rev-1",
-    embeddingSetId: paths.key.embeddingSetId,
-    vectorGenerationId: "gen-initial"
+test("AC11 P4 stronger equivalent: edition ledger replay reports stale after restart and fresh after refresh", async () => {
+  const harness = createRetrievalHarness();
+  writeRetrievalSampleVault(harness.vault);
+  const paths = await buildFreshRetrieval(harness);
+
+  const fresh = await harness.service.retrieve({
+    vault: harness.vault,
+    origin: "text",
+    text: "alpha project semantic",
+    query: "alpha project semantic",
+    limit: 5,
+    debug: true
+  }, retrievalContext());
+  assert.equal(fresh.status, "ready");
+  assert.equal(fresh.dense.state, "fresh");
+  assert.equal(fresh.dense.pendingCount, 0);
+
+  const freshDense = editionDense(paths);
+  const vectorPaths = vectorStoreCachePaths({
+    vaultRoot: harness.vault,
+    profileHash: RETRIEVAL_PROFILE_HASH,
+    embeddingSetId: freshDense.embeddingSetId,
+    env: harness.env
   });
-
-  await freshness.markDirty("rev-2");
-  assert.equal(freshness.read().state, "dirty");
-  assert.equal(freshness.isPubliclyServable("rev-2"), false);
-  await freshness.markBuilding("rev-2");
-  assert.equal(freshness.read().state, "building");
-  await freshness.markFresh({
-    corpusRevision: "rev-2",
-    embeddingSetId: paths.key.embeddingSetId,
-    vectorGenerationId: "gen-initial"
-  });
-  assert.equal(freshness.read().state, "fresh");
-  assert.equal(freshness.read().corpusRevision, "rev-2");
-  assert.equal(freshness.isPubliclyServable("rev-2"), true);
-
-  await freshness.markDirty("rev-4");
-  const restartedDirty = new RetrievalFreshnessStore({ paths });
-  assert.equal(restartedDirty.isPubliclyServable("rev-4"), false);
-  await restartedDirty.markBuilding("rev-5");
-  const restartedBuilding = new RetrievalFreshnessStore({ paths });
-  assert.equal(restartedBuilding.isPubliclyServable("rev-5"), false);
-
-  await restartedBuilding.write({
-    schemaVersion: 1,
-    state: "dirty",
-    corpusRevision: "rev-2",
-    published: {
-      corpusRevision: "rev-2",
-      embeddingSetId: paths.key.embeddingSetId,
-      vectorGenerationId: "gen-save"
-    },
-    updatedAt: new Date().toISOString()
-  });
-  await restartedBuilding.startupReconcile({ onDiskCorpusRevision: "rev-2" });
-  assert.equal(restartedBuilding.read().state, "fresh");
-  assert.equal(restartedBuilding.isPubliclyServable("rev-2"), true);
-
-  await restartedBuilding.markBuilding("rev-6");
-  fs.mkdirSync(paths.stagingDir, { recursive: true });
-  fs.writeFileSync(path.join(paths.stagingDir, "orphan"), "x");
+  fs.mkdirSync(vectorPaths.stagingDir, { recursive: true });
+  fs.writeFileSync(path.join(vectorPaths.stagingDir, "orphan"), "x");
   const lexicalTmp = path.join(tempRoot(), "lexical-tmp");
   const linkTmp = path.join(tempRoot(), "link-tmp");
   fs.mkdirSync(lexicalTmp, { recursive: true });
@@ -685,17 +882,62 @@ test("AC11 P4 freshness persists dirty/building/fresh states across startup reco
   fs.writeFileSync(path.join(lexicalTmp, "orphan"), "x");
   fs.writeFileSync(path.join(linkTmp, "orphan"), "x");
   await recoverRetrievalStaging({
-    vectorPaths: paths,
+    vectorPaths,
     lexicalTmpDir: lexicalTmp,
-    linkGraphTmpDir: linkTmp,
-    freshness: restartedBuilding
+    linkGraphTmpDir: linkTmp
   });
-  assert.equal(restartedBuilding.read().state, "dirty");
-  assert.deepEqual(fs.readdirSync(paths.stagingDir), []);
+  assert.deepEqual(fs.readdirSync(vectorPaths.stagingDir), []);
   assert.deepEqual(fs.readdirSync(lexicalTmp), []);
   assert.deepEqual(fs.readdirSync(linkTmp), []);
-  assert.equal(restartedBuilding.read().published.corpusRevision, "rev-2");
-  await pool.close();
+
+  await closeRetrievalHarness(harness);
+  writeRetrievalVaultFile(harness.vault, "Projects/Alpha.md", [
+    "---",
+    "tags: [project, alpha]",
+    "---",
+    "# Alpha",
+    "",
+    "alpha project semantic handle edited after restart"
+  ].join("\n"));
+
+  const restarted = createRetrievalHarness({
+    root: harness.root,
+    vault: harness.vault,
+    env: harness.env
+  });
+  try {
+    const stale = await restarted.service.retrieve({
+      vault: restarted.vault,
+      origin: "text",
+      text: "alpha project semantic",
+      query: "alpha project semantic",
+      limit: 5,
+      debug: true
+    }, retrievalContext());
+    assert.equal(stale.status, "ready");
+    assert.equal(stale.dense.state, "stale");
+    assert.equal(stale.dense.pendingCount, 1);
+    assert.notEqual(stale.dense.state, "fresh");
+    assert.equal(editionDense(searchStoreCachePaths(restarted.vault, restarted.env)).state, "unavailable");
+    assert.equal(denseAgreementForPath(stale, "Projects/Alpha.md"), 0);
+
+    const refreshed = await restarted.service.refresh(restarted.vault, retrievalContext());
+    assert.equal(refreshed.ok, true);
+    assert.equal(editionDense(searchStoreCachePaths(restarted.vault, restarted.env)).state, "fresh");
+    const freshAgain = await restarted.service.retrieve({
+      vault: restarted.vault,
+      origin: "text",
+      text: "alpha project semantic",
+      query: "alpha project semantic",
+      limit: 5,
+      debug: true
+    }, retrievalContext());
+    assert.equal(freshAgain.status, "ready");
+    assert.equal(freshAgain.dense.state, "fresh");
+    assert.equal(freshAgain.dense.pendingCount, 0);
+  } finally {
+    await closeRetrievalHarness(restarted);
+  }
 });
 
 test("P4 pickDevice defaults to CPU when required VRAM is unconfigured (0) and never probes", async () => {

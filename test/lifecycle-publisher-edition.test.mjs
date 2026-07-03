@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  VaultPublisherRegistry,
   SharedReclamationAuthority,
   VaultPublisher,
   createLocalTenancyFenceProvider,
@@ -12,6 +13,15 @@ import {
   editionCoverageFromCorpus,
   liveEditionHeadsUnder
 } from "../src/daemon/search-store/publisher.ts";
+import {
+  searchStoreCachePaths,
+  searchStoreLedgerRootDir
+} from "../src/daemon/search-store/cache-paths.ts";
+import { DaemonSnapshotStore } from "../src/daemon/search-store/snapshot-store.ts";
+import {
+  vectorGenerationDir,
+  vectorStoreCachePaths
+} from "../src/daemon/vector-store/index.ts";
 
 test("AC2 atomic edition records dense failure without blocking lexical visibility", async () => {
   const root = tempRoot();
@@ -171,8 +181,173 @@ test("AC2 shared lexical GC sees sibling ledgers under one lexical store", async
   }
 });
 
+test("AC4 vector GC for one lexical ledger preserves sibling ledger generation in the shared vector store", async () => {
+  const root = tempRoot();
+  try {
+    const vault = path.join(root, "vault");
+    const env = {
+      ...process.env,
+      XDG_CACHE_HOME: path.join(root, "cache"),
+      XDG_CONFIG_HOME: path.join(root, "config")
+    };
+    fs.mkdirSync(vault, { recursive: true });
+
+    const pathsA = searchStoreCachePaths(vault, env, { lexicalIdentityHash: "lex-a" });
+    const pathsB = searchStoreCachePaths(vault, env, { lexicalIdentityHash: "lex-b" });
+    const fence = createLocalTenancyFenceProvider();
+    const identityA = retrievalIdentity(pathsA.vaultStateHash, pathsA.lexicalIdentityHash, "space-a");
+    const identityB = retrievalIdentity(pathsB.vaultStateHash, pathsB.lexicalIdentityHash, "space-a");
+
+    await commitFreshEditionAtLedgerRoot(
+      searchStoreLedgerRootDir(pathsA, identityA.embeddingSpaceId),
+      identityA,
+      fence,
+      "manifest-owned-by-lex-a",
+      "snapshot-a"
+    );
+    await commitFreshEditionAtLedgerRoot(
+      searchStoreLedgerRootDir(pathsB, identityB.embeddingSpaceId),
+      identityB,
+      fence,
+      "manifest-owned-by-lex-b",
+      "snapshot-b"
+    );
+
+    const vectorPaths = vectorStoreCachePaths({
+      vaultRoot: vault,
+      profileHash: "ac4-cross-ledger-gc",
+      embeddingSetId: "embedding-shared",
+      env
+    });
+    const ownGenerationDir = vectorGenerationDir(vectorPaths, "manifest-owned-by-lex-a");
+    const siblingGenerationDir = vectorGenerationDir(vectorPaths, "manifest-owned-by-lex-b");
+    const staleGenerationDir = vectorGenerationDir(vectorPaths, "manifest-stale");
+    fs.mkdirSync(ownGenerationDir, { recursive: true });
+    fs.mkdirSync(siblingGenerationDir, { recursive: true });
+    fs.mkdirSync(staleGenerationDir, { recursive: true });
+
+    const storeA = new DaemonSnapshotStore({
+      env,
+      profileHash: "ac4-cross-ledger-gc",
+      lexicalIdentityHash: pathsA.lexicalIdentityHash,
+      analyzerIdentity: { name: "test-analyzer", version: "ac4", node: "test" },
+      embeddingSetBuilder: {}
+    });
+
+    await storeA.runBackgroundGc(pathsA);
+
+    assert.equal(fs.existsSync(ownGenerationDir), true);
+    assert.equal(fs.existsSync(siblingGenerationDir), true);
+    assert.equal(fs.existsSync(staleGenerationDir), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("AC4 publisher registry reuses live entries, replaces closing entries, and deletes only after stop", async () => {
+  const root = tempRoot();
+  try {
+    const registry = new VaultPublisherRegistry();
+    const fence = createLocalTenancyFenceProvider();
+    const identity = retrievalIdentity("vault-registry", "lex-registry", "space-registry");
+    const commitGate = deferred();
+    const options = {
+      paths: VaultPublisher.pathsFor(path.join(root, "registry-ledger")),
+      retrievalIdentity: identity,
+      tenancyFence: fence,
+      beforeAppendForTests: () => commitGate.promise
+    };
+
+    const firstLease = registry.acquire(options);
+    const secondLease = registry.acquire(options);
+    assert.equal(firstLease.publisher, secondLease.publisher);
+    assert.equal(registry.get(identity), firstLease.publisher);
+    assert.equal(registry.size(), 1);
+
+    await firstLease.release();
+    assert.equal(registry.get(identity), secondLease.publisher);
+    assert.equal(registry.size(), 1);
+
+    const document = doc("doc-registry", "Registry.md", "hash-registry");
+    secondLease.publisher.markDirty({
+      op: "upsert",
+      docId: document.documentId,
+      path: document.path,
+      contentHash: document.contentHash
+    });
+    const boundary = secondLease.publisher.recordScanBoundary();
+    const commitPromise = secondLease.publisher.commit(
+      candidate({
+        identity,
+        frontierSeq: boundary.frontierSeq,
+        scanBoundaryJournalSeq: boundary.scanBoundaryJournalSeq,
+        corpus: corpus("snapshot-registry"),
+        documents: [document],
+        dense: fresh("manifest-registry", identity)
+      }),
+      undefined,
+      fence.writerToken
+    );
+
+    let releaseResolved = false;
+    const releasePromise = secondLease.release().then(() => {
+      releaseResolved = true;
+    });
+    assert.equal(releaseResolved, false);
+    assert.equal(registry.get(identity), secondLease.publisher);
+    assert.equal(registry.size(), 1);
+
+    const closingPublisher = secondLease.publisher;
+    const freshLease = registry.acquire(options);
+    assert.notEqual(freshLease.publisher, closingPublisher);
+    assert.equal(registry.get(identity), freshLease.publisher);
+    assert.equal(registry.size(), 1);
+
+    await Promise.resolve();
+    assert.equal(releaseResolved, false);
+    commitGate.resolve();
+    const committed = await commitPromise;
+    assert.equal(committed.ok, true);
+    await releasePromise;
+    assert.equal(releaseResolved, true);
+    assert.equal(registry.get(identity), freshLease.publisher);
+    assert.equal(registry.size(), 1);
+
+    await freshLease.release();
+    assert.equal(registry.get(identity), undefined);
+    assert.equal(registry.size(), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function commitFreshEdition(searchStoresDir, identity, fence, manifestHash, snapshotId) {
   const publisher = publisherAt(searchStoresDir, identity, fence);
+  const document = doc(`${snapshotId}-doc`, `${snapshotId}.md`, `${snapshotId}-hash`);
+  publisher.markDirty({ op: "upsert", docId: document.documentId, path: document.path, contentHash: document.contentHash });
+  const boundary = publisher.recordScanBoundary();
+  const committed = await publisher.commit(
+    candidate({
+      identity,
+      frontierSeq: boundary.frontierSeq,
+      scanBoundaryJournalSeq: boundary.scanBoundaryJournalSeq,
+      corpus: corpus(snapshotId),
+      documents: [document],
+      dense: fresh(manifestHash, identity)
+    }),
+    undefined,
+    fence.writerToken
+  );
+  assert.equal(committed.ok, true);
+  await publisher.stop();
+}
+
+async function commitFreshEditionAtLedgerRoot(ledgerRootDir, identity, fence, manifestHash, snapshotId) {
+  const publisher = new VaultPublisher({
+    paths: VaultPublisher.pathsFor(ledgerRootDir),
+    retrievalIdentity: identity,
+    tenancyFence: fence
+  });
   const document = doc(`${snapshotId}-doc`, `${snapshotId}.md`, `${snapshotId}-hash`);
   publisher.markDirty({ op: "upsert", docId: document.documentId, path: document.path, contentHash: document.contentHash });
   const boundary = publisher.recordScanBoundary();
@@ -260,4 +435,14 @@ function fresh(manifestHash, identity) {
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-publisher-edition-"));
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
