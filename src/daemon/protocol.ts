@@ -24,6 +24,7 @@ import type {
   SearchShardExecutionResult
 } from "./search-execution.js";
 import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
+import type { ReduceBuildSegmentInput } from "./search-store/builder.js";
 import type {
   CoralChunkRecord,
   CoralEmbeddingSpec,
@@ -146,10 +147,7 @@ export type ParseBuildDocumentsWorkerResult = {
   documents: ParsedBuildDocument[];
 };
 
-export type ReduceBuildSegmentWorkerPayload = {
-  partitionId: number;
-  documents: readonly ParsedBuildDocument[];
-};
+export type ReduceBuildSegmentWorkerPayload = ReduceBuildSegmentInput;
 
 export type ReduceBuildSegmentWorkerResult = BuiltSegment;
 

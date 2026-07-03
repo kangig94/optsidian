@@ -920,6 +920,10 @@ function decodeBm25Section(bytes: Uint8Array): CanonicalBm25FieldStats[] {
   return normalizeBm25Stats(stats);
 }
 
+export function decodeCanonicalBm25Section(bytes: Uint8Array): CanonicalBm25FieldStats[] {
+  return decodeBm25Section(bytes);
+}
+
 type DocProjectionBuildInput = {
   documents: readonly CanonicalDocumentRecord[];
   fieldTexts: readonly CanonicalFieldText[];

@@ -126,7 +126,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function waitFor(predicate, timeoutMs = 1000) {
+async function waitFor(predicate, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

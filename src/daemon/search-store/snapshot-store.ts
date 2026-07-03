@@ -9,9 +9,11 @@ import {
   corpusSnapshotIdFromManifest,
   decodeCanonicalSegment,
   canonicalValueBytes,
+  partitionIdForDocument,
   reduceCanonicalBm25GlobalStats,
   snapshotIdFromManifest,
-  type CanonicalBm25FieldStats
+  type CanonicalBm25FieldStats,
+  type CanonicalDocumentRecord
 } from "../../core/search/segments/index.js";
 import type { PositionalBm25GlobalStats } from "../../core/search/retrieval/positional/index.js";
 import type {
@@ -70,8 +72,14 @@ import {
   buildCanonicalSearchSnapshot,
   DEFAULT_PARTITION_BITS,
   snapshotIdentityTuple,
-  snapshotIdentityTupleForAnalyzerIdentity
+  snapshotIdentityTupleForAnalyzerIdentity,
+  scanBuildDocuments,
+  type BuildSnapshotBase
 } from "./builder.js";
+import {
+  computeBaseReuseImplementationIdentity,
+  type BaseReuseImplementationIdentity
+} from "./base-reuse-identity.js";
 import {
   safeStoreFileName,
   searchStoreCachePaths,
@@ -195,10 +203,21 @@ type SnapshotBuilderInput = {
   vaultRoot: string;
   partitionBits: number;
   searchSettings: IndexAffectingSearchSettings;
+  base?: BuildSnapshotBase;
   deadline?: number;
   cancellationId?: string;
   progress?: (progress: SearchIndexProgressUpdate) => void;
 };
+
+type PublishFreshSnapshotOptions = {
+  prepareRetrieval?: boolean;
+  base?: BuildSnapshotBase;
+  incrementalFallbackReason?: string;
+};
+
+type ReusableBaseCandidate =
+  | { ok: true; base: BuildSnapshotBase }
+  | { ok: false; reason: string };
 
 export type RetrievalEmbeddingSetBuilderInput = {
   vaultRoot: string;
@@ -401,6 +420,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly partitionBits: number;
   private readonly analyzer: SearchAnalyzer | undefined;
   private readonly analyzerIdentity: SearchAnalyzerIdentity;
+  private readonly baseReuseImplementationIdentity: BaseReuseImplementationIdentity;
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly snapshotBuilder: ((input: SnapshotBuilderInput) => Promise<BuiltSnapshot>) | undefined;
   private readonly cacheCatalog: SearchCacheCatalog;
@@ -453,6 +473,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const runtime = searchAnalyzerRuntimeFromProcess();
     this.analyzer = options.analyzer ?? (options.snapshotBuilder ? undefined : resolveSearchAnalyzer(this.env, settings, runtime));
     this.analyzerIdentity = options.analyzerIdentity ?? options.analyzer?.identity ?? this.analyzer?.identity ?? resolveSearchAnalyzer(this.env, settings, runtime).identity;
+    this.baseReuseImplementationIdentity = computeBaseReuseImplementationIdentity({
+      analyzerIdentity: this.analyzerIdentity,
+      env: this.env,
+      cwd: process.cwd()
+    });
     this.lexicalIdentityHash = options.lexicalIdentityHash ?? "default-lexical";
     this.snapshotBuilder = options.snapshotBuilder;
     this.cacheCatalog = options.cacheCatalog ?? new SearchCacheCatalog({ env: this.env });
@@ -517,7 +542,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async publishSaveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
     const paths = this.paths(vaultRoot);
     return this.withLifecycleStore(paths, async () => {
-      return this.publishFreshSnapshot(paths.vaultRoot, { ...context, embeddingLane: "save" }, { prepareRetrieval: true });
+      await this.recoverVault(paths);
+      const baseCandidate = this.reusableActiveBase(paths);
+      return this.publishFreshSnapshot(
+        paths.vaultRoot,
+        { ...context, embeddingLane: "save" },
+        { prepareRetrieval: true, ...publishOptionsFromReusableBase(baseCandidate) }
+      );
     });
   }
 
@@ -1169,9 +1200,23 @@ export class DaemonSnapshotStore implements SnapshotStore {
         return { snapshotId: active.corpus.snapshotId, rebuilt: false };
       }
       if (delta) reportRefreshDelta(context, delta);
+      const baseCandidate = this.reusableBaseForSnapshot(paths, active.corpus.snapshotId);
+      return {
+        snapshotId: await this.publishFreshSnapshot(
+          paths.vaultRoot,
+          context,
+          { prepareRetrieval: true, ...publishOptionsFromReusableBase(baseCandidate) }
+        ),
+        rebuilt: true
+      };
     }
+    const fallbackCandidate = active ? this.reusableBaseForSnapshot(paths, active.corpus.snapshotId) : undefined;
+    const fallbackReason = fallbackCandidate && !fallbackCandidate.ok ? fallbackCandidate.reason : undefined;
     return {
-      snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true }),
+      snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, {
+        prepareRetrieval: true,
+        ...(fallbackReason ? { incrementalFallbackReason: fallbackReason } : {})
+      }),
       rebuilt: true
     };
   }
@@ -1195,24 +1240,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private async publishFreshSnapshot(
     vaultRoot: string,
     context: SnapshotRequestContext = {},
-    options: { prepareRetrieval?: boolean } = {}
+    options: PublishFreshSnapshotOptions = {}
   ): Promise<string> {
     const paths = this.paths(vaultRoot);
     await this.recoverVault(paths);
     const publisher = this.publisherFor(paths);
     const expectedHeadSeq = publisher.ledger.current()?.editionSeq;
     const scanBoundary = publisher.recordScanBoundary();
-    const built = this.snapshotBuilder
-      ? await this.snapshotBuilder({
-          vaultRoot: paths.vaultRoot,
-          partitionBits: this.partitionBits,
-          searchSettings: this.searchSettings,
-          deadline: context.deadline,
-          cancellationId: context.cancellationId,
-          progress: context.progress
-        })
-      : await this.buildSnapshotInProcess(paths.vaultRoot, context.progress);
-    const envelope = snapshotEnvelope(built);
+    const built = await this.buildSnapshotWithIncrementalFallback(paths, context, options);
+    const envelope = snapshotEnvelope(built, this.baseReuseImplementationIdentity.identity);
     const retrievalPublicationPromise: Promise<RetrievalSnapshotPublication | { error: unknown }> | undefined = options.prepareRetrieval
       ? this.buildRetrievalSnapshotPublication(
           paths,
@@ -1291,9 +1327,52 @@ export class DaemonSnapshotStore implements SnapshotStore {
     return built.snapshotId;
   }
 
+  private async buildSnapshotWithIncrementalFallback(
+    paths: SearchStoreCachePaths,
+    context: SnapshotRequestContext,
+    options: PublishFreshSnapshotOptions
+  ): Promise<BuiltSnapshot> {
+    let fallbackWarning = options.incrementalFallbackReason
+      ? reportIncrementalFallback(context, options.incrementalFallbackReason)
+      : undefined;
+    if (!options.base) {
+      const built = await this.buildSnapshotOnce(paths, context, undefined);
+      return fallbackWarning ? builtSnapshotWithWarning(built, fallbackWarning) : built;
+    }
+    try {
+      return await this.buildSnapshotOnce(paths, context, options.base);
+    } catch (error) {
+      fallbackWarning = reportIncrementalFallback(
+        context,
+        `incremental build aborted: ${errorMessage(error)}`
+      );
+      const built = await this.buildSnapshotOnce(paths, context, undefined);
+      return builtSnapshotWithWarning(built, fallbackWarning);
+    }
+  }
+
+  private buildSnapshotOnce(
+    paths: SearchStoreCachePaths,
+    context: SnapshotRequestContext,
+    base: BuildSnapshotBase | undefined
+  ): Promise<BuiltSnapshot> {
+    return this.snapshotBuilder
+      ? this.snapshotBuilder({
+          vaultRoot: paths.vaultRoot,
+          partitionBits: this.partitionBits,
+          searchSettings: this.searchSettings,
+          base,
+          deadline: context.deadline,
+          cancellationId: context.cancellationId,
+          progress: context.progress
+        })
+      : this.buildSnapshotInProcess(paths.vaultRoot, context.progress, base);
+  }
+
   private async buildSnapshotInProcess(
     vaultRoot: string,
-    progress?: (progress: SearchIndexProgressUpdate) => void
+    progress?: (progress: SearchIndexProgressUpdate) => void,
+    base?: BuildSnapshotBase
   ): Promise<BuiltSnapshot> {
     if (!this.analyzer) throw new Error("snapshot builder is not configured");
     return withSearchAnalyzerLease(this.analyzer, (leasedAnalyzer) =>
@@ -1302,6 +1381,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         analyzer: leasedAnalyzer,
         searchSettings: this.searchSettings,
         partitionBits: this.partitionBits,
+        base,
         progress
       })
     );
@@ -1994,6 +2074,48 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.markSweepGc(paths);
   }
 
+  private reusableActiveBase(paths: SearchStoreCachePaths): ReusableBaseCandidate | undefined {
+    const active = this.currentEdition(paths);
+    return active ? this.reusableBaseForSnapshot(paths, active.corpus.snapshotId) : undefined;
+  }
+
+  private reusableBaseForSnapshot(paths: SearchStoreCachePaths, snapshotId: string): ReusableBaseCandidate {
+    try {
+      const envelope = this.readSnapshotEnvelope(paths, snapshotId);
+      if (!envelope) return { ok: false, reason: "invalid or absent base envelope" };
+      const expected = this.analyzer
+        ? snapshotIdentityTuple(this.analyzer, this.partitionBits, this.searchSettings)
+        : snapshotIdentityTupleForAnalyzerIdentity(this.analyzerIdentity, this.partitionBits, this.searchSettings);
+      if (!snapshotIdentityTupleEquals(envelope.manifest.identityTuple, expected)) {
+        return { ok: false, reason: "identity tuple mismatch" };
+      }
+      const runningBaseReuseIdentity = this.baseReuseImplementationIdentity.identity;
+      if (!runningBaseReuseIdentity) {
+        return {
+          ok: false,
+          reason: this.baseReuseImplementationIdentity.warning ?? "base-reuse implementation identity unavailable"
+        };
+      }
+      if (!envelope.baseReuseImplementationIdentity) {
+        return { ok: false, reason: "base envelope is missing base-reuse implementation identity" };
+      }
+      if (envelope.baseReuseImplementationIdentity !== runningBaseReuseIdentity) {
+        return { ok: false, reason: "base-reuse implementation identity mismatch" };
+      }
+      validateReusableBaseEnvelope(paths, envelope, this.partitionBits);
+      return {
+        ok: true,
+        base: {
+          envelope,
+          segmentsDir: paths.segmentsDir,
+          baseReuseImplementationIdentity: envelope.baseReuseImplementationIdentity
+        }
+      };
+    } catch (error) {
+      return { ok: false, reason: `invalid base envelope: ${errorMessage(error)}` };
+    }
+  }
+
   private readSnapshotEnvelope(paths: SearchStoreCachePaths, snapshotId: string): SnapshotEnvelope | undefined {
     if (!isValidSnapshotId(snapshotId)) return undefined;
     try {
@@ -2471,12 +2593,13 @@ export function createConfiguredEmbeddingSetBuilder(
   return createLocalOnnxEmbeddingSetBuilder(settings, env);
 }
 
-function snapshotEnvelope(built: BuiltSnapshot): SnapshotEnvelope {
+function snapshotEnvelope(built: BuiltSnapshot, baseReuseImplementationIdentity?: string): SnapshotEnvelope {
   return {
     schemaHash: SNAPSHOT_PERSISTENCE_SCHEMA_HASH,
     snapshotId: built.snapshotId,
     corpusSnapshotId: built.corpusSnapshotId,
     linkGraphId: built.linkGraphId,
+    ...(baseReuseImplementationIdentity ? { baseReuseImplementationIdentity } : {}),
     manifest: built.manifest,
     canonicalManifestSha256: built.canonicalManifestSha256,
     documents: built.documents,
@@ -2985,6 +3108,166 @@ function currentContentHashes(vaultRoot: string): Map<string, string> {
   return hashes;
 }
 
+function publishOptionsFromReusableBase(candidate: ReusableBaseCandidate | undefined): Partial<PublishFreshSnapshotOptions> {
+  if (!candidate) return {};
+  return candidate.ok ? { base: candidate.base } : { incrementalFallbackReason: candidate.reason };
+}
+
+function reportIncrementalFallback(context: SnapshotRequestContext, reason: string): string {
+  const warning = `incremental fallback-to-full: ${reason}`;
+  context.progress?.({
+    phase: "scanning",
+    total: 0,
+    completed: 0,
+    message: warning
+  });
+  return warning;
+}
+
+function builtSnapshotWithWarning(built: BuiltSnapshot, warning: string): BuiltSnapshot {
+  return {
+    ...built,
+    diagnostics: {
+      ...built.diagnostics,
+      warnings: [...new Set([...(built.diagnostics.warnings ?? []), warning])]
+    }
+  };
+}
+
+function validateReusableBaseEnvelope(
+  paths: SearchStoreCachePaths,
+  envelope: SnapshotEnvelope,
+  partitionBits: number
+): void {
+  if (envelope.snapshotId !== snapshotIdFromManifest(envelope.manifest)) {
+    throw new Error("snapshotId does not match manifest");
+  }
+  if (envelope.canonicalManifestSha256 !== envelope.snapshotId) {
+    throw new Error("canonical manifest hash mismatch");
+  }
+  if (envelope.corpusSnapshotId !== undefined && envelope.corpusSnapshotId !== corpusSnapshotIdFromManifest(envelope.manifest)) {
+    throw new Error("corpus snapshot id mismatch");
+  }
+  if (!linkGraphSidecarExists(paths, envelope.linkGraphId)) {
+    throw new Error("base link sidecar is missing");
+  }
+
+  const persistedDocuments = persistedDocumentsByDocumentId(envelope.documents, partitionBits);
+  const decodedDocuments = decodedCanonicalDocumentsByDocumentId(paths, envelope, partitionBits);
+  if (decodedDocuments.size !== persistedDocuments.size) {
+    throw new Error("base persisted/canonical document count mismatch");
+  }
+  const currentDocuments = currentScanDocumentsByDocumentId(paths.vaultRoot, partitionBits);
+  const liveRecords = [...decodedDocuments.values()]
+    .sort((left, right) => compareCodePoint(left.documentId, right.documentId))
+    .map((canonicalDocument) => {
+      const persisted = persistedDocuments.get(canonicalDocument.documentId);
+      if (!persisted) throw new Error(`base canonical document ${canonicalDocument.documentId} has no persisted record`);
+      const current = currentDocuments.get(canonicalDocument.documentId);
+      if (current && current.path !== persisted.path) {
+        throw new Error(`base document ${canonicalDocument.documentId} path disagrees with current scan`);
+      }
+      if (current && current.contentHash === persisted.contentHash && current.partitionId !== persisted.partitionId) {
+        throw new Error(`base document ${canonicalDocument.documentId} partition disagrees with current scan`);
+      }
+      return {
+        documentId: canonicalDocument.documentId,
+        path: persisted.path,
+        contentHash: persisted.contentHash,
+        parsedFieldHashes: canonicalDocument.parsedFieldHashes,
+        snippetLineSpanHash: canonicalDocument.snippetLineSpanHash,
+        deleted: false
+      };
+    });
+  for (const persisted of persistedDocuments.values()) {
+    if (!decodedDocuments.has(persisted.documentId)) {
+      throw new Error(`base persisted document ${persisted.documentId} has no canonical record`);
+    }
+  }
+  const liveDocumentManifestHash = sha256(canonicalValueBytes(liveRecords));
+  if (liveDocumentManifestHash !== envelope.manifest.liveDocumentManifestHash) {
+    throw new Error("semantic document manifest hash mismatch");
+  }
+}
+
+function persistedDocumentsByDocumentId(
+  documents: readonly PersistedDocumentRecord[],
+  partitionBits: number
+): Map<string, PersistedDocumentRecord> {
+  const byDocumentId = new Map<string, PersistedDocumentRecord>();
+  for (const document of documents) {
+    const normalizedPath = normalizeVaultRelativePathForSnapshot(document.path);
+    if (document.path !== normalizedPath) throw new Error(`base document ${document.documentId} path is not normalized`);
+    const expectedDocumentId = sha256(utf8ForSnapshot(normalizedPath));
+    if (document.documentId !== expectedDocumentId) throw new Error(`base document ${document.path} documentId mismatch`);
+    const expectedPartitionId = partitionIdForDocument(document.documentId, partitionBits);
+    if (document.partitionId !== expectedPartitionId) throw new Error(`base document ${document.documentId} partition mismatch`);
+    if (byDocumentId.has(document.documentId)) throw new Error(`duplicate base persisted document ${document.documentId}`);
+    byDocumentId.set(document.documentId, document);
+  }
+  return byDocumentId;
+}
+
+function decodedCanonicalDocumentsByDocumentId(
+  paths: SearchStoreCachePaths,
+  envelope: SnapshotEnvelope,
+  partitionBits: number
+): Map<string, CanonicalDocumentRecord> {
+  const byDocumentId = new Map<string, CanonicalDocumentRecord>();
+  for (const partition of envelope.manifest.partitions) {
+    const segmentPath = path.join(paths.segmentsDir, partition.segmentHash);
+    if (!fs.existsSync(segmentPath)) throw new Error(`base segment ${partition.segmentHash} is missing`);
+    const bytes = fs.readFileSync(segmentPath);
+    if (bytes.length !== partition.byteLength) throw new Error(`base segment ${partition.segmentHash} byte length mismatch`);
+    const actualHash = sha256(bytes);
+    if (actualHash !== partition.segmentHash) throw new Error(`base segment ${partition.segmentHash} hash mismatch`);
+    const decoded = decodeCanonicalSegment(bytes);
+    const documents = decoded.documents ?? [];
+    const documentIds = documents.map((document) => document.documentId);
+    if (documentIds.length !== partition.documentCount) {
+      throw new Error(`base partition ${partition.partitionId} document count mismatch`);
+    }
+    if (
+      (documentIds[0] ?? "") !== partition.documentIdStart ||
+      (documentIds[documentIds.length - 1] ?? "") !== partition.documentIdEnd
+    ) {
+      throw new Error(`base partition ${partition.partitionId} document bounds mismatch`);
+    }
+    for (const document of documents) {
+      const expectedPartitionId = partitionIdForDocument(document.documentId, partitionBits);
+      if (expectedPartitionId !== partition.partitionId) {
+        throw new Error(`base canonical document ${document.documentId} partition mismatch`);
+      }
+      if (byDocumentId.has(document.documentId)) throw new Error(`duplicate base canonical document ${document.documentId}`);
+      byDocumentId.set(document.documentId, document);
+    }
+  }
+  return byDocumentId;
+}
+
+function currentScanDocumentsByDocumentId(vaultRoot: string, partitionBits: number): Map<string, {
+  path: string;
+  contentHash: string;
+  partitionId: number;
+}> {
+  const byDocumentId = new Map<string, { path: string; contentHash: string; partitionId: number }>();
+  for (const record of scanBuildDocuments(vaultRoot).documents) {
+    const normalizedPath = normalizeVaultRelativePathForSnapshot(record.path);
+    const documentId = sha256(utf8ForSnapshot(normalizedPath));
+    if (byDocumentId.has(documentId)) throw new Error(`duplicate current documentId ${documentId}`);
+    byDocumentId.set(documentId, {
+      path: normalizedPath,
+      contentHash: record.contentHash,
+      partitionId: partitionIdForDocument(documentId, partitionBits)
+    });
+  }
+  return byDocumentId;
+}
+
+function snapshotIdentityTupleEquals(left: unknown, right: unknown): boolean {
+  return Buffer.compare(Buffer.from(canonicalValueBytes(left)), Buffer.from(canonicalValueBytes(right))) === 0;
+}
+
 function reportRefreshDelta(context: SnapshotRequestContext, delta: SnapshotContentDelta): void {
   context.progress?.({
     phase: "scanning",
@@ -3031,6 +3314,23 @@ function sha256(bytes: Uint8Array): string {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+function normalizeVaultRelativePathForSnapshot(value: string): string {
+  const parts: string[] = [];
+  for (const part of value.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part.normalize("NFC"));
+  }
+  return parts.join("/");
+}
+
+function utf8ForSnapshot(value: string): Uint8Array {
+  return new TextEncoder().encode(value.normalize("NFC"));
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -3062,6 +3362,7 @@ function isSnapshotEnvelope(value: unknown): value is SnapshotEnvelope {
     value.schemaHash === SNAPSHOT_PERSISTENCE_SCHEMA_HASH &&
     typeof value.snapshotId === "string" &&
     typeof value.linkGraphId === "string" &&
+    (!("baseReuseImplementationIdentity" in value) || typeof value.baseReuseImplementationIdentity === "string") &&
     isRecord(value.manifest) &&
     typeof value.canonicalManifestSha256 === "string" &&
     Array.isArray(value.documents) &&

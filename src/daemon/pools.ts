@@ -1,15 +1,18 @@
 import type { SearchTextAnalysis, SearchTextAnalysisOptions } from "../core/search/analysis/index.js";
-import type { SearchAnalyzerIdentity } from "../core/search/analyzer.js";
+import type { SearchAnalyzer, SearchAnalyzerIdentity } from "../core/search/analyzer.js";
 import {
   normalizeIndexAffectingSearchSettings,
   type IndexAffectingSearchSettings
 } from "../core/search/index-settings.js";
 import {
   DEFAULT_PARTITION_BITS,
+  buildCanonicalSearchSnapshot,
   buildCanonicalSearchSnapshotFromSegments,
+  documentProjectionsFromParses,
   scanBuildDocuments,
   shuffleParsedBuildDocumentsByPartition,
-  sortParsedBuildDocuments
+  sortParsedBuildDocuments,
+  type BuildSnapshotBase
 } from "./search-store/builder.js";
 import type { BuiltSegment, BuiltSnapshot, ParsedBuildDocument } from "./search-store/types.js";
 import {
@@ -128,9 +131,23 @@ export class AnalyzerWorkerPool {
     vaultRoot: string,
     partitionBits: number | undefined,
     options: WorkerPoolRunOptions,
-    searchSettings?: Partial<IndexAffectingSearchSettings>
+    searchSettings?: Partial<IndexAffectingSearchSettings>,
+    base?: BuildSnapshotBase
   ): Promise<BuiltSnapshot> {
     const analyzerIdentity = await this.warmAnalyzerIdentity();
+    if (base) {
+      const analyzer = this.buildSnapshotAnalyzer(analyzerIdentity, options);
+      const built = await buildCanonicalSearchSnapshot({
+        vaultRoot,
+        analyzer,
+        partitionBits,
+        searchSettings,
+        base,
+        progress: options.onProgress
+      });
+      this.analyzerIdentityValue = built.diagnostics.analyzer;
+      return built;
+    }
     options.onProgress?.({ phase: "scanning", completed: 0 });
     const scan = scanBuildDocuments(vaultRoot);
     options.onProgress?.({ phase: "scanning", total: scan.files.length, completed: scan.files.length });
@@ -152,11 +169,25 @@ export class AnalyzerWorkerPool {
       analyzerIdentity,
       partitionBits: effectivePartitionBits,
       searchSettings: effectiveSearchSettings,
-      documents,
+      documents: documentProjectionsFromParses(documents, scan.documents),
       segments
     });
     this.analyzerIdentityValue = built.diagnostics.analyzer;
     return built;
+  }
+
+  private buildSnapshotAnalyzer(identity: SearchAnalyzerIdentity, options: WorkerPoolRunOptions): SearchAnalyzer {
+    return {
+      identity,
+      tokenize: async (text) => {
+        const result = await this.tokenizeBatch([text], options);
+        return result.tokens[0] ?? [];
+      },
+      tokenizeBatch: async (texts) => {
+        const result = await this.tokenizeBatch(texts, options);
+        return result.tokens;
+      }
+    };
   }
 
   private async warmAnalyzerIdentity(): Promise<SearchAnalyzerIdentity> {

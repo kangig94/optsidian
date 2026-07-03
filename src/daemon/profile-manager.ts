@@ -176,7 +176,7 @@ export class ProfileRuntime {
         cancellationId: input.cancellationId ?? `${input.vaultRoot}:snapshot-build`,
         vault: input.vaultRoot,
         onProgress: input.progress
-      }, input.searchSettings)
+      }, input.searchSettings, input.base)
     });
     const searchStore = new DaemonSearchStoreService(snapshotStore, pools.latencyAnalyzer, embedScheduler, pools.searchExecution, {
       queryCacheSize: normalized.cache.queryAnalysisEntries,

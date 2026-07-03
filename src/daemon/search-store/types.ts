@@ -27,6 +27,7 @@ export const SNAPSHOT_PERSISTENCE_SCHEMA = {
       "snapshotId",
       "corpusSnapshotId?",
       "linkGraphId",
+      "baseReuseImplementationIdentity?",
       "manifest",
       "canonicalManifestSha256",
       "documents",
@@ -87,6 +88,7 @@ export type SnapshotEnvelope = {
   snapshotId: string;
   corpusSnapshotId?: CorpusSnapshotId;
   linkGraphId: LinkGraphId;
+  baseReuseImplementationIdentity?: string;
   manifest: CanonicalSnapshotManifest;
   canonicalManifestSha256: string;
   documents: readonly PersistedDocumentRecord[];

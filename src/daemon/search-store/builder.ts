@@ -15,7 +15,7 @@ import {
   type BodyIndexBudget,
   type SearchTokenChannel
 } from "../../core/search/analysis/index.js";
-import { parseNoteLinks } from "../../core/search/analysis/links.js";
+import { parseNoteLinks, type ParsedNoteLinks, type UnresolvedNoteLink } from "../../core/search/analysis/links.js";
 import { MIN_NGRAM, MAX_NGRAM } from "../../core/search/analysis/korean.js";
 import { RANKING_CONSTANTS, SEARCH_SCORING_LAMBDAS } from "../../core/search/constants.js";
 import {
@@ -31,10 +31,13 @@ import {
   CANONICAL_SEGMENT_SECTION,
   CANONICAL_SEGMENT_VERSION,
   CANONICAL_TERM_DICTIONARY_SCHEMA_ID,
+  canonicalSegmentSectionBytes,
   canonicalSegmentHash,
   canonicalSnapshotManifestBytes,
   canonicalValueBytes,
   corpusSnapshotIdFromManifest,
+  decodeCanonicalBm25Section,
+  decodeCanonicalSegment,
   encodeCanonicalSegment,
   partitionIdForDocument,
   reduceCanonicalBm25GlobalStats,
@@ -63,6 +66,7 @@ import {
   type ParsedSnippetCorpus,
   type PersistedDocumentRecord,
   type ResolvedLinkEdge,
+  type SnapshotEnvelope,
   type SnapshotSnippetLine
 } from "./types.js";
 
@@ -75,6 +79,9 @@ export const DEFAULT_PARTITION_BITS = 4;
 // (fieldSetVersion = sha256(schema), rankingFeatureVersion = sha256(RANKING_CONSTANTS))
 // do not already capture. NEVER derive it from the binary hash: index identity is
 // deliberately decoupled from the build so unrelated code changes don't force a reindex.
+// The daemon's binary hash is folded only into baseReuseImplementationIdentity,
+// a separate reuse fence that can force a full recompute without changing any
+// content-addressed snapshot or corpus identity.
 export const INDEX_BUILD_VERSION = "daemon-positional-build-v7";
 export { INDEX_AFFECTING_SEARCH_SETTINGS_HASH, indexAffectingSearchSettingsHash };
 
@@ -83,12 +90,26 @@ type BuildInput = {
   analyzer: SearchAnalyzer;
   searchSettings?: Partial<IndexAffectingSearchSettings>;
   partitionBits?: number;
+  base?: BuildSnapshotBase;
   progress?: (progress: SearchIndexProgressUpdate) => void;
+};
+
+export type BuildSnapshotBase = {
+  envelope: SnapshotEnvelope;
+  segmentsDir: string;
+  baseReuseImplementationIdentity?: string;
 };
 
 export type BuildDocumentScan = {
   root: string;
   files: readonly string[];
+  documents: readonly BuildDocumentScanRecord[];
+};
+
+export type BuildDocumentScanRecord = {
+  path: string;
+  contentHash: string;
+  unresolvedLinks: readonly UnresolvedNoteLink[];
 };
 
 export type ParseBuildDocumentBatchInput = {
@@ -105,7 +126,42 @@ export type ParseBuildDocumentBatchResult = {
 
 export type ReduceBuildSegmentInput = {
   partitionId: number;
-  documents: readonly ParsedBuildDocument[];
+  documents?: readonly ParsedBuildDocument[];
+  freshDocuments?: readonly ParsedBuildDocument[];
+  base?: ReduceBuildSegmentBaseInput;
+};
+
+export type ReduceBuildSegmentBaseInput = {
+  segmentsDir: string;
+  segmentHash: string;
+  retainedDocumentIds: readonly string[];
+};
+
+export type BuildSnapshotLiveDocumentProjection = {
+  documentId: string;
+  path: string;
+  contentHash: string;
+  parsedFieldHashes?: Record<string, string>;
+  snippetLineSpanHash?: string;
+};
+
+export type BuildSnapshotPersistedDocumentProjection = {
+  partitionId: number;
+  title: string;
+  tags: readonly string[];
+  snippetCorpus: ParsedSnippetCorpus;
+};
+
+export type BuildSnapshotDocumentLinkProjection = {
+  documentId: string;
+  path: string;
+  unresolvedLinks: readonly UnresolvedNoteLink[];
+};
+
+export type BuildSnapshotDocumentProjection = {
+  liveManifest: BuildSnapshotLiveDocumentProjection;
+  persisted: BuildSnapshotPersistedDocumentProjection;
+  links: BuildSnapshotDocumentLinkProjection;
 };
 
 export type BuildSnapshotFromSegmentsInput = {
@@ -114,8 +170,26 @@ export type BuildSnapshotFromSegmentsInput = {
   analyzerIdentity: SearchAnalyzer["identity"];
   partitionBits?: number;
   searchSettings?: Partial<IndexAffectingSearchSettings>;
-  documents: readonly ParsedBuildDocument[];
+  documents: readonly BuildSnapshotDocumentProjection[];
   segments: readonly BuiltSegment[];
+};
+
+export type DocumentSegmentPostingContribution = Omit<CanonicalPosting, "docId">;
+
+export type DocumentSegmentFieldTextContribution = Omit<CanonicalFieldText, "docId">;
+
+export type DocumentSegmentFieldLengthContribution = {
+  channel: SearchTokenChannel;
+  fieldId: number;
+  length: number;
+};
+
+export type DocumentSegmentContribution = {
+  documentId: string;
+  document: CanonicalDocumentRecord;
+  postings: readonly DocumentSegmentPostingContribution[];
+  fieldLengths: readonly DocumentSegmentFieldLengthContribution[];
+  fieldTexts: readonly DocumentSegmentFieldTextContribution[];
 };
 
 export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<BuiltSnapshot> {
@@ -124,6 +198,13 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
   input.progress?.({ phase: "scanning", completed: 0 });
   const scan = scanBuildDocuments(input.vaultRoot);
   input.progress?.({ phase: "scanning", total: scan.files.length, completed: scan.files.length });
+  const identityTuple = snapshotIdentityTupleForAnalyzerIdentity(input.analyzer.identity, partitionBits, searchSettings);
+  if (input.base) {
+    if (!baseSnapshotIdentityMatches(input.base, identityTuple)) {
+      throw new Error("incremental build base identity tuple mismatch");
+    }
+    return buildCanonicalSearchSnapshotIncremental(input, input.base, scan, partitionBits, searchSettings);
+  }
   const documents = await parseVaultDocuments(scan, input.analyzer, partitionBits, searchSettings, input.progress);
   const partitionEntries = shuffleParsedBuildDocumentsByPartition(documents);
   const builtSegments = reduceBuildSegments(partitionEntries, input.progress);
@@ -133,8 +214,67 @@ export async function buildCanonicalSearchSnapshot(input: BuildInput): Promise<B
     analyzerIdentity: input.analyzer.identity,
     partitionBits,
     searchSettings,
-    documents,
+    documents: documentProjectionsFromParses(documents, scan.documents),
     segments: builtSegments
+  });
+}
+
+async function buildCanonicalSearchSnapshotIncremental(
+  input: BuildInput,
+  base: BuildSnapshotBase,
+  scan: BuildDocumentScan,
+  partitionBits: number,
+  searchSettings: IndexAffectingSearchSettings
+): Promise<BuiltSnapshot> {
+  const liveRecords = liveDocumentRecordsFromScan(scan.documents, partitionBits);
+  const baseDocuments = new Map(base.envelope.documents.map((document) => [document.documentId, document]));
+  const basePartitions = new Map(base.envelope.manifest.partitions.map((partition) => [partition.partitionId, partition]));
+  const affectedPartitions = affectedPartitionsForBase(liveRecords, baseDocuments, basePartitions);
+  const reusedPartitionIds = reusedPartitionIdsForLiveRecords(liveRecords, affectedPartitions);
+  const affectedPlans = affectedPartitionPlansForBase(liveRecords, affectedPartitions, baseDocuments, basePartitions);
+  const retainedProjectionPartitionIds = sortedUniqueNumbers([
+    ...reusedPartitionIds,
+    ...affectedPlans
+      .filter((plan) => plan.retainedDocumentIds.length > 0)
+      .map((plan) => plan.partitionId)
+  ]);
+  const baseProjectionPartitions = readReusableBasePartitions(base, retainedProjectionPartitionIds);
+  const freshPaths = affectedPlans.flatMap((plan) => plan.freshPaths);
+  const freshPathSet = new Set(freshPaths);
+  const affectedScan: BuildDocumentScan = {
+    root: scan.root,
+    files: freshPaths,
+    documents: scan.documents.filter((record) => freshPathSet.has(record.path))
+  };
+  const affectedDocuments = await parseVaultDocuments(affectedScan, input.analyzer, partitionBits, searchSettings, input.progress);
+  const affectedSegments = reduceBuildSegmentPlans(
+    affectedPlans,
+    affectedDocuments,
+    base,
+    basePartitions,
+    input.progress
+  );
+  const retainedDocumentIds = retainedDocumentIdsForProjection(liveRecords, reusedPartitionIds, affectedPlans);
+  const documents = sortBuildSnapshotDocumentProjections([
+    ...documentProjectionsFromParses(affectedDocuments, scan.documents),
+    ...documentProjectionsFromRetainedBase(liveRecords, retainedDocumentIds, baseDocuments, baseProjectionPartitions)
+  ]);
+  const segments = sortBuiltSegmentsByPartitionId([
+    ...reusedPartitionIds.map((partitionId) => {
+      const partition = baseProjectionPartitions.get(partitionId);
+      if (!partition) throw new Error(`incremental build base is missing reused partition ${partitionId}`);
+      return partition.segment;
+    }),
+    ...affectedSegments
+  ]);
+  return buildCanonicalSearchSnapshotFromSegments({
+    vaultRoot: scan.root,
+    scannedPaths: scan.files,
+    analyzerIdentity: input.analyzer.identity,
+    partitionBits,
+    searchSettings,
+    documents,
+    segments
   });
 }
 
@@ -144,18 +284,18 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
   const identityTuple = snapshotIdentityTupleForAnalyzerIdentity(input.analyzerIdentity, partitionBits, searchSettings);
   const documents = input.documents;
   const builtSegments = input.segments;
-  const linkEdges = input.vaultRoot
-    ? resolveParsedDocumentLinkEdges(input.vaultRoot, documents, input.scannedPaths ?? documents.map((document) => document.path))
-    : [];
-  assertParsedDocumentsSortedByDocumentId(documents);
+  assertBuildSnapshotDocumentProjectionsSortedByDocumentId(documents);
   assertBuiltSegmentsSortedByPartitionId(builtSegments);
+  const linkEdges = input.vaultRoot
+    ? resolveParsedDocumentLinkEdges(input.vaultRoot, documents.map((document) => document.links), input.scannedPaths ?? documents.map((document) => document.liveManifest.path))
+    : [];
   const bm25GlobalStats = reduceBuiltSegmentBm25Stats(builtSegments);
   const liveRecords = documents.map((document) => ({
-    documentId: document.documentId,
-    path: document.path,
-    contentHash: document.contentHash,
-    parsedFieldHashes: document.canonicalRecord.parsedFieldHashes,
-    snippetLineSpanHash: document.canonicalRecord.snippetLineSpanHash,
+    documentId: document.liveManifest.documentId,
+    path: document.liveManifest.path,
+    contentHash: document.liveManifest.contentHash,
+    parsedFieldHashes: document.liveManifest.parsedFieldHashes,
+    snippetLineSpanHash: document.liveManifest.snippetLineSpanHash,
     deleted: false
   }));
   const manifest = {
@@ -184,18 +324,18 @@ export function buildCanonicalSearchSnapshotFromSegments(input: BuildSnapshotFro
     for (const documentId of segment.documentIds) segmentByDocumentId.set(documentId, segment.hash);
   }
   const persistedDocuments: PersistedDocumentRecord[] = documents.map((document) => ({
-    documentId: document.documentId,
-    path: document.path,
-    contentHash: document.contentHash,
-    partitionId: document.partitionId,
-    title: document.searchDocument.title,
-    tags: document.searchDocument.tags,
+    documentId: document.liveManifest.documentId,
+    path: document.liveManifest.path,
+    contentHash: document.liveManifest.contentHash,
+    partitionId: document.persisted.partitionId,
+    title: document.persisted.title,
+    tags: [...document.persisted.tags],
     snippetCorpus: {
-      bodyStartLine: document.snippetCorpus.bodyStartLine,
-      fallback: document.snippetCorpus.fallback,
-      lines: document.snippetCorpus.lines.map((line) => ({
+      bodyStartLine: document.persisted.snippetCorpus.bodyStartLine,
+      fallback: document.persisted.snippetCorpus.fallback,
+      lines: document.persisted.snippetCorpus.lines.map((line) => ({
         ...line,
-        segmentId: segmentByDocumentId.get(document.documentId) ?? ""
+        segmentId: segmentByDocumentId.get(document.liveManifest.documentId) ?? ""
       }))
     }
   }));
@@ -306,7 +446,28 @@ export function scanBuildDocuments(vaultRoot: string): BuildDocumentScan {
   const files = walkFiles(root, root, { includeHidden: false, all: false })
     .map((abs) => vaultRelative(root, abs))
     .sort((left, right) => compareUtf8(left, right));
-  return { root, files };
+  const documents = files
+    .map((relPath) => scanBuildDocument(root, relPath))
+    .filter((document): document is BuildDocumentScanRecord => document !== undefined);
+  return { root, files, documents };
+}
+
+function scanBuildDocument(vaultRoot: string, relPath: string): BuildDocumentScanRecord | undefined {
+  const abs = path.join(vaultRoot, relPath);
+  let bytes: Buffer;
+  let text: string;
+  try {
+    bytes = fs.readFileSync(abs);
+    text = decodeUtf8(bytes, relPath);
+  } catch {
+    return undefined;
+  }
+  const { parsedLinks } = parseMarkdownNoteLinks(relPath, text);
+  return {
+    path: normalizeVaultRelativePath(relPath),
+    contentHash: sha256(bytes),
+    unresolvedLinks: parsedLinks.unresolvedLinks
+  };
 }
 
 async function parseVaultDocuments(
@@ -354,7 +515,7 @@ export async function parseBuildDocumentBatch(
 
 export function resolveParsedDocumentLinkEdges(
   vaultRoot: string,
-  documents: readonly ParsedBuildDocument[],
+  documents: readonly BuildSnapshotDocumentLinkProjection[],
   scannedPaths: readonly string[]
 ): ResolvedLinkEdge[] {
   const targetIndex = buildLinkTargetIndex(scannedPaths);
@@ -397,26 +558,86 @@ export function shuffleParsedBuildDocumentsByPartition(
 }
 
 export function reduceBuildSegment(input: ReduceBuildSegmentInput): BuiltSegment {
-  return buildSegment(input.partitionId, input.documents);
+  if (input.base) {
+    return reduceBuildSegmentWithBase(input.partitionId, input.freshDocuments ?? [], input.base);
+  }
+  return buildSegment(input.partitionId, input.documents ?? input.freshDocuments ?? []);
 }
 
 function reduceBuildSegments(
   partitionEntries: readonly (readonly [partitionId: number, documents: readonly ParsedBuildDocument[]])[],
   progress?: (progress: SearchIndexProgressUpdate) => void
 ): BuiltSegment[] {
+  return reduceBuildSegmentInputs(
+    partitionEntries.map(([partitionId, documents]) => ({ partitionId, documents })),
+    progress
+  );
+}
+
+function reduceBuildSegmentInputs(
+  inputs: readonly ReduceBuildSegmentInput[],
+  progress?: (progress: SearchIndexProgressUpdate) => void
+): BuiltSegment[] {
   const builtSegments: BuiltSegment[] = [];
-  progress?.({ phase: "segmenting", total: partitionEntries.length, completed: 0 });
-  for (const [index, [partitionId, partitionDocuments]] of partitionEntries.entries()) {
-    builtSegments.push(buildSegment(partitionId, partitionDocuments));
+  progress?.({ phase: "segmenting", total: inputs.length, completed: 0 });
+  for (const [index, input] of inputs.entries()) {
+    builtSegments.push(reduceBuildSegment(input));
     progress?.({
       phase: "segmenting",
-      total: partitionEntries.length,
+      total: inputs.length,
       completed: index + 1,
-      current: String(partitionId)
+      current: String(input.partitionId)
     });
   }
   assertBuiltSegmentsSortedByPartitionId(builtSegments);
   return builtSegments;
+}
+
+function reduceBuildSegmentWithBase(
+  partitionId: number,
+  freshDocuments: readonly ParsedBuildDocument[],
+  base: ReduceBuildSegmentBaseInput
+): BuiltSegment {
+  const bytes = fs.readFileSync(path.join(base.segmentsDir, base.segmentHash));
+  const actualHash = sha256(bytes);
+  if (actualHash !== base.segmentHash) {
+    throw new Error(`incremental build base segment hash mismatch for ${base.segmentHash}`);
+  }
+  const extracted = contributionsFromSegment(decodeCanonicalSegment(bytes));
+  const retained = retainedContributionsFromSegment(extracted, base.retainedDocumentIds, base.segmentHash);
+  const retainedIds = new Set(retained.map((contribution) => contribution.documentId));
+  const fresh = freshDocuments.map((document) => {
+    if (document.partitionId !== partitionId) {
+      throw new Error(`incremental build fresh document ${document.documentId} belongs to partition ${document.partitionId}, not ${partitionId}`);
+    }
+    if (retainedIds.has(document.documentId)) {
+      throw new Error(`incremental build duplicate retained/fresh document ${document.documentId}`);
+    }
+    return contributionFromParse(document);
+  });
+  return foldSegment(partitionId, [...retained, ...fresh]);
+}
+
+function retainedContributionsFromSegment(
+  contributions: readonly DocumentSegmentContribution[],
+  retainedDocumentIds: readonly string[],
+  segmentHash: string
+): DocumentSegmentContribution[] {
+  const byDocumentId = new Map(contributions.map((contribution) => [contribution.documentId, contribution]));
+  const retained: DocumentSegmentContribution[] = [];
+  const seen = new Set<string>();
+  for (const documentId of retainedDocumentIds) {
+    if (seen.has(documentId)) {
+      throw new Error(`incremental build retained document ${documentId} is duplicated for base segment ${segmentHash}`);
+    }
+    seen.add(documentId);
+    const contribution = byDocumentId.get(documentId);
+    if (!contribution) {
+      throw new Error(`incremental build base segment ${segmentHash} is missing retained document ${documentId}`);
+    }
+    retained.push(contribution);
+  }
+  return retained;
 }
 
 function progressInterval(total: number): number {
@@ -440,8 +661,7 @@ async function parseBuildDocument(
   } catch {
     return undefined;
   }
-  const note = parseMarkdownNote(relPath, text);
-  const parsedLinks = parseNoteLinks(note.body);
+  const { note, parsedLinks } = parseMarkdownNoteLinks(relPath, text);
   const renderedNote = {
     ...note,
     body: parsedLinks.renderedText
@@ -535,46 +755,472 @@ async function parseBuildDocument(
   };
 }
 
+function parseMarkdownNoteLinks(
+  relPath: string,
+  text: string
+): { note: ReturnType<typeof parseMarkdownNote>; parsedLinks: ParsedNoteLinks } {
+  const note = parseMarkdownNote(relPath, text);
+  return {
+    note,
+    parsedLinks: parseNoteLinks(note.body)
+  };
+}
+
+export function documentProjectionsFromParses(
+  documents: readonly ParsedBuildDocument[],
+  scanRecords: readonly BuildDocumentScanRecord[] = []
+): BuildSnapshotDocumentProjection[] {
+  const scanRecordByPath = new Map(scanRecords.map((record) => [record.path, record]));
+  return documents.map((document) => documentProjectionFromParse(document, scanRecordByPath.get(document.path)));
+}
+
+function documentProjectionFromParse(
+  document: ParsedBuildDocument,
+  scanRecord?: BuildDocumentScanRecord
+): BuildSnapshotDocumentProjection {
+  return {
+    liveManifest: {
+      documentId: document.documentId,
+      path: document.path,
+      contentHash: document.contentHash,
+      parsedFieldHashes: document.canonicalRecord.parsedFieldHashes,
+      snippetLineSpanHash: document.canonicalRecord.snippetLineSpanHash
+    },
+    persisted: {
+      partitionId: document.partitionId,
+      title: document.searchDocument.title,
+      tags: document.searchDocument.tags,
+      snippetCorpus: document.snippetCorpus
+    },
+    links: {
+      documentId: document.documentId,
+      path: document.path,
+      unresolvedLinks: scanRecord?.unresolvedLinks ?? document.unresolvedLinks
+    }
+  };
+}
+
+type LiveBuildDocumentScanRecord = BuildDocumentScanRecord & {
+  documentId: string;
+  partitionId: number;
+};
+
+type ReusedBasePartition = {
+  segment: BuiltSegment;
+  canonicalDocumentsByDocumentId: ReadonlyMap<string, CanonicalDocumentRecord>;
+};
+
+type AffectedPartitionPlan = {
+  partitionId: number;
+  freshPaths: readonly string[];
+  retainedDocumentIds: readonly string[];
+};
+
+function liveDocumentRecordsFromScan(
+  scanRecords: readonly BuildDocumentScanRecord[],
+  partitionBits: number
+): LiveBuildDocumentScanRecord[] {
+  const sorted = scanRecords.map((record) => {
+    const normalizedPath = normalizeVaultRelativePath(record.path);
+    const documentId = sha256(utf8(normalizedPath));
+    return {
+      ...record,
+      path: normalizedPath,
+      documentId,
+      partitionId: partitionIdForDocument(documentId, partitionBits)
+    };
+  }).sort((left, right) => compareUtf8(left.documentId, right.documentId));
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index - 1].documentId === sorted[index].documentId) {
+      throw new Error(`incremental build base diff failed: duplicate live documentId ${sorted[index].documentId}`);
+    }
+  }
+  return sorted;
+}
+
+function affectedPartitionsForBase(
+  liveRecords: readonly LiveBuildDocumentScanRecord[],
+  baseDocuments: ReadonlyMap<string, PersistedDocumentRecord>,
+  basePartitions: ReadonlyMap<number, CanonicalPartitionDescriptor>
+): Set<number> {
+  const affected = new Set<number>();
+  const liveByDocumentId = new Map(liveRecords.map((record) => [record.documentId, record]));
+  for (const record of liveRecords) {
+    const baseDocument = baseDocuments.get(record.documentId);
+    if (!baseDocument) {
+      affected.add(record.partitionId);
+      continue;
+    }
+    if (
+      baseDocument.contentHash !== record.contentHash ||
+      baseDocument.path !== record.path ||
+      baseDocument.partitionId !== record.partitionId
+    ) {
+      affected.add(record.partitionId);
+      affected.add(baseDocument.partitionId);
+    }
+  }
+  for (const baseDocument of baseDocuments.values()) {
+    if (!liveByDocumentId.has(baseDocument.documentId)) affected.add(baseDocument.partitionId);
+  }
+  for (const record of liveRecords) {
+    if (!affected.has(record.partitionId) && !basePartitions.has(record.partitionId)) {
+      affected.add(record.partitionId);
+    }
+  }
+  return affected;
+}
+
+function reusedPartitionIdsForLiveRecords(
+  liveRecords: readonly LiveBuildDocumentScanRecord[],
+  affectedPartitions: ReadonlySet<number>
+): number[] {
+  return [...new Set(
+    liveRecords
+      .filter((record) => !affectedPartitions.has(record.partitionId))
+      .map((record) => record.partitionId)
+  )].sort((left, right) => left - right);
+}
+
+function affectedPartitionPlansForBase(
+  liveRecords: readonly LiveBuildDocumentScanRecord[],
+  affectedPartitions: ReadonlySet<number>,
+  baseDocuments: ReadonlyMap<string, PersistedDocumentRecord>,
+  basePartitions: ReadonlyMap<number, CanonicalPartitionDescriptor>
+): AffectedPartitionPlan[] {
+  const plans = new Map<number, { freshPaths: string[]; retainedDocumentIds: string[] }>();
+  for (const record of liveRecords) {
+    if (!affectedPartitions.has(record.partitionId)) continue;
+    const plan = plans.get(record.partitionId) ?? { freshPaths: [], retainedDocumentIds: [] };
+    if (liveRecordCanReuseBaseContribution(record, baseDocuments, basePartitions)) {
+      plan.retainedDocumentIds.push(record.documentId);
+    } else {
+      plan.freshPaths.push(record.path);
+    }
+    plans.set(record.partitionId, plan);
+  }
+  return [...plans.entries()]
+    .map(([partitionId, plan]) => ({
+      partitionId,
+      freshPaths: plan.freshPaths,
+      retainedDocumentIds: plan.retainedDocumentIds.sort(compareUtf8)
+    }))
+    .sort((left, right) => left.partitionId - right.partitionId);
+}
+
+function liveRecordCanReuseBaseContribution(
+  record: LiveBuildDocumentScanRecord,
+  baseDocuments: ReadonlyMap<string, PersistedDocumentRecord>,
+  basePartitions: ReadonlyMap<number, CanonicalPartitionDescriptor>
+): boolean {
+  const baseDocument = baseDocuments.get(record.documentId);
+  return baseDocument !== undefined &&
+    baseDocument.contentHash === record.contentHash &&
+    baseDocument.path === record.path &&
+    baseDocument.partitionId === record.partitionId &&
+    basePartitions.has(record.partitionId);
+}
+
+function reduceBuildSegmentPlans(
+  plans: readonly AffectedPartitionPlan[],
+  freshDocuments: readonly ParsedBuildDocument[],
+  base: BuildSnapshotBase,
+  basePartitions: ReadonlyMap<number, CanonicalPartitionDescriptor>,
+  progress?: (progress: SearchIndexProgressUpdate) => void
+): BuiltSegment[] {
+  const freshByPartition = new Map<number, ParsedBuildDocument[]>();
+  for (const document of freshDocuments) {
+    const partition = freshByPartition.get(document.partitionId) ?? [];
+    partition.push(document);
+    freshByPartition.set(document.partitionId, partition);
+  }
+  const inputs = plans.map((plan): ReduceBuildSegmentInput => {
+    const documents = freshByPartition.get(plan.partitionId) ?? [];
+    const descriptor = basePartitions.get(plan.partitionId);
+    if (plan.retainedDocumentIds.length > 0 && !descriptor) {
+      throw new Error(`incremental build base is missing affected partition ${plan.partitionId}`);
+    }
+    return {
+      partitionId: plan.partitionId,
+      freshDocuments: documents,
+      base: plan.retainedDocumentIds.length > 0 && descriptor ? {
+        segmentsDir: base.segmentsDir,
+        segmentHash: descriptor.segmentHash,
+        retainedDocumentIds: plan.retainedDocumentIds
+      } : undefined
+    };
+  });
+  return reduceBuildSegmentInputs(inputs, progress);
+}
+
+function retainedDocumentIdsForProjection(
+  liveRecords: readonly LiveBuildDocumentScanRecord[],
+  reusedPartitionIds: readonly number[],
+  affectedPlans: readonly AffectedPartitionPlan[]
+): Set<string> {
+  const reused = new Set(reusedPartitionIds);
+  const retained = new Set<string>();
+  for (const record of liveRecords) {
+    if (reused.has(record.partitionId)) retained.add(record.documentId);
+  }
+  for (const plan of affectedPlans) {
+    for (const documentId of plan.retainedDocumentIds) retained.add(documentId);
+  }
+  return retained;
+}
+
+function sortedUniqueNumbers(values: readonly number[]): number[] {
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function readReusableBasePartitions(
+  base: BuildSnapshotBase,
+  partitionIds: readonly number[]
+): Map<number, ReusedBasePartition> {
+  const byPartition = new Map(base.envelope.manifest.partitions.map((partition) => [partition.partitionId, partition]));
+  const reused = new Map<number, ReusedBasePartition>();
+  for (const partitionId of partitionIds) {
+    const descriptor = byPartition.get(partitionId);
+    if (!descriptor) throw new Error(`incremental build base is missing partition ${partitionId}`);
+    const bytes = fs.readFileSync(path.join(base.segmentsDir, descriptor.segmentHash));
+    const actualHash = sha256(bytes);
+    if (actualHash !== descriptor.segmentHash) {
+      throw new Error(`incremental build base segment hash mismatch for ${descriptor.segmentHash}`);
+    }
+    const decoded = decodeCanonicalSegment(bytes);
+    const bm25Bytes = canonicalSegmentSectionBytes(bytes, CANONICAL_SEGMENT_SECTION.bm25);
+    const bm25Stats = bm25Bytes ? decodeCanonicalBm25Section(bm25Bytes) : [];
+    const canonicalDocuments = decoded.documents ?? [];
+    const documentIds = canonicalDocuments.map((document) => document.documentId);
+    if (documentIds.length !== descriptor.documentCount) {
+      throw new Error(`incremental build base partition ${partitionId} document count mismatch`);
+    }
+    if (
+      documentIds[0] !== descriptor.documentIdStart ||
+      documentIds[documentIds.length - 1] !== descriptor.documentIdEnd
+    ) {
+      throw new Error(`incremental build base partition ${partitionId} document bounds mismatch`);
+    }
+    reused.set(partitionId, {
+      segment: {
+        partitionId,
+        hash: descriptor.segmentHash,
+        bytes,
+        documentIds,
+        bm25Stats
+      },
+      canonicalDocumentsByDocumentId: new Map(canonicalDocuments.map((document) => [document.documentId, document]))
+    });
+  }
+  return reused;
+}
+
+function documentProjectionsFromRetainedBase(
+  liveRecords: readonly LiveBuildDocumentScanRecord[],
+  retainedDocumentIds: ReadonlySet<string>,
+  baseDocuments: ReadonlyMap<string, PersistedDocumentRecord>,
+  reusedPartitions: ReadonlyMap<number, ReusedBasePartition>
+): BuildSnapshotDocumentProjection[] {
+  const documents: BuildSnapshotDocumentProjection[] = [];
+  for (const record of liveRecords) {
+    if (!retainedDocumentIds.has(record.documentId)) continue;
+    const baseDocument = baseDocuments.get(record.documentId);
+    if (!baseDocument) throw new Error(`incremental build base is missing document ${record.documentId}`);
+    const reusedPartition = reusedPartitions.get(record.partitionId);
+    if (!reusedPartition) throw new Error(`incremental build base is missing reused partition ${record.partitionId}`);
+    const canonicalDocument = reusedPartition.canonicalDocumentsByDocumentId.get(record.documentId);
+    if (!canonicalDocument) throw new Error(`incremental build base segment is missing document ${record.documentId}`);
+    documents.push({
+      liveManifest: {
+        documentId: record.documentId,
+        path: record.path,
+        contentHash: record.contentHash,
+        parsedFieldHashes: canonicalDocument.parsedFieldHashes,
+        snippetLineSpanHash: canonicalDocument.snippetLineSpanHash
+      },
+      persisted: persistedProjectionFromBaseDocument(baseDocument),
+      links: {
+        documentId: record.documentId,
+        path: record.path,
+        unresolvedLinks: record.unresolvedLinks
+      }
+    });
+  }
+  return documents;
+}
+
+function persistedProjectionFromBaseDocument(
+  document: PersistedDocumentRecord
+): BuildSnapshotPersistedDocumentProjection {
+  return {
+    partitionId: document.partitionId,
+    title: document.title,
+    tags: [...document.tags],
+    snippetCorpus: {
+      bodyStartLine: document.snippetCorpus.bodyStartLine,
+      fallback: document.snippetCorpus.fallback,
+      lines: document.snippetCorpus.lines.map(({ segmentId: _segmentId, ...line }) => ({ ...line }))
+    }
+  };
+}
+
+function sortBuildSnapshotDocumentProjections(
+  documents: readonly BuildSnapshotDocumentProjection[]
+): BuildSnapshotDocumentProjection[] {
+  const sorted = [...documents].sort((left, right) => compareUtf8(left.liveManifest.documentId, right.liveManifest.documentId));
+  assertBuildSnapshotDocumentProjectionsSortedByDocumentId(sorted);
+  return sorted;
+}
+
+function sortBuiltSegmentsByPartitionId(segments: readonly BuiltSegment[]): BuiltSegment[] {
+  const sorted = [...segments].sort((left, right) => left.partitionId - right.partitionId);
+  assertBuiltSegmentsSortedByPartitionId(sorted);
+  return sorted;
+}
+
+function baseSnapshotIdentityMatches(base: BuildSnapshotBase, expected: SnapshotIdentityTuple): boolean {
+  if (base.envelope.snapshotId !== sha256(canonicalSnapshotManifestBytes(base.envelope.manifest))) return false;
+  if (base.envelope.canonicalManifestSha256 !== base.envelope.snapshotId) return false;
+  if (base.envelope.corpusSnapshotId !== undefined && base.envelope.corpusSnapshotId !== corpusSnapshotIdFromManifest(base.envelope.manifest)) {
+    return false;
+  }
+  return Buffer.compare(
+    Buffer.from(canonicalValueBytes(base.envelope.manifest.identityTuple)),
+    Buffer.from(canonicalValueBytes(expected))
+  ) === 0;
+}
+
+export function contributionFromParse(document: ParsedBuildDocument): DocumentSegmentContribution {
+  const postings: DocumentSegmentPostingContribution[] = [];
+  const fieldLengths: DocumentSegmentFieldLengthContribution[] = [];
+  const fieldTexts: DocumentSegmentFieldTextContribution[] = [];
+  for (const field of SEGMENT_FIELD_TEXT_FIELDS) {
+    fieldTexts.push({
+      fieldId: POSITIONAL_FIELD_ID[field],
+      text: canonicalFieldText(document.searchDocument, field)
+    });
+  }
+  for (const channel of SEARCH_TOKEN_CHANNELS) {
+    for (const field of SEARCH_PROPERTIES) {
+      const fieldId = POSITIONAL_FIELD_ID[field];
+      const tokens = document.positionTokens[channel][field];
+      const positionsByTerm = new Map<string, number[]>();
+      const normalizedTokens: string[] = [];
+      tokens.forEach((token, position) => {
+        const normalized = token.normalize("NFC").trim();
+        if (!normalized) return;
+        normalizedTokens.push(normalized);
+        const positions = positionsByTerm.get(normalized) ?? [];
+        positions.push(position);
+        positionsByTerm.set(normalized, positions);
+      });
+      fieldLengths.push({ channel, fieldId, length: normalizedTokens.length });
+      for (const [term, positions] of positionsByTerm) {
+        postings.push({
+          term: `${channel}\u0000${term}`,
+          fieldId,
+          positions
+        });
+      }
+    }
+  }
+  return {
+    documentId: document.documentId,
+    document: document.canonicalRecord,
+    postings,
+    fieldLengths,
+    fieldTexts
+  };
+}
+
+export function contributionsFromSegment(segment: CanonicalSegment): DocumentSegmentContribution[] {
+  const documents = segment.documents ?? [];
+  const contributions = documents.map((document): DocumentSegmentContribution & {
+    postings: DocumentSegmentPostingContribution[];
+    fieldLengths: DocumentSegmentFieldLengthContribution[];
+    fieldTexts: DocumentSegmentFieldTextContribution[];
+  } => ({
+    documentId: document.documentId,
+    document,
+    postings: [],
+    fieldLengths: [],
+    fieldTexts: []
+  }));
+  const byLocalDocId = new Map(contributions.map((contribution, index) => [index + 1, contribution]));
+  assertExtractedDocumentsAreUsable(documents);
+
+  for (const posting of segment.postings) {
+    const contribution = byLocalDocId.get(posting.docId);
+    if (!contribution) throw new Error(`canonical segment extraction failed: posting references missing local docId ${posting.docId}`);
+    const { channel } = contributionPostingTerm(posting.term);
+    assertSegmentContributionChannel(channel);
+    contribution.postings.push({
+      term: posting.term,
+      fieldId: posting.fieldId,
+      positions: [...posting.positions]
+    });
+  }
+
+  for (const fieldText of segment.fieldTexts ?? []) {
+    const contribution = byLocalDocId.get(fieldText.docId);
+    if (!contribution) throw new Error(`canonical segment extraction failed: fieldTexts reference missing local docId ${fieldText.docId}`);
+    contribution.fieldTexts.push({
+      fieldId: fieldText.fieldId,
+      text: fieldText.text
+    });
+  }
+
+  const bm25 = segment.bm25 ?? [];
+  if (documents.length > 0 && bm25.length === 0) {
+    throw new Error("canonical segment extraction failed: non-empty segment is missing BM25 field lengths");
+  }
+  for (const field of bm25) {
+    assertSegmentBm25FieldLengths(field, documents.length);
+    const channel = assertSegmentContributionChannel(field.channel);
+    for (const length of field.documentLengths) {
+      const contribution = byLocalDocId.get(length.docId);
+      if (!contribution) throw new Error(`canonical segment extraction failed: BM25 references missing local docId ${length.docId}`);
+      contribution.fieldLengths.push({
+        channel,
+        fieldId: field.fieldId,
+        length: length.length
+      });
+    }
+  }
+
+  assertExtractedFieldLengthsAreComplete(contributions);
+  assertSegmentBm25FrequenciesMatchPostings(segment.postings, bm25);
+  return contributions;
+}
+
 function buildSegment(partitionId: number, documents: readonly ParsedBuildDocument[]): BuiltSegment {
-  const sorted = [...documents].sort((left, right) => compareUtf8(left.documentId, right.documentId));
+  return foldSegment(partitionId, documents.map((document) => contributionFromParse(document)));
+}
+
+export function foldSegment(partitionId: number, contributions: readonly DocumentSegmentContribution[]): BuiltSegment {
+  const sorted = [...contributions].sort((left, right) => compareUtf8(left.documentId, right.documentId));
   const postings: CanonicalPosting[] = [];
   const canonicalDocuments: CanonicalDocumentRecord[] = [];
   const fieldTexts: CanonicalFieldText[] = [];
   const bm25 = new Map<string, MutableBuildBm25Stats>();
-  sorted.forEach((document, index) => {
+  sorted.forEach((contribution, index) => {
     const docId = index + 1;
-    canonicalDocuments.push(document.canonicalRecord);
-    for (const field of SEGMENT_FIELD_TEXT_FIELDS) {
+    canonicalDocuments.push(contribution.document);
+    for (const fieldText of contribution.fieldTexts) {
       fieldTexts.push({
         docId,
-        fieldId: POSITIONAL_FIELD_ID[field],
-        text: canonicalFieldText(document.searchDocument, field)
+        fieldId: fieldText.fieldId,
+        text: fieldText.text
       });
     }
-    for (const channel of SEARCH_TOKEN_CHANNELS) {
-      for (const field of SEARCH_PROPERTIES) {
-        const fieldId = POSITIONAL_FIELD_ID[field];
-        const tokens = document.positionTokens[channel][field];
-        const positionsByTerm = new Map<string, number[]>();
-        const normalizedTokens: string[] = [];
-        tokens.forEach((token, position) => {
-          const normalized = token.normalize("NFC").trim();
-          if (!normalized) return;
-          normalizedTokens.push(normalized);
-          const positions = positionsByTerm.get(normalized) ?? [];
-          positions.push(position);
-          positionsByTerm.set(normalized, positions);
-        });
-        recordBuildBm25Stats(bm25, channel, fieldId, docId, normalizedTokens);
-        for (const [term, positions] of positionsByTerm) {
-          postings.push({
-            term: `${channel}\u0000${term}`,
-            fieldId,
-            docId,
-            positions
-          });
-        }
-      }
+    recordContributionBm25Stats(bm25, docId, contribution);
+    for (const posting of contribution.postings) {
+      postings.push({
+        term: posting.term,
+        fieldId: posting.fieldId,
+        docId,
+        positions: posting.positions
+      });
     }
   });
   const segment: CanonicalSegment = {
@@ -623,6 +1269,28 @@ function assertParsedDocumentsSortedByDocumentId(documents: readonly ParsedBuild
   }
 }
 
+function assertBuildSnapshotDocumentProjectionsSortedByDocumentId(
+  documents: readonly BuildSnapshotDocumentProjection[]
+): void {
+  for (const document of documents) {
+    if (document.liveManifest.documentId !== document.links.documentId) {
+      throw new Error("parallel build determinism assertion failed: document projection ids must match");
+    }
+    if (document.liveManifest.path !== document.links.path) {
+      throw new Error("parallel build determinism assertion failed: document projection paths must match");
+    }
+  }
+  for (let index = 1; index < documents.length; index += 1) {
+    const previous = documents[index - 1].liveManifest;
+    const current = documents[index].liveManifest;
+    const order = compareUtf8(previous.documentId, current.documentId);
+    if (order === 0) throw new Error(`parallel build determinism assertion failed: duplicate documentId ${current.documentId}`);
+    if (order > 0) {
+      throw new Error("parallel build determinism assertion failed: document projections must be sorted by documentId");
+    }
+  }
+}
+
 function assertBuiltSegmentsSortedByPartitionId(segments: readonly BuiltSegment[]): void {
   for (let index = 1; index < segments.length; index += 1) {
     const previous = segments[index - 1];
@@ -654,6 +1322,108 @@ function assertUnsignedInteger(value: number, label: string): void {
   }
 }
 
+function assertExtractedDocumentsAreUsable(documents: readonly CanonicalDocumentRecord[]): void {
+  const seen = new Set<string>();
+  for (const document of documents) {
+    if (seen.has(document.documentId)) {
+      throw new Error(`canonical segment extraction failed: duplicate documentId ${document.documentId}`);
+    }
+    seen.add(document.documentId);
+  }
+}
+
+function assertSegmentBm25FieldLengths(field: CanonicalBm25FieldStats, documentCount: number): void {
+  const channel = assertSegmentContributionChannel(field.channel);
+  assertUnsignedInteger(field.fieldId, "BM25 extraction fieldId");
+  assertUnsignedInteger(field.documentCount, "BM25 extraction documentCount");
+  assertUnsignedInteger(field.totalFieldLength, "BM25 extraction totalFieldLength");
+  if (field.documentCount !== documentCount) {
+    throw new Error(`canonical segment extraction failed: BM25 ${channel}/${field.fieldId} documentCount mismatch`);
+  }
+  if (field.documentLengths.length !== documentCount) {
+    throw new Error(`canonical segment extraction failed: BM25 ${channel}/${field.fieldId} must carry one length per document`);
+  }
+  let total = 0;
+  for (let index = 0; index < field.documentLengths.length; index += 1) {
+    const length = field.documentLengths[index];
+    assertUnsignedInteger(length.docId, "BM25 extraction document length docId");
+    assertUnsignedInteger(length.length, "BM25 extraction document length");
+    if (length.docId !== index + 1) {
+      throw new Error(`canonical segment extraction failed: BM25 ${channel}/${field.fieldId} lengths must cover local docIds 1..N`);
+    }
+    total += length.length;
+  }
+  if (total !== field.totalFieldLength) {
+    throw new Error(`canonical segment extraction failed: BM25 ${channel}/${field.fieldId} totalFieldLength mismatch`);
+  }
+}
+
+function assertExtractedFieldLengthsAreComplete(contributions: readonly DocumentSegmentContribution[]): void {
+  if (contributions.length === 0) return;
+  const expected = expectedSegmentFieldLengthKeys();
+  for (const contribution of contributions) {
+    const actual = new Set(contribution.fieldLengths.map((field) => bm25ContributionKey(field.channel, field.fieldId)));
+    if (actual.size !== expected.size) {
+      throw new Error(`canonical segment extraction failed: document ${contribution.documentId} has incomplete fieldLengths`);
+    }
+    for (const key of expected) {
+      if (!actual.has(key)) {
+        throw new Error(`canonical segment extraction failed: document ${contribution.documentId} is missing fieldLength ${key}`);
+      }
+    }
+  }
+}
+
+function assertSegmentBm25FrequenciesMatchPostings(
+  postings: readonly CanonicalPosting[],
+  bm25: readonly CanonicalBm25FieldStats[]
+): void {
+  const expectedDocsByTerm = new Map<string, Set<number>>();
+  for (const posting of postings) {
+    const { channel, term } = contributionPostingTerm(posting.term);
+    assertSegmentContributionChannel(channel);
+    const key = bm25FrequencyKey(channel, posting.fieldId, term);
+    const docs = expectedDocsByTerm.get(key) ?? new Set<number>();
+    docs.add(posting.docId);
+    expectedDocsByTerm.set(key, docs);
+  }
+  const expected = new Map([...expectedDocsByTerm.entries()].map(([key, docs]) => [key, docs.size]));
+  const actual = new Map<string, number>();
+  for (const field of bm25) {
+    const channel = assertSegmentContributionChannel(field.channel);
+    for (const frequency of field.documentFrequencies) {
+      assertUnsignedInteger(frequency.frequency, "BM25 extraction documentFrequency");
+      const key = bm25FrequencyKey(channel, field.fieldId, frequency.term);
+      actual.set(key, (actual.get(key) ?? 0) + frequency.frequency);
+    }
+  }
+  assertNumberMapsEqual(actual, expected, "canonical segment extraction failed: BM25 document frequencies do not match postings");
+}
+
+function assertNumberMapsEqual(actual: ReadonlyMap<string, number>, expected: ReadonlyMap<string, number>, label: string): void {
+  if (actual.size !== expected.size) throw new Error(label);
+  for (const [key, value] of expected) {
+    if (actual.get(key) !== value) throw new Error(label);
+  }
+}
+
+function expectedSegmentFieldLengthKeys(): Set<string> {
+  return new Set(SEARCH_TOKEN_CHANNELS.flatMap((channel) =>
+    SEARCH_PROPERTIES.map((field) => bm25ContributionKey(channel, POSITIONAL_FIELD_ID[field]))
+  ));
+}
+
+function assertSegmentContributionChannel(channel: string): SearchTokenChannel {
+  if (!SEARCH_TOKEN_CHANNELS.includes(channel as SearchTokenChannel)) {
+    throw new Error(`canonical segment extraction failed: unknown token channel ${channel}`);
+  }
+  return channel as SearchTokenChannel;
+}
+
+function bm25FrequencyKey(channel: string, fieldId: number, term: string): string {
+  return `${channel}\u0000${fieldId}\u0000${term}`;
+}
+
 type MutableBuildBm25Stats = {
   channel: SearchTokenChannel;
   fieldId: number;
@@ -669,14 +1439,34 @@ const SEGMENT_FIELD_TEXT_FIELDS = SEARCH_PROPERTIES.filter(
   (field): field is SegmentFieldTextField => field !== "body"
 );
 
+function recordContributionBm25Stats(
+  stats: Map<string, MutableBuildBm25Stats>,
+  docId: number,
+  contribution: DocumentSegmentContribution
+): void {
+  const termsByField = new Map<string, { channel: SearchTokenChannel; fieldId: number; terms: Set<string> }>();
+  for (const posting of contribution.postings) {
+    const { channel, term } = contributionPostingTerm(posting.term);
+    const key = bm25ContributionKey(channel, posting.fieldId);
+    const entry = termsByField.get(key) ?? { channel, fieldId: posting.fieldId, terms: new Set<string>() };
+    entry.terms.add(term);
+    termsByField.set(key, entry);
+  }
+  for (const fieldLength of contribution.fieldLengths) {
+    const terms = termsByField.get(bm25ContributionKey(fieldLength.channel, fieldLength.fieldId))?.terms ?? new Set<string>();
+    recordBuildBm25Stats(stats, fieldLength.channel, fieldLength.fieldId, docId, fieldLength.length, terms);
+  }
+}
+
 function recordBuildBm25Stats(
   stats: Map<string, MutableBuildBm25Stats>,
   channel: SearchTokenChannel,
   fieldId: number,
   docId: number,
-  terms: readonly string[]
+  fieldLength: number,
+  distinctTerms: ReadonlySet<string>
 ): void {
-  const key = `${channel}\u0000${fieldId}`;
+  const key = bm25ContributionKey(channel, fieldId);
   const entry = stats.get(key) ?? {
     channel,
     fieldId,
@@ -686,12 +1476,25 @@ function recordBuildBm25Stats(
     documentFrequencies: new Map<string, number>()
   };
   entry.documentCount += 1;
-  entry.totalFieldLength += terms.length;
-  entry.documentLengths.push({ docId, length: terms.length });
-  for (const term of new Set(terms)) {
+  entry.totalFieldLength += fieldLength;
+  entry.documentLengths.push({ docId, length: fieldLength });
+  for (const term of distinctTerms) {
     entry.documentFrequencies.set(term, (entry.documentFrequencies.get(term) ?? 0) + 1);
   }
   stats.set(key, entry);
+}
+
+function contributionPostingTerm(value: string): { channel: SearchTokenChannel; term: string } {
+  const separator = value.indexOf("\u0000");
+  if (separator <= 0) throw new Error("segment contribution posting term must include a token channel");
+  return {
+    channel: value.slice(0, separator) as SearchTokenChannel,
+    term: value.slice(separator + 1)
+  };
+}
+
+function bm25ContributionKey(channel: SearchTokenChannel, fieldId: number): string {
+  return `${channel}\u0000${fieldId}`;
 }
 
 function buildBm25StatsRows(stats: ReadonlyMap<string, MutableBuildBm25Stats>): CanonicalBm25FieldStats[] {
