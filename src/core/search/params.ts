@@ -34,7 +34,7 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
     throw new UsageError("search requires query=<text> or tag=<tag>");
   }
   return {
-    query: query || undefined,
+    query: query ? query : undefined,
     path: params.path,
     tags,
     fields,

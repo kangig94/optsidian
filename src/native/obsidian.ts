@@ -84,7 +84,9 @@ export function discoverObsidianVaultRoots(options: { env?: NodeJS.ProcessEnv } 
   const env = options.env ?? process.env;
   const warnings: string[] = [];
   const vaults: ObsidianVaultDiscoveryEntry[] = [];
-  const explicitRegistry = Boolean(env[OBSIDIAN_CONFIG_PATH_ENV]?.trim() || env[OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV]?.trim());
+  const obsidianConfigPath = env[OBSIDIAN_CONFIG_PATH_ENV]?.trim();
+  const optsidianConfigPath = env[OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV]?.trim();
+  const explicitRegistry = Boolean(obsidianConfigPath ? obsidianConfigPath : optsidianConfigPath);
 
   for (const configPath of obsidianConfigPaths(env)) {
     vaults.push(...readObsidianConfigVaults(configPath, warnings));
@@ -114,11 +116,14 @@ export function resolveVaultPathInput(input: string): string {
 }
 
 function obsidianConfigPaths(env: NodeJS.ProcessEnv): string[] {
-  const override = env[OBSIDIAN_CONFIG_PATH_ENV]?.trim() || env[OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV]?.trim();
+  const obsidianConfigPath = env[OBSIDIAN_CONFIG_PATH_ENV]?.trim();
+  const optsidianConfigPath = env[OPTSIDIAN_OBSIDIAN_CONFIG_PATH_ENV]?.trim();
+  const override = obsidianConfigPath ? obsidianConfigPath : optsidianConfigPath;
   if (override) return [path.resolve(override)];
 
   const home = os.homedir();
-  const configHome = env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
+  const configured = env.XDG_CONFIG_HOME?.trim();
+  const configHome = configured ? configured : path.join(os.homedir(), ".config");
   const candidates = [
     path.join(configHome, "obsidian", "obsidian.json"),
     path.join(home, ".config", "obsidian", "obsidian.json"),

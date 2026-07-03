@@ -104,7 +104,7 @@ export function partitionJobPlans(
   channels: readonly SearchTokenChannel[]
 ): ShardTaskPlan[] {
   const needsDenseFanout = Boolean(input.queryVector && input.denseEmbeddingSet);
-  const needsLinkFanout = Boolean(input.sourceDocumentId || input.sourcePath);
+  const needsLinkFanout = Boolean(input.sourceDocumentId ? input.sourceDocumentId : input.sourcePath);
   return [...input.snapshot.segments]
     .filter((segment) => segmentMatchesPathFilter(segment, input.pathFilter))
     .sort(compareSegments)

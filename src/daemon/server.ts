@@ -655,19 +655,22 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {
   const runtimeDir = defaultSearchDaemonRuntimeDir(env);
   const binaryPath = defaultSearchDaemonBinaryPath(env);
+  const runtimeHash = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH?.trim();
+  const binaryVersion = env.OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION?.trim();
+  const socketPathOverride = env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim();
+  const incarnation = env.OPTSIDIAN_SEARCH_DAEMON_INCARNATION?.trim();
   const desired: DesiredOwnerIdentity = {
     uid: env.OPTSIDIAN_SEARCH_DAEMON_UID ? Number(env.OPTSIDIAN_SEARCH_DAEMON_UID) : currentUid(),
-    runtimeHash: env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH?.trim() || computeRuntimeHash(binaryPath),
-    binaryVersion: env.OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION?.trim() || computeBinaryVersion(binaryPath),
+    runtimeHash: runtimeHash ? runtimeHash : computeRuntimeHash(binaryPath),
+    binaryVersion: binaryVersion ? binaryVersion : computeBinaryVersion(binaryPath),
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
   };
-  const socketPath = env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim() ||
-    socketPathForOwner(runtimeDir, desired);
+  const socketPath = socketPathOverride ? socketPathOverride : socketPathForOwner(runtimeDir, desired);
   return createOwnerRecord(
     desired,
     socketPath,
     0,
-    env.OPTSIDIAN_SEARCH_DAEMON_INCARNATION?.trim() || "pending",
+    incarnation ? incarnation : "pending",
     process.pid,
     new Date().toISOString()
   );

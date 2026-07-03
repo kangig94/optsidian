@@ -168,7 +168,7 @@ export class EmbedScheduler {
         lane,
         options,
         task,
-        resolve: resolve as (value: unknown) => void,
+        resolve: resolve,
         reject
       });
       this.pump();

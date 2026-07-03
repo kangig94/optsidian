@@ -81,7 +81,8 @@ export function defaultSearchDaemonRuntimeDir(env: NodeJS.ProcessEnv = process.e
   const override = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR?.trim();
   if (override) return path.resolve(override);
   const uid = currentUid();
-  const runtimeBase = env.XDG_RUNTIME_DIR?.trim() || path.join(os.tmpdir(), `optsidian-${uid}`);
+  const configured = env.XDG_RUNTIME_DIR?.trim();
+  const runtimeBase = configured ? configured : path.join(os.tmpdir(), `optsidian-${uid}`);
   return path.join(runtimeBase, "optsidian", "search-daemon");
 }
 

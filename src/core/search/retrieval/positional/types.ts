@@ -14,7 +14,7 @@ export const POSITIONAL_FIELD_ID: Record<SearchField, PositionalFieldId> = Objec
 
 export const POSITIONAL_FIELD_BY_ID: Record<PositionalFieldId, SearchField> = Object.fromEntries(
   POSITIONAL_SEARCH_FIELDS.map((field, index) => [index, field])
-) as Record<PositionalFieldId, SearchField>;
+);
 
 export type PositionalPosting = {
   docId: PositionalDocId;

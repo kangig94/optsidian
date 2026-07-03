@@ -178,7 +178,8 @@ async function installRe2Runtime(tempDir: string, env: NodeJS.ProcessEnv): Promi
 }
 
 function re2WasmTarballUrl(env: NodeJS.ProcessEnv): string {
-  const raw = env.OPTSIDIAN_RE2_WASM_TARBALL_URL?.trim() || RE2_WASM_TARBALL_URL;
+  const configured = env.OPTSIDIAN_RE2_WASM_TARBALL_URL?.trim();
+  const raw = configured ? configured : RE2_WASM_TARBALL_URL;
   let parsed: URL;
   try {
     parsed = new URL(raw);

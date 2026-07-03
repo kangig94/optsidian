@@ -574,7 +574,7 @@ function hasProxyEnv(env: NodeJS.ProcessEnv): boolean {
 }
 
 export function hasCommand(command: string, env: NodeJS.ProcessEnv): boolean {
-  const searchPath = env.PATH || process.env.PATH || "";
+  const searchPath = env.PATH ? env.PATH : process.env.PATH ? process.env.PATH : "";
   for (const entry of searchPath.split(path.delimiter)) {
     if (!entry) continue;
     const candidate = path.join(entry, command);

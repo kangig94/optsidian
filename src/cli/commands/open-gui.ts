@@ -14,7 +14,7 @@ export async function runOpenGui(args: ParsedArgs): Promise<void> {
   if (hasFlag(args, "wait")) {
     throw new UsageError("open-gui waits by default; use no-wait to return immediately");
   }
-  const envVaultPath = process.env.OPTSIDIAN_VAULT_PATH || undefined;
+  const envVaultPath = process.env.OPTSIDIAN_VAULT_PATH ? process.env.OPTSIDIAN_VAULT_PATH : undefined;
   const result = await openObsidianGui({
     vaultPath: vaultPathArg(args) ?? envVaultPath,
     wait: !hasFlag(args, "no-wait")

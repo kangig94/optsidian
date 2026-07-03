@@ -158,7 +158,8 @@ function similarityProjectionVersion(
 
 function normalizeProviderModel(model: string | undefined): string {
   if (model !== undefined && typeof model !== "string") throw new UsageError("provider.model must be a string");
-  const normalized = model?.trim() || DEFAULT_SIMILARITY_MODEL;
+  const trimmed = model?.trim();
+  const normalized = trimmed ? trimmed : DEFAULT_SIMILARITY_MODEL;
   return normalized;
 }
 

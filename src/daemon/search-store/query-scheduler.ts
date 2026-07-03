@@ -67,12 +67,8 @@ export class SearchQueryScheduler {
       DEFAULT_EXHAUSTIVE_WORK_CEILING;
   }
 
-  execute(input: SearchQuerySchedulerInput): Promise<SearchExecutionResult> {
-    try {
-      return this.submit(input).result;
-    } catch (error) {
-      return Promise.reject(error);
-    }
+  async execute(input: SearchQuerySchedulerInput): Promise<SearchExecutionResult> {
+    return this.submit(input).result;
   }
 
   submit(input: SearchQuerySchedulerInput): SearchQuerySession {

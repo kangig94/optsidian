@@ -139,8 +139,8 @@ class CoralNeedleProcessInstance implements CoralNeedleInstance {
     }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      this.child.send?.({ id, ...request } as ProcessRequest, (error) => {
+      this.pending.set(id, { resolve: resolve, reject });
+      this.child.send?.({ id, ...request }, (error) => {
         if (!error) return;
         this.pending.delete(id);
         reject(error);

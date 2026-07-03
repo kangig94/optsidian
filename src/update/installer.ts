@@ -158,7 +158,8 @@ export function attestationAssetNameForTag(tag: string): string {
 }
 
 export function releaseApiBase(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.OPTSIDIAN_RELEASE_API_BASE || DEFAULT_RELEASE_API_BASE).replace(/\/+$/, "");
+  const configured = env.OPTSIDIAN_RELEASE_API_BASE?.trim();
+  return (configured ? configured : DEFAULT_RELEASE_API_BASE).replace(/\/+$/, "");
 }
 
 export function loadInstallManifest(env: NodeJS.ProcessEnv = process.env): InstallManifest | undefined {
@@ -421,7 +422,7 @@ async function fetchLatestReleaseVersion(env: NodeJS.ProcessEnv, timeoutMs: numb
     throw new RuntimeError("Release metadata payload is invalid");
   }
   const json = payload as Record<string, unknown>;
-  const tag = normalizeTag(String(json.tag_name ?? ""));
+  const tag = normalizeTag(typeof json.tag_name === "string" ? json.tag_name : "");
   if (json.draft === true) {
     throw new RuntimeError(`Release ${tag} is still a draft`);
   }
@@ -434,7 +435,7 @@ function parseReleaseInfo(payload: unknown, requestedTag: string | undefined): R
     throw new RuntimeError("Release metadata payload is invalid");
   }
   const json = payload as Record<string, unknown>;
-  const tag = normalizeTag(String(json.tag_name ?? ""));
+  const tag = normalizeTag(typeof json.tag_name === "string" ? json.tag_name : "");
   if (requestedTag && tag !== requestedTag) {
     throw new RuntimeError(`Requested ${requestedTag} but release metadata returned ${tag}`);
   }

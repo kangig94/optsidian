@@ -9,7 +9,7 @@ export type McpConfig = {
 };
 
 export function parseMcpArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): McpConfig {
-  let vaultPath = env.OPTSIDIAN_VAULT_PATH || undefined;
+  let vaultPath = env.OPTSIDIAN_VAULT_PATH ? env.OPTSIDIAN_VAULT_PATH : undefined;
   let help = false;
   let version = false;
 

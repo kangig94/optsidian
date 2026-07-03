@@ -146,7 +146,7 @@ export class Attempt<T> {
           waiter.active = false;
           waiter.cleanup();
           this.waiters.delete(waiterId);
-          reject(error);
+          reject(error instanceof Error ? error : new Error(String(error)));
         }
       );
     });

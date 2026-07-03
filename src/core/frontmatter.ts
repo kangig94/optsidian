@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isMap, isNode, isSeq, parseDocument } from "yaml";
-import type { Document, Node as YAMLNode } from "yaml";
+import type { Document } from "yaml";
 import { UsageError } from "../errors.js";
 import { resolveVaultPath } from "./path.js";
 import { simpleDiff } from "./text.js";
@@ -216,7 +216,7 @@ function requireFrontmatterValue(params: FrontmatterMutationParams): Frontmatter
 }
 
 function nodeToValue(node: unknown): FrontmatterValue {
-  const value = isNode(node) ? JSON.parse(JSON.stringify(node as YAMLNode)) : node;
+  const value = isNode(node) ? JSON.parse(JSON.stringify(node)) : node;
   return normalizeFrontmatterValue(value, "value");
 }
 

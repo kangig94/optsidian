@@ -1940,13 +1940,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
     for (const file of await safeReadDirAsync(paths.linkGraphsDir)) {
       if (!isValidSnapshotId(file)) continue;
-      if (await this.linkGraphIsProtectedForGc(paths, file as LinkGraphId)) continue;
+      if (await this.linkGraphIsProtectedForGc(paths, file)) continue;
       await rmBestEffort(path.join(paths.linkGraphsDir, file), { force: true });
     }
   }
 
   private async retrievalSnapshotIsProtected(paths: SearchStoreCachePaths, retrievalSnapshotId: string): Promise<boolean> {
-    return (await this.gcRootsAsync(paths)).retrievalSnapshotIds.has(retrievalSnapshotId as RetrievalSnapshotId);
+    return (await this.gcRootsAsync(paths)).retrievalSnapshotIds.has(retrievalSnapshotId);
   }
 
   private async snapshotIsProtectedForGc(paths: SearchStoreCachePaths, snapshotId: string): Promise<boolean> {

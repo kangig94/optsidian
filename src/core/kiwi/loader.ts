@@ -140,7 +140,8 @@ export async function loadKiwiAnalyzer(options: LoadKiwiAnalyzerOptions = {}): P
 function filteredKiwiTokenStrings(tokens: readonly KiwiTokenInfo[]): string[] {
   const values: string[] = [];
   for (const token of tokens) {
-    if (isSearchableKiwiToken(token)) values.push(token.str!.trim());
+    const value = token.str?.trim();
+    if (value && isSearchableKiwiToken(token)) values.push(value);
   }
   return values;
 }

@@ -392,7 +392,7 @@ export class DaemonSearchStoreService {
         excludeDocumentIds: retrieval.excludeDocumentIds
       }), [...searchExecutionWarningLabels(search), ...(retrieval.warnings ?? [])]);
     }
-    const rawQuery = search.query || retrieval.sourcePath || "";
+    const rawQuery = search.query ? search.query : retrieval.sourcePath ? retrieval.sourcePath : "";
     const analysisResult = rawQuery
       ? await this.queryAnalysis(rawQuery, search, payload.vault, context)
       : undefined;
@@ -742,7 +742,7 @@ export class DaemonSearchStoreService {
       };
     }
     return {
-      queryText: payload.query?.trim() || "",
+      queryText: payload.query?.trim() ?? "",
       warnings
     };
   }
@@ -827,7 +827,7 @@ function retrieveSearchPayload(payload: RetrieveRequestPayload, queryText: strin
     : undefined;
   return {
     vault: payload.vault,
-    query: queryText || payload.query || undefined,
+    query: queryText ? queryText : payload.query ? payload.query : undefined,
     path: pairRightPath ?? payload.path,
     tags: payload.tags,
     fields: payload.fields,
@@ -876,7 +876,8 @@ function scoreForMatch(match: SearchMatch): number {
 }
 
 function titleFromPath(relPath: string): string {
-  return relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
+  const basename = relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "");
+  return basename ? basename : relPath;
 }
 
 function recordByPath(

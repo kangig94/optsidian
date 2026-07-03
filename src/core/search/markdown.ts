@@ -41,7 +41,7 @@ export function parseMarkdownNote(relPath: string, content: string): ParsedMarkd
   const parsed = splitFrontmatter(content);
   const headings = extractHeadings(parsed.body);
   const firstH1 = headings.find((heading) => heading.level === 1)?.text;
-  const title = parsed.frontmatter.title || firstH1 || filenameTitle(relPath);
+  const title = parsed.frontmatter.title ? parsed.frontmatter.title : firstH1 ? firstH1 : filenameTitle(relPath);
   const inlineTags = extractInlineTags(parsed.body);
   return {
     id: relPath,

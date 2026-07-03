@@ -19,10 +19,11 @@ export function searchRequestFromArgs(args: ParsedArgs, vaultRoot: string): Sear
   const budget = parseSearchBudget(args);
   const coverage = parseSearchCoverage(args, budget !== undefined);
   const retrieval = parseSearchRetrieval(args);
+  const trimmedQuery = query?.trim();
   validateSearchRequest(query, tags, fields, retrieval);
   return {
     vault: vaultRoot,
-    query: query?.trim() || undefined,
+    query: trimmedQuery ? trimmedQuery : undefined,
     path: getValue(args, "path"),
     tags,
     fields,
@@ -60,7 +61,7 @@ function parseSearchRetrieval(args: ParsedArgs): SearchRetrievalMode | undefined
   if (raw !== undefined && raw !== "lexical" && raw !== "vector" && raw !== "hybrid") {
     throw new UsageError("retrieval must be lexical, vector, or hybrid");
   }
-  return raw as SearchRetrievalMode | undefined;
+  return raw;
 }
 
 function parseSearchCoverage(args: ParsedArgs, hasBudget: boolean): SearchCoverageMode | undefined {
@@ -68,7 +69,7 @@ function parseSearchCoverage(args: ParsedArgs, hasBudget: boolean): SearchCovera
   if (raw !== undefined && raw !== "full" && raw !== "bounded") {
     throw new UsageError("coverage must be full or bounded");
   }
-  const explicit = raw as SearchCoverageMode | undefined;
+  const explicit = raw;
   if (explicit === "full" && hasBudget) {
     throw new UsageError("search budgets require coverage=bounded");
   }

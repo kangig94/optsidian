@@ -607,7 +607,8 @@ function minimalRankDocuments(hits: readonly SearchHitEvidence[]): Array<{ docum
 }
 
 function minimalRankDocument(documentId: string, relPath: string): RankDocument {
-  const title = relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "") || relPath;
+  const basename = relPath.split(/[\\/]/u).pop()?.replace(/\.[^.]+$/u, "");
+  const title = basename ? basename : relPath;
   return {
     id: documentId,
     path: relPath,

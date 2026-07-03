@@ -241,7 +241,7 @@ async function providerSessionForPayload(payload: ModelProviderPayload, device: 
   return {
     device,
     async encode(texts, options) {
-      return Promise.all(texts.map((text) => provider.embed(text, {
+      return Promise.all(texts.map(async (text) => provider.embed(text, {
         inputKind: options?.inputKind
       })));
     },

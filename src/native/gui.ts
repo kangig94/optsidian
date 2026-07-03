@@ -155,7 +155,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function findExecutable(command: string, env: NodeJS.ProcessEnv): string | undefined {
-  const pathValue = env.PATH || "";
+  const pathValue = env.PATH ?? "";
   for (const dir of pathValue.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, command);

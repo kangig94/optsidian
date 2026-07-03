@@ -287,11 +287,11 @@ export class DaemonWorkerPool {
       this.armDeadline(item);
       if (target?.leased && target.readyState && !target.busy && !target.restarting) {
         target.leased = false;
-        this.dispatchItem(target, item as QueueItem<unknown>);
+        this.dispatchItem(target, item);
         if (!target.busy) this.drain();
         return;
       }
-      this.queue.push(item as QueueItem<unknown>);
+      this.queue.push(item);
       this.drain();
     });
   }

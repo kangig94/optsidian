@@ -170,11 +170,11 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   }
 
   async function statusOnce(owner: OwnerRecord, deadlineMs: number): Promise<StatusResult> {
-    return requestOnce(owner, "query", "Status", {}, { deadlineMs }) as Promise<StatusResult>;
+    return requestOnce(owner, "query", "Status", {}, { deadlineMs });
   }
 
   async function waitReadyOnce(owner: OwnerRecord, deadlineMs: number): Promise<StatusResult> {
-    return requestOnce(owner, "query", "WaitReady", {}, { deadlineMs }) as Promise<StatusResult>;
+    return requestOnce(owner, "query", "WaitReady", {}, { deadlineMs });
   }
 
   async function requestOnce<M extends QueryDaemonMethod>(
@@ -251,10 +251,10 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     payload: Extract<QueryDaemonRequest, { method: M }>["payload"],
     options: ClientRequestOptions = {}
   ): Promise<QueryDaemonResultByMethod[M]> {
-    return (await withDaemon(
+    return (await callWithDaemon(
       "query",
-      method as QueryDaemonMethod,
-      payload as QueryDaemonRequest["payload"],
+      method,
+      payload,
       options
     )) as QueryDaemonResultByMethod[M];
   }
@@ -264,13 +264,20 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     payload: Extract<ControlDaemonRequest, { method: M }>["payload"],
     options: ClientRequestOptions = {}
   ): Promise<ControlDaemonResultByMethod[M]> {
-    return (await withDaemon(
+    return (await callWithDaemon(
       "control",
-      method as ControlDaemonMethod,
-      payload as ControlDaemonRequest["payload"],
+      method,
+      payload,
       options
     )) as ControlDaemonResultByMethod[M];
   }
+
+  const callWithDaemon = withDaemon as (
+    capability: "query" | "control",
+    method: QueryDaemonMethod | ControlDaemonMethod,
+    payload: QueryDaemonRequest["payload"] | ControlDaemonRequest["payload"],
+    options?: ClientRequestOptions
+  ) => Promise<unknown>;
 
   return {
     retrieve(request) {
@@ -302,34 +309,34 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
         });
     },
     status(options = {}) {
-      return withDaemon("query", "Status", {}, options) as Promise<StatusResult>;
+      return withDaemon("query", "Status", {}, options);
     },
     loadVault(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("LoadVault", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexWarmResult>;
+      return controlReady("LoadVault", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     rebuild(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("Rebuild", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return controlReady("Rebuild", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     refresh(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("Refresh", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<RefreshResult>;
+      return controlReady("Refresh", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     compact(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("Compact", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<CompactResult>;
+      return controlReady("Compact", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     clear(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexMutationResult>;
+      return controlReady("Clear", withRuntimeProfile(payload, runtimeProfile), { deadlineMs, cancellationId, traceId });
     },
     prune(request = {}) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
-      return controlReady("Prune", payload, { deadlineMs, cancellationId, traceId }) as Promise<SearchIndexPruneResult>;
+      return controlReady("Prune", payload, { deadlineMs, cancellationId, traceId });
     },
     shutdown(options = {}) {
-      return withDaemon("control", "Shutdown", {}, options) as Promise<ShutdownResult>;
+      return withDaemon("control", "Shutdown", {}, options);
     }
   };
 }

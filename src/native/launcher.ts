@@ -26,7 +26,7 @@ let cachedLinuxGuiEnv: GuiEnvSnapshot | undefined;
 let hasCachedLinuxGuiEnv = false;
 
 export function obsidianBin(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OPTSIDIAN_OBSIDIAN_BIN || "obsidian";
+  return env.OPTSIDIAN_OBSIDIAN_BIN ? env.OPTSIDIAN_OBSIDIAN_BIN : "obsidian";
 }
 
 export function clearObsidianLaunchEnvCache(): void {
@@ -157,7 +157,7 @@ function shouldRetryObsidianRun(result: SpawnSyncReturns<string>, stdio: RunObsi
 }
 
 function hasLocalGuiContext(env: NodeJS.ProcessEnv): boolean {
-  return Boolean((env.DISPLAY || env.WAYLAND_DISPLAY) && (env.DBUS_SESSION_BUS_ADDRESS || env.XDG_RUNTIME_DIR));
+  return Boolean((env.DISPLAY ? env.DISPLAY : env.WAYLAND_DISPLAY) && (env.DBUS_SESSION_BUS_ADDRESS ? env.DBUS_SESSION_BUS_ADDRESS : env.XDG_RUNTIME_DIR));
 }
 
 function collectParentChainGuiEnv(
@@ -210,7 +210,7 @@ function collectObsidianProcessGuiEnv(
 function finalizeGuiEnvSnapshot(recovered: GuiEnvSnapshot, baseEnv: NodeJS.ProcessEnv): GuiEnvSnapshot {
   const finalized = { ...recovered };
   if (!baseEnv.DBUS_SESSION_BUS_ADDRESS && !finalized.DBUS_SESSION_BUS_ADDRESS) {
-    const runtimeDir = finalized.XDG_RUNTIME_DIR || baseEnv.XDG_RUNTIME_DIR;
+    const runtimeDir = finalized.XDG_RUNTIME_DIR ? finalized.XDG_RUNTIME_DIR : baseEnv.XDG_RUNTIME_DIR;
     if (runtimeDir) {
       finalized.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(runtimeDir, "bus")}`;
     }

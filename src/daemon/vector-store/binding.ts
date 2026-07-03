@@ -44,7 +44,11 @@ export function loadCoralNeedleBinding(): CoralNeedleBinding {
       lastError = error;
     }
   }
-  const message = lastError instanceof Error ? lastError.message : lastError === undefined ? "coral-needle binary was not found" : String(lastError);
+  const message = lastError instanceof Error
+    ? lastError.message
+    : lastError === undefined
+      ? "coral-needle binary was not found"
+      : "coral-needle binary failed to load";
   cachedStatus = { loaded: false, attempted, error: message };
   throw Object.assign(new Error(`coral-needle native binding is not available: ${message}`), {
     code: "CORAL_NEEDLE_UNAVAILABLE",

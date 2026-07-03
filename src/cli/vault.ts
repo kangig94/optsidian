@@ -25,7 +25,7 @@ export function vaultPathArg(args: ParsedArgs): string | undefined {
 export function resolveVaultRoot(args: ParsedArgs, env: NodeJS.ProcessEnv = process.env): string {
   const vault = vaultArg(args);
   const explicitVaultPath = vaultPathArg(args);
-  const envVaultPath = env.OPTSIDIAN_VAULT_PATH || undefined;
+  const envVaultPath = env.OPTSIDIAN_VAULT_PATH ? env.OPTSIDIAN_VAULT_PATH : undefined;
   const vaultPath = explicitVaultPath ?? envVaultPath;
   if (vaultPath && vault) {
     throw new UsageError("Use either vault-path=<path> or vault=<name>, not both");

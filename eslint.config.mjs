@@ -8,17 +8,23 @@ export default tseslint.config(
   },
 
   js.configs.recommended,
-  ...tseslint.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
 
   {
     files: ["src/**/*.ts"],
     languageOptions: {
       parserOptions: {
-        sourceType: "module"
+        projectService: true,
+        sourceType: "module",
+        tsconfigRootDir: import.meta.dirname
       }
     },
     rules: {
       "no-undef": "off",
+      "no-console": "error",
+      eqeqeq: ["error", "always"],
+      "prefer-const": "error",
+      "no-var": "error",
       "no-restricted-syntax": [
         "error",
         {
@@ -42,7 +48,24 @@ export default tseslint.config(
           destructuredArrayIgnorePattern: "^_",
           ignoreRestSiblings: true
         }
-      ]
+      ],
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/prefer-nullish-coalescing": [
+        "error",
+        {
+          ignoreTernaryTests: true
+        }
+      ],
+      "@typescript-eslint/no-non-null-assertion": "error",
+      "@typescript-eslint/no-redundant-type-constituents": "off",
+      "@typescript-eslint/restrict-template-expressions": "off",
+      "@typescript-eslint/unbound-method": "off",
+      "@typescript-eslint/require-await": "off"
     }
   },
 

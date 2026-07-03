@@ -121,7 +121,8 @@ export function unsetConfigValue(cwd: string, key: string, env: NodeJS.ProcessEn
 export function resolveSettingsPath(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
   const override = env[SETTINGS_PATH_ENV]?.trim();
   if (override) return path.resolve(cwd, override);
-  const configHome = env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
+  const configured = env.XDG_CONFIG_HOME?.trim();
+  const configHome = configured ? configured : path.join(os.homedir(), ".config");
   return path.join(configHome, "optsidian", SETTINGS_FILE);
 }
 
