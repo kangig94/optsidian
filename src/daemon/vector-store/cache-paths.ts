@@ -11,12 +11,12 @@ export type VectorStoreCachePaths = {
   cacheRootDir: string;
   vectorsRootDir: string;
   storesDir: string;
-  profileDir: string;
   vaultDir: string;
   rootDir: string;
   storeStatePath: string;
   generationsDir: string;
   stagingDir: string;
+  reservationsDir: string;
   activeDir: string;
   tmpDir: string;
   freshnessStatePath: string;
@@ -25,35 +25,33 @@ export type VectorStoreCachePaths = {
 
 export function vectorStoreCachePaths(input: {
   vaultRoot: string;
-  profileHash: string;
+  profileHash?: string;
   embeddingSetId: string;
   env?: NodeJS.ProcessEnv;
 }): VectorStoreCachePaths {
   const env = input.env ?? process.env;
   const root = vaultRealpath(input.vaultRoot);
   const vaultStateHash = sha256(root).slice(0, 16);
-  const profileHash = safeStoreFileName(input.profileHash);
   const embeddingSetId = safeStoreFileName(input.embeddingSetId);
   const cacheRootDir = optsidianCacheRoot(env);
   const vectorsRootDir = path.join(cacheRootDir, "vectors");
   const storesDir = path.join(vectorsRootDir, "stores");
-  const profileDir = path.join(storesDir, profileHash);
-  const vaultDir = path.join(profileDir, vaultStateHash);
+  const vaultDir = path.join(storesDir, vaultStateHash);
   const rootDir = path.join(vaultDir, embeddingSetId);
   const activeDir = path.join(rootDir, "active");
-  const key: VectorStoreKey = { profileHash, vaultStateHash, embeddingSetId };
+  const key: VectorStoreKey = { vaultStateHash, embeddingSetId };
   return {
     vaultRoot: root,
     key,
     cacheRootDir,
     vectorsRootDir,
     storesDir,
-    profileDir,
     vaultDir,
     rootDir,
     storeStatePath: path.join(rootDir, "store.json"),
     generationsDir: path.join(rootDir, "generations"),
     stagingDir: path.join(rootDir, "staging"),
+    reservationsDir: path.join(rootDir, "reservations"),
     activeDir,
     tmpDir: path.join(rootDir, "tmp"),
     freshnessStatePath: path.join(vaultDir, "retrieval-freshness.json"),
@@ -61,12 +59,12 @@ export function vectorStoreCachePaths(input: {
   };
 }
 
-export function vectorGenerationDir(paths: VectorStoreCachePaths, generationId: string): string {
-  return path.join(paths.generationsDir, safeStoreFileName(generationId));
+export function vectorGenerationDir(paths: VectorStoreCachePaths, manifestHash: string): string {
+  return path.join(paths.generationsDir, safeStoreFileName(manifestHash));
 }
 
-export function vectorGenerationDbPath(paths: VectorStoreCachePaths, generationId: string): string {
-  return path.join(vectorGenerationDir(paths, generationId), "vectors.duckdb");
+export function vectorGenerationDbPath(paths: VectorStoreCachePaths, manifestHash: string): string {
+  return path.join(vectorGenerationDir(paths, manifestHash), "vectors.duckdb");
 }
 
 export function vectorStagingDir(paths: VectorStoreCachePaths, generationId: string): string {

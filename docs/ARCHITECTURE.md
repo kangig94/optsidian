@@ -4,7 +4,7 @@
 `optsidian` (CLI) and `optsidian-mcp` (an MCP server) — that sit on a single shell-independent
 core. The CLI and MCP adapters translate their respective transports into raw-string calls into
 `src/core/*`, which returns structured results. Search and similarity are served through one
-resident search daemon using query/control RPC sockets, immutable lexical/retrieval snapshots,
+resident search daemon using a single protocol-v4 RPC socket, immutable lexical/retrieval snapshots,
 Kiwi Korean morphology worker pools, a process-scoped embed scheduler/model lifecycle, and one
 process-scoped vector generation manager for dense retrieval.
 
@@ -28,7 +28,7 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 
 | Layer | Modules | Role |
 |-------|---------|------|
-| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, retrieval, indexing, worker pools, the process-scoped embed scheduler/vector manager, query/control sockets, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
+| L3 — adapters / daemon | `src/cli.ts`, `src/cli/*`, `src/mcp.ts`, `src/mcp/*`, `src/daemon/*` | CLI and MCP translate their transports into core calls or daemon RPC calls; the search daemon owns snapshot serving, retrieval, indexing, worker pools, the process-scoped embed scheduler/vector manager, the single RPC socket, and status. CLI adapters also apply the native-first policy and delegate to the native Obsidian CLI. |
 | L2 — core | `src/core/*` including `search/*` and `kiwi/*` | Shell-independent command layer shared by both adapters: raw-string in, structured out. Editing, frontmatter, search/indexing, Korean analysis. |
 | L1 — platform | `src/native/*`, `src/net/github.ts`, `src/errors.ts`, `src/version.ts` | OS- and service-facing primitives: native Obsidian invocation + GUI launch, GitHub HTTP, error/exit-code types, version. `src/update/installer.ts` composes net + native for self-update. |
 
@@ -53,6 +53,7 @@ L1 platform   native/* (Obsidian CLI + GUI)   net/github.ts   errors.ts / versio
 | `src/core/*` | Pure and shared. No `process.*` I/O, no native delegation. New logic lives here so both adapters get it; adapters stay thin. |
 | `src/core/search/*` | Changing the analyzer, token channels, indexed fields, or ranking in a way that affects snapshot contents requires bumping the relevant search identity/schema version (see [Search](#search)). Snapshot indexing, query analysis, positional retrieval, and ranking must stay consistent. |
 | `src/core/kiwi/*` | Standalone. Must not import `search/*`. |
+| `src/core/lifecycle/*` | L2 lifecycle primitive substrate (`ProcessToken`, `ExclusiveClaim`, `ConditionalCommit`/`Attempt`, `LevelReconciler`, `FrontierJournal`, `installArtifact`). Pure and shared; must NOT import `src/daemon/*`, `src/cli/*`, or `src/mcp/*` (enforced by `test/import-boundaries.test.mjs`). |
 | `src/daemon/*` | L3 search-daemon adapter. Owns socket transport, snapshot-store MVCC/GC, worker pools, vault registry, request scheduler, and `EmbedScheduler`. Bump the RPC protocol version on breaking wire changes. No upward dependency on `src/cli/*` or `src/mcp/*`. |
 | `src/cli/policy.ts` | The native-first policy table. Classify every new command (delegate / optimize / extend) and keep the table, its regression test, and the docs in sync. |
 | `src/mcp/tools.ts` | MCP tool registration. zod input schemas and the `destructiveHint` / `openWorldHint` annotations must match real behavior. |
@@ -92,21 +93,23 @@ native-delegated Optsidian commands. Keep this list synchronized with `MCP_TOOL_
 ## Daemon & Lifecycle State
 
 There is exactly **one** search daemon process. It is started by the shared daemon client, owns a
-nonce-authenticated query socket and control socket, and serves multiple vaults. The daemon is
-resident until the no-request idle timer expires. The daemon constructs one process-scoped
-`EmbedScheduler`; that scheduler owns the single embedding worker/model-session lane and one
-`VectorGenerationManager`, while profile runtimes hold leases and own only profile-scoped search and
-analyzer resources. Embedding model sessions have their own idle unload lifecycle inside workers, so
+single bind-backed protocol-v4 RPC socket, and serves multiple vaults. The bind is the tenancy commit:
+the daemon writes its record only after `listen()` succeeds, with a monotonic `epoch` and random
+`incarnationId`. The daemon is resident until the no-request idle timer expires. The daemon constructs
+one process-scoped `EmbedScheduler`; that scheduler owns the single embedding worker/model-session lane
+and one `VectorGenerationManager`, while profile runtimes hold leases and own only profile-scoped search
+and analyzer resources. Embedding model sessions have their own idle unload lifecycle inside workers, so
 zero-footprint-at-rest applies to loaded model sessions rather than to the daemon process. Background
-embed/watch/scheduler activity does not reset the daemon idle timer; idle expiry drains through daemon
-close, which drains the scheduler before closing model/vector owners.
+embed/watch/scheduler activity does not reset the daemon idle timer; idle expiry runs
+`drain("draining")`, which relinquishes the socket and owner record before closing profile,
+scheduler, model, and vector owners.
 
 For the full runtime lifecycle — daemon birth/death, model session load/unload, per-mode request
 flow, and cache/index build/publish/GC — see [`lifecycle.md`](lifecycle.md).
 
 | Process | Hidden verb | Module | Transport & lifecycle |
 |---------|-------------|--------|-----------------------|
-| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; separate query/control Unix domain sockets under the runtime search-daemon directory. Query RPC exposes `Status`, `Search`, and `Retrieve`; CLI `search` uses `Search` for default lexical search and switches to `Retrieve` for vector/hybrid retrieval, while `explain` uses `Retrieve`. Control RPC exposes `Status`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, and `Shutdown`. The daemon owns snapshot MVCC, retrieval generations, worker pools, the process embed scheduler/vector manager, query caches, and loaded vault state. |
+| Search daemon | `__search-daemon` | `src/daemon/server.ts` | Detached `node <bin> __search-daemon`; one Unix domain socket under the runtime search-daemon directory. The dispatcher exposes method-layer query capabilities (`Status`, `WaitReady`, `Search`, `Retrieve`) and control capabilities (`Status`, `WaitReady`, `LoadVault`, `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, `Shutdown`). CLI `search` uses `Search` for default lexical search and switches to `Retrieve` for vector/hybrid retrieval, while `explain` uses `Retrieve`. Mutating/work methods carry the current `incarnation`; stale incarnations are retryable lifecycle errors. The daemon owns snapshot MVCC, retrieval generations, worker pools, the process embed scheduler/vector manager, query caches, and loaded vault state. |
 
 **Install / update lifecycle.** `scripts/install.sh` installs a release and writes the manifest
 `~/.cache/optsidian/install.json`. `optsidian update` (`src/update/installer.ts`) fetches a release,
@@ -126,7 +129,7 @@ The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
   build and publish new snapshots atomically, and active requests keep their pinned snapshot until
   release. Query release is refcount-only; file deletion and mark-sweep GC are control/index
   maintenance operations.
-- **Search and Retrieve are separate query paths.** Query RPC accepts `Search` for default lexical
+- **Search and Retrieve are separate query paths.** The daemon RPC accepts `Search` for default lexical
   search, and `Retrieve` for `origin=text`, `origin=note`, `origin=pair`, `origin=global`,
   vector/hybrid search, similarity, and explain. Retrieve pins the active lexical corpus first, then
   optionally attaches a committed dense generation. For `origin=text` flows, including text-derived

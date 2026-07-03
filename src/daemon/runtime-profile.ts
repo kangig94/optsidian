@@ -5,6 +5,7 @@ import { readOptsidianSettings, searchNgramEnabled, type OptsidianSettings, type
 import type { IndexAffectingSearchSettings } from "../core/search/index-settings.js";
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from "./query-analysis-cache-defaults.js";
 import { defaultSearchExecutionWorkerCount } from "./worker-pool.js";
+import { INDEX_BUILD_VERSION } from "./search-store/builder.js";
 
 export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
 
@@ -178,6 +179,15 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
 
 export function searchRuntimeProfileHash(profile: SearchRuntimeProfile): string {
   return sha256(canonicalJson(normalizeSearchRuntimeProfile(profile)));
+}
+
+export function lexicalIdentityHashForSearchRuntimeProfile(profile: SearchRuntimeProfile): string {
+  const normalized = normalizeSearchRuntimeProfile(profile);
+  return sha256(canonicalJson({
+    buildVersion: INDEX_BUILD_VERSION,
+    analyzer: normalized.analyzer,
+    index: normalized.index
+  }));
 }
 
 export function envForSearchRuntimeProfile(profile: SearchRuntimeProfile, baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

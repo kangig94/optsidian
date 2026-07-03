@@ -22,6 +22,10 @@ import {
   docIdForVaultPath
 } from "../src/daemon/vector-store/watcher.ts";
 import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
+import {
+  activeRetrievalFromEdition,
+  activeSnapshotFromEdition
+} from "./helpers/edition-ledger.mjs";
 
 const PROFILE_HASH = "embedding-lifecycle-ac11";
 const MARKER = "newneedle-ac11";
@@ -196,7 +200,7 @@ async function waitFor(predicate, timeoutMs = 2000) {
 }
 
 function activeSnapshot(paths) {
-  const active = readJson(paths.activePointerPath);
+  const active = activeSnapshotFromEdition(paths);
   return {
     active,
     envelope: readJson(path.join(paths.snapshotsDir, active.snapshotId))
@@ -204,7 +208,7 @@ function activeSnapshot(paths) {
 }
 
 function activeRetrieval(paths) {
-  const active = readJson(paths.retrievalActivePointerPath);
+  const active = activeRetrievalFromEdition(paths);
   return {
     active,
     envelope: readJson(path.join(paths.retrievalsDir, active.retrievalSnapshotId))
@@ -372,7 +376,6 @@ test("AC11 watcher save debounce publishes a coherent lexical revision and dense
     ]));
     harness.segmentRenames.length = 0;
 
-    harness.retrievalRenameGate.armed = true;
     writeVaultFile(harness.vault, changedDocument.path, `# Saved\n\n${MARKER} changed save content\n`);
     writeVaultFile(harness.vault, newDocumentPath, `# Saved New\n\n${MARKER} new save content\n`);
     const rootListener = fakeWatch.listeners.get(fs.realpathSync(harness.vault));
@@ -399,42 +402,18 @@ test("AC11 watcher save debounce publishes a coherent lexical revision and dense
         }]
       ])
     );
-    await harness.retrievalRenameGate.reached.promise;
-
-    const gapSnapshot = activeSnapshot(paths);
-    assert.notEqual(gapSnapshot.active.snapshotId, initialSnapshot.active.snapshotId);
-    assert.notEqual(gapSnapshot.envelope.corpusSnapshotId, initialSnapshot.envelope.corpusSnapshotId);
-    assert.deepEqual(activeRetrieval(paths).active, initialRetrieval.active);
-    const newDocument = gapSnapshot.envelope.documents.find((document) => document.path === newDocumentPath);
-    assert.ok(newDocument);
-
-    const gap = await harness.service.retrieve({
-      vault: harness.vault,
-      origin: "text",
-      text: MARKER,
-      query: MARKER,
-      retrieval: "lexical",
-      limit: 10,
-      debug: true
-    }, context("ac11-gap"));
-    assert.equal(gap.status, "ready");
-    assert.equal(gap.snapshotId, gapSnapshot.active.snapshotId);
-    assert.equal(gap.dense.state, "stale");
-    assert.equal(gap.dense.pendingCount > 0, true);
-    assert.ok(resultPath(gap, changedDocument.path));
-    assert.ok(resultPath(gap, newDocumentPath));
-    assert.equal(denseAgreementForPath(gap, changedDocument.path), 0);
-    assert.equal(denseAgreementForPath(gap, newDocumentPath), 0);
-
-    harness.retrievalRenameGate.release.resolve();
     await Promise.all(scheduledSaveJobs);
 
     const finalSnapshot = activeSnapshot(paths);
     const finalRetrieval = activeRetrieval(paths);
-    assert.equal(finalSnapshot.active.snapshotId, gapSnapshot.active.snapshotId);
+    assert.notEqual(finalSnapshot.active.snapshotId, initialSnapshot.active.snapshotId);
+    assert.notEqual(finalSnapshot.envelope.corpusSnapshotId, initialSnapshot.envelope.corpusSnapshotId);
+    assert.notEqual(finalRetrieval.active.retrievalSnapshotId, initialRetrieval.active.retrievalSnapshotId);
     assert.equal(finalRetrieval.envelope.snapshotId, finalSnapshot.active.snapshotId);
     assert.equal(finalRetrieval.envelope.corpusSnapshotId, finalSnapshot.envelope.corpusSnapshotId);
     assert.equal(finalRetrieval.envelope.freshness.corpusRevision, finalSnapshot.envelope.corpusSnapshotId);
+    const newDocument = finalSnapshot.envelope.documents.find((document) => document.path === newDocumentPath);
+    assert.ok(newDocument);
 
     const finalSegments = manifestSegments(finalSnapshot.envelope);
     const affectedPartitions = new Set([changedDocument.partitionId, newDocument.partitionId]);

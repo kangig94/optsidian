@@ -8,7 +8,7 @@ paths:
 
 Search is a purpose-built **positional** inverted index plus Kiwi Korean morphology, served by one
 long-running `search-daemon`. Its iron law is **deterministic identity**: results are a pure function
-of `(snapshot id, query, filters, limit, ranking version, analyzer identity)`, and a stale or
+of `(snapshot id, query, filters, limit, ranking version, ranking tuning hash, analyzer identity)`, and a stale or
 non-canonical index must be detectable. Latency may vary; results may not.
 
 ## Principles

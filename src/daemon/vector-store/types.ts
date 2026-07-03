@@ -2,7 +2,6 @@ import type { EmbeddingSetId } from "../../core/search/contracts.js";
 import type { EmbeddingRecipeFreshnessId, EmbeddingSpaceId } from "../../core/search/dense/index.js";
 
 export type VectorStoreKey = {
-  profileHash: string;
   vaultStateHash: string;
   embeddingSetId: EmbeddingSetId;
 };
@@ -100,5 +99,5 @@ export type VectorSearchNotReadyResult = {
 export type VectorSearchResult = VectorSearchReadyResult | VectorSearchNotReadyResult;
 
 export function vectorStoreKeyString(key: VectorStoreKey): string {
-  return `${key.profileHash}:${key.vaultStateHash}:${key.embeddingSetId}`;
+  return `${key.vaultStateHash}:${key.embeddingSetId}`;
 }

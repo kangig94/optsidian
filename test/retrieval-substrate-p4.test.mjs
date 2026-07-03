@@ -186,6 +186,10 @@ function makeVectorPaths(vault, key = makeKey()) {
   });
 }
 
+function vectorHandleKey(paths, generationId) {
+  return `${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:${generationId}`;
+}
+
 test("AC7 Test A P4 active built vector spec serves search while staging buildIndex is held", async () => {
   const vault = tempRoot();
   fs.writeFileSync(path.join(vault, "A.md"), "alpha\n");
@@ -275,7 +279,7 @@ test("AC1 post-restart pinReadableGeneration lazy-opens committed on-disk active
   assert.equal(result.status, "ready");
   const hits = await result.lease.searchVector([1, 0, 0], 2);
   assert.deepEqual(hits.map((entry) => entry.entryId), ["near", "far"]);
-  const key = `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:gen-restart`;
+  const key = vectorHandleKey(paths, "gen-restart");
   assert.equal(restartedPool.statsForTests().refCounts[key], 1);
   result.lease.release();
   assert.equal(restartedPool.statsForTests().refCounts[key], 0);
@@ -325,7 +329,7 @@ test("AC1 concurrent post-restart pinReadableGeneration lazy-open is single-flig
   assert.equal(firstResult.status, "ready");
   assert.equal(secondResult.status, "ready");
   assert.equal(queryCreates, 1);
-  const key = `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:gen-concurrent`;
+  const key = vectorHandleKey(paths, "gen-concurrent");
   assert.equal(restartedPool.statsForTests().refCounts[key], 2);
   firstResult.lease.release();
   assert.equal(restartedPool.statsForTests().refCounts[key], 1);
@@ -398,7 +402,7 @@ test("AC7 Test D P4 generation swap drains in-flight readers before closing old 
   assert.deepEqual(result.results.map((entry) => entry.entryId), ["old"]);
 
   await waitFor(() => fake.calls.close.some((call) => call.generationId === "gen-n" && call.role === "query"));
-  assert.equal(pool.statsForTests().refCounts[`${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}:gen-n`], undefined);
+  assert.equal(pool.statsForTests().refCounts[vectorHandleKey(paths, "gen-n")], undefined);
   await pool.close();
 });
 
@@ -472,6 +476,28 @@ test("AC10 P4 model session lifecycle handles device pick idle unload promotion 
       idleMs: 1000
     });
     await lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "document-embed" });
+    assert.deepEqual(calls, ["cpu"]);
+    assert.equal(sessions[0].closed, false);
+    assert.equal(lifecycle.stats().device, "cpu");
+    await lifecycle.unload();
+  }
+
+  {
+    const calls = [];
+    const sessions = [];
+    const probes = [{ freeBytes: 0 }, { freeBytes: 200 }];
+    const lifecycle = new ModelSessionLifecycle({
+      requiredVramBytes: required,
+      probeVram: () => probes.shift() ?? { freeBytes: 200 },
+      loadSession: async (device) => {
+        calls.push(device);
+        const session = fakeSession(device);
+        sessions.push(session);
+        return session;
+      },
+      idleMs: 1000
+    });
+    await lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "query-text" });
     assert.deepEqual(calls, ["cpu", "gpu"]);
     assert.equal(sessions[0].closed, true);
     assert.equal(lifecycle.stats().device, "gpu");
@@ -669,6 +695,75 @@ test("AC11 P4 freshness persists dirty/building/fresh states across startup reco
   assert.deepEqual(fs.readdirSync(lexicalTmp), []);
   assert.deepEqual(fs.readdirSync(linkTmp), []);
   assert.equal(restartedBuilding.read().published.corpusRevision, "rev-2");
+  await pool.close();
+});
+
+test("P4 pickDevice defaults to CPU when required VRAM is unconfigured (0) and never probes", async () => {
+  let probed = false;
+  const lifecycle = new ModelSessionLifecycle({
+    requiredVramBytes: 0,
+    probeVram: () => {
+      probed = true;
+      return { freeBytes: 1_000_000_000 };
+    },
+    loadSession: async (device) => fakeSession(device),
+    idleMs: 1000
+  });
+  await lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "query-text" });
+  assert.equal(lifecycle.stats().device, "cpu");
+  assert.equal(probed, false, "probeVram must not be consulted when required VRAM is unconfigured");
+  await lifecycle.unload();
+});
+
+test("P4 a failed encode still re-arms idle unload so the session is not pinned resident forever", async () => {
+  const sessions = [];
+  const lifecycle = new ModelSessionLifecycle({
+    requiredVramBytes: 100,
+    probeVram: () => ({ freeBytes: 0 }),
+    loadSession: async (device) => {
+      const session = fakeSession(device);
+      session.encode = async () => {
+        throw new Error("encode boom");
+      };
+      sessions.push(session);
+      return session;
+    },
+    idleMs: 10
+  });
+  await assert.rejects(
+    lifecycle.encode(["q"], { deadline: Date.now() + 1000, origin: "query-text" }),
+    /encode boom/
+  );
+  assert.equal(lifecycle.stats().loaded, true, "session stays loaded immediately after a failed encode");
+  await delay(30);
+  assert.equal(lifecycle.stats().loaded, false, "idle unload must fire even though the encode failed");
+  assert.equal(sessions[0].closed, true);
+});
+
+test("P4 a retired generation whose close() rejects is still dropped from the pool", async () => {
+  const vault = tempRoot();
+  const paths = makeVectorPaths(vault);
+  const spec = makeSpec();
+  const closeAttempts = [];
+  const fake = createFakeCoralFactory({
+    onCreate: (instance) => {
+      if (instance.role === "query" && instance.generationId === "gen-a") {
+        instance.close = async () => {
+          instance.closed = true;
+          closeAttempts.push(instance.generationId);
+          throw new Error("close boom");
+        };
+      }
+    }
+  });
+  const pool = new VectorGenerationPool({ factory: fake.factory });
+  await publishGeneration(pool, paths, spec, "gen-a", [makeChunk("a", [1, 0, 0], spec)]);
+  await publishGeneration(pool, paths, spec, "gen-b", [makeChunk("b", [0, 1, 0], spec)]);
+
+  const keyPrefix = `${paths.key.vaultStateHash}:${paths.key.embeddingSetId}`;
+  await waitFor(() => pool.statsForTests().refCounts[`${keyPrefix}:gen-a`] === undefined);
+  assert.ok(closeAttempts.includes("gen-a"), "gen-a query close was attempted and rejected");
+  assert.notEqual(pool.statsForTests().refCounts[`${keyPrefix}:gen-b`], undefined, "gen-b remains tracked");
   await pool.close();
 });
 

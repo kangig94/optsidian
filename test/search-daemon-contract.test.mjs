@@ -8,6 +8,11 @@ import test from "node:test";
 import { unpack } from "msgpackr";
 import { SEARCH_DAEMON_PROTOCOL_VERSION as CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION } from "../src/daemon/protocol.ts";
 import { createDeterministicEmbeddingSetBuilder, DeterministicHashProvider } from "./helpers/deterministic-embedding.mjs";
+import {
+  activeRetrievalFromEdition,
+  activeSnapshotFromEdition,
+  currentEdition
+} from "./helpers/edition-ledger.mjs";
 
 const repoRoot = process.cwd();
 const AC17_PUBLICATION_STEPS = [
@@ -28,14 +33,12 @@ const AC17_PUBLICATION_STEPS = [
 ];
 
 const AC18_OWNER_FIELDS = [
-  "pid",
-  "uid",
-  "runtimeHash",
+  "slot",
+  "epoch",
+  "incarnationId",
   "binaryVersion",
-  "protocolVersion",
-  "nonce",
-  "querySocketPath",
-  "controlSocketPath",
+  "pid",
+  "socketPath",
   "startedAt"
 ];
 
@@ -259,8 +262,42 @@ function statusRequest(requestId) {
     requestId,
     method: "Status",
     deadline: Date.now() + 1000,
-    payload: { nonce: "test" }
+    payload: {}
   };
+}
+
+function statusResult(owner, overrides = {}) {
+  return {
+    ok: true,
+    ready: true,
+    phase: "ready",
+    protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
+    binaryVersion: owner.binaryVersion,
+    epoch: owner.epoch,
+    incarnationId: owner.incarnationId,
+    pid: owner.pid,
+    socketPath: owner.socketPath,
+    startedAt: owner.startedAt,
+    owner,
+    metrics: { requests: 0, failures: 0, activeRequests: 0, startedAt: owner.startedAt },
+    pools: {},
+    searchStore: {},
+    profiles: {},
+    vaults: [],
+    ...overrides
+  };
+}
+
+function publishFakeOwner(registry, record, pid = record.pid || process.pid) {
+  const current = registry.readOwner();
+  const owner = {
+    ...record,
+    epoch: (current?.epoch ?? 0) + 1,
+    pid,
+    startedAt: new Date().toISOString()
+  };
+  registry.writeOwner(owner);
+  return owner;
 }
 
 async function assertBadFrameThenAlive({ socketPath, frame, encodeFrame, label }) {
@@ -1623,7 +1660,7 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
           protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
           requestId: "retrieve-primitive-payload",
           method: "Retrieve",
-          nonce: owner.nonce,
+          incarnation: owner.incarnationId,
           deadline: Date.now() + 1000,
           payload: 1
         }
@@ -1631,11 +1668,11 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
     ];
 
     for (const { label, request } of malformed) {
-      const rejected = await requestRawRpc(owner.querySocketPath, encodeFrame, request);
+      const rejected = await requestRawRpc(owner.socketPath, encodeFrame, request);
       assert.equal(rejected.ok, false, label);
       assert.equal(rejected.error.code, "BAD_REQUEST", label);
 
-      const alive = await requestRawRpc(owner.querySocketPath, encodeFrame, statusRequest(`alive-${label}`));
+      const alive = await requestRawRpc(owner.socketPath, encodeFrame, statusRequest(`alive-${label}`));
       assert.equal(alive.ok, true, label);
       assert.equal(alive.result.ready, true, label);
     }
@@ -1644,7 +1681,7 @@ test("AC3 daemon rejects malformed deadlines and payload shapes without dying", 
   }
 });
 
-test("AC10 owner registry treats a 20 second control lock age as the stale boundary", async () => {
+test("AC10 owner registry has no client-side control lock or time-stale reclaim path", async () => {
   const { createOwnerRegistry } = await futureImport("src/daemon/owner-registry.ts");
   const desired = {
     uid: process.getuid?.() ?? 0,
@@ -1652,25 +1689,9 @@ test("AC10 owner registry treats a 20 second control lock age as the stale bound
     binaryVersion: "binary-lock",
     protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION
   };
-  const fresh = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-fresh-"), desired });
-  fs.mkdirSync(fresh.lockPath, { recursive: true });
-  const nineteenSecondsAgo = new Date(Date.now() - 19_000);
-  fs.utimesSync(fresh.lockPath, nineteenSecondsAgo, nineteenSecondsAgo);
-
-  await assert.rejects(
-    () => fresh.withControlLock(1, async () => "unreachable"),
-    (error) => {
-      assert.equal(error.code, "SEARCH_DAEMON_UNAVAILABLE");
-      return true;
-    }
-  );
-  assert.equal(fs.existsSync(fresh.lockPath), true);
-
-  const stale = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-stale-"), desired });
-  fs.mkdirSync(stale.lockPath, { recursive: true });
-  const twentyOneSecondsAgo = new Date(Date.now() - 21_000);
-  fs.utimesSync(stale.lockPath, twentyOneSecondsAgo, twentyOneSecondsAgo);
-  assert.equal(await stale.withControlLock(100, async () => "acquired"), "acquired");
+  const registry = createOwnerRegistry({ runtimeDir: tempRoot("optsidian-owner-v4-"), desired });
+  assert.equal("lockPath" in registry, false);
+  assert.equal("withControlLock" in registry, false);
 });
 
 test("AC8 snapshot tmp sweep removes only files aged at least five minutes", async () => {
@@ -1719,17 +1740,19 @@ test("search store persists cache directories and snapshot files privately", asy
   assertPrivateMode(paths.segmentsDir, 0o700);
   assertPrivateMode(paths.snapshotsDir, 0o700);
   assertPrivateMode(paths.activeDir, 0o700);
+  assertPrivateMode(paths.ledgersDir, 0o700);
   assertPrivateMode(paths.tmpDir, 0o700);
-  assertPrivateMode(paths.activePointerPath, 0o600);
 
   const storeState = JSON.parse(fs.readFileSync(paths.storeStatePath, "utf8"));
   assert.equal(storeState.schemaVersion, 1);
-  assert.equal(storeState.storeId, paths.vaultStateHash);
+  assert.equal(storeState.storeId, paths.storeId);
   assert.equal(storeState.kind, "search-store");
   assert.equal(typeof storeState.lastUsedAtMs, "number");
   assert.equal(typeof storeState.lastIndexedAtMs, "number");
 
-  const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const edition = currentEdition(paths);
+  const active = activeSnapshotFromEdition(paths);
+  assertPrivateMode(path.join(paths.ledgersDir, edition.identity.embeddingSpaceId, "publications", String(edition.editionSeq)), 0o600);
   const manifestPath = path.join(paths.snapshotsDir, active.snapshotId);
   const envelope = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assertPrivateMode(manifestPath, 0o600);
@@ -1760,13 +1783,13 @@ test("search cache catalog prunes stores by last-used time and skips loaded stor
 
   const dryRun = await store.prune({ unusedDays: 30, dryRun: true, nowMs });
   assert.equal(dryRun.dryRun, true);
-  assert.deepEqual(dryRun.removedStores.map((entry) => entry.storeId), [oldPaths.vaultStateHash]);
-  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === loadedPaths.vaultStateHash && entry.reason === "protected"), true);
+  assert.deepEqual(dryRun.removedStores.map((entry) => entry.storeId), [oldPaths.storeId]);
+  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === loadedPaths.storeId && entry.reason === "protected"), true);
   assert.equal(fs.existsSync(oldPaths.rootDir), true);
 
   const pruned = await store.prune({ unusedDays: 30, nowMs });
   assert.equal(pruned.dryRun, false);
-  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [oldPaths.vaultStateHash]);
+  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [oldPaths.storeId]);
   assert.equal(fs.existsSync(oldPaths.rootDir), false);
   assert.equal(fs.existsSync(loadedPaths.rootDir), true);
   store.release(loadedPin);
@@ -1813,7 +1836,7 @@ test("search cache prune skips stores with a lifecycle mutation in progress", as
 
   const dryRun = await store.prune({ unusedDays: 30, dryRun: true, nowMs });
   assert.deepEqual(dryRun.removedStores, []);
-  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === paths.vaultStateHash && entry.reason === "protected"), true);
+  assert.equal(dryRun.skippedStores.some((entry) => entry.storeId === paths.storeId && entry.reason === "protected"), true);
   assert.equal(fs.existsSync(paths.rootDir), true);
 
   releaseBuild();
@@ -1836,11 +1859,10 @@ test("search cache prune falls back to mtimes when metadata JSON is corrupt", as
   const oldDate = new Date(oldMs);
   fs.writeFileSync(paths.storeStatePath, "{", { mode: 0o600 });
   fs.writeFileSync(path.join(paths.searchRootDir, "catalog.json"), "{", { mode: 0o600 });
-  fs.utimesSync(paths.activePointerPath, oldDate, oldDate);
   fs.utimesSync(paths.rootDir, oldDate, oldDate);
 
   const pruned = await store.prune({ unusedDays: 30, nowMs });
-  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [paths.vaultStateHash]);
+  assert.deepEqual(pruned.removedStores.map((entry) => entry.storeId), [paths.storeId]);
   assert.equal(fs.existsSync(paths.rootDir), false);
 });
 
@@ -1857,7 +1879,7 @@ test("AC4 snapshot envelope stores runtime documents outside diagnostics", async
   assert.equal(first.vaults[0].status, "ready");
 
   const paths = searchStoreCachePaths(vault, env);
-  const active = JSON.parse(fs.readFileSync(paths.activePointerPath, "utf8"));
+  const active = activeSnapshotFromEdition(paths);
   const manifestPath = path.join(paths.snapshotsDir, active.snapshotId);
   const envelope = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(Array.isArray(envelope.documents), true);
@@ -1930,7 +1952,7 @@ test("AC7 snapshot GC keeps active snapshot segment files after count-cap evicti
 
   await store.loadVault(vaultA);
   const pathsA = searchStoreCachePaths(vaultA, env);
-  const activeA = JSON.parse(fs.readFileSync(pathsA.activePointerPath, "utf8"));
+  const activeA = activeSnapshotFromEdition(pathsA);
   const envelopeA = JSON.parse(fs.readFileSync(path.join(pathsA.snapshotsDir, activeA.snapshotId), "utf8"));
   const segmentPathsA = envelopeA.manifest.partitions.map((partition) => path.join(pathsA.segmentsDir, partition.segmentHash));
   assert.ok(segmentPathsA.length > 0);
@@ -1956,7 +1978,7 @@ test("AC1 protocol method coverage is split by query and control capability", as
     createOwnerRecord,
     createOwnerRegistry,
     desiredOwnerIdentity,
-    socketPathsForOwner
+    socketPathForOwner
   } = await futureImport("src/daemon/owner-registry.ts");
   const {
     CONTROL_DAEMON_METHODS,
@@ -1964,7 +1986,7 @@ test("AC1 protocol method coverage is split by query and control capability", as
     SEARCH_DAEMON_PROTOCOL_VERSION
   } = await futureImport("src/daemon/protocol.ts");
 
-  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ["Retrieve", "Search", "Status"]);
+  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ["Retrieve", "Search", "Status", "WaitReady"]);
   assert.deepEqual([...CONTROL_DAEMON_METHODS].sort(), [
     "Clear",
     "Compact",
@@ -1973,26 +1995,26 @@ test("AC1 protocol method coverage is split by query and control capability", as
     "Rebuild",
     "Refresh",
     "Shutdown",
-    "Status"
+    "Status",
+    "WaitReady"
   ]);
   for (const mutating of ["LoadVault", "Rebuild", "Refresh", "Compact", "Clear", "Prune", "Shutdown"]) {
     assert.equal(QUERY_DAEMON_METHODS.includes(mutating), false);
     assert.equal(CONTROL_DAEMON_METHODS.includes(mutating), true);
   }
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
-  assert.equal(SEARCH_DAEMON_PROTOCOL_VERSION, 3);
+  assert.equal(SEARCH_DAEMON_PROTOCOL_VERSION, 4);
 
   const runtimeDir = tempRoot();
   const desired = desiredOwnerIdentity(process.execPath);
   assert.equal(desired.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
-  const sockets = socketPathsForOwner(runtimeDir, desired);
-  assert.match(sockets.querySocketPath, /optsidian-search-daemon-query-v3-/);
-  assert.match(sockets.controlSocketPath, /optsidian-search-daemon-control-v3-/);
-  assert.doesNotMatch(sockets.querySocketPath, /optsidian-search-daemon-query-v2-/);
-  assert.doesNotMatch(sockets.controlSocketPath, /optsidian-search-daemon-control-v2-/);
+  const socketPath = socketPathForOwner(runtimeDir, desired);
+  assert.match(socketPath, /optsidian-search-daemon-v4-/);
+  assert.doesNotMatch(socketPath, /optsidian-search-daemon-query-/);
+  assert.doesNotMatch(socketPath, /optsidian-search-daemon-control-/);
 
   const registry = createOwnerRegistry({ runtimeDir, desired });
-  const owner = createOwnerRecord(desired, sockets, "nonce", process.pid);
+  const owner = createOwnerRecord(desired, socketPath, 1, "incarnation", process.pid);
   registry.writeOwner(owner);
   const requests = [];
   const client = createSearchDaemonClient({
@@ -2001,25 +2023,20 @@ test("AC1 protocol method coverage is split by query and control capability", as
     connect: (record, capability) => ({
       async request(request) {
         requests.push({ record, capability, request });
-        return {
-          ok: true,
-          ready: true,
-          phase: "ready",
-          nonce: record.nonce,
-          protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION
-        };
+        return statusResult(record);
       },
       async close() {}
     })
   });
   await client.status({ deadlineMs: 100 });
   assert.equal(requests.length > 0, true);
-  assert.equal(requests[0].record.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
+  assert.equal(requests[0].record.slot.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
   assert.equal(requests[0].request.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
 });
 
 test("lifecycle deadlines scale with vault markdown count and bytes", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport("src/daemon/owner-registry.ts");
   const {
     SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
     vaultLifecycleDeadlineMs
@@ -2032,15 +2049,21 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
   fs.writeFileSync(path.join(vault, "ignored.txt"), "ignored");
 
   const requests = [];
+  const runtimeDir = tempRoot();
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
   const client = createSearchDaemonClient({
-    runtimeDir: tempRoot(),
-    binaryPath: path.join(repoRoot, "dist", "optsidian"),
-    spawnDaemon: async () => ({ pid: 2100 }),
-    connect: async () => ({
+    registry,
+    binaryPath,
+    spawnDaemon: async (record) => {
+      publishFakeOwner(registry, record, 2100);
+      return { pid: 2100 };
+    },
+    connect: async (record) => ({
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, vaults: [] };
+          return statusResult(record);
         }
         if (request.method === "LoadVault") {
           return { ok: true, command: "index", action: "warm", vaults: [{ vaultRoot: vault, status: "ready" }], snapshotId: "snap-a" };
@@ -2080,16 +2103,23 @@ test("lifecycle deadlines scale with vault markdown count and bytes", async () =
 
 test("daemon client sends prune as a global cache request", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport("src/daemon/owner-registry.ts");
   const requests = [];
+  const runtimeDir = tempRoot();
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
   const client = createSearchDaemonClient({
-    runtimeDir: tempRoot(),
-    binaryPath: path.join(repoRoot, "dist", "optsidian"),
-    spawnDaemon: async () => ({ pid: 2200 }),
-    connect: async () => ({
+    registry,
+    binaryPath,
+    spawnDaemon: async (record) => {
+      publishFakeOwner(registry, record, 2200);
+      return { pid: 2200 };
+    },
+    connect: async (record) => ({
       request: async (request) => {
         requests.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, vaults: [] };
+          return statusResult(record);
         }
         if (request.method === "Prune") {
           return {
@@ -2464,12 +2494,15 @@ test("search shard execution reuses preloaded segment readers", async () => {
 
 test("AC1 shared search-daemon client starts daemon, waits ready, and has no direct fallback", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport("src/daemon/owner-registry.ts");
   const runtimeDir = tempRoot();
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
   const calls = [];
   const spawns = [];
   const responses = [
     { method: "Status", result: { ready: false, phase: "starting" } },
-    { method: "Status", result: { ready: true, nonce: "nonce-a", protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION } },
+    { method: "WaitReady", result: { ready: true, phase: "ready" } },
     {
       method: "Search",
       result: {
@@ -2486,20 +2519,21 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   ];
 
   const client = createSearchDaemonClient({
-    runtimeDir,
-    binaryPath: path.join(repoRoot, "dist", "optsidian"),
+    registry,
+    binaryPath,
     spawnDaemon: async (record) => {
-      spawns.push(record);
+      spawns.push(publishFakeOwner(registry, record, 1001));
       return { pid: 1001 };
     },
-    connect: async () => ({
+    connect: async (record) => ({
       request: async (request) => {
         calls.push(request);
         const next = responses.shift();
         assert.equal(request.method, next.method);
-        if (next.method === "Status" && next.result.ready) next.result.nonce = spawns[0].nonce;
-        if (next.method === "Search") assert.equal(request.nonce, spawns[0].nonce);
-        return next.result;
+        if (next.method === "Search") assert.equal(request.incarnation, spawns[0].incarnationId);
+        return request.method === "Status" || request.method === "WaitReady"
+          ? statusResult(record, next.result)
+          : next.result;
       },
       close: async () => {}
     })
@@ -2508,7 +2542,7 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const result = await client.search({ vault: runtimeDir, query: "alpha", limit: 5, deadlineMs: 1000 });
 
   assert.equal(spawns.length, 1);
-  assert.deepEqual(calls.map((call) => call.method), ["Status", "Status", "Search"]);
+  assert.deepEqual(calls.map((call) => call.method), ["Status", "WaitReady", "Search"]);
   assert.equal(result.snapshotId, "snap-a");
   assert.deepEqual(result.matches.map((match) => match.path), ["Alpha.md"]);
 
@@ -2534,22 +2568,30 @@ test("AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   );
 });
 
-test("daemon readiness nonce auth is deterministic in-process", async () => {
+test("daemon client sends incarnation on work requests and omits nonce from v4", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport("src/daemon/owner-registry.ts");
   const runtimeDir = tempRoot();
+  const binaryPath = path.join(repoRoot, "dist", "optsidian");
+  const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
   const seen = [];
+  const published = [];
   const client = createSearchDaemonClient({
-    runtimeDir,
-    binaryPath: path.join(repoRoot, "dist", "optsidian"),
-    spawnDaemon: async () => ({ pid: 2002 }),
-    connect: async () => ({
+    registry,
+    binaryPath,
+    spawnDaemon: async (record) => {
+      published.push(publishFakeOwner(registry, record, 2002));
+      return { pid: 2002 };
+    },
+    connect: async (record) => ({
       request: async (request) => {
         seen.push(request);
         if (request.method === "Status") {
-          return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION, owner: { nonce: request.nonce } };
+          return statusResult(record);
         }
         assert.equal(request.method, "Search");
-        assert.equal(typeof request.nonce, "string");
+        assert.equal(request.incarnation, published[0].incarnationId);
+        assert.equal("nonce" in request, false);
         return {
           ok: true,
           command: "search",
@@ -2567,28 +2609,13 @@ test("daemon readiness nonce auth is deterministic in-process", async () => {
 
   await client.search({ vault: runtimeDir, query: "alpha", limit: 1 });
   assert.deepEqual(seen.map((request) => request.method), ["Status", "Search"]);
-  assert.equal(seen[0].nonce, seen[1].nonce);
-
-  const mismatched = createSearchDaemonClient({
-    runtimeDir: tempRoot(),
-    binaryPath: path.join(repoRoot, "dist", "optsidian"),
-    spawnDaemon: async () => ({ pid: 2003 }),
-    connect: async () => ({
-      request: async () => ({ ok: true, ready: true, phase: "ready", nonce: "wrong-owner-nonce", protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION }),
-      close: async () => {}
-    })
-  });
-  await assert.rejects(
-    () => mismatched.status({ deadlineMs: 100 }),
-    (error) => {
-      assert.equal(error.code, "SEARCH_DAEMON_AUTH_FAILED");
-      return true;
-    }
-  );
+  assert.equal("incarnation" in seen[0], false);
+  assert.equal(seen[1].incarnation, published[0].incarnationId);
 });
 
 test("daemon client sends runtime profile per request even when owner is reused", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
+  const { createOwnerRegistry, desiredOwnerIdentity } = await futureImport("src/daemon/owner-registry.ts");
   const {
     effectiveSearchRuntimeProfile,
     searchRuntimeProfileHash
@@ -2605,10 +2632,11 @@ test("daemon client sends runtime profile per request even when owner is reused"
     OPTSIDIAN_SEARCH_INDEX_WORKERS: "1",
     OPTSIDIAN_SEARCH_EXECUTION_WORKERS: "1"
   };
-  const connect = async () => ({
+  const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
+  const connect = async (record) => ({
     request: async (request) => {
       if (request.method === "Status") {
-        return { ok: true, ready: true, phase: "ready", nonce: request.nonce, protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION };
+        return statusResult(record);
       }
       assert.equal(request.method, "Search");
       searchRequests.push(request);
@@ -2626,17 +2654,17 @@ test("daemon client sends runtime profile per request even when owner is reused"
     close: async () => {}
   });
   const noKiwi = createSearchDaemonClient({
-    runtimeDir,
+    registry,
     binaryPath,
     env: { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "" },
     spawnDaemon: async (record) => {
-      spawns.push(record);
+      spawns.push(publishFakeOwner(registry, record, 3001));
       return { pid: 3001 };
     },
     connect
   });
   const kiwi = createSearchDaemonClient({
-    runtimeDir,
+    registry,
     binaryPath,
     env: { ...baseEnv, OPTSIDIAN_SEARCH_EXTRA_LANGS: "ko" },
     spawnDaemon: async (record) => {
@@ -2888,7 +2916,7 @@ test("runtime profile tracks ngram as an index-affecting setting", async () => {
   assert.notEqual(searchRuntimeProfileHash(disabled), searchRuntimeProfileHash(enabled));
 });
 
-test("daemon readiness handshake authenticates owner nonce over RPC integration", async () => {
+test("daemon readiness handshake publishes protocol-v4 tenancy status over RPC integration", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const runtimeDir = tempRoot();
   const env = {
@@ -2912,16 +2940,19 @@ test("daemon readiness handshake authenticates owner nonce over RPC integration"
     assert.equal(status.ok, true);
     assert.equal(status.ready, true);
     assert.equal(status.protocolVersion, CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION);
-    assert.equal(status.owner.nonce, status.nonce);
-    assert.equal(status.owner.querySocketPath.endsWith(".sock"), true);
-    assert.equal(status.owner.controlSocketPath.endsWith(".sock"), true);
-    assert.notEqual(status.owner.querySocketPath, status.owner.controlSocketPath);
+    assert.equal(status.phase, "ready");
+    assert.equal(Number.isInteger(status.epoch), true);
+    assert.equal(typeof status.incarnationId, "string");
+    assert.equal(status.owner.incarnationId, status.incarnationId);
+    assert.equal(status.owner.socketPath, status.socketPath);
+    assert.equal(status.socketPath.endsWith(".sock"), true);
+    assert.equal("nonce" in status, false);
   } finally {
     await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
   }
 });
 
-test("daemon Status without nonce returns public health only", async () => {
+test("daemon Status returns one protocol-v4 shape without nonce", async () => {
   const { createSearchDaemonClient } = await futureImport("src/daemon/client.ts");
   const { encodeFrame } = await futureImport("src/daemon/protocol.ts");
   const runtimeDir = tempRoot();
@@ -2942,9 +2973,9 @@ test("daemon Status without nonce returns public health only", async () => {
 
   try {
     const authenticated = await client.status({ deadlineMs: 5000 });
-    const response = await requestRawRpc(authenticated.owner.querySocketPath, encodeFrame, {
+    const response = await requestRawRpc(authenticated.owner.socketPath, encodeFrame, {
       protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
-      requestId: "public-status",
+      requestId: "single-status",
       method: "Status",
       deadline: Date.now() + 1000,
       payload: {}
@@ -2956,12 +2987,13 @@ test("daemon Status without nonce returns public health only", async () => {
     assert.equal(response.result.phase, "ready");
     assert.equal(response.result.protocolVersion, CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION);
     assert.equal("nonce" in response.result, false);
-    assert.equal("owner" in response.result, false);
-    assert.equal("metrics" in response.result, false);
-    assert.equal("pools" in response.result, false);
-    assert.equal("searchStore" in response.result, false);
-    assert.equal("profiles" in response.result, false);
-    assert.equal("vaults" in response.result, false);
+    assert.equal(response.result.incarnationId, authenticated.incarnationId);
+    assert.equal(response.result.owner.socketPath, authenticated.socketPath);
+    assert.equal("metrics" in response.result, true);
+    assert.equal("pools" in response.result, true);
+    assert.equal("searchStore" in response.result, true);
+    assert.equal("profiles" in response.result, true);
+    assert.equal("vaults" in response.result, true);
   } finally {
     await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
   }
@@ -3609,7 +3641,8 @@ test("refresh repairs missing retrieval without rebuilding a fresh corpus snapsh
 
   const rebuilt = await store.rebuild(vault);
   const paths = searchStoreCachePaths(vault, env);
-  fs.rmSync(paths.retrievalActivePointerPath, { force: true });
+  const staleRetrieval = activeRetrievalFromEdition(paths);
+  fs.rmSync(path.join(paths.retrievalsDir, staleRetrieval.retrievalSnapshotId), { force: true });
 
   const progress = [];
   const refreshed = await store.refresh(vault, {
@@ -3619,7 +3652,8 @@ test("refresh repairs missing retrieval without rebuilding a fresh corpus snapsh
   assert.equal(refreshed.snapshotId, rebuilt.snapshotId);
   assert.equal(corpusBuilds, 1);
   assert.equal(retrievalBuilds, 2);
-  assert.ok(fs.existsSync(paths.retrievalActivePointerPath));
+  const repairedRetrieval = activeRetrievalFromEdition(paths);
+  assert.ok(fs.existsSync(path.join(paths.retrievalsDir, repairedRetrieval.retrievalSnapshotId)));
   assert.ok(progress.some((update) => update.phase === "vector-indexing"));
 });
 
@@ -3662,7 +3696,8 @@ test("refresh surfaces retrieval repair failures without rebuilding a fresh corp
 
   await store.rebuild(vault);
   const paths = searchStoreCachePaths(vault, env);
-  fs.rmSync(paths.retrievalActivePointerPath, { force: true });
+  const staleRetrieval = activeRetrievalFromEdition(paths);
+  fs.rmSync(path.join(paths.retrievalsDir, staleRetrieval.retrievalSnapshotId), { force: true });
   failRetrieval = true;
 
   await assert.rejects(
@@ -4211,8 +4246,7 @@ test("AC18 owner registry records stable fields and converges stale starts to on
   const desiredRegistry = createOwnerRegistry({ runtimeDir: scopeRuntimeDir, desired });
   const peerRegistry = createOwnerRegistry({ runtimeDir: scopeRuntimeDir, desired: peerDesired });
   assert.notEqual(desiredRegistry.ownerPath, peerRegistry.ownerPath);
-  assert.notEqual(desiredRegistry.lockPath, peerRegistry.lockPath);
-  peerRegistry.writeOwner(createOwnerRecord(peerDesired, path.join(scopeRuntimeDir, "peer.sock"), "peer", 999999));
+  peerRegistry.writeOwner(createOwnerRecord(peerDesired, path.join(scopeRuntimeDir, "peer.sock"), 1, "peer", 999999));
   assert.equal(desiredRegistry.readOwner(), undefined);
   assert.equal(peerRegistry.compatibleOwners(peerDesired).length, 1);
   const unsafeDesired = { ...desired, runtimeHash: "../../escape" };
@@ -4231,23 +4265,13 @@ test("AC18 owner registry records stable fields and converges stale starts to on
     const registry = createOwnerRegistryForTests({ scenario, desired });
     const result = await convergeOnCompatibleDaemonForTests(registry, desired);
     assert.equal(result.owner.binaryVersion, desired.binaryVersion, scenario);
-    assert.equal(result.owner.protocolVersion, desired.protocolVersion, scenario);
+    assert.equal(result.owner.slot.protocolVersion, desired.protocolVersion, scenario);
     assert.equal(result.replaced, scenario === "binary-mismatch", scenario);
     assert.equal(registry.compatibleOwners().length, 1, scenario);
   }
 
-  const authFailure = createOwnerRegistryForTests({ scenario: "auth-failure", desired });
-  await assert.rejects(
-    () => convergeOnCompatibleDaemonForTests(authFailure, desired),
-    (error) => {
-      assert.equal(error.code, "SEARCH_DAEMON_AUTH_FAILED");
-      assert.match(error.message, /auth|nonce|daemon/i);
-      return true;
-    }
-  );
-
   const coldStartRegistry = createOwnerRegistryForTests({ scenario: "simultaneous-cold-starts", desired });
   const results = await Promise.all(Array.from({ length: 8 }, () => convergeOnCompatibleDaemonForTests(coldStartRegistry, desired)));
-  assert.equal(new Set(results.map((result) => result.owner.nonce)).size, 1);
+  assert.equal(new Set(results.map((result) => result.owner.incarnationId)).size, 1);
   assert.equal(coldStartRegistry.compatibleOwners().length, 1);
 });

@@ -510,7 +510,15 @@ export async function createDaemonPools(
       };
     }
   };
-  await pools.warmup();
+  try {
+    await pools.warmup();
+  } catch (error) {
+    // Warmup failure leaves the worker-thread pools already constructed (their Workers spawn
+    // eagerly). Tear them down before propagating, otherwise every retried createDaemonPools leaks
+    // another full set of threads that keep the process alive past shutdown.
+    await pools.close().catch(() => undefined);
+    throw error;
+  }
   return pools;
 }
 

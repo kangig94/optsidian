@@ -14,6 +14,10 @@ import {
 } from "../src/core/search/dense/index.ts";
 import { buildCanonicalSearchSnapshot } from "../src/daemon/search-store/builder.ts";
 import {
+  effectiveSearchRuntimeProfile,
+  lexicalIdentityHashForSearchRuntimeProfile
+} from "../src/daemon/runtime-profile.ts";
+import {
   DaemonSnapshotStore,
   createWorkerEmbeddingSetBuilder
 } from "../src/daemon/search-store/snapshot-store.ts";
@@ -27,6 +31,10 @@ import {
 } from "../src/daemon/vector-store/index.ts";
 import { docIdForVaultPath } from "../src/daemon/vector-store/watcher.ts";
 import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
+import {
+  activeRetrievalFromEdition,
+  generationDirForEnvelope
+} from "./helpers/edition-ledger.mjs";
 
 const PROFILE_HASH = "embedding-lifecycle-ac6-ac12";
 
@@ -50,6 +58,12 @@ function dirtyMarkForPath(vault, rel) {
     path: rel,
     contentHash: sha256(fs.readFileSync(path.join(vault, rel)))
   };
+}
+
+function searchPathsForRuntime(vault, env, profile = effectiveSearchRuntimeProfile(process.cwd(), env)) {
+  return searchStoreCachePaths(vault, env, {
+    lexicalIdentityHash: lexicalIdentityHashForSearchRuntimeProfile(profile)
+  });
 }
 
 function context(id = "embedding-lifecycle") {
@@ -136,7 +150,7 @@ function retrievalEnvelope(paths, retrievalSnapshotId) {
 }
 
 function activeRetrieval(paths) {
-  const active = readJson(paths.retrievalActivePointerPath);
+  const active = activeRetrievalFromEdition(paths);
   return {
     active,
     envelope: retrievalEnvelope(paths, active.retrievalSnapshotId)
@@ -397,15 +411,14 @@ test("AC12 identical-content rebuild reuses the active vector generation directo
 
   await store.rebuild(vault, context("ac12-reuse-first"));
   const paths = searchStoreCachePaths(vault, env);
-  const firstActive = readJson(paths.retrievalActivePointerPath);
-  const firstEnvelope = retrievalEnvelope(paths, firstActive.retrievalSnapshotId);
+  const { active: firstActive, envelope: firstEnvelope } = activeRetrieval(paths);
   const firstVectorPaths = vectorStoreCachePaths({
     vaultRoot: vault,
     profileHash: PROFILE_HASH,
     embeddingSetId: firstEnvelope.embeddingSetId,
     env
   });
-  const firstGenerationDir = vectorGenerationDir(firstVectorPaths, firstEnvelope.vector.generationId);
+  const firstGenerationDir = generationDirForEnvelope(firstVectorPaths, firstEnvelope);
   const sentinel = path.join(firstGenerationDir, "live-reader.sentinel");
   fs.writeFileSync(sentinel, "held\n");
 
@@ -418,8 +431,7 @@ test("AC12 identical-content rebuild reuses the active vector generation directo
 
   await store.rebuild(vault, context("ac12-reuse-second"));
 
-  const secondActive = readJson(paths.retrievalActivePointerPath);
-  const secondEnvelope = retrievalEnvelope(paths, secondActive.retrievalSnapshotId);
+  const { active: secondActive, envelope: secondEnvelope } = activeRetrieval(paths);
   assert.equal(secondEnvelope.vector.generationId, firstEnvelope.vector.generationId);
   assert.equal(fs.existsSync(sentinel), true);
   assert.equal(vectorCreates.length, vectorCreateCountBefore);
@@ -477,7 +489,7 @@ test("AC6 watcher save folds queued docs in place and embedded docs into the nex
         preload: false,
         warmupQueryAnalyzer: false
       });
-      const paths = searchStoreCachePaths(vault, env);
+      const paths = searchPathsForRuntime(vault, env, lease.runtime.profile);
       const initialRetrieval = activeRetrieval(paths);
       const initialCallCount = embedding.calls.length;
       embedding.setGateDocuments(true);
@@ -592,15 +604,14 @@ test("AC1 post-restart lazy-open GC pin protects the opening vector generation",
   await firstStore.rebuild(vault, context("ac1-gc-first"));
   const paths = searchStoreCachePaths(vault, env);
   await drainBackgroundGc(firstStore, paths);
-  const oldActive = readJson(paths.retrievalActivePointerPath);
-  const oldEnvelope = retrievalEnvelope(paths, oldActive.retrievalSnapshotId);
+  const { active: oldActive, envelope: oldEnvelope } = activeRetrieval(paths);
   const oldVectorPaths = vectorStoreCachePaths({
     vaultRoot: vault,
     profileHash: PROFILE_HASH,
     embeddingSetId: oldEnvelope.embeddingSetId,
     env
   });
-  const oldGenerationDir = vectorGenerationDir(oldVectorPaths, oldEnvelope.vector.generationId);
+  const oldGenerationDir = generationDirForEnvelope(oldVectorPaths, oldEnvelope);
   await firstPool.close();
 
   const lazyOpenEntered = deferred();
@@ -642,8 +653,7 @@ test("AC1 post-restart lazy-open GC pin protects the opening vector generation",
 
   writeVaultFile(vault, "Alpha.md", "# Alpha\n\nalpha after active generation flip\n");
   await restartedStore.rebuild(vault, context("ac1-gc-flip"));
-  const newActive = readJson(paths.retrievalActivePointerPath);
-  const newEnvelope = retrievalEnvelope(paths, newActive.retrievalSnapshotId);
+  const { envelope: newEnvelope } = activeRetrieval(paths);
   assert.notEqual(newEnvelope.vector.generationId, oldEnvelope.vector.generationId);
   fs.rmSync(path.join(paths.retrievalsDir, oldActive.retrievalSnapshotId), { force: true });
 
@@ -871,8 +881,7 @@ test("AC6 queued save folds in place while in-flight save folds to next incremen
   await rebuild;
 
   const paths = searchStoreCachePaths(vault, env);
-  const active = readJson(paths.retrievalActivePointerPath);
-  const envelope = retrievalEnvelope(paths, active.retrievalSnapshotId);
+  const { envelope } = activeRetrieval(paths);
   const firstRecord = envelope.embeddingSet.records.find((record) => record.documentId === firstOldDocument.documentId);
   const queuedRecord = envelope.embeddingSet.records.find((record) => record.documentId === queuedNewDocument.documentId);
   assert.ok(firstRecord);

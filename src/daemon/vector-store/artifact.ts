@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { optsidianCacheRoot } from "../../core/cache-root.js";
+import { installArtifact } from "../../core/lifecycle/artifact-install.js";
 import { ensureExistingPrivateFileSync, ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-path.js";
 import { RuntimeError } from "../../errors.js";
 import { downloadFileStreaming } from "../../net/github.js";
@@ -12,7 +13,6 @@ const CORAL_NEEDLE_RELEASE_BASE_URL = `https://github.com/kangig94/coral-needle/
 const CORAL_NEEDLE_MANIFEST = "optsidian-coral-needle.json";
 const CORAL_NEEDLE_BINDING = "coral-needle.node";
 const CORAL_NEEDLE_INSTALL_TIMEOUT_MS = 30_000;
-const CORAL_NEEDLE_LOCK_STALE_MS = 2 * 60 * 1000;
 
 export type CoralNeedlePlatform = "darwin" | "linux" | "win32";
 export type CoralNeedleArch = "amd64" | "arm64";
@@ -161,24 +161,23 @@ async function installWithLock(
   const targetDir = coralNeedleInstallDir(asset, env);
   ensurePrivateDirSync(optsidianCacheRoot(env), "Optsidian cache directory");
   ensurePrivateDirSync(root, "Optsidian coral-needle cache directory");
-  const release = await acquireInstallLock(path.join(root, "install.lock"), options.lockTimeoutMs ?? CORAL_NEEDLE_INSTALL_TIMEOUT_MS);
-  try {
-    if (isCoralNeedleBindingInstalled(targetDir, asset)) return path.join(targetDir, CORAL_NEEDLE_BINDING);
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    const tempDir = path.join(root, `.install-${asset.platform}-${asset.arch}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    ensurePrivateDirSync(tempDir, "Optsidian coral-needle temp directory");
-    try {
-      await installCoralNeedleBinding(tempDir, asset, env, options.downloadFile ?? downloadFileStreaming);
-      fs.renameSync(tempDir, targetDir);
-    } catch (error) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-      throw error;
-    }
-    assertCoralNeedleBindingInstalled(targetDir, asset);
-    return path.join(targetDir, CORAL_NEEDLE_BINDING);
-  } finally {
-    release();
-  }
+  const installed = await installArtifact<string, "digest">({
+    artifactDir: targetDir,
+    claimDir: path.join(root, "install.claim"),
+    stagingRoot: path.join(root, "staging"),
+    verifyDepth: "digest",
+    timeoutMs: options.lockTimeoutMs ?? CORAL_NEEDLE_INSTALL_TIMEOUT_MS,
+    verifyInstalled: (artifactDir) => isCoralNeedleBindingInstalled(artifactDir, asset)
+      ? path.join(artifactDir, CORAL_NEEDLE_BINDING)
+      : undefined,
+    stage: (stagingDir) => installCoralNeedleBinding(stagingDir, asset, env, options.downloadFile ?? downloadFileStreaming),
+    computeChecksum: (stagingDir) => {
+      assertCoralNeedleBindingInstalled(stagingDir, asset);
+      return asset.bindingSha256;
+    },
+    activate: (stagingDir, artifactDir) => replaceArtifactDir(stagingDir, artifactDir)
+  });
+  return installed.artifact;
 }
 
 async function installCoralNeedleBinding(
@@ -218,6 +217,12 @@ function isCoralNeedleBindingInstalled(targetDir: string, asset: CoralNeedleRele
   } catch {
     return false;
   }
+}
+
+function replaceArtifactDir(stagingDir: string, artifactDir: string): void {
+  ensurePrivateDirSync(path.dirname(artifactDir), "Optsidian coral-needle artifact directory");
+  fs.rmSync(artifactDir, { recursive: true, force: true });
+  fs.renameSync(stagingDir, artifactDir);
 }
 
 function assertCoralNeedleBindingInstalled(targetDir: string, asset: CoralNeedleReleaseAsset): void {
@@ -444,40 +449,6 @@ function isZeroBlock(block: Buffer): boolean {
   return true;
 }
 
-async function acquireInstallLock(lockDir: string, timeoutMs: number): Promise<() => void> {
-  const start = Date.now();
-  while (true) {
-    try {
-      fs.mkdirSync(lockDir, { recursive: false, mode: 0o700 });
-      ensurePrivateDirSync(lockDir, "Optsidian coral-needle install lock directory");
-      writePrivateFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify({
-        pid: process.pid,
-        createdAt: new Date().toISOString()
-      }, null, 2)}\n`, "Optsidian coral-needle install lock owner");
-      return () => fs.rmSync(lockDir, { recursive: true, force: true });
-    } catch (error) {
-      if (!isAlreadyExistsError(error)) throw error;
-      if (removeStaleInstallLock(lockDir)) continue;
-      if (Date.now() - start >= timeoutMs) {
-        throw new RuntimeError(`Timed out waiting for coral-needle install lock: ${lockDir}`);
-      }
-      await sleep(50);
-    }
-  }
-}
-
-function removeStaleInstallLock(lockDir: string): boolean {
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(lockDir);
-  } catch {
-    return false;
-  }
-  if (Date.now() - stat.mtimeMs < CORAL_NEEDLE_LOCK_STALE_MS) return false;
-  fs.rmSync(lockDir, { recursive: true, force: true });
-  return true;
-}
-
 function normalizePlatform(platform: NodeJS.Platform): CoralNeedlePlatform {
   if (platform === "darwin" || platform === "linux" || platform === "win32") return platform;
   throw new RuntimeError(`coral-needle ${CORAL_NEEDLE_VERSION} is not available for ${platform}`);
@@ -487,14 +458,6 @@ function normalizeArch(arch: NodeJS.Architecture | CoralNeedleArch): CoralNeedle
   if (arch === "x64" || arch === "amd64") return "amd64";
   if (arch === "arm64") return "arm64";
   throw new RuntimeError(`coral-needle ${CORAL_NEEDLE_VERSION} is not available for ${arch}`);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isAlreadyExistsError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST";
 }
 
 function digestHex(data: Buffer): string {

@@ -338,7 +338,7 @@ export type SearchAnalyzerRuntimeStatus = {
     modelState: "missing" | "installed";
     modelPath: string;
     missingFiles: string[];
-    analyzerState: "unloaded" | "loading" | "loaded" | "degraded" | "daemon";
+    analyzerState: "unloaded" | "loading" | "loaded" | "daemon";
     leaseCount: number;
     reason?: string;
   };

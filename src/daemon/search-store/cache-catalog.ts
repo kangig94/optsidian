@@ -73,7 +73,7 @@ export class SearchCacheCatalog {
   touchUsed(paths: SearchStoreCachePaths, options: SearchCacheTouchOptions = {}): void {
     const nowMs = options.nowMs ?? Date.now();
     const throttleMs = options.throttleMs ?? SEARCH_CACHE_TOUCH_THROTTLE_MS;
-    const memo = this.recentTouches.get(paths.vaultStateHash);
+    const memo = this.recentTouches.get(paths.storeId);
     const memoSnapshotChanged = options.snapshotId !== undefined && memo?.activeSnapshotId !== options.snapshotId;
     if (memo && !memoSnapshotChanged && nowMs - memo.lastUsedAtMs < throttleMs) return;
 
@@ -81,11 +81,11 @@ export class SearchCacheCatalog {
     const localExists = fs.existsSync(paths.storeStatePath);
     const snapshotChanged = options.snapshotId !== undefined && existing?.activeSnapshotId !== options.snapshotId;
     if (existing && localExists && !snapshotChanged && nowMs - existing.lastUsedAtMs < throttleMs) {
-      if (!this.catalogHasRecord(paths.vaultStateHash)) {
+      if (!this.catalogHasRecord(paths.storeId)) {
         this.upsert(paths, existing);
         return;
       }
-      this.recentTouches.set(paths.vaultStateHash, {
+      this.recentTouches.set(paths.storeId, {
         lastUsedAtMs: existing.lastUsedAtMs,
         ...(existing.activeSnapshotId ? { activeSnapshotId: existing.activeSnapshotId } : {})
       });
@@ -93,7 +93,7 @@ export class SearchCacheCatalog {
     }
 
     this.upsert(paths, {
-      ...baseRecord(paths.vaultStateHash, existing, nowMs),
+      ...baseRecord(paths.storeId, existing, nowMs),
       lastUsedAtMs: nowMs,
       ...(options.snapshotId ? { activeSnapshotId: options.snapshotId } : {}),
       state: "active"
@@ -104,7 +104,7 @@ export class SearchCacheCatalog {
     const nowMs = options.nowMs ?? Date.now();
     const existing = this.readRecordForPaths(paths);
     this.upsert(paths, {
-      ...baseRecord(paths.vaultStateHash, existing, nowMs),
+      ...baseRecord(paths.storeId, existing, nowMs),
       lastUsedAtMs: nowMs,
       lastIndexedAtMs: nowMs,
       activeSnapshotId: options.snapshotId,
@@ -116,7 +116,7 @@ export class SearchCacheCatalog {
   recordCleared(paths: SearchStoreCachePaths, nowMs = Date.now()): void {
     const existing = this.readRecordForPaths(paths);
     const { activeSnapshotId: _activeSnapshotId, documentCount: _documentCount, ...record } = {
-      ...baseRecord(paths.vaultStateHash, existing, nowMs),
+      ...baseRecord(paths.storeId, existing, nowMs),
       lastUsedAtMs: nowMs,
       state: "cold" as const
     };
@@ -223,8 +223,8 @@ export class SearchCacheCatalog {
   }
 
   private readRecordForPaths(paths: SearchStoreCachePaths): SearchCacheRecord | undefined {
-    return this.readStoreRecord(paths.rootDir, paths.vaultStateHash) ??
-      this.readCatalog().records.find((record) => record.storeId === paths.vaultStateHash);
+    return this.readStoreRecord(paths.rootDir, paths.storeId) ??
+      this.readCatalog().records.find((record) => record.storeId === paths.storeId);
   }
 
   private catalogHasRecord(storeId: string): boolean {
@@ -270,8 +270,11 @@ export class SearchCacheCatalog {
 
   private listKnownStoreIds(catalogRecords: ReadonlyMap<string, SearchCacheRecord>): string[] {
     const ids = new Set(catalogRecords.keys());
-    for (const entry of safeReadDir(this.storesRootDir())) {
-      ids.add(entry);
+    for (const vaultEntry of safeReadDir(this.storesRootDir())) {
+      const vaultDir = path.join(this.storesRootDir(), vaultEntry);
+      for (const lexicalEntry of safeReadDir(vaultDir)) {
+        ids.add(`${vaultEntry}:${lexicalEntry}`);
+      }
     }
     return [...ids].sort();
   }
@@ -300,6 +303,10 @@ export class SearchCacheCatalog {
   }
 
   private storeRootDir(storeId: string): string {
+    const [vaultStateHash, lexicalIdentityHash] = storeId.split(":");
+    if (vaultStateHash && lexicalIdentityHash) {
+      return path.join(this.storesRootDir(), vaultStateHash, lexicalIdentityHash);
+    }
     return path.join(this.storesRootDir(), storeId);
   }
 
@@ -438,7 +445,7 @@ function lstatIfExists(target: string): fs.Stats | undefined {
 }
 
 function isStoreId(value: unknown): value is string {
-  return typeof value === "string" && /^[a-f0-9]{16}$/.test(value);
+  return typeof value === "string" && /^[a-f0-9]{16}:[A-Za-z0-9_.-]+$/.test(value);
 }
 
 function isUsableTimestamp(value: unknown): value is number {

@@ -253,6 +253,31 @@ test("AC7 fallback scan emits a delete dirty mark when a known markdown path dis
   }
 });
 
+test("default watcher factory routes an fs.watch 'error' event to the fallback scan instead of crashing", async () => {
+  const vault = tempVault();
+  writeVaultFile(vault, "Note.md", "body\n");
+  const realWatch = fs.watch;
+  const created = [];
+  fs.watch = (dir, listener) => {
+    const watcher = realWatch(dir, listener);
+    created.push(watcher);
+    return watcher;
+  };
+  let producer;
+  try {
+    // No watchDirectory injected → the production default factory is used, which must attach the
+    // 'error' listener. Emitting 'error' would throw as an uncaughtException without that listener.
+    producer = new VaultChangeProducer({ vaultRoot: vault, debounceMs: 1000, onDirtyMarks() {} });
+    assert.equal(producer.usingFallbackScan(), false);
+    assert.ok(created.length > 0, "default factory created at least one fs.watch handle");
+    created[0].emit("error", new Error("simulated watch error"));
+    await waitFor(() => producer.usingFallbackScan() === true);
+  } finally {
+    fs.watch = realWatch;
+    producer?.close();
+  }
+});
+
 async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

@@ -5,6 +5,7 @@ import { ensurePrivateDirSync, writePrivateFileSync } from "../../core/private-p
 import { durableRename, fsyncDirSync, fsyncFileSync, type DurableRename } from "../search-store/publication.js";
 import type { VectorStoreCachePaths } from "./cache-paths.js";
 import { sweepVectorStaging } from "./pool.js";
+import { liveEditionHeadsUnder } from "../search-store/publisher.js";
 
 export type RetrievalFreshnessState = "fresh" | "dirty" | "building" | "failed";
 
@@ -190,21 +191,17 @@ export async function recoverRetrievalStartupState(input: {
   const cacheRoot = optsidianCacheRoot(env);
   const searchStores = readSearchStoreRecoveryState(path.join(cacheRoot, "search", "stores"));
   const vectorStoresRoot = path.join(cacheRoot, "vectors", "stores");
-  for (const profileHash of safeReadDir(vectorStoresRoot)) {
-    const profileDir = path.join(vectorStoresRoot, profileHash);
-    if (!isDirectory(profileDir)) continue;
-    for (const vaultStateHash of safeReadDir(profileDir)) {
-      const vaultDir = path.join(profileDir, vaultStateHash);
-      if (!isDirectory(vaultDir)) continue;
-      const search = searchStores.get(vaultStateHash);
-      const candidates = vectorEmbeddingSetCandidates(vaultDir);
-      for (const embeddingSetId of candidates) {
-        const vectorPaths = vectorPathsFromCacheParts({
-          cacheRoot,
-          profileHash,
-          vaultStateHash,
-          embeddingSetId
-        });
+  for (const vaultStateHash of safeReadDir(vectorStoresRoot)) {
+    const vaultDir = path.join(vectorStoresRoot, vaultStateHash);
+    if (!isDirectory(vaultDir)) continue;
+    const search = searchStores.get(vaultStateHash);
+    const candidates = vectorEmbeddingSetCandidates(vaultDir);
+    for (const embeddingSetId of candidates) {
+      const vectorPaths = vectorPathsFromCacheParts({
+        cacheRoot,
+        vaultStateHash,
+        embeddingSetId
+      });
         const freshness = new RetrievalFreshnessStore({ paths: vectorPaths, now: input.now });
         const current = freshness.read();
         const onDiskCorpusRevision = search?.onDiskCorpusRevision ??
@@ -225,7 +222,6 @@ export async function recoverRetrievalStartupState(input: {
           linkGraphTmpDir: search?.tmpDir,
           freshness
         });
-      }
     }
   }
 }
@@ -246,21 +242,18 @@ type SearchStoreRecoveryState = {
 function readSearchStoreRecoveryState(storesDir: string): Map<string, SearchStoreRecoveryState> {
   const stores = new Map<string, SearchStoreRecoveryState>();
   for (const vaultStateHash of safeReadDir(storesDir)) {
-    const rootDir = path.join(storesDir, vaultStateHash);
-    if (!isDirectory(rootDir)) continue;
+    const vaultDir = path.join(storesDir, vaultStateHash);
+    if (!isDirectory(vaultDir)) continue;
+    const lexicalRoots = safeReadDir(vaultDir)
+      .map((entry) => path.join(vaultDir, entry))
+      .filter(isDirectory);
+    const rootDir = lexicalRoots[0] ?? vaultDir;
     const tmpDir = path.join(rootDir, "tmp");
-    const activeRetrieval = readJson(path.join(rootDir, "active", `${vaultStateHash}.retrieval`));
-    const retrievalSnapshotId = isRecord(activeRetrieval) && typeof activeRetrieval.retrievalSnapshotId === "string"
-      ? activeRetrieval.retrievalSnapshotId
+    const edition = liveEditionHeadsUnder(vaultDir).at(-1);
+    const retrieval = edition?.identity.retrievalSnapshotId
+      ? readJson(path.join(rootDir, "retrievals", edition.identity.retrievalSnapshotId))
       : undefined;
-    const retrieval = retrievalSnapshotId
-      ? readJson(path.join(rootDir, "retrievals", retrievalSnapshotId))
-      : undefined;
-    const activeCorpus = readJson(path.join(rootDir, "active", vaultStateHash));
-    const activeSnapshotId = isRecord(activeCorpus) && typeof activeCorpus.snapshotId === "string"
-      ? activeCorpus.snapshotId
-      : undefined;
-    const snapshot = activeSnapshotId ? readJson(path.join(rootDir, "snapshots", activeSnapshotId)) : undefined;
+    const snapshot = edition?.corpus.snapshotId ? readJson(path.join(rootDir, "snapshots", edition.corpus.snapshotId)) : undefined;
     stores.set(vaultStateHash, {
       tmpDir,
       ...(corpusRevisionFromSnapshot(snapshot) ?? corpusRevisionFromRetrieval(retrieval)
@@ -290,32 +283,29 @@ function vectorEmbeddingSetCandidates(vaultDir: string): string[] {
 
 function vectorPathsFromCacheParts(input: {
   cacheRoot: string;
-  profileHash: string;
   vaultStateHash: string;
   embeddingSetId: string;
 }): VectorStoreCachePaths {
   const vectorsRootDir = path.join(input.cacheRoot, "vectors");
   const storesDir = path.join(vectorsRootDir, "stores");
-  const profileDir = path.join(storesDir, input.profileHash);
-  const vaultDir = path.join(profileDir, input.vaultStateHash);
+  const vaultDir = path.join(storesDir, input.vaultStateHash);
   const rootDir = path.join(vaultDir, input.embeddingSetId);
   const activeDir = path.join(rootDir, "active");
   return {
     vaultRoot: "",
     key: {
-      profileHash: input.profileHash,
       vaultStateHash: input.vaultStateHash,
       embeddingSetId: input.embeddingSetId
     },
     cacheRootDir: input.cacheRoot,
     vectorsRootDir,
     storesDir,
-    profileDir,
     vaultDir,
     rootDir,
     storeStatePath: path.join(rootDir, "store.json"),
     generationsDir: path.join(rootDir, "generations"),
     stagingDir: path.join(rootDir, "staging"),
+    reservationsDir: path.join(rootDir, "reservations"),
     activeDir,
     tmpDir: path.join(rootDir, "tmp"),
     freshnessStatePath: path.join(vaultDir, "retrieval-freshness.json"),

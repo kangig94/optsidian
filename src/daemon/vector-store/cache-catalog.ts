@@ -14,7 +14,6 @@ export type VectorCacheRecord = {
   schemaVersion: typeof VECTOR_CACHE_CATALOG_SCHEMA_VERSION;
   storeId: string;
   kind: "vector-store";
-  profileHash: string;
   vaultStateHash: string;
   embeddingSetId: string;
   createdAtMs: number;
@@ -175,7 +174,7 @@ export class VectorCacheCatalog {
 }
 
 export function vectorStoreId(paths: VectorStoreCachePaths): string {
-  return `${paths.key.profileHash}:${paths.key.vaultStateHash}:${paths.key.embeddingSetId}`;
+  return `${paths.key.vaultStateHash}:${paths.key.embeddingSetId}`;
 }
 
 function baseRecord(paths: VectorStoreCachePaths, existing: VectorCacheRecord | undefined, nowMs: number): VectorCacheRecord {
@@ -183,7 +182,6 @@ function baseRecord(paths: VectorStoreCachePaths, existing: VectorCacheRecord | 
     schemaVersion: VECTOR_CACHE_CATALOG_SCHEMA_VERSION,
     storeId: vectorStoreId(paths),
     kind: "vector-store",
-    profileHash: paths.key.profileHash,
     vaultStateHash: paths.key.vaultStateHash,
     embeddingSetId: paths.key.embeddingSetId,
     createdAtMs: existing?.createdAtMs ?? nowMs,

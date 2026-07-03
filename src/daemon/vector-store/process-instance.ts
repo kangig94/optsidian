@@ -79,7 +79,7 @@ class CoralNeedleProcessInstance implements CoralNeedleInstance {
     this.key = input.key;
     this.generationId = input.generationId;
     this.dbPath = input.dbPath;
-    this.instanceId = `${input.role}:${input.key.profileHash}:${input.key.vaultStateHash}:${input.key.embeddingSetId}:${input.generationId}:${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    this.instanceId = `${input.role}:${input.key.vaultStateHash}:${input.key.embeddingSetId}:${input.generationId}:${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
     this.child = fork(options.scriptPath ?? defaultProcessScript(), [], {
       env: options.env ?? process.env,
       execArgv: processExecArgv(),
@@ -118,9 +118,18 @@ class CoralNeedleProcessInstance implements CoralNeedleInstance {
     if (this.closed) return;
     this.closed = true;
     try {
-      await this.call<void>({ type: "close", payload: {} });
+      // Only attempt the graceful close RPC if the IPC channel is still open. A crashed/exited
+      // child leaves `connected === false`; sending to it rejects with "Channel closed", which —
+      // on the fire-and-forget retire path — would surface as an unhandled rejection that kills
+      // the whole daemon, defeating the subprocess isolation this instance exists to provide.
+      if (this.child.connected) {
+        await this.call<void>({ type: "close", payload: {} });
+      }
+    } catch {
+      // Any close-RPC failure is non-actionable during teardown (channel closed, child already
+      // exited, or an app-level close error we cannot recover from) — the kill below still runs.
     } finally {
-      await this.child.kill();
+      this.child.kill();
     }
   }
 

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { Attempt, type AttemptOwner } from "../../lifecycle/conditional-commit.js";
 import {
   normalizeEmbeddingVector,
   type EmbeddingInputKind,
@@ -97,11 +98,15 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   private readonly ensureArtifactImpl: (descriptor: LocalOnnxModelDescriptor, env: NodeJS.ProcessEnv) => Promise<void>;
   private readonly loadTokenizerImpl: (descriptor: LocalOnnxModelDescriptor, env: NodeJS.ProcessEnv) => Promise<LocalOnnxTokenizer>;
   private readonly platform: NodeJS.Platform;
-  private ortPromise: Promise<LocalOnnxRuntime> | undefined;
-  private tokenizerPromise: Promise<LocalOnnxTokenizer> | undefined;
-  private sessionPromise: Promise<LocalOnnxSessionSelection> | undefined;
+  private readonly ortAttemptOwner: AttemptOwner<LocalOnnxRuntime> = { current: undefined };
+  private readonly tokenizerAttemptOwner: AttemptOwner<LocalOnnxTokenizer> = { current: undefined };
+  private readonly sessionAttemptOwner: AttemptOwner<LocalOnnxSessionSelection> = { current: undefined };
+  private ortAttempt: Attempt<LocalOnnxRuntime> | undefined;
+  private tokenizerAttempt: Attempt<LocalOnnxTokenizer> | undefined;
+  private sessionAttempt: Attempt<LocalOnnxSessionSelection> | undefined;
   private selectedExecutionProvider: OnnxExecutionProvider | undefined;
   private activeOrt: LocalOnnxRuntime | undefined;
+  private activeSessionSelection: LocalOnnxSessionSelection | undefined;
 
   constructor(options: LocalOnnxProviderOptions = {}) {
     this.descriptor = localOnnxModelDescriptor(options.model);
@@ -140,22 +145,40 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   }
 
   async close(): Promise<void> {
-    const selection = this.sessionPromise ? await this.sessionPromise.catch(() => undefined) : undefined;
-    this.sessionPromise = undefined;
+    const attempt = this.sessionAttempt;
+    this.sessionAttempt = undefined;
+    if (attempt && this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
+    // Await the in-flight load attempt's settlement AFTER detaching ownership. A superseded attempt
+    // closes its own produced session asynchronously (the Attempt `close` callback); if close()
+    // returned before that ran, a caller sequencing teardown/exit after close() could observe a
+    // use-after-close as the abandoned session releases in the background. Reading the active
+    // selection after the await also captures any session that installed before we detached.
+    if (attempt) await attempt.result.catch(() => undefined);
+    const selection = this.activeSessionSelection;
+    this.activeSessionSelection = undefined;
+    this.selectedExecutionProvider = undefined;
     if (selection?.session.release) await selection.session.release();
   }
 
   private async tokenizer(): Promise<LocalOnnxTokenizer> {
     if (this.injectedTokenizer) return this.injectedTokenizer;
-    this.tokenizerPromise ??= (async () => {
+    if (this.tokenizerAttempt) return this.tokenizerAttempt.wait();
+    const attempt = Attempt.start(this.tokenizerAttemptOwner, async () => {
       await this.ensureArtifact();
       return this.loadTokenizerImpl(this.descriptor, this.env);
-    })();
-    return this.tokenizerPromise;
+    });
+    this.tokenizerAttempt = attempt;
+    attempt.result.catch(() => {
+      if (this.tokenizerAttempt !== attempt) return;
+      this.tokenizerAttempt = undefined;
+      if (this.tokenizerAttemptOwner.current === attempt) this.tokenizerAttemptOwner.current = undefined;
+    });
+    return attempt.wait();
   }
 
   private async session(): Promise<LocalOnnxSessionSelection> {
-    this.sessionPromise ??= (async () => {
+    if (this.sessionAttempt) return this.sessionAttempt.wait();
+    const attempt = Attempt.start(this.sessionAttemptOwner, async () => {
       await this.ensureArtifact();
       const ort = await this.ort();
       this.activeOrt = ort;
@@ -166,10 +189,21 @@ export class LocalOnnxProvider implements EmbeddingProvider {
         executionProvider: this.executionProviderPreference,
         platform: this.platform
       });
-      this.selectedExecutionProvider = selection.executionProvider;
       return selection;
-    })();
-    return this.sessionPromise;
+    }, {
+      install: (selection) => {
+        this.activeSessionSelection = selection;
+        this.selectedExecutionProvider = selection.executionProvider;
+      },
+      close: (selection) => selection.session.release?.()
+    });
+    this.sessionAttempt = attempt;
+    attempt.result.catch(() => {
+      if (this.sessionAttempt !== attempt) return;
+      this.sessionAttempt = undefined;
+      if (this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
+    });
+    return attempt.wait();
   }
 
   private async ort(): Promise<LocalOnnxRuntime> {
@@ -177,8 +211,20 @@ export class LocalOnnxProvider implements EmbeddingProvider {
       this.activeOrt = this.injectedOrt;
       return this.injectedOrt;
     }
-    this.ortPromise ??= importOnnxRuntime();
-    this.activeOrt = await this.ortPromise;
+    if (!this.ortAttempt) {
+      const attempt = Attempt.start(this.ortAttemptOwner, () => importOnnxRuntime(), {
+        install: (ort) => {
+          this.activeOrt = ort;
+        }
+      });
+      this.ortAttempt = attempt;
+      attempt.result.catch(() => {
+        if (this.ortAttempt !== attempt) return;
+        this.ortAttempt = undefined;
+        if (this.ortAttemptOwner.current === attempt) this.ortAttemptOwner.current = undefined;
+      });
+    }
+    this.activeOrt = await this.ortAttempt.wait();
     return this.activeOrt;
   }
 

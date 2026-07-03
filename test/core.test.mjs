@@ -981,7 +981,7 @@ test("kiwi analyzer manager reuses active handles without rechecking model files
   }
 });
 
-test("kiwi analyzer manager does not apply degraded state across cache envs", async () => {
+test("kiwi analyzer manager does not apply failed load state across cache envs", async () => {
   const { KiwiAnalyzerManager, KiwiAnalyzerTerminalLoadError } = await import(path.join(repoRoot, "src/core/kiwi/manager.ts"));
   const loadCalls = [];
   const manager = new KiwiAnalyzerManager({
@@ -1046,7 +1046,7 @@ test("kiwi analyzer manager does not apply degraded state across cache envs", as
       ),
       KiwiAnalyzerTerminalLoadError
     );
-    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-degraded-a" }).state, "degraded");
+    assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-degraded-a" }).state, "unloaded");
     assert.equal(manager.status({ XDG_CACHE_HOME: "/tmp/kiwi-degraded-b" }).state, "unloaded");
 
     const second = await manager.withAnalyzerLease(
@@ -1188,7 +1188,7 @@ test("kiwi loader resolves direct and wrapped wasm initializer imports", async (
   assert.throws(() => __resolveKiwiWasmInitializerForTests({}), /Kiwi wasm initializer is not available/);
 });
 
-test("kiwi wasm install recovers stale install locks", async () => {
+test("kiwi wasm install recovers dead install claims", async () => {
   const cache = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-cache-"));
   const wasm = fs.readFileSync(path.join(repoRoot, "node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"));
   const archive = zlib.gzipSync(tarSingleFile("package/dist/kiwi-wasm.wasm", wasm));
@@ -1198,27 +1198,26 @@ test("kiwi wasm install recovers stale install locks", async () => {
     status: 200,
     arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
   });
-  const {
-    __setKiwiInstallLockStaleMsForTests,
-    inspectKiwiWasmArtifact,
-    kiwiDataDir
-  } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
+  const { inspectKiwiWasmArtifact, kiwiDataDir } = await import(path.join(repoRoot, "src/core/kiwi/artifact.ts"));
+  const { ExclusiveClaim } = await import(path.join(repoRoot, "src/core/lifecycle/exclusive-claim.ts"));
+  const { createProcessToken } = await import(path.join(repoRoot, "src/core/lifecycle/process-token.ts"));
   const { loadKiwiWasmBinary } = await import(path.join(repoRoot, "src/core/kiwi/loader.ts"));
   const env = { XDG_CACHE_HOME: cache };
-  const lockDir = path.join(kiwiDataDir(env), "wasm-install.lock");
+  const claimDir = path.join(kiwiDataDir(env), "wasm-install.claim");
 
-  fs.mkdirSync(lockDir, { recursive: true });
-  const staleAt = new Date(Date.now() - 10_000);
-  fs.utimesSync(lockDir, staleAt, staleAt);
-  __setKiwiInstallLockStaleMsForTests(1);
+  const current = createProcessToken();
+  await ExclusiveClaim.acquire(claimDir, {
+    token: { pid: current.pid, startId: `${current.startId}:previous-process` },
+    claimId: "dead-holder",
+    timeoutMs: 0
+  });
   try {
     const binary = await loadKiwiWasmBinary(env);
     const state = inspectKiwiWasmArtifact(env);
     assert.equal(binary.length, wasm.length);
     assert.equal(state.installed, true);
-    assert.equal(fs.existsSync(lockDir), false);
+    assert.equal(fs.existsSync(claimDir), false);
   } finally {
-    __setKiwiInstallLockStaleMsForTests(undefined);
     globalThis.fetch = originalFetch;
   }
 });

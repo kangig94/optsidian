@@ -9,7 +9,7 @@ names; exact line numbers are included only where they are useful orientation, n
 maintained citation set.
 
 Iron law (unchanged): results are a pure function of `(snapshot id, query, filters, limit, ranking
-version, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
+version, ranking tuning hash, analyzer identity)`; latency may vary, results may not. This document is about the *latency*
 and *lifecycle* half — the resident daemon, the load/unload of the model, and the build/publish/GC of
 caches — none of which may change a served result.
 
@@ -23,42 +23,39 @@ Every CLI/MCP entry goes through `createSearchDaemonClient` (`src/daemon/client.
 in-process search fallback: if the daemon cannot be reached, the client throws
 `SEARCH_DAEMON_UNAVAILABLE` (`client.ts:481`).
 
-`ensureReady()` (`client.ts:111-132`) is the birth path:
+`ensureReady()` is a lock-free verdict loop:
 
-1. Read the owner record from the registry (`client.ts:112`). If a live, compatible owner already
-   answers `Status`, reuse it (`ownerCanBeUsed`, `client.ts:134-150`; validates identity, PID
-   liveness, socket ownership, and nonce).
-2. Otherwise take a **directory lock** (`registry.withControlLock`, `client.ts:118`;
-   `owner-registry.ts:319-342`, `mkdir`-based, stale after `LOCK_STALE_MS = 20_000`) so two cold
-   clients cannot both spawn. Under the lock, re-check, fence a stale owner
-   (`fenceOrRemoveOwner`, `client.ts:152-176` — sends `Shutdown` to a same-slot live owner), then
-   `spawnOwner()`.
-3. `spawnOwner()` (`client.ts:178-196`) writes a fresh owner record with a **random 24-byte nonce**
-   (`owner-registry.ts:105-107`) and detaches the process: `spawn(binaryPath, ["__search-daemon"],
-   { detached: true, stdio: "ignore" })` then `child.unref()` (`client.ts:451-479`).
-4. `waitUntilReady()` (`client.ts:198-217`) polls `Status` every 50 ms until `ready`, up to
-   `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS = 15000` (`protocol.ts:58`).
+1. Read the daemon-authored tenancy record from the registry. If it matches the desired slot and the
+   single socket answers `Status`, reuse it.
+2. If no usable owner exists, spawn `node <bin> __search-daemon`. The client does **not** write the
+   owner record and does not take a directory lock; the daemon's successful `listen()` is the exclusive
+   tenancy commit.
+3. While the daemon is constructing, the same socket serves `Status` and `WaitReady` from a boot
+   responder. `WaitReady` is a long poll, so clients do not busy-poll readiness.
+4. Lifecycle failures (`STALE_INCARNATION`, `DAEMON_STARTING`, `DAEMON_DRAINING`, transient connect
+   errors) resync until the caller's deadline. Semantic failures such as malformed payloads, invalid
+   vaults, and real protocol mismatches surface immediately.
 
-### Owner registry, nonce, and separate sockets
+### Owner registry, incarnation, and the single socket
 
-The daemon is **per-user, per-runtime**. Identity is `(uid, runtimeHash, binaryVersion,
-protocolVersion)` (`owner-registry.ts:26-31`, `desiredOwnerIdentity` `:123-130`). It listens on
-**two Unix domain sockets** — a query socket and a control socket — under the runtime directory
-(`socketPathsForOwner`, `owner-registry.ts:147-155`; default dir from `XDG_RUNTIME_DIR` else
-`os.tmpdir()/optsidian-<uid>`, `:85-91`).
+The daemon is **per-user, per-runtime**. The tenancy slot is `(uid, runtimeHash, protocolVersion)`;
+the record also carries `binaryVersion`, `epoch`, `incarnationId`, `pid`, `socketPath`, and
+`startedAt`. It listens on exactly **one Unix domain socket** under the runtime directory
+(`socketPathForOwner`; default dir from `XDG_RUNTIME_DIR` else `os.tmpdir()/optsidian-<uid>`).
 
-- **Query capability** (`QUERY_DAEMON_METHODS`, `protocol.ts:36-40`): `Status`, `Search`, `Retrieve`.
-- **Control capability** (`CONTROL_DAEMON_METHODS`, `protocol.ts:42-51`): `Status`, `LoadVault`,
-  `Rebuild`, `Refresh`, `Compact`, `Clear`, `Prune`, `Shutdown`.
+The single dispatcher preserves the method-level capability split:
 
-Every request except `Status` must carry the owner nonce or it is rejected with
-`SEARCH_DAEMON_AUTH_FAILED` (`server.ts:287-289`). The protocol version must match
-(`SEARCH_DAEMON_PROTOCOL_VERSION = 3`, `protocol.ts:35`; validated `server.ts:272-274`).
+- **Query methods** (`QUERY_DAEMON_METHODS`): `Status`, `WaitReady`, `Search`, `Retrieve`.
+- **Control methods** (`CONTROL_DAEMON_METHODS`): `Status`, `WaitReady`, `LoadVault`, `Rebuild`,
+  `Refresh`, `Compact`, `Clear`, `Prune`, `Shutdown`.
 
-The **ready handshake**: on start the daemon opens both sockets, then sets `phase = "ready"`
-(`initialize`, `server.ts:222-224`). Until `daemon` is constructed, both socket handlers throw
-`SEARCH_DAEMON_NOT_READY` (`server.ts:161-163, 177-179`). The client's `Status` reports
-`ready: phase === "ready"` (`server.ts:419`).
+Every method except `Status` and `WaitReady` must carry the current `incarnation` value. A mismatched
+incarnation is a retryable `STALE_INCARNATION`. The protocol version is
+`SEARCH_DAEMON_PROTOCOL_VERSION = 4`, and a genuine protocol mismatch is a semantic `BAD_REQUEST`.
+
+The **ready handshake**: the daemon binds first, then writes the tenancy record. The record is therefore
+never observable until the socket is established. During construction, `Status` returns
+`phase:"starting"` and `WaitReady` waits for the monotonic phase transition to `ready` or `draining`.
 
 ### What keeps the daemon alive
 
@@ -66,8 +63,8 @@ The daemon arms a no-request idle shutdown timer. `daemonIdleMs` defaults to `6 
 and still honors `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` / `settings.search.daemonIdleMs`
 (`daemonIdleMs`, `server.ts`). Startup arms the timer after `phase = "ready"` (`SearchDaemon.initialize`);
 `SearchDaemon.handleRequest` clears it at request admission and re-arms it in `finally` after the
-request completes. When the timer fires, it runs the same shutdown path as explicit `Shutdown`
-(`SearchDaemon.shutdown`). A later CLI or MCP call auto-boots the daemon through `ensureReady()`.
+request completes. When the timer fires, it runs the same `drain("draining")` path as explicit
+`Shutdown`. A later CLI or MCP call auto-boots the daemon through `ensureReady()`.
 
 > **DO** treat the daemon as warm between requests within the idle window.
 > **DON'T** confuse daemon idle shutdown with model idle unload; embedding model sessions keep their
@@ -87,36 +84,48 @@ profile is the norm; a distinct `profile` in the request payload spins up a seco
 
 ### Explicit shutdown
 
-The `Shutdown` control method (`server.ts:384-393`) requires the nonce, replies `{ok, shuttingDown}`,
-then asynchronously runs `shutdown()` on an `unref`'d timer. `shutdown()` (`server.ts:443-464`) sets
-`phase = "shutting-down"`, removes the owner record, closes both RPC servers, closes all profile
-runtimes (`profiles.close()`), unlinks both sockets, and resolves the `waitForShutdown` promise that
-keeps `runSearchDaemon` alive (`server.ts:94-96`).
+The `Shutdown` control method replies `{ok, shuttingDown}` and schedules `drain("draining")` on an
+`unref`'d timer. `drain(phase)` is the only daemon teardown path for explicit shutdown, idle expiry, and
+startup failure after bind. It moves the monotonic phase to `draining`, wakes `WaitReady` waiters,
+relinquishes the RPC server/socket, unlinks the socket path, and removes the owner record **before**
+slow teardown of profile runtimes (`profiles.close()`) and the embed scheduler (`embedScheduler.close()`).
+The RPC server then waits for admitted handlers to drain or observe cancellation, preventing
+use-after-close and un-journaled save loss.
+
+The socket path and owner slot must be fully relinquished *before* slow teardown (the 2fe1f70 ordering):
+otherwise a client arriving mid-shutdown can auto-boot a successor daemon that binds the same socket path,
+and this daemon's later teardown would delete the successor's live socket.
 
 ### Startup partial-failure cleanup & crash recovery
 
-- **Partial-start cleanup**: if construction fails after a socket is opened, `SearchDaemon.start`'s
-  `catch` closes whichever RPC servers opened, unlinks both socket paths, and removes the owner record
-  (`server.ts:192-215`). Orphan sockets are also unlinked *before* binding (`removeOrphanSocket`,
-  `server.ts:147-148, 528-534`).
+- **Partial-start cleanup**: if construction fails after the socket is opened, startup enters the same
+  `drain("draining")` ordering. The daemon relinquishes the socket and removes its owner record before
+  slow scheduler/profile teardown, so no half-established tenancy is advertised.
+- **Stale socket recovery**: a stale socket path is unlinked only after a connect probe proves that no
+  listener is present (`ECONNREFUSED`). A provably live listener is not reclaimed.
 - **Process error handlers**: uncaught exceptions / unhandled rejections log to stderr and
   `process.exit(1)` for both the daemon (`server.ts:540-558`) and its workers
   (`worker-entry.ts:377-395`).
-- **Crash / restart recovery**: a fresh daemon re-derives its owner slot from env
-  (`resolveOwnerFromEnv`, `server.ts:503-526`) and reclaims the sockets. On the index side, the corpus
-  active pointer is validated at read time and a dangling pointer is dropped (`recoverVault`,
+- **Crash / restart recovery**: a fresh daemon re-derives its desired slot from env, binds the single
+  socket, reads the previous record, writes `epoch + 1` with a fresh random `incarnationId`, and starts
+  serving. Process liveness is proven through `ProcessToken` start identity, so pid reuse cannot
+  deadlock or cause a live holder to be mis-reclaimed. On the index side, the corpus active pointer is
+  validated at read time and a dangling pointer is dropped (`recoverVault`,
   `snapshot-store.ts:1395-1403`), and a background GC re-runs. At the daemon ready transition,
   retrieval startup recovery demotes stale `building` records and sweeps orphan staging.
+- **Write fencing**: the production `TenancyFenceProvider` is bind-backed. Snapshot publish CAS receives
+  `(epoch, incarnationId, claimId, processToken)`, so stale cross-incarnation publish work cannot commit
+  after a successor takes over.
 
 ### Key constants & env vars
 
 | Name | Value | Source |
 |------|-------|--------|
-| `SEARCH_DAEMON_PROTOCOL_VERSION` | `3` | `protocol.ts:35` |
-| Ready poll timeout | `15000` ms | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts:58` |
-| Owner control lock stale | `20_000` ms | `LOCK_STALE_MS`, `owner-registry.ts:61` |
-| Daemon idle timeout | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.shutdown` |
-| Nonce | random 24 bytes | `randomNonce`, `owner-registry.ts:105-107` |
+| `SEARCH_DAEMON_PROTOCOL_VERSION` | `4` | `protocol.ts` |
+| Ready wait timeout | `15000` ms | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts` |
+| Daemon idle timeout | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.drain` |
+| Incarnation id | random per daemon bind winner | `randomIncarnationId`, `owner-registry.ts` |
+| Epoch | previous owner record epoch + 1 | `nextOwnerEpoch`, `owner-registry.ts` |
 | Runtime dir override | `OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR` | `owner-registry.ts:85-91` |
 | Idle-ms override | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` | `daemonIdleMs` |
 
@@ -229,12 +238,11 @@ active (`embed-scheduler.ts:116-137, 312-315`).
 **`vector`**, **`hybrid`**. The request `origin` (for `Retrieve`) is one of
 `text | note | pair | global` (`RetrieveOrigin`, `core/types.ts:171`).
 
-The client splits the transport (`client.ts:298-305`): a `search` request with `retrieval` `vector`
-or `hybrid` is rewritten into a `Retrieve` (`searchPayloadToRetrieve` sets `origin: "text"`,
-`client.ts:409-416`); plain lexical `search` uses `Search`; `explain` always uses `Retrieve` with
-`debug + explain` (`client.ts:306-321`). Retrieve-derived search results carry the retrieve `dense`
-signal through `searchResultFromRetrieve` (`client.ts:418-438`). The daemon dispatch is
-`server.ts:292-311`.
+The client chooses the daemon method: a `search` request with `retrieval` `vector` or `hybrid` is
+rewritten into a `Retrieve` (`searchPayloadToRetrieve` sets `origin: "text"`); plain lexical `search`
+uses `Search`; `explain` always uses `Retrieve` with debug + explain. Retrieve-derived search results
+carry the retrieve `dense` signal through `searchResultFromRetrieve`. The daemon routes all methods
+through one socket dispatcher.
 
 ### Lexical (`Search`, or `retrieval=lexical`)
 
@@ -302,16 +310,29 @@ stored vector from the attached generation or the response is soft `index-not-re
 
 ### Request admission, deadlines, cancellation
 
-`SearchDaemon.handleRequest` (`server.ts:256-281`) validates protocol/nonce/deadline, registers the
-request cancellation id, and runs through the scheduler. Default query deadline is
+`SearchDaemon.handleRequest` validates protocol, incarnation, and deadline, registers the request
+cancellation id, and runs through the scheduler. Default query deadline is
 `SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 3000` for `Retrieve` (`protocol.ts:60, 528-532`); a cold
 lifecycle command gets a work-sized deadline `60s + 750ms·files + 5s·MiB`
 (`vaultLifecycleDeadlineMs`, `protocol.ts:539-545`; applied client-side `client.ts:394-397`). A closed
-RPC connection cancels its in-flight requests (`server.ts:166-171, 261-269`).
+RPC connection cancels its in-flight requests.
 
 ---
 
 ## 4. Cache & index lifecycle (the lifelines)
+
+> **Superseded model note.** The active-pointer and `retrieval-freshness.json` mechanics described in
+> the remainder of this section are the *pre-ledger* model. Visible state is now an **append-only
+> edition ledger** (`search-store/publisher.ts` `EditionLedger`, `publications/<editionSeq>`): a
+> `VaultPublisher` (one per `retrievalIdentity = (vaultStateHash, lexicalIdentityHash,
+> embeddingSpaceId)`) is the sole writer; "current" is the max valid `editionSeq`; each `EditionRecord`
+> names the corpus + link graph + a dense union (`fresh|building|failed|unavailable`) atomically, so a
+> reader never chases separate pointers and freshness is *derived* from the edition's dense arm.
+> Reclamation is a daemon-wide `SharedReclamationAuthority`: vector-generation GC roots are the union
+> of live edition heads across every ledger sharing a `(vaultStateHash, embeddingSetId)` store, plus
+> in-memory pins and build reservations, swept under a per-key `ExclusiveClaim`. The corpus/retrieval
+> active-pointer files and `retrieval-freshness.json` remain only as legacy/startup-recovery artifacts,
+> not the live serving mechanism. (Full rewrite of the prose below is a tracked follow-up.)
 
 The search subsystem persists **four distinct artifacts**, each content-addressed and independently
 GC'd.
@@ -480,10 +501,10 @@ doubles live under `test/` and are injected directly through `VectorGenerationPo
 
 ### (a) Cold first query after daemon start
 
-1. Client `ensureReady` finds no owner → takes the control lock → `spawnOwner` detaches
-   `node <bin> __search-daemon` (`client.ts:118-126, 451-479`).
-2. Daemon opens query + control sockets, `phase = "ready"` (`server.ts:157-224`); client's `Status`
-   poll returns ready within ≤15 s (`client.ts:198-217`).
+1. Client `ensureReady` finds no usable owner and detaches `node <bin> __search-daemon`.
+2. Daemon binds the single socket, writes the tenancy record with a fresh `incarnationId` and monotonic
+   `epoch`, constructs the runtime, and transitions from `starting` to `ready`. Clients wait through
+   `WaitReady` rather than polling.
 3. Lexical `search` → `Search` RPC → `store.pin` builds the corpus snapshot on first touch
    (`ensureActiveSnapshot` → `publishFreshSnapshot`), warms one search-execution worker on that
    snapshot, then runs the positional query (`service.ts:294-358`).
@@ -535,7 +556,8 @@ encode re-loads on demand.
 
 ### (f) Daemon restart with a dirty index
 
-1. New daemon reclaims the owner slot and sockets (`server.ts:503-526, 147-148`).
+1. New daemon binds the single owner socket, proves the previous holder is not listening when needed,
+   increments the slot epoch, and writes a fresh tenancy record.
 2. On the next lifecycle/query, `recoverVault` validates the corpus active pointer and drops it if the
    manifest is missing, then queues a background GC (`snapshot-store.ts:1395-1403`).
 3. The daemon schedules startup recovery after `phase = "ready"`: `startupReconcile` demotes stale

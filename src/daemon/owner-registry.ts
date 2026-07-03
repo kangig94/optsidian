@@ -3,25 +3,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensurePrivateDirSync, writePrivateFileAtomicSync, writePrivateFileSync } from "../core/private-path.js";
+import { ensurePrivateDirSync, writePrivateFileAtomicSync } from "../core/private-path.js";
+import { createProcessToken, processTokenEquals, type ProcessToken } from "../core/lifecycle/process-token.js";
+import type { CurrentWriterToken, TenancyFenceProvider } from "../core/lifecycle/conditional-commit.js";
 import {
   SEARCH_DAEMON_PROTOCOL_VERSION,
-  type OwnerStatus
+  type TenancySlot,
+  type TenancyRecord
 } from "./protocol.js";
 
 export const OWNER_RECORD_FIELDS = [
-  "pid",
-  "uid",
-  "runtimeHash",
+  "slot",
+  "epoch",
+  "incarnationId",
   "binaryVersion",
-  "protocolVersion",
-  "nonce",
-  "querySocketPath",
-  "controlSocketPath",
+  "pid",
+  "socketPath",
   "startedAt"
 ] as const;
 
-export type OwnerRecord = OwnerStatus;
+export type OwnerRecord = TenancyRecord;
 
 export type DesiredOwnerIdentity = {
   uid: number;
@@ -33,11 +34,9 @@ export type DesiredOwnerIdentity = {
 export type OwnerRegistry = {
   runtimeDir: string;
   ownerPath: string;
-  lockPath: string;
   readOwner(): OwnerRecord | undefined;
   writeOwner(record: OwnerRecord): void;
   removeOwner(record?: OwnerRecord): void;
-  withControlLock<T>(deadlineMs: number, fn: () => Promise<T> | T): Promise<T>;
   compatibleOwners?(desired?: DesiredOwnerIdentity): OwnerRecord[];
 };
 
@@ -58,22 +57,18 @@ export class SearchDaemonOwnerError extends Error {
 }
 
 const DAEMON_SCOPE_HASH_PREFIX_LENGTH = 24;
-const LOCK_STALE_MS = 20_000;
 
 export function createOwnerRegistry(options: CreateOwnerRegistryOptions): OwnerRegistry {
   const runtimeDir = options.runtimeDir ?? defaultSearchDaemonRuntimeDir(options.env);
   ensurePrivateDirSync(runtimeDir, "Optsidian search daemon runtime directory");
   const stem = ownerRegistryStem(options.desired);
   const ownerPath = path.join(runtimeDir, `${stem}.owner`);
-  const lockPath = path.join(runtimeDir, `${stem}.control.lock`);
   return {
     runtimeDir,
     ownerPath,
-    lockPath,
     readOwner: () => readOwnerFile(ownerPath),
     writeOwner: (record) => writeOwnerFile(ownerPath, record),
     removeOwner: (record) => removeOwnerFile(ownerPath, record),
-    withControlLock: (deadlineMs, fn) => withDirectoryLock(lockPath, deadlineMs, fn),
     compatibleOwners(desired) {
       const owner = readOwnerFile(ownerPath);
       if (!owner) return [];
@@ -102,7 +97,7 @@ export function currentUid(): number {
   return process.getuid?.() ?? 0;
 }
 
-export function randomNonce(): string {
+export function randomIncarnationId(): string {
   return crypto.randomBytes(24).toString("hex");
 }
 
@@ -129,14 +124,11 @@ export function desiredOwnerIdentity(binaryPath: string): DesiredOwnerIdentity {
   };
 }
 
-export type OwnerSocketCapability = "query" | "control";
-
 export function socketPathForOwner(
   runtimeDir: string,
-  desired: DesiredOwnerIdentity,
-  capability: OwnerSocketCapability = "query"
+  desired: DesiredOwnerIdentity
 ): string {
-  const name = `optsidian-search-daemon-${capability}-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
+  const name = `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
   const candidate = path.join(runtimeDir, name);
   if (candidate.length < 100) return candidate;
   const socketDir = path.join(os.tmpdir(), `od-${desired.uid}-${sha256(path.resolve(runtimeDir)).slice(0, 12)}`);
@@ -144,37 +136,67 @@ export function socketPathForOwner(
   return path.join(socketDir, name);
 }
 
-export function socketPathsForOwner(runtimeDir: string, desired: DesiredOwnerIdentity): {
-  querySocketPath: string;
-  controlSocketPath: string;
-} {
-  return {
-    querySocketPath: socketPathForOwner(runtimeDir, desired, "query"),
-    controlSocketPath: socketPathForOwner(runtimeDir, desired, "control")
-  };
-}
-
 export function createOwnerRecord(
   desired: DesiredOwnerIdentity,
-  socketPath: string | { querySocketPath: string; controlSocketPath: string },
-  nonce: string,
+  socketPath: string,
+  epoch: number,
+  incarnationId: string,
   pid = process.pid,
   startedAt = new Date().toISOString()
 ): OwnerRecord {
-  const sockets = typeof socketPath === "string"
-    ? { querySocketPath: socketPath, controlSocketPath: socketPath }
-    : socketPath;
   return {
-    pid,
-    uid: desired.uid,
-    runtimeHash: desired.runtimeHash,
+    slot: {
+      uid: desired.uid,
+      runtimeHash: desired.runtimeHash,
+      protocolVersion: desired.protocolVersion
+    },
+    epoch,
+    incarnationId,
     binaryVersion: desired.binaryVersion,
-    protocolVersion: desired.protocolVersion,
-    nonce,
-    querySocketPath: sockets.querySocketPath,
-    controlSocketPath: sockets.controlSocketPath,
+    pid,
+    socketPath,
     startedAt
   };
+}
+
+export function nextOwnerEpoch(registry: Pick<OwnerRegistry, "readOwner">): number {
+  return (registry.readOwner()?.epoch ?? 0) + 1;
+}
+
+export function createBindBackedTenancyFenceProvider(
+  registry: Pick<OwnerRegistry, "readOwner">,
+  owner: OwnerRecord,
+  claimId: string,
+  processToken: ProcessToken = createProcessToken(owner.pid)
+): TenancyFenceProvider & { readonly writerToken: CurrentWriterToken } {
+  const writerToken: CurrentWriterToken = {
+    epoch: owner.epoch,
+    incarnationId: owner.incarnationId,
+    claimId,
+    processToken
+  };
+  return {
+    writerToken,
+    currentWriterToken() {
+      const current = registry.readOwner();
+      if (!current || !sameOwnerIncarnation(current, owner)) return undefined;
+      if (!processTokenEquals(writerToken.processToken, processToken)) return undefined;
+      return writerToken;
+    }
+  };
+}
+
+export function sameOwnerIncarnation(left: OwnerRecord, right: OwnerRecord): boolean {
+  return left.epoch === right.epoch &&
+    left.incarnationId === right.incarnationId &&
+    left.socketPath === right.socketPath &&
+    ownerSlotEquals(left, right);
+}
+
+function ownerSlotEquals(left: OwnerRecord, right: OwnerRecord): boolean {
+  return left.slot.uid === right.slot.uid &&
+    left.slot.runtimeHash === right.slot.runtimeHash &&
+    left.slot.protocolVersion === right.slot.protocolVersion;
 }
 
 export function ownerMatchesDesired(owner: OwnerRecord, desired: DesiredOwnerIdentity): boolean {
@@ -183,9 +205,9 @@ export function ownerMatchesDesired(owner: OwnerRecord, desired: DesiredOwnerIde
 }
 
 export function ownerSharesDesiredSlot(owner: OwnerRecord, desired: DesiredOwnerIdentity): boolean {
-  return owner.uid === desired.uid
-    && owner.runtimeHash === desired.runtimeHash
-    && owner.protocolVersion === desired.protocolVersion;
+  return owner.slot.uid === desired.uid
+    && owner.slot.runtimeHash === desired.runtimeHash
+    && owner.slot.protocolVersion === desired.protocolVersion;
 }
 
 export function ownerPidIsLive(owner: OwnerRecord): boolean {
@@ -199,40 +221,23 @@ export function ownerPidIsLive(owner: OwnerRecord): boolean {
   }
 }
 
-export function socketOwnershipMatches(owner: OwnerRecord): boolean {
-  try {
-    const query = fs.statSync(owner.querySocketPath);
-    const control = fs.statSync(owner.controlSocketPath);
-    return query.uid === owner.uid && control.uid === owner.uid;
-  } catch {
-    return false;
-  }
-}
-
 export async function convergeOnCompatibleDaemonForTests(
   registry: OwnerRegistry,
   desired: DesiredOwnerIdentity
 ): Promise<{ owner: OwnerRecord; replaced: boolean }> {
-  return registry.withControlLock(1000, async () => {
-    const current = registry.readOwner();
-    if (current?.nonce === "auth-failure") {
-      throw new SearchDaemonOwnerError(
-        "SEARCH_DAEMON_AUTH_FAILED",
-        "search daemon owner nonce authentication failed"
-      );
-    }
-    if (current && ownerMatchesDesired(current, desired)) {
-      return { owner: current, replaced: false };
-    }
-    const owner = createOwnerRecord(
-      desired,
-    socketPathsForOwner(registry.runtimeDir, desired),
-      current?.nonce && current.nonce !== "stale" ? current.nonce : randomNonce(),
-      process.pid
-    );
-    registry.writeOwner(owner);
-    return { owner, replaced: Boolean(current) };
-  });
+  const current = registry.readOwner();
+  if (current && ownerMatchesDesired(current, desired)) {
+    return { owner: current, replaced: false };
+  }
+  const owner = createOwnerRecord(
+    desired,
+    socketPathForOwner(registry.runtimeDir, desired),
+    (current?.epoch ?? 0) + 1,
+    randomIncarnationId(),
+    process.pid
+  );
+  registry.writeOwner(owner);
+  return { owner, replaced: Boolean(current) };
 }
 
 export function createOwnerRegistryForTests(options: {
@@ -242,7 +247,7 @@ export function createOwnerRegistryForTests(options: {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "optsidian-owner-registry-test-"));
   const registry = createOwnerRegistry({ runtimeDir, desired: options.desired });
   const incompatible = (overrides: Partial<OwnerRecord>): OwnerRecord => ({
-    ...createOwnerRecord(options.desired, socketPathsForOwner(runtimeDir, options.desired), "stale", 999999),
+    ...createOwnerRecord(options.desired, socketPathForOwner(runtimeDir, options.desired), 1, "stale", 999999),
     ...overrides
   });
 
@@ -253,7 +258,7 @@ export function createOwnerRegistryForTests(options: {
         protocolVersion: options.desired.protocolVersion + 1
       };
       createOwnerRegistry({ runtimeDir, desired: peerDesired }).writeOwner(
-        createOwnerRecord(peerDesired, socketPathsForOwner(runtimeDir, peerDesired), "stale", 999999)
+        createOwnerRecord(peerDesired, socketPathForOwner(runtimeDir, peerDesired), 1, "stale", 999999)
       );
       break;
     }
@@ -261,17 +266,13 @@ export function createOwnerRegistryForTests(options: {
       registry.writeOwner(incompatible({ binaryVersion: "old-binary-version" }));
       break;
     case "stale-pid-lock":
-      registry.writeOwner(incompatible({ pid: 999999, nonce: "stale" }));
+      registry.writeOwner(incompatible({ pid: 999999, incarnationId: "stale" }));
       break;
     case "orphaned-socket":
       registry.writeOwner(incompatible({
-        querySocketPath: path.join(runtimeDir, "missing-query.sock"),
-        controlSocketPath: path.join(runtimeDir, "missing-control.sock"),
-        nonce: "stale"
+        socketPath: path.join(runtimeDir, "missing.sock"),
+        incarnationId: "stale"
       }));
-      break;
-    case "auth-failure":
-      registry.writeOwner(incompatible({ nonce: "auth-failure" }));
       break;
     case "simultaneous-cold-starts":
       break;
@@ -307,7 +308,7 @@ function writeOwnerFile(ownerPath: string, record: OwnerRecord): void {
 function removeOwnerFile(ownerPath: string, record?: OwnerRecord): void {
   if (record) {
     const current = readOwnerFile(ownerPath);
-    if (!current || current.nonce !== record.nonce) return;
+    if (!current || current.epoch !== record.epoch || current.incarnationId !== record.incarnationId) return;
   }
   try {
     fs.rmSync(ownerPath, { force: true });
@@ -316,52 +317,24 @@ function removeOwnerFile(ownerPath: string, record?: OwnerRecord): void {
   }
 }
 
-async function withDirectoryLock<T>(lockPath: string, deadlineMs: number, fn: () => Promise<T> | T): Promise<T> {
-  const started = Date.now();
-  while (true) {
-    try {
-      fs.mkdirSync(lockPath, { recursive: false, mode: 0o700 });
-      ensurePrivateDirSync(lockPath, "Optsidian search daemon lock directory");
-      writePrivateFileSync(path.join(lockPath, "pid"), `${process.pid}\n`, "Optsidian search daemon lock pid file");
-      break;
-    } catch (error) {
-      if (!isAlreadyExistsError(error)) throw error;
-      removeStaleLock(lockPath);
-      if (Date.now() - started >= deadlineMs) {
-        throw new SearchDaemonOwnerError("SEARCH_DAEMON_UNAVAILABLE", "timed out waiting for search daemon owner lock");
-      }
-      await delay(20);
-    }
-  }
-
-  try {
-    return await fn();
-  } finally {
-    fs.rmSync(lockPath, { recursive: true, force: true });
-  }
-}
-
-function removeStaleLock(lockPath: string): void {
-  try {
-    const stat = fs.statSync(lockPath);
-    if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-      fs.rmSync(lockPath, { recursive: true, force: true });
-    }
-  } catch (error) {
-    if (!isNoEntryError(error)) throw error;
-  }
-}
-
 function isOwnerRecord(value: unknown): value is OwnerRecord {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return OWNER_RECORD_FIELDS.every((field) => (
-    field === "pid"
-      ? Number.isInteger(record[field])
-      : field === "uid" || field === "protocolVersion"
-        ? Number.isInteger(record[field])
-        : typeof record[field] === "string"
-  ));
+  return isSlot(record.slot) &&
+    Number.isInteger(record.epoch) &&
+    typeof record.incarnationId === "string" &&
+    typeof record.binaryVersion === "string" &&
+    Number.isInteger(record.pid) &&
+    typeof record.socketPath === "string" &&
+    typeof record.startedAt === "string";
+}
+
+function isSlot(value: unknown): value is TenancySlot {
+  if (!value || typeof value !== "object") return false;
+  const slot = value as Record<string, unknown>;
+  return Number.isInteger(slot.uid) &&
+    typeof slot.runtimeHash === "string" &&
+    Number.isInteger(slot.protocolVersion);
 }
 
 function resolveExistingPath(filePath: string): string {
@@ -377,14 +350,6 @@ function sha256(value: string | Buffer): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isNoEntryError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT");
-}
-
-function isAlreadyExistsError(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "EEXIST");
 }

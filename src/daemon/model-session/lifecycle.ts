@@ -1,3 +1,5 @@
+import { Attempt, type AttemptOwner } from "../../core/lifecycle/conditional-commit.js";
+
 export type ModelDevice = "gpu" | "cpu";
 
 export type VramProbeResult = {
@@ -38,21 +40,12 @@ export class ModelSessionLifecycle {
   private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
   private readonly clearTimer: (timer: NodeJS.Timeout) => void;
   private readonly isOomError: (error: unknown) => boolean;
+  private readonly loadAttemptOwner: AttemptOwner<ModelSession> = { current: undefined };
   private session: ModelSession | undefined;
-  private loading: {
-    promise: Promise<ModelSession>;
-    device: ModelDevice;
-    generation: number;
-    controller: AbortController;
-    waiters: number;
-  } | undefined;
-  private coldLoad: Promise<ModelSession> | undefined;
-  private coldLoadWaiters = 0;
-  private coldLoadCancelled = false;
-  private loadGeneration = 0;
+  private loadAttempt: Attempt<ModelSession> | undefined;
+  private loadingDevice: ModelDevice | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
   private suppressPromotionAfterGpuOom = false;
-  private currentLoadCancelled = false;
 
   constructor(options: ModelSessionLifecycleOptions) {
     this.requiredVramBytes = options.requiredVramBytes;
@@ -76,23 +69,35 @@ export class ModelSessionLifecycle {
       deadline: options.deadline,
       signal: options.signal
     });
-    const output = await abortable(
-      session.encode(texts, {
-        signal: options.signal,
-        inputKind: options.origin === "query-text" ? "query" : "document"
-      }),
-      options.signal,
-      () => undefined
-    );
-    this.armIdleUnload();
-    if (!options.suppressCpuPromotion) {
-      await this.promoteCpuSessionIfGpuAvailable(options.signal);
+    try {
+      const output = await abortable(
+        session.encode(texts, {
+          signal: options.signal,
+          inputKind: options.origin === "query-text" ? "query" : "document"
+        }),
+        options.signal,
+        () => undefined
+      );
+      if (options.origin === "query-text" && !options.suppressCpuPromotion) {
+        await this.promoteCpuSessionIfGpuAvailable(options.signal);
+      }
+      return output;
+    } finally {
+      // Re-arm idle unload even when the encode (or promotion) throws — `ensureSession` cleared the
+      // timer on entry, so a failed encode would otherwise leave the loaded session resident forever.
+      this.armIdleUnload();
     }
-    return output;
   }
 
   async unload(): Promise<void> {
     this.clearIdleUnload();
+    const attempt = this.loadAttempt;
+    if (attempt && this.loadAttemptOwner.current === attempt) {
+      this.loadAttemptOwner.current = undefined;
+      const device = this.loadingDevice;
+      this.loadingDevice = undefined;
+      if (device) await this.terminateLoad(device, "abort");
+    }
     const session = this.session;
     this.session = undefined;
     if (session) await session.close();
@@ -107,7 +112,7 @@ export class ModelSessionLifecycle {
     return {
       loaded: this.session !== undefined,
       ...(this.session ? { device: this.session.device } : {}),
-      ...(this.loading ? { loadingDevice: this.loading.device } : {}),
+      ...(this.loadingDevice ? { loadingDevice: this.loadingDevice } : {}),
       ...(this.idleTimer ? { idleDeadline: new Date(this.now() + this.idleMs).toISOString() } : {})
     };
   }
@@ -117,61 +122,64 @@ export class ModelSessionLifecycle {
       this.clearIdleUnload();
       return this.session;
     }
-    if (this.loading) {
-      return this.waitForSharedLoad(this.loading, options.deadline, options.signal);
+    const current = this.loadAttempt;
+    if (current && !current.aborted) {
+      return this.waitForLoadAttempt(current, options.deadline, options.signal);
     }
-    if (this.coldLoad) {
-      return this.waitForColdLoad(this.coldLoad, options.deadline, options.signal);
-    }
-    this.coldLoadCancelled = false;
-    const coldLoad = (async () => {
+
+    let attempt!: Attempt<ModelSession>;
+    attempt = Attempt.start(this.loadAttemptOwner, async (signal) => {
       const device = await this.pickDevice();
-      if (this.coldLoadCancelled) {
-        throw Object.assign(new Error("model session load was cancelled"), { code: "CANCELLED" });
-      }
-      return this.startLoadWithFallback(device, options);
-    })().finally(() => {
-      if (this.coldLoad === coldLoad) this.coldLoad = undefined;
-      this.coldLoadWaiters = 0;
+      throwIfLoadAborted(signal);
+      return this.startLoadWithFallback(device, signal);
+    }, {
+      install: (session) => {
+        this.session = session;
+        this.armIdleUnload();
+      },
+      close: (session) => session.close()
     });
-    this.coldLoad = coldLoad;
-    return this.waitForColdLoad(coldLoad, options.deadline, options.signal);
+    this.loadAttempt = attempt;
+    attempt.result.finally(() => {
+      if (this.loadAttempt !== attempt) return;
+      this.loadAttempt = undefined;
+      if (this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
+      this.loadingDevice = undefined;
+    }).catch(() => undefined);
+    return this.waitForLoadAttempt(attempt, options.deadline, options.signal);
   }
 
   private async startLoadWithFallback(
     device: ModelDevice,
-    options: { deadline: number; signal?: AbortSignal }
+    signal: AbortSignal
   ): Promise<ModelSession> {
     try {
-      return await this.startLoad(device, options);
+      return await this.startLoad(device, signal);
     } catch (error) {
+      throwIfLoadAborted(signal);
       if (device !== "gpu" || !this.isOomError(error)) throw error;
       this.suppressPromotionAfterGpuOom = true;
-      await this.cancelLoading("gpu", "abort");
-      return this.startLoad("cpu", options);
+      await this.terminateLoad("gpu", "abort");
+      return this.startLoad("cpu", signal);
     }
   }
 
-  private async startLoad(device: ModelDevice, options: { deadline: number; signal?: AbortSignal }): Promise<ModelSession> {
-    const generation = ++this.loadGeneration;
-    this.currentLoadCancelled = false;
-    const controller = new AbortController();
-    const rawLoad = this.loadSession(device, { signal: controller.signal });
-    const promise = rawLoad.then(async (session) => {
-      if (this.loadGeneration !== generation) {
-        await session.close();
-        throw Object.assign(new Error("model session load was superseded"), { code: "CANCELLED" });
-      }
-      this.session = session;
-      this.loading = undefined;
-      this.armIdleUnload();
-      return session;
-    }).catch((error) => {
-      if (this.loading?.generation === generation) this.loading = undefined;
-      throw error;
-    });
-    this.loading = { promise, device, generation, controller, waiters: 0 };
-    return promise;
+  private async startLoad(device: ModelDevice, signal: AbortSignal): Promise<ModelSession> {
+    this.loadingDevice = device;
+    throwIfLoadAborted(signal);
+    let terminated = false;
+    const terminate = () => {
+      if (terminated) return;
+      terminated = true;
+      if (this.loadingDevice === device) this.loadingDevice = undefined;
+      void this.terminateLoad(device, loadTerminationReason(signal));
+    };
+    signal.addEventListener("abort", terminate, { once: true });
+    try {
+      return await this.loadSession(device, { signal });
+    } finally {
+      signal.removeEventListener("abort", terminate);
+    }
   }
 
   private async promoteCpuSessionIfGpuAvailable(signal: AbortSignal | undefined): Promise<void> {
@@ -183,10 +191,9 @@ export class ModelSessionLifecycle {
     }
     const device = await this.pickDevice();
     if (device !== "gpu") return;
-    const generation = ++this.loadGeneration;
     try {
       const gpu = await abortable(this.loadSession("gpu", { signal }), signal, () => this.terminateLoad("gpu", "abort"));
-      if (this.session !== current || this.loadGeneration !== generation) {
+      if (this.session !== current) {
         await gpu.close();
         return;
       }
@@ -199,141 +206,53 @@ export class ModelSessionLifecycle {
   }
 
   private async pickDevice(): Promise<ModelDevice> {
+    // Required VRAM of 0 means "unconfigured" (the out-of-box default) — treat it as CPU rather
+    // than letting `0 >= 0 * 1.5` select GPU, so the documented "default is CPU" holds.
+    if (this.requiredVramBytes <= 0) return "cpu";
     const vram = await this.probeVram();
     return vram.freeBytes >= this.requiredVramBytes * 1.5 ? "gpu" : "cpu";
   }
 
-  private withDeadline<T>(promise: Promise<T>, device: ModelDevice, deadline: number): Promise<T> {
-    const remaining = deadline - this.now();
-    if (remaining <= 0) {
-      void this.cancelLoading(device, "deadline");
-      return Promise.reject(Object.assign(new Error("model session load deadline exceeded"), { code: "DEADLINE_EXCEEDED" }));
-    }
-    let timer: NodeJS.Timeout | undefined;
-    return Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = this.setTimer(() => {
-          void this.cancelLoading(device, "deadline");
-          reject(Object.assign(new Error("model session load deadline exceeded"), { code: "DEADLINE_EXCEEDED" }));
-        }, remaining);
-        timer.unref?.();
-      })
-    ]).finally(() => {
-      if (timer) this.clearTimer(timer);
-    });
-  }
-
-  private async cancelLoading(device: ModelDevice | undefined, reason: "deadline" | "abort"): Promise<void> {
-    if (this.currentLoadCancelled) return;
-    this.currentLoadCancelled = true;
-    this.loadGeneration += 1;
-    const loading = this.loading;
-    if (loading) loading.controller.abort(reason);
-    this.loading = undefined;
-    this.coldLoad = undefined;
-    this.coldLoadCancelled = true;
-    this.coldLoadWaiters = 0;
-    if (device) await this.terminateLoad(device, reason);
-  }
-
-  private waitForColdLoad(
-    promise: Promise<ModelSession>,
+  private async waitForLoadAttempt(
+    attempt: Attempt<ModelSession>,
     deadline: number,
     signal: AbortSignal | undefined
   ): Promise<ModelSession> {
-    this.coldLoadWaiters += 1;
-    return this.waitForLoadPromise(
-      promise,
-      deadline,
-      signal,
-      () => this.loading?.device,
-      (reason) => this.releaseColdLoadWaiter(reason)
-    );
+    const waiterSignal = this.createWaiterSignal(deadline, signal);
+    try {
+      return await attempt.wait({ signal: waiterSignal.signal });
+    } finally {
+      waiterSignal.dispose();
+    }
   }
 
-  private waitForSharedLoad(
-    loading: NonNullable<ModelSessionLifecycle["loading"]>,
-    deadline: number,
-    signal: AbortSignal | undefined
-  ): Promise<ModelSession> {
-    loading.waiters += 1;
-    return this.waitForLoadPromise(
-      loading.promise,
-      deadline,
-      signal,
-      () => loading.device,
-      (reason) => this.releaseSharedLoadWaiter(loading, reason)
-    );
-  }
-
-  private async waitForLoadPromise(
-    promise: Promise<ModelSession>,
-    deadline: number,
-    signal: AbortSignal | undefined,
-    device: () => ModelDevice | undefined,
-    release: (reason: "deadline" | "abort" | "settled") => void | Promise<void>
-  ): Promise<ModelSession> {
-    const remaining = deadline - this.now();
-    if (remaining <= 0) {
-      await release("deadline");
-      throw Object.assign(new Error("model session load deadline exceeded"), { code: "DEADLINE_EXCEEDED" });
-    }
-    if (signal?.aborted) {
-      await release("abort");
-      throw Object.assign(new Error("model session request was aborted"), { code: "CANCELLED" });
-    }
+  private createWaiterSignal(deadline: number, signal: AbortSignal | undefined): { signal: AbortSignal; dispose(): void } {
+    const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
     let abort: (() => void) | undefined;
-    let settled = false;
-    const waiter = new Promise<ModelSession>((_resolve, reject) => {
-      timer = this.setTimer(() => {
-        if (settled) return;
-        settled = true;
-        void Promise.resolve(release("deadline")).finally(() => {
-          reject(Object.assign(new Error("model session load deadline exceeded"), { code: "DEADLINE_EXCEEDED" }));
-        });
-      }, remaining);
+    const abortOnce = (reason: unknown) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
+    const remaining = deadline - this.now();
+    if (remaining <= 0) {
+      abortOnce(deadlineExceededError());
+    } else {
+      timer = this.setTimer(() => abortOnce(deadlineExceededError()), remaining);
       timer.unref?.();
-      if (signal) {
-        abort = () => {
-          if (settled) return;
-          settled = true;
-          void Promise.resolve(release("abort")).finally(() => {
-            reject(Object.assign(new Error("model session request was aborted"), { code: "CANCELLED" }));
-          });
-        };
-        signal.addEventListener("abort", abort, { once: true });
-      }
-    });
-    try {
-      return await Promise.race([promise, waiter]);
-    } finally {
-      if (!settled) {
-        settled = true;
-        await release("settled");
-      }
-      if (timer) this.clearTimer(timer);
-      if (abort && signal) signal.removeEventListener("abort", abort);
-      void device;
     }
-  }
-
-  private async releaseColdLoadWaiter(reason: "deadline" | "abort" | "settled"): Promise<void> {
-    this.coldLoadWaiters = Math.max(0, this.coldLoadWaiters - 1);
-    if (reason === "settled" || this.session || this.coldLoadWaiters > 0) return;
-    const loading = this.loading;
-    await this.cancelLoading(loading?.device, reason);
-  }
-
-  private async releaseSharedLoadWaiter(
-    loading: NonNullable<ModelSessionLifecycle["loading"]>,
-    reason: "deadline" | "abort" | "settled"
-  ): Promise<void> {
-    loading.waiters = Math.max(0, loading.waiters - 1);
-    if (reason === "settled" || this.session) return;
-    if (loading.waiters + this.coldLoadWaiters > 0) return;
-    await this.cancelLoading(loading.device, reason);
+    if (signal?.aborted) {
+      abortOnce(requestAbortedError());
+    } else if (signal) {
+      abort = () => abortOnce(requestAbortedError());
+      signal.addEventListener("abort", abort, { once: true });
+    }
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        if (timer) this.clearTimer(timer);
+        if (abort && signal) signal.removeEventListener("abort", abort);
+      }
+    };
   }
 
   private armIdleUnload(): void {
@@ -363,13 +282,13 @@ async function abortable<T>(
   if (!signal) return promise;
   if (signal.aborted) {
     await onAbort();
-    throw Object.assign(new Error("model session request was aborted"), { code: "CANCELLED" });
+    throw requestAbortedError();
   }
   let abort: (() => void) | undefined;
   const abortPromise = new Promise<T>((_resolve, reject) => {
     abort = () => {
       void Promise.resolve(onAbort()).finally(() => {
-        reject(Object.assign(new Error("model session request was aborted"), { code: "CANCELLED" }));
+        reject(requestAbortedError());
       });
     };
     signal.addEventListener("abort", abort, { once: true });
@@ -384,4 +303,31 @@ async function abortable<T>(
 function defaultIsOomError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /out[- ]?of[- ]?memory|oom|cuda.*memory/i.test(message);
+}
+
+function throwIfLoadAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const reason = abortSignalReason(signal);
+  if (reason instanceof Error) throw reason;
+  throw Object.assign(new Error("model session load was cancelled"), { code: "CANCELLED" });
+}
+
+function loadTerminationReason(signal: AbortSignal): "deadline" | "abort" {
+  return errorCode(abortSignalReason(signal)) === "DEADLINE_EXCEEDED" ? "deadline" : "abort";
+}
+
+function deadlineExceededError(): Error {
+  return Object.assign(new Error("model session load deadline exceeded"), { code: "DEADLINE_EXCEEDED" });
+}
+
+function requestAbortedError(): Error {
+  return Object.assign(new Error("model session request was aborted"), { code: "CANCELLED" });
+}
+
+function abortSignalReason(signal: AbortSignal): unknown {
+  return "reason" in signal ? signal.reason : undefined;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }

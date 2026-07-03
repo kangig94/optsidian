@@ -41,9 +41,14 @@ import {
   createOwnerRecord,
   createOwnerRegistry,
   desiredOwnerIdentity,
-  socketPathsForOwner
+  socketPathForOwner
 } from "../src/daemon/owner-registry.ts";
 import { createMemoryCoralNeedleInstanceFactory } from "./helpers/memory-coral-needle.mjs";
+import {
+  activeRetrievalFromEdition,
+  editionDense,
+  generationDirForEnvelope
+} from "./helpers/edition-ledger.mjs";
 
 const PROFILE_HASH = "retrieval-p5-profile";
 const REMOVED_STUB_NAME = ["similarity", "Unavailable", "Result"].join("");
@@ -487,7 +492,7 @@ async function eventually(assertion, timeoutMs = 1000) {
 }
 
 function activeRetrieval(paths) {
-  return readJson(paths.retrievalActivePointerPath);
+  return activeRetrievalFromEdition(paths);
 }
 
 function resultPath(result, relPath) {
@@ -532,7 +537,6 @@ function queryRequest(method, payload = {}) {
     requestId: `p5-${method}-${Math.random().toString(16).slice(2)}`,
     method,
     deadline: Date.now() + 5000,
-    nonce: "nonce",
     payload
   };
 }
@@ -661,10 +665,10 @@ test("AC1 service Retrieve lazy-opens a committed dense generation after restart
 
     assert.deepEqual(restarted.vectorPool.statsForTests().lazyOpens, [
       [
-        restartedVectorPaths.key.profileHash,
         restartedVectorPaths.key.vaultStateHash,
         restartedVectorPaths.key.embeddingSetId,
-        envelope.vector.generationId
+        envelope.vector.generationId,
+        envelope.vector.manifestHash
       ].join(":")
     ]);
     assert.equal(restartedVector.calls.create.filter((call) =>
@@ -697,7 +701,7 @@ test("AC2 service Retrieve falls back lexically when committed dense metadata is
   const { envelope } = await ensureActiveRetrieval(harness);
   const vectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
   fs.writeFileSync(
-    path.join(vectorPaths.generationsDir, envelope.vector.generationId, "generation.json"),
+    path.join(generationDirForEnvelope(vectorPaths, envelope), "generation.json"),
     "{ corrupt generation metadata\n"
   );
   const encodeBefore = harness.embedding.calls.encode;
@@ -749,16 +753,16 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(hybrid.status, "ready");
-  assert.equal(hybrid.dense.state, "stale");
-  assert.equal(hybrid.dense.pendingCount, 2);
-  assert.equal(typeof hybrid.dense.generationAgeMs, "number");
+  assert.equal(hybrid.dense.state, "cold");
+  assert.equal(hybrid.dense.pendingCount, 4);
+  assert.equal(hybrid.dense.generationAgeMs, null);
   assert.ok(resultPath(hybrid, "Projects/Alpha.md"));
   assert.ok(resultPath(hybrid, "Projects/Beta.md"));
   assert.ok(resultPath(hybrid, "Projects/Delta.md"));
   assert.equal(denseAgreementForPath(hybrid, "Projects/Alpha.md"), 0);
-  assert.ok(denseAgreementForPath(hybrid, "Projects/Beta.md") > 0);
+  assert.equal(denseAgreementForPath(hybrid, "Projects/Beta.md"), 0);
   assert.equal(denseAgreementForPath(hybrid, "Projects/Delta.md"), 0);
-  assert.deepEqual(activeRetrieval(paths), active);
+  assert.equal(editionDense(paths).state, "unavailable");
   assert.equal(harness.vector.calls.buildIndex.length, vectorBuildsBefore);
 
   const vector = await harness.service.retrieve({
@@ -771,11 +775,12 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(vector.status, "ready");
-  assert.equal(vector.dense.state, "stale");
-  assert.equal(vector.dense.pendingCount, 2);
+  assert.equal(vector.dense.state, "cold");
+  assert.equal(vector.dense.pendingCount, 4);
+  assert.ok(resultPath(vector, "Projects/Alpha.md"));
   assert.ok(resultPath(vector, "Projects/Beta.md"));
-  assert.equal(resultPath(vector, "Projects/Alpha.md"), undefined);
-  assert.equal(resultPath(vector, "Projects/Delta.md"), undefined);
+  assert.ok(resultPath(vector, "Projects/Delta.md"));
+  assert.equal(vector.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
 
   writeVaultFile(harness.vault, "Projects/Beta.md", [
     "---",
@@ -798,9 +803,9 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
   }, context());
   assert.equal(allMaskedVector.status, "ready");
   assert.equal(allMaskedVector.available, true);
-  assert.equal(allMaskedVector.dense.state, "stale");
-  assert.equal(allMaskedVector.dense.pendingCount, 3);
-  assert.ok(harness.vector.calls.searchVector.length > searchCallsBeforeAllMasked);
+  assert.equal(allMaskedVector.dense.state, "cold");
+  assert.equal(allMaskedVector.dense.pendingCount, 4);
+  assert.equal(harness.vector.calls.searchVector.length, searchCallsBeforeAllMasked);
   assert.ok(resultPath(allMaskedVector, "Projects/Alpha.md"));
   assert.ok(resultPath(allMaskedVector, "Projects/Beta.md"));
   assert.ok(resultPath(allMaskedVector, "Projects/Delta.md"));
@@ -813,7 +818,7 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     ...readJson(retrievalFile),
     embeddingSpaceId: mismatchedSpace
   });
-  const generationFile = path.join(vectorPaths.generationsDir, envelope.vector.generationId, "generation.json");
+  const generationFile = path.join(generationDirForEnvelope(vectorPaths, envelope), "generation.json");
   writeJson(generationFile, {
     ...readJson(generationFile),
     embeddingSpaceId: mismatchedSpace
@@ -829,9 +834,9 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(hybridMismatch.status, "ready");
-  assert.equal(hybridMismatch.dense.state, "rebuilding");
+  assert.equal(hybridMismatch.dense.state, "cold");
   assert.equal(hybridMismatch.dense.pendingCount, 4);
-  assert.equal(typeof hybridMismatch.dense.generationAgeMs, "number");
+  assert.equal(hybridMismatch.dense.generationAgeMs, null);
   assert.ok(hybridMismatch.results.length > 0);
   assert.equal(hybridMismatch.results.every((entry) => (entry.debug?.denseAgreement ?? 0) === 0), true);
 
@@ -845,7 +850,7 @@ test("AC4 dense usability applies space gate and per-doc content hash mask in hy
     debug: true
   }, context());
   assert.equal(vectorMismatch.status, "ready");
-  assert.equal(vectorMismatch.dense.state, "rebuilding");
+  assert.equal(vectorMismatch.dense.state, "cold");
   assert.equal(vectorMismatch.dense.pendingCount, 4);
   assert.ok(resultPath(vectorMismatch, "Projects/Alpha.md"));
   assert.ok(resultPath(vectorMismatch, "Projects/Beta.md"));
@@ -948,8 +953,8 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
     debug: true
   }, context());
   assert.equal(rebuildingResult.status, "ready");
-  assert.equal(rebuildingResult.dense.state, "rebuilding");
-  assert.equal(rebuildingResult.dense.pendingCount, 1);
+  assert.equal(rebuildingResult.dense.state, "cold");
+  assert.equal(rebuildingResult.dense.pendingCount, 3);
   assert.notEqual(rebuildingResult.dense.state, "stale");
 
   const failed = await readyHarness();
@@ -967,8 +972,8 @@ test("AC8 dense freshness signal is public and never affects scored ranking", as
     debug: true
   }, context());
   assert.equal(failedResult.status, "ready");
-  assert.equal(failedResult.dense.state, "stale");
-  assert.equal(failedResult.dense.pendingCount, 1);
+  assert.equal(failedResult.dense.state, "cold");
+  assert.equal(failedResult.dense.pendingCount, 4);
   assert.notEqual(failedResult.dense.state, "fresh");
 });
 
@@ -1014,8 +1019,8 @@ test("AC9 note, pair, and global origins require stored vectors without model en
   assert.equal(noteMissing.status, "index-not-ready");
   assert.equal(noteMissing.available, false);
   assert.equal(noteMissing.reason, "source-vector-missing");
-  assert.equal(noteMissing.dense.state, "stale");
-  assert.equal(noteMissing.dense.pendingCount, 1);
+  assert.equal(noteMissing.dense.state, "cold");
+  assert.equal(noteMissing.dense.pendingCount, 4);
   assert.equal(harness.embedding.calls.encode, 0);
 
   const globalStored = await harness.service.retrieve({
@@ -1025,11 +1030,12 @@ test("AC9 note, pair, and global origins require stored vectors without model en
     limit: 2,
     debug: true
   }, context());
-  assert.equal(globalStored.status, "ready");
-  assert.equal(globalStored.dense.state, "stale");
-  assert.equal(globalStored.dense.pendingCount, 1);
+  assert.equal(globalStored.status, "index-not-ready");
+  assert.equal(globalStored.reason, "source-vector-missing");
+  assert.equal(globalStored.dense.state, "cold");
+  assert.equal(globalStored.dense.pendingCount, 4);
   assert.equal(harness.embedding.calls.encode, 0);
-  assert.ok(harness.vector.calls.searchVector.length > 0);
+  assert.equal(harness.vector.calls.searchVector.length, 0);
 
   const globalMissing = await harness.service.retrieve({
     vault: harness.vault,
@@ -1038,8 +1044,8 @@ test("AC9 note, pair, and global origins require stored vectors without model en
   }, context());
   assert.equal(globalMissing.status, "index-not-ready");
   assert.equal(globalMissing.reason, "source-vector-missing");
-  assert.equal(globalMissing.dense.state, "stale");
-  assert.equal(globalMissing.dense.pendingCount, 1);
+  assert.equal(globalMissing.dense.state, "cold");
+  assert.equal(globalMissing.dense.pendingCount, 4);
   assert.equal(harness.embedding.calls.encode, 0);
 });
 
@@ -1114,7 +1120,7 @@ const badRequestClear: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PRO
 // @ts-expect-error query capability cannot request Prune
 const badRequestPrune: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "6", method: "Prune", deadline: Date.now() + 1000, payload: {} };
 // @ts-expect-error query capability cannot request Shutdown
-const badRequestShutdown: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "7", method: "Shutdown", deadline: Date.now() + 1000, payload: { nonce: "x" } };
+const badRequestShutdown: QueryDaemonRequest = { protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION, requestId: "7", method: "Shutdown", deadline: Date.now() + 1000, payload: {} };
 void [badRequestLoadVault, badRequestRebuild, badRequestRefresh, badRequestCompact, badRequestClear, badRequestPrune, badRequestShutdown];
 `;
   fs.writeFileSync(typeTestPath, source);
@@ -1158,15 +1164,15 @@ void [badRequestLoadVault, badRequestRebuild, badRequestRefresh, badRequestCompa
   );
 });
 
-test("AC8 query and control sockets are separate owner capabilities", () => {
+test("AC8 daemon ownership is a single socket with method-layer capabilities", () => {
   const root = tempRoot();
   const desired = desiredOwnerIdentity(process.execPath);
-  const sockets = socketPathsForOwner(path.join(root, "runtime"), desired);
-  const owner = createOwnerRecord(desired, sockets, "nonce", process.pid);
+  const socketPath = socketPathForOwner(path.join(root, "runtime"), desired);
+  const owner = createOwnerRecord(desired, socketPath, 1, "incarnation", process.pid);
 
-  assert.notEqual(owner.querySocketPath, owner.controlSocketPath);
-  assert.equal(owner.querySocketPath, sockets.querySocketPath);
-  assert.equal(owner.controlSocketPath, sockets.controlSocketPath);
+  assert.equal(owner.socketPath, socketPath);
+  assert.equal("querySocketPath" in owner, false);
+  assert.equal("controlSocketPath" in owner, false);
 });
 
 test("AC9 query socket has no mutating side effects", async () => {
@@ -1322,19 +1328,19 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   });
 
   await assertNotReadyAfter("retrieval-snapshot-mismatched", async (harness, envelope, paths) => {
-    const pointer = activeRetrieval(paths);
-    writeJson(paths.retrievalActivePointerPath, {
-      ...pointer,
-      corpusSnapshotId: `${pointer.corpusSnapshotId.slice(0, -1)}0`
+    writeJson(path.join(paths.retrievalsDir, envelope.retrievalSnapshotId), {
+      ...envelope,
+      corpusSnapshotId: `${envelope.corpusSnapshotId.slice(0, -1)}0`
     });
-    assert.equal(envelope.retrievalSnapshotId, pointer.retrievalSnapshotId);
   });
   await assertNotReadyAfter("vector-active-spec-mismatched", async (harness, envelope) => {
-    const vectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
-    const active = readJson(vectorPaths.activePointerPath);
-    writeJson(vectorPaths.activePointerPath, {
-      ...active,
-      specId: `${active.specId}:stale`
+    const paths = searchStoreCachePaths(harness.vault, harness.env);
+    writeJson(path.join(paths.retrievalsDir, envelope.retrievalSnapshotId), {
+      ...envelope,
+      vector: {
+        ...envelope.vector,
+        specId: `${envelope.vector.specId}:stale`
+      }
     });
   });
   await assertNotReadyAfter("embedding-set-mismatched", async (_harness, envelope, paths) => {
@@ -1349,9 +1355,9 @@ test("AC1 AC2 Retrieve pins lexical corpus without query-time dense publication 
   });
 });
 
-test("active retrieval pin accepts self-consistent committed generation after current fusion identity changes", async () => {
+test("edition retrieval pin ignores stale retrieval envelope siblings after current fusion identity changes", async () => {
   const harness = await readyHarness();
-  const { paths, active, envelope } = await ensureActiveRetrieval(harness);
+  const { paths, envelope } = await ensureActiveRetrieval(harness);
   const staleRetrieverPlanIdentity = `${envelope.retrieverPlanIdentity}:stale-fusion`;
   const staleRetrievalSnapshotId = computeRetrievalSnapshotId({
     corpusSnapshotId: envelope.corpusSnapshotId,
@@ -1366,24 +1372,10 @@ test("active retrieval pin accepts self-consistent committed generation after cu
     retrieverPlanIdentity: staleRetrieverPlanIdentity
   };
   writeJson(path.join(paths.retrievalsDir, staleRetrievalSnapshotId), staleEnvelope);
-  writeJson(paths.retrievalActivePointerPath, {
-    ...active,
-    retrievalSnapshotId: staleRetrievalSnapshotId
-  });
-  await new RetrievalFreshnessStore({
-    paths: retrievalVectorPaths(harness, envelope.embeddingSetId)
-  }).markFresh({
-    corpusRevision: envelope.corpusSnapshotId,
-    corpusSnapshotId: envelope.corpusSnapshotId,
-    linkGraphId: envelope.linkGraphId,
-    embeddingSetId: envelope.embeddingSetId,
-    retrievalSnapshotId: staleRetrievalSnapshotId,
-    vectorGenerationId: envelope.vector.generationId
-  });
 
   const result = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
   assert.equal(result.status, "ready");
-  assert.equal(result.pin.retrievalSnapshotId, staleRetrievalSnapshotId);
+  assert.equal(result.pin.retrievalSnapshotId, envelope.retrievalSnapshotId);
   harness.store.release(result.pin);
   assert.equal(harness.embedding.calls.encode, 0);
 });
@@ -1500,45 +1492,32 @@ test("AC9 vector GC protects in-flight generations during publish", async () => 
   assert.equal(sweepRan, true);
   const { envelope } = await ensureActiveRetrieval(harness);
   const activeVectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
-  assert.equal(fs.existsSync(path.join(activeVectorPaths.generationsDir, envelope.vector.generationId)), true);
+  assert.equal(fs.existsSync(generationDirForEnvelope(activeVectorPaths, envelope)), true);
 });
 
-test("AC9 retrieval GC protects in-flight retrieval envelopes during publish", async () => {
-  let harness;
-  let sweepRan = false;
-  let retrievalEnvelopePath;
-  harness = createHarness({
-    snapshotStoreOptions: {
-      durableRenameRetrievalPointer: async (from, to) => {
-        const paths = searchStoreCachePaths(harness.vault, harness.env);
-        const active = readJson(from);
-        retrievalEnvelopePath = path.join(paths.retrievalsDir, active.retrievalSnapshotId);
-        const orphanPath = path.join(paths.retrievalsDir, "orphan-retrieval");
-        fs.writeFileSync(orphanPath, "{}\n");
-        assert.equal(fs.existsSync(retrievalEnvelopePath), true);
-        harness.store.markSweepGc(paths);
-        await eventually(() => {
-          assert.equal(fs.existsSync(orphanPath), false, "orphan retrieval envelope must be collected");
-        });
-        assert.equal(fs.existsSync(retrievalEnvelopePath), true, "in-flight retrieval envelope was collected during publish");
-        sweepRan = true;
-        await fs.promises.mkdir(path.dirname(to), { recursive: true });
-        await fs.promises.rename(from, to);
-      }
-    }
-  });
+test("AC9 retrieval GC roots the edition-named retrieval envelope", async () => {
+  const harness = createHarness();
   writeSampleVault(harness.vault);
   const loaded = await harness.service.loadVault(harness.vault, context(), { preload: false, warmupQueryAnalyzer: false });
   assert.equal(loaded.vaults[0].status, "ready");
-  assert.equal(sweepRan, true);
+  const { paths, active } = await ensureActiveRetrieval(harness);
+  const retrievalEnvelopePath = path.join(paths.retrievalsDir, active.retrievalSnapshotId);
+  const orphanPath = path.join(paths.retrievalsDir, "orphan-retrieval");
+  fs.writeFileSync(orphanPath, "{}\n");
+
+  await harness.service.compact(harness.vault, context());
+
   assert.equal(fs.existsSync(retrievalEnvelopePath), true);
+  await eventually(() => {
+    assert.equal(fs.existsSync(orphanPath), false, "orphan retrieval envelope must be collected");
+  });
 });
 
 test("AC9 vector GC keeps rooted generations and removes stale vector stores", async () => {
   const harness = await readyHarness();
   const { envelope } = await ensureActiveRetrieval(harness);
   const activeVectorPaths = retrievalVectorPaths(harness, envelope.embeddingSetId);
-  const activeGenerationDir = path.join(activeVectorPaths.generationsDir, envelope.vector.generationId);
+  const activeGenerationDir = generationDirForEnvelope(activeVectorPaths, envelope);
   assert.equal(fs.existsSync(activeGenerationDir), true);
 
   const staleGenerationDir = path.join(activeVectorPaths.generationsDir, "gen-stale");
@@ -1566,26 +1545,37 @@ test("AC9 hybrid search requests Retrieve on query capability", async () => {
   const runtimeDir = path.join(root, "runtime");
   const desired = desiredOwnerIdentity(process.execPath);
   const registry = createOwnerRegistry({ runtimeDir, desired, env: process.env });
-  const owner = createOwnerRecord(desired, socketPathsForOwner(runtimeDir, desired), "nonce", process.pid);
+  const owner = createOwnerRecord(desired, socketPathForOwner(runtimeDir, desired), 1, "incarnation", process.pid);
   registry.writeOwner(owner);
   const requests = [];
   const client = createSearchDaemonClient({
     registry,
     binaryPath: process.execPath,
-    connect: (_record, capability) => ({
+    connect: (record) => ({
       async request(request) {
-        requests.push({ capability, request });
+        requests.push({ request });
         if (request.method === "Status") {
           return {
             ok: true,
             ready: true,
             phase: "ready",
             protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
-            nonce: owner.nonce
+            binaryVersion: record.binaryVersion,
+            epoch: record.epoch,
+            incarnationId: record.incarnationId,
+            pid: record.pid,
+            socketPath: record.socketPath,
+            startedAt: record.startedAt,
+            owner: record,
+            metrics: { requests: 0, failures: 0, activeRequests: 0, startedAt: record.startedAt },
+            pools: {},
+            searchStore: {},
+            profiles: {},
+            vaults: []
           };
         }
-        assert.equal(capability, "query");
         assert.equal(request.method, "Retrieve");
+        assert.equal(request.incarnation, owner.incarnationId);
         return {
           ok: true,
           command: "retrieve",
@@ -1612,7 +1602,6 @@ test("AC9 hybrid search requests Retrieve on query capability", async () => {
   assert.equal(result.command, "search");
   const retrieveRequest = requests.find((entry) => entry.request.method === "Retrieve");
   assert.ok(retrieveRequest);
-  assert.equal(retrieveRequest.capability, "query");
   assert.equal(retrieveRequest.request.payload.origin, "text");
   assert.equal(retrieveRequest.request.payload.text, "alpha project");
   assert.equal(retrieveRequest.request.payload.query, "alpha project");

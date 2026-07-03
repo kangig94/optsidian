@@ -42,7 +42,6 @@ export type BuildVectorGenerationInput = {
   embeddingSpaceId?: EmbeddingSpaceId;
   embeddingRecipeFreshnessId?: EmbeddingRecipeFreshnessId;
   progress?: (progress: SearchIndexProgressUpdate) => void;
-  canReplaceExistingGeneration?: () => boolean | Promise<boolean>;
 };
 
 export type BuiltVectorGeneration = {
@@ -109,8 +108,8 @@ export class VectorGenerationPool {
     this.assertOpen();
     const generationId = input.generationId;
     const manifestHash = vectorGenerationManifestHash(input);
-    const finalDir = vectorGenerationDir(input.paths, generationId);
-    const finalDbPath = vectorGenerationDbPath(input.paths, generationId);
+    const finalDir = vectorGenerationDir(input.paths, manifestHash);
+    const finalDbPath = vectorGenerationDbPath(input.paths, manifestHash);
     const existing = await this.inspectExistingGeneration(input, manifestHash);
     if (existing.status === "reusable") {
       input.progress?.({
@@ -122,9 +121,7 @@ export class VectorGenerationPool {
       });
       return { metadata: existing.metadata, dbPath: existing.metadata.dbPath, reused: true };
     }
-    if (existing.status === "blocked") {
-      throw new Error(`vector generation ${generationId} already exists and is not safely replaceable: ${existing.reason}`);
-    }
+    if (existing.status === "blocked") throw new Error(`vector generation ${generationId} already exists with conflicting manifest content: ${existing.reason}`);
     const stagingToken = `${generationId}.${process.pid}.${this.now()}.${Math.random().toString(16).slice(2)}`;
     const stagingDir = vectorStagingDir(input.paths, stagingToken);
     const stagingDbPath = vectorStagingDbPath(input.paths, stagingToken);
@@ -176,7 +173,7 @@ export class VectorGenerationPool {
         ...(input.embeddingRecipeFreshnessId ? { embeddingRecipeFreshnessId: input.embeddingRecipeFreshnessId } : {}),
         manifestHash
       };
-      await this.publishBuiltGenerationDirectory(input, stagingDir, finalDir, existing.status === "replaceable");
+      await this.publishBuiltGenerationDirectory(input, stagingDir, finalDir);
       await storeVectorGenerationMetadata(input.paths, metadata);
       input.progress?.({
         phase: "vector-indexing",
@@ -199,12 +196,6 @@ export class VectorGenerationPool {
     }
     const active = this.activeByKey.get(vectorStoreKeyString(paths.key));
     if (active && !active.draining && !active.closeStarted && generationHandleMatchesMetadata(active, metadata)) {
-      await writeActiveVectorPointer(paths, metadata, this.renameActive);
-      this.recordPromotedGeneration(paths, metadata);
-      return;
-    }
-    const pointer = readActiveVectorPointer(paths);
-    if (!active && activeVectorPointerMatchesMetadata(pointer, metadata)) {
       this.recordPromotedGeneration(paths, metadata);
       return;
     }
@@ -231,7 +222,6 @@ export class VectorGenerationPool {
         closeStarted: false,
         drainResolvers: []
       };
-      await writeActiveVectorPointer(paths, metadata, this.renameActive);
       const current = this.activeByKey.get(vectorStoreKeyString(paths.key));
       if (current && !current.draining && !current.closeStarted && generationHandleMatchesMetadata(current, metadata)) {
         promoted = true;
@@ -274,6 +264,8 @@ export class VectorGenerationPool {
     paths: VectorStoreCachePaths;
     key?: VectorStoreKey;
     expectedGenerationId: string;
+    expectedManifestHash?: string;
+    expectedDbPath?: string;
     expectedSpec: CoralEmbeddingSpec;
   }): Promise<PinReadableGenerationResult> {
     this.assertOpen();
@@ -284,17 +276,28 @@ export class VectorGenerationPool {
     const activePin = this.acquireActive(key);
     if (activePin) {
       if (
-        activePin.handle.generationId !== input.expectedGenerationId ||
-        !embeddingSpecEqual(activePin.handle.spec, input.expectedSpec)
+        activePin.handle.generationId === input.expectedGenerationId &&
+        embeddingSpecEqual(activePin.handle.spec, input.expectedSpec)
       ) {
-        this.release(activePin);
-        return { status: "index-not-ready", reason: "active-generation-mismatched" };
+        return { status: "ready", lease: this.leaseFromPin(activePin) };
       }
-      return { status: "ready", lease: this.leaseFromPin(activePin) };
+      // The single active slot holds a different generation than the edition names. Do not reject:
+      // the requested generation may be a committed, on-disk generation this pool simply has not
+      // cached as active (a reader legitimately pinning an edition whose dense generation differs
+      // from the currently-active one). Release the active pin and fall through to lazy-open the
+      // exact expected generation as its own handle.
+      this.release(activePin);
     }
 
     try {
-      const handle = await this.lazyOpenActiveGeneration(input.paths, key, input.expectedGenerationId, input.expectedSpec);
+      const handle = await this.lazyOpenGeneration({
+        paths: input.paths,
+        key,
+        expectedGenerationId: input.expectedGenerationId,
+        expectedManifestHash: input.expectedManifestHash,
+        expectedDbPath: input.expectedDbPath,
+        expectedSpec: input.expectedSpec
+      });
       const pin = this.acquireHandle(handle);
       return { status: "ready", lease: this.leaseFromPin(pin) };
     } catch (error) {
@@ -310,6 +313,22 @@ export class VectorGenerationPool {
       }
       return { status: "index-not-ready", reason: "active-generation-unreadable" };
     }
+  }
+
+  // Manifest hashes of generations currently held open by a live in-memory handle (a pinned reader
+  // or the active slot). The shared reclamation sweeper consults this so it never deletes a
+  // generation dir still mapped by this daemon's pool, even when no committed edition names it yet
+  // (e.g. a just-promoted generation awaiting its reader) — complementing the on-disk live-edition
+  // union and the build reservation. Generation dirs are named by manifest hash, so we derive it
+  // from each open handle's dbPath (`.../generations/<manifestHash>/vectors.duckdb`).
+  pinnedManifestHashes(): Set<string> {
+    const pinned = new Set<string>();
+    const consider = (handle: GenerationHandle) => {
+      if (handle.refCount > 0) pinned.add(path.basename(path.dirname(handle.dbPath)));
+    };
+    for (const handle of this.generations.values()) consider(handle);
+    for (const handle of this.activeByKey.values()) consider(handle);
+    return pinned;
   }
 
   statsForTests(): {
@@ -382,19 +401,23 @@ export class VectorGenerationPool {
     }
     this.generations.set(generationMapKey(key, next.generationId), next);
     this.activeByKey.set(keyString, next);
-    if (old && old !== next) void this.retire(old);
+    // Retiring a superseded generation is best-effort: its subprocess may already be dead, and a
+    // rejected close must never escape as an unhandled rejection (which would exit the daemon).
+    if (old && old !== next) void this.retire(old).catch(() => undefined);
   }
 
-  private async lazyOpenActiveGeneration(
-    paths: VectorStoreCachePaths,
-    key: VectorStoreKey,
-    expectedGenerationId: string,
-    expectedSpec: CoralEmbeddingSpec
-  ): Promise<GenerationHandle> {
-    const mapKey = generationMapKey(key, expectedGenerationId);
+  private async lazyOpenGeneration(input: {
+    paths: VectorStoreCachePaths;
+    key: VectorStoreKey;
+    expectedGenerationId: string;
+    expectedManifestHash?: string;
+    expectedDbPath?: string;
+    expectedSpec: CoralEmbeddingSpec;
+  }): Promise<GenerationHandle> {
+    const mapKey = generationMapKey(input.key, `${input.expectedGenerationId}:${input.expectedManifestHash ?? ""}`);
     const existing = this.lazyOpenByGeneration.get(mapKey);
     if (existing) return existing;
-    const open = this.openActiveGeneration(paths, key, expectedGenerationId, expectedSpec);
+    const open = this.openGeneration(input);
     this.lazyOpenByGeneration.set(mapKey, open);
     try {
       return await open;
@@ -403,38 +426,37 @@ export class VectorGenerationPool {
     }
   }
 
-  private async openActiveGeneration(
-    paths: VectorStoreCachePaths,
-    key: VectorStoreKey,
-    expectedGenerationId: string,
-    expectedSpec: CoralEmbeddingSpec
-  ): Promise<GenerationHandle> {
-    const ready = this.activeByKey.get(vectorStoreKeyString(key));
+  private async openGeneration(input: {
+    paths: VectorStoreCachePaths;
+    key: VectorStoreKey;
+    expectedGenerationId: string;
+    expectedManifestHash?: string;
+    expectedDbPath?: string;
+    expectedSpec: CoralEmbeddingSpec;
+  }): Promise<GenerationHandle> {
+    const ready = this.activeByKey.get(vectorStoreKeyString(input.key));
     if (ready && !ready.draining && !ready.closeStarted) {
-      if (ready.generationId !== expectedGenerationId || !embeddingSpecEqual(ready.spec, expectedSpec)) {
+      if (
+        ready.generationId !== input.expectedGenerationId ||
+        (input.expectedDbPath !== undefined && ready.dbPath !== input.expectedDbPath) ||
+        !embeddingSpecEqual(ready.spec, input.expectedSpec)
+      ) {
         throw notReady("active-generation-mismatched");
       }
       return ready;
     }
 
-    const active = readActiveVectorPointer(paths);
-    if (!active) throw notReady("no-active-built-spec");
-    if (
-      active.generationId !== expectedGenerationId ||
-      active.embeddingSetId !== key.embeddingSetId ||
-      active.specId !== expectedSpec.specId
-    ) {
-      throw notReady("active-generation-mismatched");
-    }
-    const metadata = loadVectorGenerationMetadata(paths, active.generationId);
+    const metadata = input.expectedManifestHash
+      ? loadVectorGenerationMetadataByManifest(input.paths, input.expectedManifestHash)
+      : loadVectorGenerationMetadata(input.paths, input.expectedGenerationId);
     if (!metadata) throw notReady("active-generation-unreadable");
     if (
-      metadata.generationId !== expectedGenerationId ||
-      metadata.embeddingSetId !== key.embeddingSetId ||
-      metadata.dbPath !== active.dbPath ||
-      metadata.spec.specId !== active.specId ||
-      !embeddingSpecEqual(metadata.spec, expectedSpec) ||
-      !vectorStoreKeysEqual(metadata.key, key)
+      metadata.generationId !== input.expectedGenerationId ||
+      metadata.embeddingSetId !== input.key.embeddingSetId ||
+      (input.expectedDbPath !== undefined && metadata.dbPath !== input.expectedDbPath) ||
+      metadata.spec.specId !== input.expectedSpec.specId ||
+      !embeddingSpecEqual(metadata.spec, input.expectedSpec) ||
+      !vectorStoreKeysEqual(metadata.key, input.key)
     ) {
       throw notReady("active-generation-mismatched");
     }
@@ -442,7 +464,7 @@ export class VectorGenerationPool {
 
     const instance = await this.factory.create({
       role: "query",
-      key,
+      key: input.key,
       generationId: metadata.generationId,
       dbPath: metadata.dbPath
     });
@@ -452,7 +474,7 @@ export class VectorGenerationPool {
       await instance.setActiveSpec(metadata.spec);
       await instance.buildIndex(metadata.builtEngine);
       const next: GenerationHandle = {
-        key,
+        key: input.key,
         generationId: metadata.generationId,
         dbPath: metadata.dbPath,
         spec: metadata.spec,
@@ -463,17 +485,21 @@ export class VectorGenerationPool {
         closeStarted: false,
         drainResolvers: []
       };
-      const current = this.activeByKey.get(vectorStoreKeyString(key));
+      const current = this.activeByKey.get(vectorStoreKeyString(input.key));
       if (current && !current.draining && !current.closeStarted) {
-        if (current.generationId !== expectedGenerationId || !embeddingSpecEqual(current.spec, expectedSpec)) {
+        if (
+          current.generationId !== input.expectedGenerationId ||
+          (input.expectedDbPath !== undefined && current.dbPath !== input.expectedDbPath) ||
+          !embeddingSpecEqual(current.spec, input.expectedSpec)
+        ) {
           throw notReady("active-generation-mismatched");
         }
         installed = true;
         await Promise.resolve(instance.close()).catch(() => undefined);
         return current;
       }
-      this.generations.set(generationMapKey(key, next.generationId), next);
-      this.activeByKey.set(vectorStoreKeyString(key), next);
+      this.generations.set(generationMapKey(input.key, next.generationId), next);
+      this.activeByKey.set(vectorStoreKeyString(input.key), next);
       installed = true;
       return next;
     } finally {
@@ -497,9 +523,14 @@ export class VectorGenerationPool {
       }
       if (handle.closeStarted) return;
       handle.closeStarted = true;
-      await handle.instance.close();
       const mapKey = generationMapKey(handle.key, handle.generationId);
-      if (this.generations.get(mapKey) === handle) this.generations.delete(mapKey);
+      try {
+        await handle.instance.close();
+      } finally {
+        // Drop the handle even if close() rejects, so a failed teardown cannot leave a dead
+        // generation stranded in the pool forever (and re-rejected on every later close()).
+        if (this.generations.get(mapKey) === handle) this.generations.delete(mapKey);
+      }
     })();
     return handle.closePromise;
   }
@@ -510,34 +541,22 @@ export class VectorGenerationPool {
   ): Promise<
     | { status: "absent" }
     | { status: "reusable"; metadata: VectorGenerationMetadata }
-    | { status: "replaceable" }
     | { status: "blocked"; reason: string }
   > {
-    const finalDir = vectorGenerationDir(input.paths, input.generationId);
+    const finalDir = vectorGenerationDir(input.paths, manifestHash);
     if (!fs.existsSync(finalDir)) return { status: "absent" };
-    const metadata = loadVectorGenerationMetadata(input.paths, input.generationId);
+    const metadata = loadVectorGenerationMetadataByManifest(input.paths, manifestHash);
     if (
       metadata &&
       fs.existsSync(metadata.dbPath) &&
-      vectorGenerationMetadataMatchesInput(metadata, input, manifestHash, { allowMissingManifestHash: true })
+      vectorGenerationMetadataMatchesInput(metadata, input, manifestHash)
     ) {
-      if (metadata.manifestHash === manifestHash) return { status: "reusable", metadata };
-      const upgraded = { ...metadata, manifestHash };
-      await storeVectorGenerationMetadata(input.paths, upgraded);
-      return { status: "reusable", metadata: upgraded };
+      return { status: "reusable", metadata };
     }
     if (this.generationIsInUse(input.paths, input.generationId)) {
       return { status: "blocked", reason: "generation-in-use" };
     }
-    const active = readActiveVectorPointer(input.paths);
-    if (active?.generationId === input.generationId) {
-      return { status: "blocked", reason: "active-pointer-references-generation" };
-    }
-    if (!input.canReplaceExistingGeneration) {
-      return { status: "blocked", reason: "gc-roots-not-available" };
-    }
-    const canReplace = await input.canReplaceExistingGeneration();
-    return canReplace ? { status: "replaceable" } : { status: "blocked", reason: "generation-protected" };
+    return { status: "blocked", reason: "manifest-directory-conflict" };
   }
 
   private generationIsInUse(paths: VectorStoreCachePaths, generationId: string): boolean {
@@ -552,48 +571,14 @@ export class VectorGenerationPool {
   private async publishBuiltGenerationDirectory(
     input: BuildVectorGenerationInput,
     stagingDir: string,
-    finalDir: string,
-    replaceExisting: boolean
+    finalDir: string
   ): Promise<void> {
     if (!fs.existsSync(finalDir)) {
       await durableRename(stagingDir, finalDir);
       fsyncDirSync(input.paths.generationsDir);
       return;
     }
-    if (!replaceExisting) {
-      throw new Error(`vector generation ${input.generationId} appeared before publish`);
-    }
-    if (this.generationIsInUse(input.paths, input.generationId)) {
-      throw new Error(`vector generation ${input.generationId} became active before replacement`);
-    }
-    const active = readActiveVectorPointer(input.paths);
-    if (active?.generationId === input.generationId) {
-      throw new Error(`vector generation ${input.generationId} became active before replacement`);
-    }
-    const canStillReplace = input.canReplaceExistingGeneration
-      ? await input.canReplaceExistingGeneration()
-      : false;
-    if (!canStillReplace) {
-      throw new Error(`vector generation ${input.generationId} became protected before replacement`);
-    }
-    ensurePrivateDirSync(input.paths.tmpDir, "Optsidian vector tmp directory");
-    const retiredDir = path.join(
-      input.paths.tmpDir,
-      `${input.generationId}.${process.pid}.${this.now()}.${Math.random().toString(16).slice(2)}.retired`
-    );
-    await durableRename(finalDir, retiredDir);
-    fsyncDirSync(input.paths.generationsDir);
-    try {
-      await durableRename(stagingDir, finalDir);
-      fsyncDirSync(input.paths.generationsDir);
-    } catch (error) {
-      if (!fs.existsSync(finalDir) && fs.existsSync(retiredDir)) {
-        await durableRename(retiredDir, finalDir);
-        fsyncDirSync(input.paths.generationsDir);
-      }
-      throw error;
-    }
-    await fs.promises.rm(retiredDir, { recursive: true, force: true });
+    throw new Error(`vector generation manifest directory appeared before publish: ${finalDir}`);
   }
 
   private recordPromotedGeneration(paths: VectorStoreCachePaths, metadata: VectorGenerationMetadata): void {
@@ -613,7 +598,7 @@ export async function storeVectorGenerationMetadata(
   paths: VectorStoreCachePaths,
   metadata: VectorGenerationMetadata
 ): Promise<void> {
-  const generationDir = vectorGenerationDir(paths, metadata.generationId);
+  const generationDir = vectorGenerationDir(paths, metadata.manifestHash ?? metadata.generationId);
   ensurePrivateDirSync(generationDir, "Optsidian vector generation directory");
   const target = path.join(generationDir, "generation.json");
   const tmp = path.join(paths.tmpDir, `${metadata.generationId}.${process.pid}.vector-generation.tmp`);
@@ -628,10 +613,33 @@ export function loadVectorGenerationMetadata(
   paths: VectorStoreCachePaths,
   generationId: string
 ): VectorGenerationMetadata | undefined {
+  const direct = loadVectorGenerationMetadataFromDir(paths, vectorGenerationDir(paths, generationId), generationId);
+  if (direct) return direct;
+  for (const entry of safeReadDir(paths.generationsDir)) {
+    const metadata = loadVectorGenerationMetadataFromDir(paths, path.join(paths.generationsDir, entry), generationId);
+    if (metadata) return metadata;
+  }
+  return undefined;
+}
+
+export function loadVectorGenerationMetadataByManifest(
+  paths: VectorStoreCachePaths,
+  manifestHash: string
+): VectorGenerationMetadata | undefined {
+  return loadVectorGenerationMetadataFromDir(paths, vectorGenerationDir(paths, manifestHash));
+}
+
+function loadVectorGenerationMetadataFromDir(
+  paths: VectorStoreCachePaths,
+  generationDir: string,
+  generationId?: string
+): VectorGenerationMetadata | undefined {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(vectorGenerationDir(paths, generationId), "generation.json"), "utf8")) as unknown;
+    const parsed = JSON.parse(fs.readFileSync(path.join(generationDir, "generation.json"), "utf8")) as unknown;
     if (!isVectorGenerationMetadata(parsed)) return undefined;
-    if (parsed.generationId !== generationId || parsed.embeddingSetId !== paths.key.embeddingSetId) return undefined;
+    if (generationId !== undefined && parsed.generationId !== generationId) return undefined;
+    if (parsed.embeddingSetId !== paths.key.embeddingSetId) return undefined;
+    if (!vectorStoreKeysEqual(parsed.key, paths.key)) return undefined;
     return parsed;
   } catch {
     return undefined;
@@ -688,8 +696,7 @@ function generationMapKey(key: VectorStoreKey, generationId: string): string {
 }
 
 function vectorStoreKeysEqual(left: VectorStoreKey, right: VectorStoreKey): boolean {
-  return left.profileHash === right.profileHash &&
-    left.vaultStateHash === right.vaultStateHash &&
+  return left.vaultStateHash === right.vaultStateHash &&
     left.embeddingSetId === right.embeddingSetId;
 }
 
@@ -745,19 +752,18 @@ export function vectorGenerationManifestHash(input: {
 function vectorGenerationMetadataMatchesInput(
   metadata: VectorGenerationMetadata,
   input: BuildVectorGenerationInput,
-  manifestHash: string,
-  options: { allowMissingManifestHash?: boolean } = {}
+  manifestHash: string
 ): boolean {
   return vectorStoreKeysEqual(metadata.key, input.paths.key) &&
     metadata.generationId === input.generationId &&
     metadata.embeddingSetId === input.paths.key.embeddingSetId &&
-    metadata.dbPath === vectorGenerationDbPath(input.paths, input.generationId) &&
+    metadata.dbPath === vectorGenerationDbPath(input.paths, manifestHash) &&
     embeddingSpecEqual(metadata.spec, input.spec) &&
     metadata.chunkCount === input.chunks.length &&
     metadata.builtEngine === (input.engineName ?? "auto") &&
     (metadata.embeddingSpaceId ?? undefined) === (input.embeddingSpaceId ?? undefined) &&
     (metadata.embeddingRecipeFreshnessId ?? undefined) === (input.embeddingRecipeFreshnessId ?? undefined) &&
-    (metadata.manifestHash === manifestHash || (options.allowMissingManifestHash === true && metadata.manifestHash === undefined));
+    metadata.manifestHash === manifestHash;
 }
 
 function generationHandleMatchesMetadata(handle: GenerationHandle, metadata: VectorGenerationMetadata): boolean {
@@ -776,6 +782,14 @@ function activeVectorPointerMatchesMetadata(
     pointer.embeddingSetId === metadata.embeddingSetId &&
     pointer.specId === metadata.spec.specId &&
     pointer.dbPath === metadata.dbPath;
+}
+
+function safeReadDir(dirPath: string): string[] {
+  try {
+    return fs.readdirSync(dirPath);
+  } catch {
+    return [];
+  }
 }
 
 function notReady(reason: PinReadableGenerationNotReadyReason): Error {
