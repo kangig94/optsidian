@@ -389,16 +389,18 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
 
 - **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot`.
 - **`Rebuild`** → always `publishFreshSnapshot(..., {prepareRetrieval:true})`
-  (`DaemonSnapshotStore.rebuild`).
+  (`DaemonSnapshotStore.rebuild`) with **no reusable base**, so it is always a full rebuild.
 - **`Refresh`** → `refreshIndexedSnapshot`: computes a **content delta**
   (sha256 per file vs stored `contentHash`, `snapshotContentDelta`); if `changedCount === 0` it keeps
   the current edition's corpus snapshot and only ensures the retrieval snapshot matches
   (`prepareRetrievalSnapshotForSnapshot`); otherwise it reports the delta
-  (`reportRefreshDelta`) and rebuilds the whole snapshot. **The delta only decides rebuild-vs-not; there
-  is no incremental segment patching.**
-- **`publishSaveSnapshot`**: save-on-write entrypoint. It runs the same
-  canonical full lexical rebuild as refresh/rebuild, but tags embedding work with the scheduler `save`
-  lane and prepares a retrieval publication for the new corpus revision.
+  (`reportRefreshDelta`) and rebuilds — **incrementally when the active snapshot is a reusable base**
+  (`reusableBaseForSnapshot`: index identity tuple *and* base-reuse implementation identity both match),
+  reusing untouched partitions' segment bytes and re-parsing only the affected partitions; on an identity
+  mismatch or an absent/invalid base it does a full rebuild (recording an `incrementalFallbackReason`).
+- **`publishSaveSnapshot`**: save-on-write entrypoint. It runs the same incremental-with-full-fallback
+  rebuild as refresh (`reusableActiveBase` → `publishOptionsFromReusableBase`), but tags embedding work
+  with the scheduler `save` lane and prepares a retrieval publication for the new corpus revision.
 - **`publishFreshSnapshot`**: calls `recoverVault`, records the expected ledger head, builds the corpus,
   starts the retrieval publication (embedding + vector build) **concurrently** when requested, writes the
   corpus artifacts, stores the retrieval envelope if it built successfully, and commits one edition
@@ -414,9 +416,10 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
 - **`publishRetrievalSnapshot`**: for an already-committed lexical edition, builds/stores a retrieval
   envelope and commits a same-frontier edition whose dense arm names the fresh generation.
 
-Embedding happens on load/rebuild/refresh and on save-on-write. Save-on-write is intentionally a
-debounced **full lexical rebuild** followed by dense generation for that exact lexical revision; true
-incremental lexical patching is deferred (§6).
+Embedding happens on load/rebuild/refresh and on save-on-write. Save-on-write is a debounced
+**incremental lexical rebuild** — reusing the active snapshot's untouched partition segments and
+re-parsing only the affected partitions — followed by dense generation for that exact lexical
+revision. It falls back to a full rebuild when no reusable base is available (details in §6).
 
 ### Vector generation swap (drain by refcount)
 
@@ -581,13 +584,21 @@ encode re-loads on demand.
 
 ---
 
-## 6. Known follow-ups
+## 6. Incremental lexical rebuild — determinism invariant
 
-1. **True incremental lexical rebuild is deferred.** Save-on-write currently performs a debounced full
-   lexical rebuild and relies on `publishBuiltSnapshot` to reuse unchanged segment hashes/bytes on disk
-   (`snapshot-store.ts:456-461, 1063-1136`). That is coherent with the dense generation for the same
-   corpus revision, but it still reparses the full corpus. A future true-incremental lexical builder
-   must preserve the canonical full-rebuild identity exactly: global link resolution, global BM25
-   reduction, reused segment decoding, affected partition selection by `partitionIdForDocument`, and a
-   determinism gate proving incremental output has the same `retrievalSnapshotId` and `linkGraphId` as a
-   full rebuild of identical content.
+True incremental lexical rebuild is **implemented** (not deferred). `Refresh`, `LoadVault`, and
+save-on-write reuse the active snapshot as a validated base (`reusableBaseForSnapshot` /
+`reusableActiveBase`); `buildCanonicalSearchSnapshotIncremental` then reuses the untouched partitions'
+segment bytes and re-parses only the affected partitions' fresh paths (deletions force-affect their own
+partition). Base reuse is gated on two fences: the index identity tuple must match, **and** the
+`baseReuseImplementationIdentity` (analyzer identity + daemon binary hash) must match — a binary change
+forces one full recompute but never changes `corpusSnapshotId`/`lexicalIdentityHash`.
+
+The incremental path preserves the canonical full-rebuild identity **exactly**: global link resolution,
+global BM25 reduction, reused segment decoding, and affected-partition selection by
+`partitionIdForDocument` all converge on the same `buildCanonicalSearchSnapshotFromSegments`. A
+determinism gate (`tests/search-builder-ac1-incremental.test.mjs`, `assertIncrementalEqualsFull`) proves
+incremental output is byte-identical to a full rebuild of identical content — same `snapshotId`,
+`corpusSnapshotId`, `linkGraphId`, canonical manifest bytes, and per-partition segment bytes. Any
+build-time anomaly throws and falls back to a full rebuild (`buildSnapshotWithIncrementalFallback`), so
+partial or divergent output is never published.
