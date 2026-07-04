@@ -746,14 +746,19 @@ export class DaemonSnapshotStore implements SnapshotStore {
     if (snapshotId !== undefined) assertValidSnapshotId(snapshotId);
     const pinned = await this.withLifecycleStore(paths, async () => {
       const activeSnapshotId = snapshotId ?? (await this.ensureActiveSnapshot(paths.vaultRoot, context));
-      const loaded = await this.ensureLoaded(paths, activeSnapshotId);
-      loaded.refCount += 1;
-      loaded.lastAccessMs = Date.now();
-      this.vaultAccessMs.set(paths.storeId, loaded.lastAccessMs);
-      recordVaultAccess(paths.vaultRoot, { env: this.env, nowMs: loaded.lastAccessMs });
-      const pinToken = `${paths.storeId}:${activeSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-      loaded.pinTokens.add(pinToken);
-      return { activeSnapshotId, loaded, pinToken };
+      const reservation = this.reserveSnapshotPinArtifacts(paths, activeSnapshotId);
+      try {
+        const loaded = await this.ensureLoaded(paths, activeSnapshotId);
+        loaded.refCount += 1;
+        loaded.lastAccessMs = Date.now();
+        this.vaultAccessMs.set(paths.storeId, loaded.lastAccessMs);
+        recordVaultAccess(paths.vaultRoot, { env: this.env, nowMs: loaded.lastAccessMs });
+        const pinToken = `${paths.storeId}:${activeSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        loaded.pinTokens.add(pinToken);
+        return { activeSnapshotId, loaded, pinToken };
+      } finally {
+        reservation?.release();
+      }
     });
     this.enforceBudget();
     return {
@@ -761,17 +766,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
       view: pinned.loaded.view,
       pinToken: pinned.pinToken,
     };
-  }
-
-  async pinActiveOnly(vaultRoot: string): Promise<PinnedRetrievalSnapshot> {
-    const result = await this.tryPinActiveRetrievalSnapshot(vaultRoot);
-    if (result.status !== 'ready') {
-      throw Object.assign(new Error(`retrieval index is not ready: ${result.reason}`), {
-        code: 'SEARCH_DAEMON_NOT_READY',
-        reason: result.reason,
-      });
-    }
-    return result.pin;
   }
 
   async ensureActiveRetrievalSnapshot(
@@ -810,13 +804,18 @@ export class DaemonSnapshotStore implements SnapshotStore {
     try {
       pinned = await this.withLifecycleStore(paths, async () => {
         const snapshotId = await this.ensureActiveSnapshot(paths.vaultRoot, context);
-        const loaded = await this.ensureLoaded(paths, snapshotId, { touchCache: false });
-        loaded.refCount += 1;
-        loaded.lastAccessMs = Date.now();
-        this.vaultAccessMs.set(paths.storeId, loaded.lastAccessMs);
-        const pinToken = `${paths.storeId}:${snapshotId}:lexical:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-        loaded.pinTokens.add(pinToken);
-        return { loaded, pinToken };
+        const reservation = this.reserveSnapshotPinArtifacts(paths, snapshotId);
+        try {
+          const loaded = await this.ensureLoaded(paths, snapshotId, { touchCache: false });
+          loaded.refCount += 1;
+          loaded.lastAccessMs = Date.now();
+          this.vaultAccessMs.set(paths.storeId, loaded.lastAccessMs);
+          const pinToken = `${paths.storeId}:${snapshotId}:lexical:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+          loaded.pinTokens.add(pinToken);
+          return { loaded, pinToken };
+        } finally {
+          reservation?.release();
+        }
       });
       const liveDocuments = pinned.loaded.documentsByDocumentId;
       const liveContentHashes = new Map(
@@ -1111,32 +1110,37 @@ export class DaemonSnapshotStore implements SnapshotStore {
       return { status: 'index-not-ready', reason: 'retrieval-snapshot-mismatched' };
     }
 
-    const loaded = await this.ensureLoaded(paths, retrieval.snapshotId, { touchCache: false });
-    loaded.refCount += 1;
-    loaded.lastAccessMs = Date.now();
-    const pinToken = `${paths.vaultStateHash}:${retrieval.retrievalSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-    loaded.pinTokens.add(pinToken);
-    const pin: PinnedRetrievalSnapshot = {
-      snapshotId: retrieval.snapshotId,
-      view: loaded.view,
-      pinToken,
-      retrievalSnapshotId: retrieval.retrievalSnapshotId,
-      corpusSnapshotId: retrieval.corpusSnapshotId,
-      linkGraphId: retrieval.linkGraphId,
-      embeddingSetId: retrieval.embeddingSetId,
-      embeddingSpaceId: retrieval.embeddingSpaceId,
-      embeddingRecipeFreshnessId: retrieval.embeddingRecipeFreshnessId,
-      retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
-      rankingFeatureVersion: retrieval.rankingFeatureVersion,
-      embeddingSet: retrieval.embeddingSet,
-      vector: retrieval.vector,
-      vectorKey: vectorPaths.key,
-    };
-    this.retainPinnedVectorGeneration(pin);
-    return {
-      status: 'ready',
-      pin,
-    };
+    const reservation = this.reserveInFlightSearchArtifacts(paths, { snapshot: envelope, retrieval });
+    try {
+      const loaded = await this.ensureLoaded(paths, retrieval.snapshotId, { touchCache: false });
+      loaded.refCount += 1;
+      loaded.lastAccessMs = Date.now();
+      const pinToken = `${paths.vaultStateHash}:${retrieval.retrievalSnapshotId}:${loaded.refCount}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+      loaded.pinTokens.add(pinToken);
+      const pin: PinnedRetrievalSnapshot = {
+        snapshotId: retrieval.snapshotId,
+        view: loaded.view,
+        pinToken,
+        retrievalSnapshotId: retrieval.retrievalSnapshotId,
+        corpusSnapshotId: retrieval.corpusSnapshotId,
+        linkGraphId: retrieval.linkGraphId,
+        embeddingSetId: retrieval.embeddingSetId,
+        embeddingSpaceId: retrieval.embeddingSpaceId,
+        embeddingRecipeFreshnessId: retrieval.embeddingRecipeFreshnessId,
+        retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+        rankingFeatureVersion: retrieval.rankingFeatureVersion,
+        embeddingSet: retrieval.embeddingSet,
+        vector: retrieval.vector,
+        vectorKey: vectorPaths.key,
+      };
+      this.retainPinnedVectorGeneration(pin);
+      return {
+        status: 'ready',
+        pin,
+      };
+    } finally {
+      reservation.release();
+    }
   }
 
   async load(snapshotId: string): Promise<SnapshotView | undefined> {
@@ -1939,6 +1943,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
         if (inFlightSearchArtifactRootsEmpty(roots)) this.inFlightSearchArtifactRoots.delete(paths.storeId);
       },
     };
+  }
+
+  private reserveSnapshotPinArtifacts(
+    paths: SearchStoreCachePaths,
+    snapshotId: string,
+  ): SearchArtifactGcReservation | undefined {
+    const loaded = this.loaded.get(loadedKey(paths.storeId, snapshotId));
+    const envelope = loaded?.envelope ?? this.readSnapshotEnvelope(paths, snapshotId);
+    return envelope ? this.reserveInFlightSearchArtifacts(paths, { snapshot: envelope }) : undefined;
   }
 
   private addInFlightSearchArtifactGcRoots(paths: SearchStoreCachePaths, roots: GcRoots): void {

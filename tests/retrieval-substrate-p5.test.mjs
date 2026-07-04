@@ -560,6 +560,24 @@ function retrievalVectorPaths(harness, embeddingSetId) {
   });
 }
 
+function snapshotSearchArtifactPaths(paths, envelope) {
+  return [
+    path.join(paths.snapshotsDir, envelope.snapshotId),
+    path.join(paths.linkGraphsDir, envelope.linkGraphId),
+    ...envelope.manifest.partitions.map((partition) => path.join(paths.segmentsDir, partition.segmentHash)),
+  ];
+}
+
+function assertPathsExist(paths, message) {
+  for (const filePath of paths) {
+    assert.equal(fs.existsSync(filePath), true, `${message}: ${path.basename(filePath)}`);
+  }
+}
+
+function assertSearchArtifactReservationsReleased(store) {
+  assert.equal(store.inFlightSearchArtifactRoots.size, 0);
+}
+
 function queryRequest(method, payload = {}) {
   return {
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
@@ -818,6 +836,7 @@ test('AC3 cold-start failed dense head is unreadable and Retrieve stays lexical-
 
   const readContextResult = await harness.store.pinLexicalReadContext(harness.vault, context());
   assert.equal(readContextResult.status, 'ready');
+  assertSearchArtifactReservationsReleased(harness.store);
   try {
     const attached = await harness.store.tryAttachDenseGeneration(
       readContextResult.readContext,
@@ -1646,7 +1665,9 @@ test('AC9 retrieval envelope protects sidecar roots through compact', async () =
 
   assert.ok(fs.existsSync(retrievalPath));
   assert.ok(fs.existsSync(linkGraphPath));
-  const pin = await harness.store.pinActiveOnly(harness.vault);
+  const result = await harness.store.tryPinActiveRetrievalSnapshot(harness.vault);
+  assert.equal(result.status, 'ready');
+  const { pin } = result;
   assert.equal(pin.retrievalSnapshotId, envelope.retrievalSnapshotId);
   assert.equal(pin.corpusSnapshotId, envelope.corpusSnapshotId);
   assert.equal(pin.linkGraphId, envelope.linkGraphId);
@@ -1654,11 +1675,105 @@ test('AC9 retrieval envelope protects sidecar roots through compact', async () =
   assert.ok(pin.embeddingSet.records.length > 0);
   assert.equal(Array.isArray(envelope.embeddingSet.records[0].vector), true);
   assert.equal(Array.isArray(pin.embeddingSet.records[0].vector), true);
+  assertSearchArtifactReservationsReleased(harness.store);
   harness.store.release(pin);
+  assertSearchArtifactReservationsReleased(harness.store);
 
   await harness.service.compact(harness.vault, context());
   assert.ok(fs.existsSync(retrievalPath));
   assert.ok(fs.existsSync(linkGraphPath));
+});
+
+test('AC9 in-flight pin reservation protects non-head snapshot artifacts and releases roots', async () => {
+  const harness = createHarness({ snapshotStoreOptions: { retentionCount: 2 } });
+  writeSampleVault(harness.vault);
+  const first = await harness.store.loadVault(harness.vault, { ...context(), embeddingLane: 'rebuild' });
+  assert.equal(first.vaults[0].status, 'ready');
+  const paths = searchStoreCachePaths(harness.vault, harness.env);
+  const firstSnapshotId = first.snapshotId;
+  const firstEnvelope = readJson(path.join(paths.snapshotsDir, firstSnapshotId));
+
+  writeVaultFile(
+    harness.vault,
+    'Projects/Alpha.md',
+    [
+      '---',
+      'tags: [project, alpha]',
+      '---',
+      '# Alpha',
+      '',
+      'alpha project semantic handle changed for pin GC',
+      'links to [[Projects/Beta]]',
+    ].join('\n'),
+  );
+  const second = await harness.store.rebuild(harness.vault, context());
+  await harness.store.drainPublishers();
+  assert.notEqual(second.snapshotId, firstSnapshotId);
+  const secondEnvelope = readJson(path.join(paths.snapshotsDir, second.snapshotId));
+  harness.store.retentionCount = 1;
+
+  const oldTime = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(paths.snapshotsDir, firstSnapshotId), oldTime, oldTime);
+  fs.utimesSync(path.join(paths.snapshotsDir, second.snapshotId), new Date(), new Date());
+
+  const firstArtifacts = snapshotSearchArtifactPaths(paths, firstEnvelope);
+  const firstManifestPath = path.join(paths.snapshotsDir, firstSnapshotId);
+  const secondSegmentHashes = new Set(secondEnvelope.manifest.partitions.map((partition) => partition.segmentHash));
+  const oldOnlySegmentPaths = firstEnvelope.manifest.partitions
+    .filter((partition) => !secondSegmentHashes.has(partition.segmentHash))
+    .map((partition) => path.join(paths.segmentsDir, partition.segmentHash));
+  assert.ok(oldOnlySegmentPaths.length > 0, 'test fixture must create at least one stale-only segment');
+  assertPathsExist(firstArtifacts, 'old snapshot artifacts should exist before pin');
+
+  const originalEnsureLoaded = harness.store.ensureLoaded.bind(harness.store);
+  let failureGcRan = false;
+  harness.store.ensureLoaded = async (candidatePaths, snapshotId, options) => {
+    if (snapshotId === firstSnapshotId && !failureGcRan) {
+      failureGcRan = true;
+      await harness.store.markSweepSearchGc(paths);
+      throw new Error('forced pin load failure');
+    }
+    return originalEnsureLoaded(candidatePaths, snapshotId, options);
+  };
+  try {
+    await assert.rejects(() => harness.store.pin(harness.vault, firstSnapshotId, context()), /forced pin load failure/);
+  } finally {
+    harness.store.ensureLoaded = originalEnsureLoaded;
+  }
+  assert.equal(failureGcRan, true);
+  assertSearchArtifactReservationsReleased(harness.store);
+  assertPathsExist(firstArtifacts, 'failed pin reservation should protect old artifacts during GC');
+
+  let successGcRan = false;
+  harness.store.ensureLoaded = async (candidatePaths, snapshotId, options) => {
+    if (snapshotId === firstSnapshotId && !successGcRan) {
+      successGcRan = true;
+      await harness.store.markSweepSearchGc(paths);
+      assertPathsExist(firstArtifacts, 'successful pin reservation should protect old artifacts during GC');
+    }
+    return originalEnsureLoaded(candidatePaths, snapshotId, options);
+  };
+  let pin;
+  try {
+    pin = await harness.store.pin(harness.vault, firstSnapshotId, context());
+  } finally {
+    harness.store.ensureLoaded = originalEnsureLoaded;
+  }
+  try {
+    assert.equal(successGcRan, true);
+    assert.equal(pin.snapshotId, firstSnapshotId);
+    assertSearchArtifactReservationsReleased(harness.store);
+    assertPathsExist(firstArtifacts, 'pinned old snapshot artifacts should survive interleaved GC');
+  } finally {
+    harness.store.release(pin);
+  }
+
+  assertSearchArtifactReservationsReleased(harness.store);
+  await harness.store.markSweepSearchGc(paths);
+  assert.equal(fs.existsSync(firstManifestPath), false, 'unpinned stale snapshot manifest should be collected');
+  for (const segmentPath of oldOnlySegmentPaths) {
+    assert.equal(fs.existsSync(segmentPath), false, 'unpinned stale-only segment should be collected');
+  }
 });
 
 test('AC9 vector GC protects in-flight generations during publish', async () => {
