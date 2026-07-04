@@ -44,6 +44,7 @@ export type RpcServerOptions<
 type PendingRequest = {
   resolve(value: unknown): void;
   reject(error: Error): void;
+  timeout?: ReturnType<typeof setTimeout>;
 };
 
 const RPC_SOCKET_IDLE_TIMEOUT_MS = 30_000;
@@ -58,27 +59,41 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
   const pending = new Map<string, PendingRequest>();
   let closed = false;
 
+  const settlePending = (requestId: string, settle: (waiter: PendingRequest) => void): boolean => {
+    const waiter = pending.get(requestId);
+    if (!waiter) return false;
+    pending.delete(requestId);
+    if (waiter.timeout) clearTimeout(waiter.timeout);
+    settle(waiter);
+    return true;
+  };
+
+  const rejectAllPending = (error: Error): void => {
+    for (const waiter of pending.values()) {
+      if (waiter.timeout) clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    pending.clear();
+  };
+
   socket.on('data', (chunk) => {
     try {
       for (const message of decoder.push(bufferChunk(chunk))) {
         const response = message as RpcResponseLike;
-        const waiter = pending.get(response.requestId);
-        if (!waiter) continue;
-        pending.delete(response.requestId);
-        if (response.ok) waiter.resolve(response.result);
-        else waiter.reject(rpcResponseError(response.error.code, response.error.message, response.error.details));
+        settlePending(response.requestId, (waiter) => {
+          if (response.ok) waiter.resolve(response.result);
+          else waiter.reject(rpcResponseError(response.error.code, response.error.message, response.error.details));
+        });
       }
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      for (const waiter of pending.values()) waiter.reject(failure);
-      pending.clear();
+      rejectAllPending(failure);
       socket.destroy(failure);
     }
   });
 
   socket.on('error', (error) => {
-    for (const waiter of pending.values()) waiter.reject(error);
-    pending.clear();
+    rejectAllPending(error);
   });
 
   socket.on('close', () => {
@@ -87,8 +102,7 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
       'SEARCH_DAEMON_UNAVAILABLE',
       'search daemon socket closed before a response was received',
     );
-    for (const waiter of pending.values()) waiter.reject(error);
-    pending.clear();
+    rejectAllPending(error);
   });
 
   return {
@@ -97,11 +111,28 @@ export async function connectRpc<Request extends RpcRequestLike = RpcRequestLike
         return Promise.reject(rpcResponseError('SEARCH_DAEMON_UNAVAILABLE', 'search daemon socket is closed'));
       }
       return new Promise((resolve, reject) => {
-        pending.set(request.requestId, { resolve, reject });
+        const timeout = Number.isFinite(request.deadline)
+          ? setTimeout(
+              () => {
+                const error = rpcResponseError(
+                  'ETIMEDOUT',
+                  `${request.method} request timed out before a response was received`,
+                );
+                settlePending(request.requestId, (waiter) => {
+                  waiter.reject(error);
+                });
+                socket.destroy(error);
+              },
+              Math.max(0, request.deadline - Date.now()),
+            )
+          : undefined;
+        timeout?.unref();
+        pending.set(request.requestId, { resolve, reject, ...(timeout ? { timeout } : {}) });
         socket.write(encodeFrame(request), (error) => {
           if (!error) return;
-          pending.delete(request.requestId);
-          reject(error);
+          settlePending(request.requestId, (waiter) => {
+            waiter.reject(error);
+          });
         });
       });
     },

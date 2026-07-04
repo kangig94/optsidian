@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDirSync, writePrivateFileSync } from '../../core/private-path.js';
@@ -40,6 +41,8 @@ import {
 } from './publication.js';
 import { safeStoreFileName } from './cache-paths.js';
 import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS } from '../protocol.js';
+
+const COMMIT_WITH_RETRY_MAX_NOT_HEAD_RETRIES = 16;
 
 export type EditionCandidate = {
   baseEditionSeq?: number;
@@ -469,8 +472,13 @@ export class EditionLedger {
   private sweepIncomplete(): void {
     ensurePrivateDirSync(this.publicationsDir, 'Optsidian edition publications directory');
     for (const entry of safeReadDir(this.publicationsDir)) {
+      const entryPath = path.join(this.publicationsDir, entry);
       if (entry.endsWith('.tmp') || entry.endsWith('.partial')) {
-        fs.rmSync(path.join(this.publicationsDir, entry), { recursive: true, force: true });
+        fs.rmSync(entryPath, { recursive: true, force: true });
+        continue;
+      }
+      if (/^\d+$/.test(entry) && !this.readRecordFile(entryPath)) {
+        fs.rmSync(entryPath, { recursive: true, force: true });
       }
     }
   }
@@ -736,6 +744,7 @@ export class VaultPublisher {
   }): Promise<EditionRecord | undefined> {
     let { remaining, head } = input;
     const { laneSignal, timing } = input;
+    let notHeadRetries = 0;
     while (remaining.length > 0) {
       const representative = remaining[remaining.length - 1]?.intent;
       if (!representative || !isBuildIntent(representative)) return head;
@@ -799,8 +808,28 @@ export class VaultPublisher {
             for (const envelope of remaining) this.dropStructuralEnvelope(envelope, commitError);
             return head;
           }
+          const previousHeadSeq = head?.editionSeq ?? 0;
+          const previousRemainingCount = remaining.length;
           head = this.ledger.current();
           remaining = this.unsettledBuildEnvelopes(remaining, head);
+          if (remaining.length === 0) continue;
+          notHeadRetries += 1;
+          const headAdvanced = (head?.editionSeq ?? 0) > previousHeadSeq;
+          const remainingShrank = remaining.length < previousRemainingCount;
+          if (!headAdvanced && !remainingShrank) {
+            const progressError = new Error(
+              `edition commit not-head retry made no progress${committed.message ? `: ${committed.message}` : ''}`,
+            );
+            for (const envelope of remaining) this.rejectStructuralEnvelope(envelope, progressError);
+            return head;
+          }
+          if (notHeadRetries > COMMIT_WITH_RETRY_MAX_NOT_HEAD_RETRIES) {
+            const cappedError = new Error(
+              `edition commit not-head retry limit exceeded after ${notHeadRetries} retries`,
+            );
+            for (const envelope of remaining) this.rejectStructuralEnvelope(envelope, cappedError);
+            return head;
+          }
           continue;
         }
         const nextHead = committed.value.record;
@@ -1429,12 +1458,26 @@ function ensureVaultPublisherPaths(paths: VaultPublisherPaths): void {
 
 function writeEditionRecordExclusive(filePath: string, record: EditionRecord): void {
   ensurePrivateDirSync(path.dirname(filePath), 'Optsidian edition publications directory');
-  const fd = fs.openSync(filePath, 'wx', 0o600);
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let tempCreated = false;
   try {
-    fs.writeFileSync(fd, encodeEditionRecord(record));
-    fs.fsyncSync(fd);
+    const fd = fs.openSync(tempPath, 'wx', 0o600);
+    tempCreated = true;
+    try {
+      fs.writeFileSync(fd, encodeEditionRecord(record));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.linkSync(tempPath, filePath);
   } finally {
-    fs.closeSync(fd);
+    if (tempCreated) {
+      try {
+        fs.rmSync(tempPath, { force: true });
+      } catch {
+        // Leftover .tmp files are reclaimed by sweepIncomplete on the next ledger construction.
+      }
+    }
   }
 }
 

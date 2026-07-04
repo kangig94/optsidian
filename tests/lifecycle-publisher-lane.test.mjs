@@ -557,6 +557,82 @@ test('AC2 sibling commit below pending boundary forces a second build against th
   }
 });
 
+test('AC2 not-head retry rejects when ledger state makes no progress', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-ac2-no-progress-'));
+  let publisher;
+  try {
+    const fence = createLocalTenancyFenceProvider();
+    const firstDocument = doc('doc-a', 'A.md', 'hash-a');
+    const secondDocument = doc('doc-b', 'B.md', 'hash-b');
+    let buildCalls = 0;
+    publisher = createPublisher(root, fence, {
+      effects: {
+        buildSnapshot(input) {
+          buildCalls += 1;
+          return {
+            kind: 'candidate',
+            candidate: candidate({
+              baseEditionSeq: input.head?.editionSeq,
+              frontierSeq: input.intent.scanBoundary.frontierSeq,
+              scanBoundaryJournalSeq: input.intent.scanBoundary.scanBoundaryJournalSeq,
+              corpus: corpus(`built-${buildCalls}`),
+              documents: [firstDocument, secondDocument],
+              dense: unavailable(),
+              identity: publisher.retrievalIdentity,
+            }),
+          };
+        },
+      },
+    });
+
+    publisher.markDirty({
+      op: 'upsert',
+      docId: firstDocument.documentId,
+      path: firstDocument.path,
+      contentHash: firstDocument.contentHash,
+    });
+    const firstBoundary = publisher.recordScanBoundary();
+    const firstCommit = await publisher.commit(
+      candidate({
+        frontierSeq: firstBoundary.frontierSeq,
+        scanBoundaryJournalSeq: firstBoundary.scanBoundaryJournalSeq,
+        corpus: corpus('base-snapshot'),
+        documents: [firstDocument],
+        dense: unavailable(),
+        identity: publisher.retrievalIdentity,
+      }),
+      undefined,
+      fence.writerToken,
+    );
+    assert.equal(firstCommit.ok, true);
+    fs.writeFileSync(path.join(publisher.ledger.publicationsDir, '2'), 'not an edition record\n', { mode: 0o600 });
+
+    publisher.markDirty({
+      op: 'upsert',
+      docId: secondDocument.documentId,
+      path: secondDocument.path,
+      contentHash: secondDocument.contentHash,
+    });
+    const pendingBoundary = publisher.recordScanBoundary();
+
+    await assert.rejects(
+      () =>
+        publisher.enqueue({
+          kind: 'rebuild',
+          scanBoundary: pendingBoundary,
+          deadline: Date.now() + 1_000,
+          cancellationId: 'no-progress-not-head',
+        }),
+      /not-head retry made no progress/,
+    );
+    assert.equal(buildCalls, 1);
+    assert.equal(publisher.ledger.current()?.editionSeq, 1);
+  } finally {
+    await publisher?.stop().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('AC2 dense publication is not satisfied by lexical scan-boundary coverage', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-dense-predicate-'));
   let publisher;

@@ -159,6 +159,131 @@ test('AC2 edition ledger skips torn crash records and keeps GC rooted at the las
   }
 });
 
+test('AC2 edition ledger sweep reclaims a torn final so the next commit can advance', async () => {
+  const root = tempRoot();
+  let publisher;
+  let freshPublisher;
+  try {
+    const fence = createLocalTenancyFenceProvider();
+    const identity = retrievalIdentity('vault-a', 'lex-a', 'space-a');
+    publisher = publisherAt(root, identity, fence);
+    const first = await commitFreshEditionOnPublisher(publisher, identity, fence, 'manifest-a', 'snapshot-a');
+    assert.equal(first.editionSeq, 1);
+    const tornPath = path.join(publisher.ledger.publicationsDir, '2');
+
+    await publisher.stop();
+    publisher = undefined;
+    fs.writeFileSync(tornPath, 'not an edition record\n', { mode: 0o600 });
+    assert.equal(fs.existsSync(tornPath), true);
+
+    freshPublisher = publisherAt(root, identity, fence);
+    assert.equal(fs.existsSync(tornPath), false);
+    const second = await commitFreshEditionOnPublisher(freshPublisher, identity, fence, 'manifest-b', 'snapshot-b');
+    assert.equal(second.editionSeq, 2);
+    assert.equal(freshPublisher.ledger.current().editionSeq, 2);
+  } finally {
+    await publisher?.stop().catch(() => {});
+    await freshPublisher?.stop().catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('AC2 edition ledger hard-link CAS still rejects a same-seq concurrent loser', async () => {
+  const root = tempRoot();
+  let publisher;
+  let tokenGate;
+  try {
+    const baseFence = createLocalTenancyFenceProvider();
+    tokenGate = deferred();
+    const bothCommitsAtTokenRead = deferred();
+    let tokenReads = 0;
+    const fence = {
+      writerToken: baseFence.writerToken,
+      currentWriterToken() {
+        tokenReads += 1;
+        if (tokenReads === 2) bothCommitsAtTokenRead.resolve();
+        return tokenGate.promise.then(() => baseFence.writerToken);
+      },
+    };
+    const identity = retrievalIdentity('vault-a', 'lex-a', 'space-a');
+    publisher = publisherAt(root, identity, fence);
+    const document = doc('doc-a', 'A.md', 'hash-a');
+    publisher.markDirty({
+      op: 'upsert',
+      docId: document.documentId,
+      path: document.path,
+      contentHash: document.contentHash,
+    });
+    const boundary = publisher.recordScanBoundary();
+    const first = publisher.commit(
+      candidate({
+        identity,
+        frontierSeq: boundary.frontierSeq,
+        scanBoundaryJournalSeq: boundary.scanBoundaryJournalSeq,
+        corpus: corpus('snapshot-a'),
+        documents: [document],
+        dense: fresh('manifest-a', identity),
+      }),
+      undefined,
+      fence.writerToken,
+    );
+    const second = publisher.commit(
+      candidate({
+        identity,
+        frontierSeq: boundary.frontierSeq,
+        scanBoundaryJournalSeq: boundary.scanBoundaryJournalSeq,
+        corpus: corpus('snapshot-b'),
+        documents: [document],
+        dense: fresh('manifest-b', identity),
+      }),
+      undefined,
+      fence.writerToken,
+    );
+
+    await bothCommitsAtTokenRead.promise;
+    tokenGate.resolve();
+    const results = await Promise.all([first, second]);
+    const winners = results.filter((result) => result.ok);
+    const losers = results.filter((result) => !result.ok);
+    assert.equal(winners.length, 1);
+    assert.equal(losers.length, 1);
+    assert.equal(losers[0].reason, 'not-head');
+    assert.equal(losers[0].message, 'publication 1 already exists');
+    assert.equal(publisher.ledger.current().editionSeq, 1);
+  } finally {
+    tokenGate?.resolve();
+    await publisher?.stop().catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('AC2 edition ledger sweep removes leftover temp records without blocking the sequence', async () => {
+  const root = tempRoot();
+  let publisher;
+  let freshPublisher;
+  try {
+    const fence = createLocalTenancyFenceProvider();
+    const identity = retrievalIdentity('vault-a', 'lex-a', 'space-a');
+    publisher = publisherAt(root, identity, fence);
+    const tempPath = path.join(publisher.ledger.publicationsDir, '1.123456789abc.tmp');
+
+    await publisher.stop();
+    publisher = undefined;
+    fs.writeFileSync(tempPath, 'fully written but never linked\n', { mode: 0o600 });
+    assert.equal(fs.existsSync(tempPath), true);
+
+    freshPublisher = publisherAt(root, identity, fence);
+    assert.equal(fs.existsSync(tempPath), false);
+    const first = await commitFreshEditionOnPublisher(freshPublisher, identity, fence, 'manifest-a', 'snapshot-a');
+    assert.equal(first.editionSeq, 1);
+    assert.equal(freshPublisher.ledger.current().editionSeq, 1);
+  } finally {
+    await publisher?.stop().catch(() => {});
+    await freshPublisher?.stop().catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('AC2 shared vector GC keeps sibling ledger live generation and reservation-protected builds', async () => {
   const root = tempRoot();
   try {

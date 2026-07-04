@@ -469,6 +469,54 @@ test('AC3 transport survives an abruptly destroyed client socket mid-request', a
   }
 });
 
+test('AC3 transport client request deadline rejects and closes a hung RPC socket', async () => {
+  const { connectRpc, createRpcServer } = await import('../src/daemon/transport.ts');
+  const { encodeFrame } = await import('../src/daemon/protocol.ts');
+  const root = tempRoot();
+  const socketPath = path.join(root, 'rpc.sock');
+  let releaseHungRequest;
+  const hungRequest = new Promise((resolve) => {
+    releaseHungRequest = resolve;
+  });
+  const closedRequestIds = [];
+  const server = await createRpcServer({
+    socketPath,
+    handleRequest: async (request) => {
+      if (request.requestId === 'hung-request') return hungRequest;
+      return { alive: true };
+    },
+    onConnectionClosed(requestIds) {
+      closedRequestIds.push(...requestIds);
+    },
+  });
+  let connection;
+
+  try {
+    connection = await connectRpc(socketPath);
+    await assert.rejects(
+      () =>
+        connection.request({
+          ...statusRequest('hung-request'),
+          deadline: Date.now() + 50,
+        }),
+      (error) => {
+        assert.equal(error.code, 'ETIMEDOUT');
+        assert.match(error.message, /timed out/i);
+        return true;
+      },
+    );
+    await waitFor(() => closedRequestIds.includes('hung-request'));
+
+    const alive = await requestRawRpc(socketPath, encodeFrame, statusRequest('after-client-timeout'));
+    assert.equal(alive.ok, true);
+    assert.equal(alive.result.alive, true);
+  } finally {
+    releaseHungRequest?.({ alive: false });
+    await connection?.close().catch(() => undefined);
+    await server.close();
+  }
+});
+
 test('AC3 transport converts synchronous handler throws into RPC errors without killing the server', async () => {
   const { createRpcServer } = await import('../src/daemon/transport.ts');
   const { encodeFrame } = await import('../src/daemon/protocol.ts');
