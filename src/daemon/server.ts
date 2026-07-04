@@ -42,6 +42,7 @@ import type { SearchExecutionCacheStats } from './search-store/search-execution-
 import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
 import { recoverRetrievalStartupState } from './vector-store/freshness.js';
 import { createEmbedScheduler, type EmbedScheduler } from './embed-scheduler.js';
+import { logSearchDaemonProcessError } from './supervise.js';
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -331,8 +332,16 @@ class SearchDaemon {
     const activeCancellationId = this.activeCancellationIds.get(requestId);
     if (activeCancellationId) cancellationIds.add(activeCancellationId);
     for (const cancellationId of cancellationIds) {
-      this.scheduler.cancel(cancellationId);
-      this.profiles.cancel(cancellationId);
+      try {
+        this.scheduler.cancel(cancellationId);
+      } catch (error) {
+        logSearchDaemonProcessError(`request cancellation "${cancellationId}" scheduler cancel failed`, error);
+      }
+      try {
+        this.profiles.cancel(cancellationId);
+      } catch (error) {
+        logSearchDaemonProcessError(`request cancellation "${cancellationId}" profile cancel failed`, error);
+      }
     }
   }
 
@@ -824,15 +833,6 @@ function installSearchDaemonProcessErrorHandlers(): void {
     logSearchDaemonProcessError('unhandledRejection', reason);
     process.exit(1);
   });
-}
-
-function logSearchDaemonProcessError(kind: string, error: unknown): void {
-  const message = error instanceof Error && error.stack ? error.stack : errorMessage(error);
-  try {
-    process.stderr.write(`[optsidian search daemon] ${kind}: ${message}\n`);
-  } catch {
-    // Ignore stderr failures while reporting process-level errors.
-  }
 }
 
 function snapshotIdFromResult(result: unknown): string | undefined {

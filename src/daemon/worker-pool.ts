@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker, type TransferListItem } from 'node:worker_threads';
 import type { SearchIndexProgressUpdate } from './protocol.js';
+import { logSearchDaemonProcessError } from './supervise.js';
 
 type DaemonWorkerKind = 'analyzer' | 'search' | 'embedding' | 'vector';
 
@@ -422,7 +423,13 @@ export class DaemonWorkerPool {
     this.recordMemory(slot, message);
     if ('progress' in message) {
       const item = slot.busy;
-      if (item && item.id === message.id) item.options.onProgress?.(message.progress);
+      if (item && item.id === message.id) {
+        try {
+          item.options.onProgress?.(message.progress);
+        } catch (error) {
+          logSearchDaemonProcessError(`${this.options.name} worker progress callback failed`, error);
+        }
+      }
       return;
     }
 

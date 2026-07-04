@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import { FrameDecoder, encodeFrame, rpcError, type DaemonRequestBase, type SearchDaemonRpcError } from './protocol.js';
+import { logSearchDaemonProcessError } from './supervise.js';
 
 export type RpcRequestLike = DaemonRequestBase<string, unknown>;
 
@@ -158,6 +159,24 @@ export async function createRpcServer<
   const activeRequestsBySocket = new Map<net.Socket, Set<string>>();
   const activeRequestPromises = new Set<Promise<void>>();
   const socketIdleTimeoutMs = options.socketIdleTimeoutMs ?? RPC_SOCKET_IDLE_TIMEOUT_MS;
+  const writeErrorResponseBestEffort = (socket: net.Socket, request: Request, error: unknown): void => {
+    if (socket.destroyed) return;
+    try {
+      const responseError = errorToRpcError(error);
+      writeResponse(
+        socket,
+        options.responseForError?.(request.requestId, responseError) ??
+          ({
+            requestId: request.requestId,
+            ok: false,
+            error: responseError,
+          } satisfies RpcResponseLike),
+      );
+    } catch (writeError) {
+      logSearchDaemonProcessError(`RPC error response for request "${request.requestId}" failed`, writeError);
+      socket.destroy();
+    }
+  };
   const server = net.createServer((socket) => {
     sockets.add(socket);
     activeRequestsBySocket.set(socket, new Set());
@@ -208,17 +227,11 @@ export async function createRpcServer<
             );
           })
           .catch((error) => {
-            if (socket.destroyed) return;
-            const responseError = errorToRpcError(error);
-            writeResponse(
-              socket,
-              options.responseForError?.(request.requestId, responseError) ??
-                ({
-                  requestId: request.requestId,
-                  ok: false,
-                  error: responseError,
-                } satisfies RpcResponseLike),
-            );
+            writeErrorResponseBestEffort(socket, request, error);
+          })
+          .catch((error: unknown) => {
+            logSearchDaemonProcessError(`RPC active request "${request.requestId}" failed`, error);
+            socket.destroy();
           })
           .finally(() => {
             activeRequestsBySocket.get(socket)?.delete(request.requestId);
@@ -237,6 +250,9 @@ export async function createRpcServer<
   });
 
   await listenWithStaleSocketProbe(server, options.socketPath);
+  server.on('error', (error) => {
+    logSearchDaemonProcessError('RPC server error', error);
+  });
 
   let relinquished = false;
 

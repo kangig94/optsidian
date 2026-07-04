@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readVaultFileHardened, resolveVaultPath, shouldSkipDir, walkFiles, type SafePath } from '../../core/path.js';
+import { superviseBackground } from '../supervise.js';
 
 export type VaultDirtyMark = {
   docId: string;
@@ -311,8 +312,10 @@ export class VaultChangeProducer implements RetrievalSaveWatcher {
   private ensurePeriodicScan(): void {
     if (this.closed || this.periodicTimer) return;
     this.periodicTimer = this.setIntervalFn(() => {
-      if (this.fallbackScanActive) this.reconcile(this.vaultRoot);
-      else this.dropMissingWatchers();
+      superviseBackground('vector-watcher-poll', () => {
+        if (this.fallbackScanActive) this.reconcile(this.vaultRoot);
+        else this.dropMissingWatchers();
+      });
     }, this.fallbackPollMs);
     this.periodicTimer.unref?.();
   }
