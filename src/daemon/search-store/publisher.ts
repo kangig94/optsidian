@@ -677,6 +677,7 @@ export class VaultPublisher {
 
   private async actStructuralLane(folded: StructuralLaneFold, laneSignal: AbortSignal): Promise<void> {
     let head = folded.head;
+    let laneError: Error | undefined;
     try {
       for (let index = 0; index < folded.intents.length; index += 1) {
         const envelope = folded.intents[index];
@@ -705,8 +706,13 @@ export class VaultPublisher {
         this.activeStructuralErrorScope = [];
       }
     } catch (error) {
-      await this.handleStructuralLaneError(error);
+      laneError = error instanceof Error ? error : new Error(String(error));
+      await this.handleStructuralLaneError(laneError);
     } finally {
+      const unsettledError = laneError ?? new Error('VaultPublisher structural lane exited with unsettled intents.');
+      for (const envelope of folded.intents) {
+        if (envelope) this.rejectStructuralEnvelope(envelope, unsettledError);
+      }
       this.activeStructuralErrorScope = [];
     }
   }

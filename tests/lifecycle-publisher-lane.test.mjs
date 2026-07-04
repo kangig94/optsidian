@@ -243,6 +243,85 @@ test('a lost writer lease at commit-acquire rejects the intent as a retryable st
   }
 });
 
+test('publisher lane rejects all folded envelopes when a coalesced build throws', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-coalesced-throw-'));
+  let publisher;
+  try {
+    const fence = createLocalTenancyFenceProvider();
+    const thrown = new Error('coalesced build failed');
+    let buildCalls = 0;
+    publisher = createPublisher(root, fence, {
+      effects: {
+        buildSnapshot(input) {
+          buildCalls += 1;
+          assert.equal(input.intents.length, 2);
+          assert.deepEqual(
+            input.intents.map((intent) => intent.kind),
+            ['rebuild', 'save'],
+          );
+          throw thrown;
+        },
+      },
+    });
+
+    const firstDocument = doc('doc-a', 'A.md', 'hash-a');
+    const secondDocument = doc('doc-b', 'B.md', 'hash-b');
+    publisher.markDirty({
+      op: 'upsert',
+      docId: firstDocument.documentId,
+      path: firstDocument.path,
+      contentHash: firstDocument.contentHash,
+    });
+    const firstBoundary = publisher.recordScanBoundary();
+    publisher.markDirty({
+      op: 'upsert',
+      docId: secondDocument.documentId,
+      path: secondDocument.path,
+      contentHash: secondDocument.contentHash,
+    });
+    const secondBoundary = publisher.recordScanBoundary();
+
+    const first = publisher.enqueue({
+      kind: 'rebuild',
+      scanBoundary: firstBoundary,
+      deadline: Date.now() + 1_000,
+      cancellationId: 'coalesced-throw-rebuild',
+    });
+    const second = publisher.enqueue({
+      kind: 'save',
+      scanBoundary: secondBoundary,
+      deadline: Date.now() + 1_000,
+      cancellationId: 'coalesced-throw-save',
+    });
+    const trailing = publisher.enqueue({
+      kind: 'dirty-frontier',
+      operations: [{ op: 'upsert', docId: 'doc-c', path: 'C.md', contentHash: 'hash-c' }],
+    });
+    const settlements = [first, second, trailing].map(settlePromise);
+
+    await waitFor(() => buildCalls === 1);
+    await withTimeout(publisher.drain(), 1_000, 'publisher drain after coalesced build failure');
+    const results = await withTimeout(
+      Promise.all(settlements),
+      1_000,
+      'publisher folded envelopes after coalesced build failure',
+    );
+
+    assert.deepEqual(
+      results.map((result) => result.status),
+      ['rejected', 'rejected', 'rejected'],
+    );
+    for (const result of results) assert.equal(result.reason, thrown);
+    assert.equal(publisher.ledger.current(), undefined);
+
+    await withTimeout(publisher.stop(), 1_000, 'publisher stop after coalesced build failure');
+    publisher = undefined;
+  } finally {
+    await publisher?.stop().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('AC2 concurrent lexical publisher intents resolve without caller-visible not-head', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-ac2-concurrent-'));
   let publisher;
@@ -1331,6 +1410,28 @@ function candidateForEnvelope(paths, envelope, retrievalIdentity) {
     },
     coverage: editionCoverageFromCorpus({ documents: envelope.documents }),
   };
+}
+
+function settlePromise(promise) {
+  return promise.then(
+    (value) => ({ status: 'fulfilled', value }),
+    (reason) => ({ status: 'rejected', reason }),
+  );
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timeoutId.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function delay(ms) {

@@ -308,9 +308,16 @@ export class DaemonWorkerPool {
 
   async close(): Promise<void> {
     this.closed = true;
+    const closingMessage = `${this.options.name} pool is closing`;
     while (this.queue.length > 0) {
       const item = this.queue.shift();
-      if (item) this.rejectItem(item, 'CANCELLED', `${this.options.name} pool is closing`);
+      if (item) this.rejectItem(item, 'CANCELLED', closingMessage);
+    }
+    for (const slot of this.slots) {
+      const item = slot.busy;
+      if (!item) continue;
+      slot.busy = undefined;
+      this.rejectItem(item, 'CANCELLED', closingMessage);
     }
     await Promise.all(this.slots.map((slot) => slot.worker.terminate().catch(() => 0)));
   }

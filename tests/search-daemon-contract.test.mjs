@@ -76,6 +76,28 @@ async function waitFor(predicate, timeoutMs = 1000) {
   assert.equal(predicate(), true);
 }
 
+function settlePromise(promise) {
+  return promise.then(
+    (value) => ({ status: 'fulfilled', value }),
+    (reason) => ({ status: 'rejected', reason }),
+  );
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timeoutId.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function pidIsLive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -1059,6 +1081,59 @@ parentPort.on("message", (message) => {
     await waitFor(() => pool.stats().slots.find((slot) => slot.id === busy.id).job === undefined, 5000);
   } finally {
     await pool.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('worker pool close rejects an in-flight job promptly', async () => {
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const root = tempRoot();
+  const workerScript = path.join(root, 'close-busy-job.mjs');
+  const startedPath = path.join(root, 'started');
+  fs.writeFileSync(
+    workerScript,
+    `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const startedPath = ${JSON.stringify(startedPath)};
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  fs.writeFileSync(startedPath, "started");
+});
+`,
+  );
+  const pool = new DaemonWorkerPool({
+    name: 'close-busy-job',
+    kind: 'search',
+    size: 1,
+    workerScript,
+    env: { ...process.env },
+  });
+  try {
+    await pool.warmup();
+    const startedAt = Date.now();
+    const job = pool.run(
+      { type: 'search', payload: { block: true } },
+      { deadline: Date.now() + 60_000, cancellationId: 'close-busy-job' },
+    );
+    const jobSettlement = settlePromise(job);
+    await waitFor(() => fs.existsSync(startedPath) && pool.stats().slots.some((slot) => slot.busy), 5000);
+
+    const close = pool.close();
+    const result = await withTimeout(jobSettlement, 1_000, 'in-flight worker job close rejection');
+    await withTimeout(close, 1_000, 'worker pool close');
+
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason.code, 'CANCELLED');
+    assert.match(result.reason.message, /pool is closing/);
+    assert.ok(Date.now() - startedAt < 1_000);
+  } finally {
+    await pool.close().catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
