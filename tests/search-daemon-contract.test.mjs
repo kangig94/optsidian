@@ -1446,6 +1446,9 @@ parentPort.on("message", (message) => {
       () =>
         pool.stats().lastRestartReason === 'rss guard exceeded (1000 > 10)' &&
         fs.readFileSync(warmupLog, 'utf8').trim().split('\n').filter(Boolean).length >= 2,
+      // A worker restart + re-warmup is slow; give it headroom so a CPU-saturated full-suite run
+      // (parallel test files) does not spuriously time this poll out.
+      5000,
     );
     const warmups = fs.readFileSync(warmupLog, 'utf8').trim().split('\n').filter(Boolean);
     assert.ok(warmups.length >= 2);
