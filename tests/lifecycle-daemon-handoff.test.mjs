@@ -13,7 +13,7 @@ import {
   desiredOwnerIdentity,
   socketPathForOwner,
 } from '../src/daemon/owner-registry.ts';
-import { SEARCH_DAEMON_PROTOCOL_VERSION } from '../src/daemon/protocol.ts';
+import { SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS, SEARCH_DAEMON_PROTOCOL_VERSION } from '../src/daemon/protocol.ts';
 import { connectRpc, probeSocketPath } from '../src/daemon/transport.ts';
 
 const repoRoot = process.cwd();
@@ -143,6 +143,61 @@ test('AC6 WaitReady long-poll replaces readiness busy polling', async () => {
   assert.deepEqual(calls, ['Status', 'WaitReady', 'Search']);
 });
 
+test('Status liveness probe is capped at the status deadline', async () => {
+  const runtimeDir = tempRoot();
+  const binaryPath = process.execPath;
+  const desired = desiredOwnerIdentity(binaryPath);
+  const registry = createOwnerRegistry({ runtimeDir, desired });
+  const wedged = createOwnerRecord(
+    desired,
+    socketPathForOwner(runtimeDir, desired, 'wedged'),
+    1,
+    'wedged-incarnation',
+    process.pid,
+  );
+  let observedStatusBudget;
+  let spawnedAt;
+  registry.writeOwner(wedged);
+
+  const startedAt = Date.now();
+  const client = createSearchDaemonClient({
+    registry,
+    binaryPath,
+    readyTimeoutMs: 3000,
+    spawnDaemon(record) {
+      spawnedAt = Date.now();
+      registry.writeOwner(createOwnerRecord(desired, record.socketPath, 2, record.incarnationId, process.pid));
+    },
+    connect(record) {
+      return {
+        async request(request) {
+          if (request.method !== 'Status')
+            throw Object.assign(new Error('unexpected request'), { code: 'BAD_REQUEST' });
+          if (record.incarnationId === wedged.incarnationId) {
+            observedStatusBudget = request.deadline - Date.now();
+            await delay(Math.max(0, request.deadline - Date.now()) + 20);
+            throw Object.assign(new Error('Status request timed out before a response was received'), {
+              code: 'ETIMEDOUT',
+            });
+          }
+          return statusResult(record);
+        },
+        async close() {},
+      };
+    },
+  });
+
+  try {
+    const status = await client.status({ deadlineMs: 3000 });
+    assert.equal(status.ready, true);
+    assert.notEqual(status.incarnationId, wedged.incarnationId);
+    assert.equal(observedStatusBudget <= SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS + 100, true);
+    assert.equal(spawnedAt - startedAt < SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS + 800, true);
+  } finally {
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
+
 function statusResult(owner, overrides = {}) {
   return {
     ok: true,
@@ -164,6 +219,61 @@ function statusResult(owner, overrides = {}) {
     ...overrides,
   };
 }
+
+test('successor boot sends courtesy Shutdown to superseded predecessor', async () => {
+  const runtimeDir = tempRoot();
+  const env = daemonEnv(runtimeDir);
+  const binaryPath = path.join(repoRoot, 'dist', 'optsidian');
+  const client = createSearchDaemonClient({ runtimeDir, binaryPath, readyTimeoutMs: 30000, env });
+  const desired = desiredOwnerIdentity(binaryPath);
+  const registry = createOwnerRegistry({ runtimeDir, desired });
+  let predecessorPid;
+  let successor;
+  const successorStderr = [];
+
+  try {
+    const first = await client.status({ deadlineMs: 30000 });
+    assert.equal(first.ready, true);
+    predecessorPid = first.pid;
+
+    const successorSocket = socketPathForOwner(runtimeDir, desired, 'courtesy');
+    successor = spawn(binaryPath, ['__search-daemon'], {
+      env: {
+        ...env,
+        OPTSIDIAN_SEARCH_DAEMON_BINARY: binaryPath,
+        OPTSIDIAN_SEARCH_DAEMON_UID: String(desired.uid),
+        OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH: desired.runtimeHash,
+        OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION: desired.binaryVersion,
+        OPTSIDIAN_SEARCH_DAEMON_SOCKET: successorSocket,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    successor.stderr?.on('data', (chunk) => {
+      successorStderr.push(String(chunk));
+    });
+    assert.equal(typeof successor.pid, 'number');
+
+    const successorOwner = await waitForOwnerPid(registry, successor.pid, 5000, successorStderr);
+    assert.notEqual(successorOwner.incarnationId, first.incarnationId);
+    assert.equal(successorOwner.socketPath, successorSocket);
+
+    const exited = await waitForExit(predecessorPid, 3000);
+    assert.equal(exited, true, 'predecessor should exit quickly after successor courtesy shutdown');
+  } finally {
+    await createSearchDaemonClient({ runtimeDir, binaryPath, env })
+      .shutdown({ deadlineMs: 5000 })
+      .catch(() => {});
+    if (successor && successor.exitCode === null && successor.signalCode === null) successor.kill('SIGKILL');
+    if (predecessorPid !== undefined) {
+      try {
+        process.kill(predecessorPid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
+  }
+});
 
 test('a superseded daemon self-drains at equal epoch and cleans only its own socket', async () => {
   const runtimeDir = tempRoot();
@@ -315,6 +425,16 @@ async function waitForDead(pid) {
     await delay(25);
   }
   process.kill(pid, 'SIGKILL');
+}
+
+async function waitForOwnerPid(registry, pid, timeoutMs, stderr = []) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const owner = registry.readOwner();
+    if (owner?.pid === pid) return owner;
+    await delay(20);
+  }
+  throw new Error(`successor did not claim owner within ${timeoutMs}ms${stderr.length ? `: ${stderr.join('')}` : ''}`);
 }
 
 function waitForChildExit(child, timeoutMs) {

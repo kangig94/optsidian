@@ -22,6 +22,7 @@ import {
   queryDeadlineFromNow,
   SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS,
   SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
+  SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   vaultLifecycleDeadlineMs,
   type ControlDaemonResultByMethod,
@@ -139,7 +140,10 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   > {
     if (!ownerMatchesDesired(owner, desired)) return { kind: 'replace' };
     try {
-      const status = await statusOnce(owner, Math.max(1, deadline - Date.now()));
+      const status = await statusOnce(
+        owner,
+        Math.min(SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS, Math.max(1, deadline - Date.now())),
+      );
       const statusOwner = status.owner;
       if (!statusOwner || !ownerMatchesDesired(statusOwner, desired)) return { kind: 'replace' };
       if (status.phase === 'ready' && status.ready) return { kind: 'use', owner: statusOwner };

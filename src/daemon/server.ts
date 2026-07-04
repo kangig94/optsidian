@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { ensurePrivateDirSync } from '../core/private-path.js';
 import { createProcessToken } from '../core/lifecycle/process-token.js';
 import {
+  SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type ControlDaemonRequest,
   type MutatingControlDaemonMethod,
@@ -16,7 +17,7 @@ import {
   type EmbedLaneConcurrency,
   type CacheConcurrency,
 } from './protocol.js';
-import { createRpcServer, probeSocketPath, type RpcRequestLike, type RpcServer } from './transport.js';
+import { connectRpc, createRpcServer, probeSocketPath, type RpcRequestLike, type RpcServer } from './transport.js';
 import { DaemonMetrics } from './metrics.js';
 import {
   computeBinaryVersion,
@@ -42,7 +43,7 @@ import type { SearchExecutionCacheStats } from './search-store/search-execution-
 import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
 import { recoverRetrievalStartupState } from './vector-store/freshness.js';
 import { createEmbedScheduler, type EmbedScheduler } from './embed-scheduler.js';
-import { logSearchDaemonProcessError } from './supervise.js';
+import { logSearchDaemonProcessError, superviseBackground } from './supervise.js';
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -197,6 +198,7 @@ class SearchDaemon {
           }
         },
       });
+      const predecessor = registry.readOwner();
       owner = createOwnerRecord(
         desired,
         ownerSeed.socketPath,
@@ -222,6 +224,9 @@ class SearchDaemon {
         options.env,
       );
       daemon.initialize();
+      if (predecessor && predecessor.incarnationId !== owner.incarnationId) {
+        superviseBackground('predecessor-courtesy-shutdown', () => sendCourtesyShutdown(predecessor));
+      }
       wakeBootWaiters();
       return daemon;
     } catch (error) {
@@ -816,6 +821,22 @@ function desiredFromOwner(owner: OwnerRecord): DesiredOwnerIdentity {
     binaryVersion: owner.binaryVersion,
     protocolVersion: owner.slot.protocolVersion,
   };
+}
+
+async function sendCourtesyShutdown(predecessor: OwnerRecord): Promise<void> {
+  const connection = await connectRpc<Extract<ControlDaemonRequest, { method: 'Shutdown' }>>(predecessor.socketPath);
+  try {
+    await connection.request({
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: crypto.randomUUID(),
+      method: 'Shutdown',
+      deadline: Date.now() + SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
+      incarnation: predecessor.incarnationId,
+      payload: {},
+    });
+  } finally {
+    await connection.close();
+  }
 }
 
 function errorMessage(error: unknown): string {
