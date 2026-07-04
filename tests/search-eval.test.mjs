@@ -282,7 +282,7 @@ test('search eval workers option drives daemon worker env without raising defaul
   );
 
   assert.equal(result.status, 0, `search eval failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(result.stdout, /summary: mode=e2e concurrency=1 2\/2 passed/);
+  assert.match(result.stdout, /summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed/);
   const calls = fs
     .readFileSync(logPath, 'utf8')
     .trim()

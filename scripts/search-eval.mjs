@@ -82,6 +82,8 @@ function parseOptions(argv) {
       parsed.benchmark = parseBenchmark(arg.slice('--bench='.length));
     } else if (arg.startsWith('--ngram=')) {
       parsed.ngram = parseBooleanOption(arg.slice('--ngram='.length), 'ngram');
+    } else if (arg.startsWith('--retrieval=')) {
+      parsed.retrieval = parseRetrieval(arg.slice('--retrieval='.length));
     } else if (arg.startsWith('--index-actions=')) {
       parsed.indexActions = parseIndexActions(arg.slice('--index-actions='.length));
     } else if (arg.startsWith('--index-action=')) {
@@ -143,6 +145,7 @@ function parseOptions(argv) {
 
 async function runQualityBenchmark(options) {
   const mode = options.mode ?? 'core';
+  const retrieval = options.retrieval ?? 'lexical';
   const measureSpeed = Boolean(options.measureSpeed);
   const concurrency = options.concurrency ?? defaultQualityConcurrency();
   const vaultRoot = options.vault ?? process.env.OPTSIDIAN_VAULT_PATH;
@@ -170,11 +173,11 @@ async function runQualityBenchmark(options) {
   for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
     const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
     runs.push(run);
-    printRunSummary(run, { mode, concurrency, repeat, runIndex, measureSpeed });
+    printRunSummary(run, { mode, retrieval, concurrency, repeat, runIndex, measureSpeed });
   }
 
   if (repeat > 1) {
-    printRepeatSummary(runs, { mode, concurrency, measureSpeed });
+    printRepeatSummary(runs, { mode, retrieval, concurrency, measureSpeed });
   }
 
   if (options.failureReport) {
@@ -243,7 +246,7 @@ async function runIndexBenchmark(options) {
     error: error instanceof Error ? error.message : String(error),
   }));
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     benchmark: 'index',
     generatedAt: new Date().toISOString(),
     mode,
@@ -271,6 +274,8 @@ async function runIndexAction(client, vaultRoot, action, options) {
   const phases = [];
   const request = { vault: vaultRoot, ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}) };
   const started = performance.now();
+  const timeline = createPhaseTimeline(client, vaultRoot, options);
+  timeline.start();
   let payload;
   try {
     if (action === 'load') {
@@ -289,6 +294,7 @@ async function runIndexAction(client, vaultRoot, action, options) {
       usage(`Unknown index action: ${action}`);
     }
     const elapsedMs = roundMs(performance.now() - started);
+    timeline.stop();
     const status = await client.status({ deadlineMs: options.deadlineMs ?? 15000 }).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
@@ -297,6 +303,7 @@ async function runIndexAction(client, vaultRoot, action, options) {
       ok: true,
       elapsedMs,
       phases,
+      buildPhases: timeline.summary(),
       snapshotId: payloadSnapshotId(payload) ?? vaultStatus(status, vaultRoot)?.snapshotId,
       vault: vaultStatus(status, vaultRoot),
       cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
@@ -304,11 +311,13 @@ async function runIndexAction(client, vaultRoot, action, options) {
       searchStore: status.searchStore,
     };
   } catch (error) {
+    timeline.stop();
     return {
       action,
       ok: false,
       elapsedMs: roundMs(performance.now() - started),
       phases,
+      buildPhases: timeline.summary(),
       error: error instanceof Error ? error.message : String(error),
       cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
     };
@@ -346,10 +355,72 @@ async function timedPhase(name, run) {
   }
 }
 
+// Polls the daemon's build progress while an index action's RPC is in flight and records
+// the wall-clock at each build-phase transition (scanning -> parsing -> segmenting -> embedding
+// -> vector-indexing -> publishing -> preloading). This isolates the dense/vector portion
+// (embedding + vector-indexing) of a build from the lexical portion, which the coarse RPC
+// elapsed time alone cannot. Only `load`/`clear-load` await the dense build inside the RPC;
+// `rebuild`/`refresh` attach dense in the background, so their timeline ends at lexical publish.
+function createPhaseTimeline(client, vaultRoot, options) {
+  const resolvedVault = path.resolve(vaultRoot);
+  const marks = [];
+  let lastPhase;
+  let timer;
+  let polling = false;
+  let stoppedAtMs;
+
+  const sample = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const status = await client.status({ deadlineMs: 1000 });
+      const vault = Array.isArray(status.vaults)
+        ? status.vaults.find((candidate) => path.resolve(candidate.vault) === resolvedVault)
+        : undefined;
+      const progress = vault?.progress;
+      if (progress?.phase && progress.phase !== lastPhase) {
+        marks.push({ phase: progress.phase, atMs: performance.now(), total: progress.total });
+        lastPhase = progress.phase;
+      }
+    } catch {
+      // Status can transiently fail mid-build; the next poll recovers.
+    } finally {
+      polling = false;
+    }
+  };
+
+  return {
+    start() {
+      timer = setInterval(() => void sample(), options.phasePollMs ?? 250);
+      timer.unref();
+      void sample();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      stoppedAtMs = performance.now();
+    },
+    summary() {
+      if (marks.length === 0) return undefined;
+      const endMs = stoppedAtMs ?? performance.now();
+      return marks.map((mark, index) => ({
+        phase: mark.phase,
+        elapsedMs: roundMs((index + 1 < marks.length ? marks[index + 1].atMs : endMs) - mark.atMs),
+        ...(Number.isFinite(mark.total) ? { total: mark.total } : {}),
+      }));
+    },
+  };
+}
+
 function parseBenchmark(raw) {
   if (raw === 'search') return 'quality';
   if (raw === 'quality' || raw === 'index') return raw;
   usage('benchmark must be one of: quality, search, index');
+}
+
+function parseRetrieval(raw) {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'lexical' || normalized === 'vector' || normalized === 'hybrid') return normalized;
+  usage('retrieval must be one of: lexical, vector, hybrid');
 }
 
 function parseIndexActions(raw) {
@@ -500,6 +571,10 @@ function printIndexAction(result, context) {
       `phases=${phases || 'none'}`,
     ].join(' '),
   );
+  if (result.buildPhases?.length) {
+    const build = result.buildPhases.map((phase) => `${phase.phase}=${phase.elapsedMs.toFixed(0)}ms`).join(' ');
+    console.log(`       build: ${build}`);
+  }
   if (!result.ok) console.log(`       error: ${result.error}`);
 }
 
@@ -800,7 +875,7 @@ async function searchRunner(mode, cliPath, vaultRoot, options) {
         const payload = await client.search({
           vault: vaultRoot,
           ...(pinnedSnapshotId ? { snapshotId: pinnedSnapshotId } : {}),
-          ...coreSearchParams(queryCase),
+          ...coreSearchParams(queryCase, options.retrieval),
         });
         if (!pinnedSnapshotId && payload.snapshotId) pinnedSnapshotId = payload.snapshotId;
         return { ok: true, payload };
@@ -1160,7 +1235,7 @@ function truncateMiddle(value, maxLength) {
   return `${value.slice(0, keep)}...${value.slice(value.length - keep)}`;
 }
 
-function coreSearchParams(queryCase) {
+function coreSearchParams(queryCase, retrieval) {
   return {
     query: queryCase.query || undefined,
     path: queryCase.path,
@@ -1168,6 +1243,7 @@ function coreSearchParams(queryCase) {
     fields: parseFields(queryCase.field),
     limit: queryCase.limit ?? 10,
     deadlineMs: queryCase.deadlineMs ?? 30000,
+    ...(retrieval && retrieval !== 'lexical' ? { retrieval } : {}),
   };
 }
 
@@ -1179,6 +1255,7 @@ function runE2eSearch(cliPath, vaultRoot, queryCase, options) {
   if (queryCase.path) cliArgs.push(`path=${queryCase.path}`);
   const fields = parseFields(queryCase.field);
   if (fields?.length) cliArgs.push(`field=${fields.join(',')}`);
+  if (options.retrieval && options.retrieval !== 'lexical') cliArgs.push(`retrieval=${options.retrieval}`);
 
   const child = spawnSync(process.execPath, cliArgs, {
     cwd: repoRoot,
@@ -1448,6 +1525,7 @@ function printRunSummary(run, context) {
   const prefix = context.repeat > 1 ? `run ${context.runIndex}/${context.repeat} ` : '';
   const summary = [
     `${prefix}summary: mode=${context.mode}`,
+    `retrieval=${context.retrieval}`,
     `concurrency=${context.concurrency}`,
     `${run.passed}/${run.total} passed`,
   ];
@@ -1479,6 +1557,7 @@ function printRepeatSummary(runs, context) {
   const summary = [
     `repeat: runs=${runs.length}`,
     `mode=${context.mode}`,
+    `retrieval=${context.retrieval}`,
     `concurrency=${context.concurrency}`,
     `passedMedian=${median(runs.map((run) => run.passed)).toFixed(1)}/${total}`,
     `top1Median=${median(scoreSummaries.map((score) => score.top1)).toFixed(3)}`,
@@ -1855,7 +1934,7 @@ function roundMs(value) {
 function usage(message, code = 2) {
   if (message) console.error(message);
   console.error(
-    'Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--workers=<n>] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]',
+    'Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--retrieval=lexical|vector|hybrid] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--workers=<n>] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]',
   );
   console.error(
     '       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--ngram=off|on] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]',
