@@ -11,6 +11,10 @@ import {
   type SearchDaemonPhase,
   type DaemonRequestBase,
   type StatusResult,
+  type DaemonConcurrencyStatus,
+  type DaemonPoolConcurrency,
+  type EmbedLaneConcurrency,
+  type CacheConcurrency,
 } from './protocol.js';
 import { createRpcServer, type RpcRequestLike, type RpcServer } from './transport.js';
 import { DaemonMetrics } from './metrics.js';
@@ -31,7 +35,8 @@ import {
   type OwnerRegistry,
 } from './owner-registry.js';
 import { createRequestScheduler } from './scheduler.js';
-import { ProfileManager, type ProfileRuntime } from './profile-manager.js';
+import { ProfileManager, type ProfileRuntime, type ProfileRuntimeStatus } from './profile-manager.js';
+import type { SearchExecutionCacheStats } from './search-store/search-execution-state.js';
 import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
 import { recoverRetrievalStartupState } from './vector-store/freshness.js';
 import { createEmbedScheduler, type EmbedScheduler } from './embed-scheduler.js';
@@ -504,6 +509,7 @@ class SearchDaemon {
       pools: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.pools])),
       searchStore: Object.fromEntries(Object.entries(profiles).map(([hash, profile]) => [hash, profile.searchStore])),
       profiles,
+      concurrency: buildConcurrency(profiles),
       vaults: this.profiles.listVaults(),
     };
   }
@@ -900,8 +906,71 @@ function emptyStatus(owner: OwnerRecord, phase: SearchDaemonPhase): StatusResult
     pools: {},
     searchStore: {},
     profiles: {},
+    concurrency: { pools: [], embedLanes: [], caches: [] },
     vaults: [],
   };
+}
+
+export function buildConcurrency(profiles: Record<string, ProfileRuntimeStatus>): DaemonConcurrencyStatus {
+  const pools: DaemonPoolConcurrency[] = [];
+  const embedLanes: EmbedLaneConcurrency[] = [];
+  const caches: CacheConcurrency[] = [];
+  let processRssBytes: number | undefined;
+  for (const [profileHash, profile] of Object.entries(profiles)) {
+    for (const [pool, stats] of Object.entries(profile.pools)) {
+      // Worker threads share the daemon's process RSS, so a single honest reading — not a
+      // per-worker sum — is the memory signal worth surfacing.
+      processRssBytes ??= stats.processMemory.rss;
+      pools.push({
+        profileHash,
+        pool,
+        workers: stats.workers,
+        queued: stats.queued,
+        active: stats.active,
+        slots: stats.slots.map((slot) => ({
+          id: slot.id,
+          ready: slot.ready,
+          busy: slot.busy,
+          ...('job' in slot && slot.job ? { job: slot.job } : {}),
+        })),
+      });
+    }
+    embedLanes.push({
+      profileHash,
+      runningLane: profile.embedScheduler.runningLane ?? null,
+      lanes: profile.embedScheduler.lanes,
+      activeLaneScopes: profile.embedScheduler.activeLaneScopes,
+      querySingleFlights: profile.embedScheduler.querySingleFlights,
+    });
+    const searchExecution = searchExecutionCacheSummary(profile.pools.searchExecution.cache);
+    caches.push({
+      profileHash,
+      queryAnalysis: {
+        entries: profile.searchStore.queryAnalysisCache.entries,
+        hits: profile.searchStore.queryAnalysisCache.hits,
+        misses: profile.searchStore.queryAnalysisCache.misses,
+        evictions: profile.searchStore.queryAnalysisCache.evictions,
+      },
+      ...(searchExecution ? { searchExecution } : {}),
+    });
+  }
+  return { ...(processRssBytes !== undefined ? { processRssBytes } : {}), pools, embedLanes, caches };
+}
+
+export function searchExecutionCacheSummary(
+  cache: SearchExecutionCacheStats[] | { error: string },
+): CacheConcurrency['searchExecution'] | undefined {
+  if (!Array.isArray(cache) || cache.length === 0) return undefined;
+  return cache.reduce(
+    (acc, slot) => ({
+      entries: acc.entries + slot.entries,
+      hits: acc.hits + slot.hits,
+      misses: acc.misses + slot.misses,
+      evictions: acc.evictions + slot.evictions,
+      preloads: acc.preloads + slot.preloads,
+    }),
+    { entries: 0, hits: 0, misses: 0, evictions: 0, preloads: 0 },
+  );
 }
 
 function incarnationOptionalMethod(method: string): boolean {

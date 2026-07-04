@@ -252,6 +252,41 @@ export type SearchIndexProgress = SearchIndexProgressUpdate & {
   updatedAt: string;
 };
 
+type DaemonWorkerJob = {
+  type: string;
+  vault?: string;
+};
+
+export type DaemonPoolConcurrency = {
+  profileHash: string;
+  pool: string;
+  workers: number;
+  queued: number;
+  active: number;
+  slots: Array<{ id: number; ready: boolean; busy: boolean; job?: DaemonWorkerJob }>;
+};
+
+export type EmbedLaneConcurrency = {
+  profileHash: string;
+  runningLane: string | null;
+  lanes: Record<string, number>;
+  activeLaneScopes: Record<string, number>;
+  querySingleFlights: number;
+};
+
+export type CacheConcurrency = {
+  profileHash: string;
+  queryAnalysis: { entries: number; hits: number; misses: number; evictions: number };
+  searchExecution?: { entries: number; hits: number; misses: number; evictions: number; preloads: number };
+};
+
+export type DaemonConcurrencyStatus = {
+  processRssBytes?: number;
+  pools: DaemonPoolConcurrency[];
+  embedLanes: EmbedLaneConcurrency[];
+  caches: CacheConcurrency[];
+};
+
 export type StatusResult = {
   ok: true;
   ready: boolean;
@@ -273,6 +308,7 @@ export type StatusResult = {
   pools: unknown;
   searchStore: unknown;
   profiles?: unknown;
+  concurrency: DaemonConcurrencyStatus;
   vaults: Array<{
     vault: string;
     state: VaultState;

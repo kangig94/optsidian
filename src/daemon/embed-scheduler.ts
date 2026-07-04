@@ -12,6 +12,13 @@ import type { VectorGenerationPoolOptions } from './vector-store/pool.js';
 
 export type EmbedSchedulerLane = 'query' | 'save' | 'refresh' | 'rebuild';
 
+export type EmbedSchedulerLaneStats = {
+  runningLane: EmbedSchedulerLane | undefined;
+  lanes: Record<string, number>;
+  activeLaneScopes: Record<string, number>;
+  querySingleFlights: number;
+};
+
 export class VectorGenerationManager extends VectorGenerationPool {}
 
 export type EmbedSchedulerOptions = {
@@ -250,12 +257,18 @@ export class EmbedScheduler {
 
   stats() {
     return {
-      lanes: Object.fromEntries(LANE_ORDER.map((lane) => [lane, this.lanes[lane].length])),
-      runningLane: this.runningLane,
-      activeLaneScopes: Object.fromEntries(LANE_ORDER.map((lane) => [lane, this.laneScopes[lane]])),
-      querySingleFlights: this.querySingleFlights.size,
+      ...this.laneStats(),
       embedding: this.embedding.stats(),
       vectorManager: this.vectorManager.statsForTests(),
+    };
+  }
+
+  laneStats(): EmbedSchedulerLaneStats {
+    return {
+      runningLane: this.runningLane,
+      lanes: Object.fromEntries(LANE_ORDER.map((lane) => [lane, this.lanes[lane].length])),
+      activeLaneScopes: Object.fromEntries(LANE_ORDER.map((lane) => [lane, this.laneScopes[lane]])),
+      querySingleFlights: this.querySingleFlights.size,
     };
   }
 

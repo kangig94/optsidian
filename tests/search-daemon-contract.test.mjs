@@ -965,6 +965,118 @@ parentPort.on("message", (message) => {
   }
 });
 
+test('worker pool stats expose the in-flight job type and vault', async () => {
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const root = tempRoot();
+  const workerScript = path.join(root, 'busy-job.mjs');
+  const releasePath = path.join(root, 'release');
+  fs.writeFileSync(
+    workerScript,
+    `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+const releasePath = ${JSON.stringify(releasePath)};
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    parentPort.postMessage({ id: 0, ok: true, result: { ready: true }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  const timer = setInterval(() => {
+    if (fs.existsSync(releasePath)) {
+      clearInterval(timer);
+      parentPort.postMessage({ id: message.id, ok: true, result: {}, memoryRss: process.memoryUsage().rss });
+    }
+  }, 5);
+});
+`,
+  );
+  const pool = new DaemonWorkerPool({
+    name: 'busy-job',
+    kind: 'search',
+    size: 1,
+    workerScript,
+    env: { ...process.env },
+  });
+  try {
+    await pool.warmup();
+    const job = pool.run(
+      { type: 'modelEncode', payload: {} },
+      { deadline: Date.now() + 10_000, cancellationId: 'busy', vault: '/vault-x' },
+    );
+    await waitFor(() => pool.stats().slots.some((slot) => slot.busy), 5000);
+    const busy = pool.stats().slots.find((slot) => slot.busy);
+    assert.deepEqual(busy.job, { type: 'modelEncode', vault: '/vault-x' });
+    fs.writeFileSync(releasePath, '');
+    await job;
+    await waitFor(() => pool.stats().slots.find((slot) => slot.id === busy.id).job === undefined, 5000);
+  } finally {
+    await pool.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildConcurrency projects pools, lanes, and caches with an honest single RSS', async () => {
+  const { buildConcurrency, searchExecutionCacheSummary } = await import('../src/daemon/server.ts');
+  const pool = (name, over = {}) => ({
+    name,
+    kind: 'search',
+    workers: 1,
+    queued: 0,
+    active: 0,
+    ready: 1,
+    processMemory: { rss: 123456, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 },
+    slots: [],
+    ...over,
+  });
+  const profiles = {
+    p1: {
+      profileHash: 'p1',
+      profile: {},
+      activeRequests: 1,
+      pools: {
+        latencyAnalyzer: pool('latencyAnalyzer'),
+        throughputAnalyzer: pool('throughputAnalyzer'),
+        embedding: pool('embedding', {
+          active: 1,
+          slots: [{ id: 0, ready: true, busy: true, job: { type: 'modelEncode', vault: '/v' } }],
+        }),
+        vector: pool('vector'),
+        searchExecution: pool('searchExecution', {
+          cache: [
+            { entries: 2, limit: 10, hits: 3, misses: 1, evictions: 0, preloads: 1, snapshotIds: ['a'] },
+            { entries: 1, limit: 10, hits: 4, misses: 2, evictions: 1, preloads: 0, snapshotIds: ['b'] },
+          ],
+        }),
+      },
+      searchStore: {
+        queryAnalysisCache: { entries: 5, maxEntries: 100, hits: 7, misses: 3, evictions: 1 },
+        rankingTuningHash: 'h',
+      },
+      embedScheduler: {
+        runningLane: 'rebuild',
+        lanes: { query: 0, save: 1, refresh: 0, rebuild: 2 },
+        activeLaneScopes: { query: 0, save: 0, refresh: 0, rebuild: 1 },
+        querySingleFlights: 0,
+      },
+      vaults: [],
+    },
+  };
+  const c = buildConcurrency(profiles);
+  assert.equal(c.processRssBytes, 123456);
+  assert.equal(c.pools.length, 5);
+  assert.deepEqual(c.pools.find((p) => p.pool === 'embedding').slots[0].job, { type: 'modelEncode', vault: '/v' });
+  assert.equal(c.embedLanes.length, 1);
+  assert.equal(c.embedLanes[0].runningLane, 'rebuild');
+  assert.deepEqual(c.embedLanes[0].lanes, { query: 0, save: 1, refresh: 0, rebuild: 2 });
+  assert.deepEqual(c.caches[0].queryAnalysis, { entries: 5, hits: 7, misses: 3, evictions: 1 });
+  // summed across the two per-slot search-execution cache entries
+  assert.deepEqual(c.caches[0].searchExecution, { entries: 3, hits: 7, misses: 3, evictions: 1, preloads: 1 });
+
+  assert.equal(searchExecutionCacheSummary({ error: 'boom' }), undefined);
+  assert.equal(searchExecutionCacheSummary([]), undefined);
+  assert.deepEqual(buildConcurrency({}), { pools: [], embedLanes: [], caches: [] });
+});
+
 test('AC3 worker pool source has no targeted requestId rotation', () => {
   const source = fs.readFileSync(path.join(repoRoot, 'src/daemon/worker-pool.ts'), 'utf8');
   assert.doesNotMatch(source, /\blastTargetRequestGroupBySlot\b/);

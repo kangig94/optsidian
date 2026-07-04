@@ -22,6 +22,7 @@ import {
   defaultSearchExecutionWorkerCount,
   optionalWorkerCountFromEnv,
   workerCountFromEnv,
+  type DaemonWorkerPoolStats,
   type WorkerPoolRunOptions,
 } from './worker-pool.js';
 import type {
@@ -59,6 +60,14 @@ export type AnalyzerPoolTokenization = {
   tokens: string[][];
 };
 
+export type DaemonPoolsStats = {
+  latencyAnalyzer: DaemonWorkerPoolStats;
+  throughputAnalyzer: DaemonWorkerPoolStats;
+  embedding: DaemonWorkerPoolStats;
+  vector: DaemonWorkerPoolStats;
+  searchExecution: DaemonWorkerPoolStats & { cache: SearchExecutionCacheStats[] | { error: string } };
+};
+
 export type DaemonPools = {
   latencyAnalyzer: AnalyzerWorkerPool;
   throughputAnalyzer: AnalyzerWorkerPool;
@@ -68,7 +77,7 @@ export type DaemonPools = {
   warmup(): Promise<void>;
   cancel(cancellationId: string): void;
   close(): Promise<void>;
-  stats(options: WorkerPoolRunOptions): Promise<unknown>;
+  stats(options: WorkerPoolRunOptions): Promise<DaemonPoolsStats>;
 };
 
 export type DaemonPoolsOptions = {
@@ -587,7 +596,7 @@ export async function createDaemonPools(
       ]);
     },
     async stats(options) {
-      let searchExecutionCache: unknown;
+      let searchExecutionCache: SearchExecutionCacheStats[] | { error: string };
       try {
         searchExecutionCache = await searchExecution.cacheStats(options);
       } catch (error) {

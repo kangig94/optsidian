@@ -13,6 +13,8 @@ export type DaemonWorkerRequest = {
   transferList?: readonly TransferListItem[];
 };
 
+export type DaemonWorkerPoolStats = ReturnType<DaemonWorkerPool['stats']>;
+
 export type WorkerPoolRunOptions = {
   deadline: number;
   cancellationId: string;
@@ -335,6 +337,14 @@ export class DaemonWorkerPool {
         ready: slot.readyState,
         warmupStarted: slot.warmupStarted,
         busy: this.slotOccupied(slot),
+        ...(slot.busy
+          ? {
+              job: {
+                type: slot.busy.request.type,
+                ...(slot.busy.options.vault ? { vault: slot.busy.options.vault } : {}),
+              },
+            }
+          : {}),
         restarting: slot.restarting,
         restartAttempts: slot.restartAttempts,
         completedJobs: slot.completedJobs,

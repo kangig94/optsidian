@@ -1603,10 +1603,14 @@ test('index mutation rendering stays stable', async () => {
       ready: true,
       phase: 'ready',
       protocolVersion: 4,
+      incarnationId: 'inc-1',
+      epoch: 2,
+      pid: 4242,
       owner: {},
       metrics: { requests: 3, failures: 0, activeRequests: 0, startedAt: '2026-01-01T00:00:00.000Z' },
       pools: {},
       searchStore: {},
+      concurrency: { pools: [], embedLanes: [], caches: [] },
       vaults: [
         { vault: '/vault-a', state: 'ready', snapshotId: 'abc123', updatedAt: '2026-01-01T00:00:00.000Z' },
         {
@@ -1619,10 +1623,151 @@ test('index mutation rendering stays stable', async () => {
     [
       'Search daemon ready.',
       'Phase: ready.',
+      'Owner: incarnation inc-1, epoch 2, pid 4242.',
       'Requests: 3, failures: 0, active: 0.',
       'Vaults:',
       '- ready: /vault-a (snapshot: abc123, updated: 2026-01-01T00:00:00.000Z)',
       '- loading: /vault-b (progress: building 1/2 note.md)',
+      '',
+    ].join('\n'),
+  );
+});
+
+test('daemon status renders concurrency signals', async () => {
+  const { renderIndexResult } = await import('../src/cli/render.ts');
+  assert.equal(
+    renderIndexResult({
+      ok: true,
+      ready: true,
+      phase: 'ready',
+      protocolVersion: 4,
+      incarnationId: 'inc-1',
+      epoch: 2,
+      pid: 4242,
+      owner: {},
+      metrics: { requests: 0, failures: 0, activeRequests: 1, startedAt: '2026-01-01T00:00:00.000Z' },
+      pools: {},
+      searchStore: {},
+      concurrency: {
+        processRssBytes: 268435456,
+        pools: [
+          {
+            profileHash: 'p1',
+            pool: 'searchExecution',
+            workers: 4,
+            queued: 2,
+            active: 1,
+            slots: [
+              { id: 0, ready: true, busy: true, job: { type: 'Search', vault: '/vault-a' } },
+              { id: 1, ready: true, busy: false },
+            ],
+          },
+          { profileHash: 'p1', pool: 'throughputAnalyzer', workers: 1, queued: 0, active: 0, slots: [] },
+        ],
+        embedLanes: [
+          {
+            profileHash: 'p1',
+            runningLane: 'rebuild',
+            lanes: { query: 0, save: 1, refresh: 0, rebuild: 2 },
+            activeLaneScopes: { query: 0, save: 0, refresh: 0, rebuild: 1 },
+            querySingleFlights: 0,
+          },
+        ],
+        caches: [
+          {
+            profileHash: 'p1',
+            queryAnalysis: { entries: 10, hits: 7, misses: 3 },
+            searchExecution: { entries: 5, hits: 4, misses: 1, evictions: 0, preloads: 2 },
+          },
+        ],
+      },
+      vaults: [],
+    }),
+    [
+      'Search daemon ready.',
+      'Phase: ready.',
+      'Owner: incarnation inc-1, epoch 2, pid 4242.',
+      'Requests: 0, failures: 0, active: 1.',
+      'RSS: 256.0 MB.',
+      'Pools:',
+      '- searchExecution: 4 workers, queued 2, active 1, jobs: Search@/vault-a',
+      '- throughputAnalyzer: 1 workers, queued 0, active 0',
+      'Embed lanes: query 0, save 1, refresh 0, rebuild 2 (running: rebuild).',
+      'Caches: query-analysis 7/3 hit/miss; search-execution 4/1 hit/miss.',
+      'Vaults: none.',
+      '',
+    ].join('\n'),
+  );
+});
+
+test('daemon status renders concurrency off-states and multiple in-flight jobs', async () => {
+  const { renderIndexResult } = await import('../src/cli/render.ts');
+  assert.equal(
+    renderIndexResult({
+      ok: true,
+      ready: true,
+      phase: 'ready',
+      protocolVersion: 4,
+      incarnationId: 'inc-2',
+      epoch: 1,
+      pid: 100,
+      owner: {},
+      metrics: { requests: 0, failures: 0, activeRequests: 2, startedAt: '2026-01-01T00:00:00.000Z' },
+      pools: {},
+      searchStore: {},
+      concurrency: {
+        // no processRssBytes → the RSS line must be omitted
+        pools: [
+          {
+            profileHash: 'p1',
+            pool: 'searchExecution',
+            workers: 2,
+            queued: 0,
+            active: 2,
+            slots: [
+              { id: 0, ready: true, busy: true, job: { type: 'Search', vault: '/vault-a' } },
+              { id: 1, ready: true, busy: true, job: { type: 'Retrieve', vault: '/vault-b' } },
+            ],
+          },
+        ],
+        embedLanes: [
+          {
+            profileHash: 'p1',
+            runningLane: 'rebuild',
+            lanes: { query: 0, save: 0, refresh: 0, rebuild: 1 },
+            activeLaneScopes: { query: 0, save: 0, refresh: 0, rebuild: 1 },
+            querySingleFlights: 0,
+          },
+          {
+            profileHash: 'p1',
+            runningLane: null,
+            lanes: { query: 0, save: 0, refresh: 0, rebuild: 0 },
+            activeLaneScopes: { query: 0, save: 0, refresh: 0, rebuild: 0 },
+            querySingleFlights: 0,
+          },
+        ],
+        caches: [
+          {
+            profileHash: 'p1',
+            queryAnalysis: { entries: 3, hits: 1, misses: 0, evictions: 0 },
+            searchExecution: { entries: 2, hits: 2, misses: 1, evictions: 0, preloads: 1 },
+          },
+          { profileHash: 'p1', queryAnalysis: { entries: 8, hits: 5, misses: 5, evictions: 2 } },
+        ],
+      },
+      vaults: [],
+    }),
+    [
+      'Search daemon ready.',
+      'Phase: ready.',
+      'Owner: incarnation inc-2, epoch 1, pid 100.',
+      'Requests: 0, failures: 0, active: 2.',
+      'Pools:',
+      '- searchExecution: 2 workers, queued 0, active 2, jobs: Search@/vault-a, Retrieve@/vault-b',
+      'Embed lanes: query 0, save 0, refresh 0, rebuild 1 (running: rebuild).',
+      'Caches: query-analysis 1/0 hit/miss; search-execution 2/1 hit/miss.',
+      'Caches: query-analysis 5/5 hit/miss.',
+      'Vaults: none.',
       '',
     ].join('\n'),
   );

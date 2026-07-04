@@ -12,7 +12,7 @@ import type {
   SearchResult,
   SimilarityResult,
 } from '../core/types.js';
-import type { RefreshResult, StatusResult } from '../daemon/protocol.js';
+import type { DaemonConcurrencyStatus, RefreshResult, StatusResult } from '../daemon/protocol.js';
 
 export type OutputFormat = 'text' | 'json';
 
@@ -139,22 +139,24 @@ export function renderIndexResult(
   if (isDaemonStatusResult(result)) {
     const lines = [result.ready ? 'Search daemon ready.' : 'Search daemon not ready.'];
     lines.push(`Phase: ${result.phase}.`);
+    lines.push(`Owner: incarnation ${result.incarnationId}, epoch ${result.epoch}, pid ${result.pid}.`);
     lines.push(
       `Requests: ${result.metrics.requests}, failures: ${result.metrics.failures}, active: ${result.metrics.activeRequests}.`,
     );
+    appendConcurrencyLines(lines, result.concurrency);
     if (result.vaults.length === 0) {
       lines.push('Vaults: none.');
-      return `${lines.join('\n')}\n`;
-    }
-    lines.push('Vaults:');
-    for (const vault of result.vaults) {
-      const details = [
-        vault.snapshotId ? `snapshot: ${vault.snapshotId}` : '',
-        vault.updatedAt ? `updated: ${vault.updatedAt}` : '',
-        vault.progress ? `progress: ${renderIndexProgress(vault.progress)}` : '',
-        vault.error ? `error: ${vault.error}` : '',
-      ].filter(Boolean);
-      lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(', ')})` : ''}`);
+    } else {
+      lines.push('Vaults:');
+      for (const vault of result.vaults) {
+        const details = [
+          vault.snapshotId ? `snapshot: ${vault.snapshotId}` : '',
+          vault.updatedAt ? `updated: ${vault.updatedAt}` : '',
+          vault.progress ? `progress: ${renderIndexProgress(vault.progress)}` : '',
+          vault.error ? `error: ${vault.error}` : '',
+        ].filter(Boolean);
+        lines.push(`- ${vault.state}: ${vault.vault}${details.length > 0 ? ` (${details.join(', ')})` : ''}`);
+      }
     }
     return `${lines.join('\n')}\n`;
   }
@@ -207,6 +209,44 @@ export function renderIndexResult(
     return `Pruned ${count} search cache ${storeLabel}, freed ${formatBytes(result.removedBytes)}.${skipped}\n`;
   }
   return 'Index cleared.\n';
+}
+
+function appendConcurrencyLines(lines: string[], concurrency: DaemonConcurrencyStatus): void {
+  if (concurrency.processRssBytes !== undefined) {
+    lines.push(`RSS: ${(concurrency.processRssBytes / (1024 * 1024)).toFixed(1)} MB.`);
+  }
+  if (concurrency.pools.length > 0) {
+    lines.push('Pools:');
+    for (const pool of concurrency.pools) {
+      const jobs: string[] = [];
+      for (const slot of pool.slots) {
+        if (slot.job) jobs.push(`${slot.job.type}${slot.job.vault ? `@${slot.job.vault}` : ''}`);
+      }
+      const detail = [
+        `${pool.workers} workers`,
+        `queued ${pool.queued}`,
+        `active ${pool.active}`,
+        jobs.length > 0 ? `jobs: ${jobs.join(', ')}` : '',
+      ].filter(Boolean);
+      lines.push(`- ${pool.pool}: ${detail.join(', ')}`);
+    }
+  }
+  for (const lane of concurrency.embedLanes) {
+    const running = lane.runningLane;
+    const hasDepth = Object.values(lane.lanes).some((depth) => depth > 0);
+    if (!running && !hasDepth) continue;
+    const depths = Object.entries(lane.lanes)
+      .map(([name, depth]) => `${name} ${depth}`)
+      .join(', ');
+    lines.push(`Embed lanes: ${depths}${running ? ` (running: ${running})` : ''}.`);
+  }
+  for (const cache of concurrency.caches) {
+    const parts = [`query-analysis ${cache.queryAnalysis.hits}/${cache.queryAnalysis.misses} hit/miss`];
+    if (cache.searchExecution) {
+      parts.push(`search-execution ${cache.searchExecution.hits}/${cache.searchExecution.misses} hit/miss`);
+    }
+    lines.push(`Caches: ${parts.join('; ')}.`);
+  }
 }
 
 function isDaemonStatusResult(
