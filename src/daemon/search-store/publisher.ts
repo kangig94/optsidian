@@ -780,15 +780,23 @@ export class VaultPublisher {
       try {
         const committed = await this.commitBuildOutput(output);
         if (!committed.ok) {
+          if (committed.reason === 'not-current') {
+            // This daemon's writer token was superseded by a newer incarnation: a retryable
+            // stale-incarnation lifecycle condition, not a terminal failure. Reject (rather than
+            // drop) so the STALE_INCARNATION code survives to the client — a dropped result is
+            // rethrown as a bare message, stripping the code the client keys retry/resync on.
+            const staleError = Object.assign(
+              new Error(`edition commit rejected: not-current${committed.message ? `: ${committed.message}` : ''}`),
+              { code: 'STALE_INCARNATION' },
+            );
+            for (const envelope of remaining) this.rejectStructuralEnvelope(envelope, staleError);
+            return head;
+          }
           if (committed.reason !== 'not-head') {
-            for (const envelope of remaining) {
-              this.dropStructuralEnvelope(
-                envelope,
-                new Error(
-                  `edition commit rejected: ${committed.reason}${committed.message ? `: ${committed.message}` : ''}`,
-                ),
-              );
-            }
+            const commitError = new Error(
+              `edition commit rejected: ${committed.reason}${committed.message ? `: ${committed.message}` : ''}`,
+            );
+            for (const envelope of remaining) this.dropStructuralEnvelope(envelope, commitError);
             return head;
           }
           head = this.ledger.current();

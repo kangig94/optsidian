@@ -569,6 +569,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
         snapshotId,
       };
     } catch (error) {
+      // A superseded writer token (STALE_INCARNATION) is a retryable stale-incarnation lifecycle
+      // condition, not a vault-load failure: rethrow so it reaches the RPC error path and the
+      // client resyncs and retries against the current daemon — the same handling Rebuild/Refresh/
+      // Compact already get. A genuine load failure still downgrades to a per-vault status:'failed'.
+      if (isStaleIncarnation(error)) throw error;
       return {
         ok: true,
         command: 'index',
@@ -1228,7 +1233,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
         }
         this.activeByVault.set(paths.storeId, active.corpus.snapshotId);
         if (!this.retrievalReadyForEdition(paths, active)) {
-          void this.enqueueDensePublication(paths, active, context, { force: true });
+          void this.enqueueDensePublication(paths, active, context, { force: true }).catch(() => undefined);
         }
         context.progress?.({
           phase: 'scanning',
@@ -1305,11 +1310,14 @@ export class DaemonSnapshotStore implements SnapshotStore {
     });
     const edition = lexicalEditionFromPublisherResult(result);
     this.activeByVault.set(paths.storeId, edition.corpus.snapshotId);
+    // Attach the rejection handler at creation so the fire-and-forget branch (background embedding
+    // lane, not awaited below) can never surface a STALE_INCARNATION reject as an unhandledRejection
+    // during a lease handoff; the awaited branch simply awaits the already-guarded promise.
     const densePublication = options.prepareRetrieval
-      ? this.enqueueDensePublication(paths, edition, context)
+      ? this.enqueueDensePublication(paths, edition, context).catch(() => undefined)
       : undefined;
     if (densePublication && (options.awaitDense || !context.embeddingLane)) {
-      await densePublication.catch(() => undefined);
+      await densePublication;
     }
     this.markSweepGc(paths);
     this.enforceBudget();
@@ -3745,6 +3753,15 @@ function utf8ForSnapshot(value: string): Uint8Array {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isStaleIncarnation(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'STALE_INCARNATION'
+  );
 }
 
 function searchAnalyzerRuntimeFromProcess(): { node: string; icu?: string } {

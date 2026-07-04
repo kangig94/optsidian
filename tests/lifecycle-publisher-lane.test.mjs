@@ -105,6 +105,144 @@ test('AC4 publisher lane times out a hung build and continues with queued intent
   }
 });
 
+test('a writer token superseded mid-commit rejects the intent as a retryable stale incarnation', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-supersede-'));
+  let publisher;
+  try {
+    const base = createLocalTenancyFenceProvider();
+    const superseding = {
+      ...base.writerToken,
+      epoch: base.writerToken.epoch + 1,
+      incarnationId: 'superseding-incarnation',
+    };
+    let fenceCalls = 0;
+    const fence = {
+      currentWriterToken() {
+        fenceCalls += 1;
+        // The lane acquires this daemon's token, then the ledger re-verifies at commit time.
+        // Returning a newer incarnation's token on the verify read reproduces a live handoff:
+        // this daemon built the edition but no longer holds the writer lease.
+        return fenceCalls === 1 ? base.writerToken : superseding;
+      },
+    };
+    const document = doc('doc-a', 'A.md', 'hash-a');
+    publisher = createPublisher(root, fence, {
+      effects: {
+        buildSnapshot(input) {
+          return {
+            kind: 'candidate',
+            candidate: candidate({
+              frontierSeq: input.intent.scanBoundary.frontierSeq,
+              scanBoundaryJournalSeq: input.intent.scanBoundary.scanBoundaryJournalSeq,
+              corpus: corpus('superseded-snapshot'),
+              documents: [document],
+              dense: unavailable(),
+              identity: publisher.retrievalIdentity,
+            }),
+          };
+        },
+      },
+    });
+
+    publisher.markDirty({
+      op: 'upsert',
+      docId: document.documentId,
+      path: document.path,
+      contentHash: document.contentHash,
+    });
+    const boundary = publisher.recordScanBoundary();
+
+    await assert.rejects(
+      publisher.enqueue({
+        kind: 'rebuild',
+        scanBoundary: boundary,
+        deadline: Date.now() + 1_000,
+        cancellationId: 'superseded-build',
+      }),
+      (error) => {
+        // A dropped result would strip the code down to a bare message; the reject must carry
+        // STALE_INCARNATION so the client keys retry/resync on it rather than treating it as fatal.
+        assert.equal(error.code, 'STALE_INCARNATION');
+        assert.match(error.message, /not-current/);
+        return true;
+      },
+    );
+
+    assert.equal(
+      fenceCalls,
+      2,
+      `commit path should acquire then verify the writer token exactly once each, saw ${fenceCalls} reads`,
+    );
+    assert.equal(publisher.ledger.current(), undefined);
+  } finally {
+    await publisher?.stop().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a lost writer lease at commit-acquire rejects the intent as a retryable stale incarnation', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-no-lease-'));
+  let publisher;
+  try {
+    // A fence that yields no current token models this daemon having lost the writer lease
+    // outright: commitBuildOutput short-circuits at its acquire read, before ledger.commit runs,
+    // so this covers the null-token not-current path distinct from the ledger-verify mismatch.
+    let fenceCalls = 0;
+    const fence = {
+      currentWriterToken() {
+        fenceCalls += 1;
+        return undefined;
+      },
+    };
+    const document = doc('doc-a', 'A.md', 'hash-a');
+    publisher = createPublisher(root, fence, {
+      effects: {
+        buildSnapshot(input) {
+          return {
+            kind: 'candidate',
+            candidate: candidate({
+              frontierSeq: input.intent.scanBoundary.frontierSeq,
+              scanBoundaryJournalSeq: input.intent.scanBoundary.scanBoundaryJournalSeq,
+              corpus: corpus('leaseless-snapshot'),
+              documents: [document],
+              dense: unavailable(),
+              identity: publisher.retrievalIdentity,
+            }),
+          };
+        },
+      },
+    });
+
+    publisher.markDirty({
+      op: 'upsert',
+      docId: document.documentId,
+      path: document.path,
+      contentHash: document.contentHash,
+    });
+    const boundary = publisher.recordScanBoundary();
+
+    await assert.rejects(
+      publisher.enqueue({
+        kind: 'rebuild',
+        scanBoundary: boundary,
+        deadline: Date.now() + 1_000,
+        cancellationId: 'leaseless-build',
+      }),
+      (error) => {
+        assert.equal(error.code, 'STALE_INCARNATION');
+        assert.match(error.message, /not-current/);
+        return true;
+      },
+    );
+
+    assert.equal(fenceCalls, 1, `acquire should short-circuit before ledger verify, saw ${fenceCalls} reads`);
+    assert.equal(publisher.ledger.current(), undefined);
+  } finally {
+    await publisher?.stop().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('AC2 concurrent lexical publisher intents resolve without caller-visible not-head', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-publisher-ac2-concurrent-'));
   let publisher;
@@ -613,6 +751,41 @@ test('AC3 stale-incarnation search GC deletion is rejected', async () => {
     assert.equal(fs.existsSync(staleCandidate), true);
   } finally {
     if (ownerToken) currentToken = ownerToken;
+    await store?.close().catch(() => undefined);
+    fs.rmSync(cacheRoot, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  }
+});
+
+test('loadVault surfaces a superseded writer token as a retryable STALE_INCARNATION rather than a swallowed failure', async () => {
+  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-store-load-stale-cache-'));
+  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'optsidian-store-load-stale-vault-'));
+  let store;
+  try {
+    // No current writer token models this daemon having lost the lease before the warm publish
+    // commits. loadVault must NOT downgrade that to a resolved {status:'failed'} (which strips the
+    // code); it must rethrow so the client resyncs and retries against the current daemon.
+    const env = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+    const analyzer = testAnalyzer();
+    writeVaultFile(vault, 'Load.md', '# Load\n\ncontent\n');
+    store = createDaemonSnapshotStore({
+      env,
+      analyzer,
+      retentionCount: 1,
+      partitionBits: 1,
+      tenancyFence: { currentWriterToken: async () => undefined },
+      embeddingSetBuilder: createDeterministicEmbeddingSetBuilder(),
+      snapshotBuilder: async () => buildCanonicalSearchSnapshot({ vaultRoot: vault, analyzer, partitionBits: 1 }),
+    });
+
+    await assert.rejects(
+      store.loadVault(vault, { deadline: Date.now() + 5_000, cancellationId: 'load-stale', embeddingLane: 'rebuild' }),
+      (error) => {
+        assert.equal(error.code, 'STALE_INCARNATION');
+        return true;
+      },
+    );
+  } finally {
     await store?.close().catch(() => undefined);
     fs.rmSync(cacheRoot, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
