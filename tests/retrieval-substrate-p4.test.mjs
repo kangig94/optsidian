@@ -962,7 +962,9 @@ test('AC11 P4 stronger equivalent: edition ledger replay reports stale after res
 
     const refreshed = await restarted.service.refresh(restarted.vault, retrievalContext());
     assert.equal(refreshed.ok, true);
-    await waitFor(() => editionDense(searchStoreCachePaths(restarted.vault, restarted.env)).state === 'fresh');
+    // Background dense publication after refresh runs an embedding pass; give it headroom so a
+    // CPU-saturated full-suite run (parallel test files) does not spuriously time this poll out.
+    await waitFor(() => editionDense(searchStoreCachePaths(restarted.vault, restarted.env)).state === 'fresh', 5000);
     const freshAgain = await restarted.service.retrieve(
       {
         vault: restarted.vault,
