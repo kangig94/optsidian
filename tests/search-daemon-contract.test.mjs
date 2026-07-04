@@ -98,6 +98,10 @@ async function withTimeout(promise, timeoutMs, label) {
   }
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function pidIsLive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -801,6 +805,247 @@ parentPort.on("message", (message) => {
     );
     assert.equal(fs.readFileSync(logPath, 'utf8'), 'warmup\njob\n');
     assert.equal(pool.stats().ready, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
+test('worker pool warmup drives a lazy replacement after a hard-crash warmup', async () => {
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const root = tempRoot();
+  const workerScript = path.join(root, 'lazy-warmup-hard-crash-once.mjs');
+  const spawnCountPath = path.join(root, 'spawns.txt');
+  const logPath = path.join(root, 'events.log');
+  fs.writeFileSync(spawnCountPath, '0');
+  fs.writeFileSync(logPath, '');
+  fs.writeFileSync(
+    workerScript,
+    `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const spawnCountPath = ${JSON.stringify(spawnCountPath)};
+const logPath = ${JSON.stringify(logPath)};
+const spawn = Number(fs.readFileSync(spawnCountPath, "utf8")) + 1;
+fs.writeFileSync(spawnCountPath, String(spawn));
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(logPath, "warmup:" + spawn + "\\n");
+    if (spawn === 1) process.exit(1);
+    parentPort.postMessage({ id: 0, ok: true, result: { spawn }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  parentPort.postMessage({ id: message.id, ok: true, result: { spawn }, memoryRss: process.memoryUsage().rss });
+});
+`,
+  );
+  const pool = new DaemonWorkerPool({
+    name: 'lazy-warmup-hard-crash-once',
+    kind: 'analyzer',
+    size: 1,
+    workerScript,
+    autoWarmup: false,
+    restartBackoffBaseMs: 10,
+    restartBackoffCapMs: 20,
+    env: { ...process.env },
+  });
+  try {
+    const warmed = await withTimeout(pool.warmup(), 2000, 'lazy hard-crash warmup');
+
+    assert.deepEqual(warmed, [{ spawn: 2 }]);
+    assert.equal(fs.readFileSync(logPath, 'utf8'), 'warmup:1\nwarmup:2\n');
+    assert.equal(pool.stats().ready, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
+test('worker pool lazily recreates a dead pool with bounded cooldown', async () => {
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const root = tempRoot();
+  const workerScript = path.join(root, 'always-crash-warmup.mjs');
+  const spawnCountPath = path.join(root, 'spawns.txt');
+  const logPath = path.join(root, 'events.log');
+  fs.writeFileSync(spawnCountPath, '0');
+  fs.writeFileSync(logPath, '');
+  fs.writeFileSync(
+    workerScript,
+    `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const spawnCountPath = ${JSON.stringify(spawnCountPath)};
+const logPath = ${JSON.stringify(logPath)};
+const spawn = Number(fs.readFileSync(spawnCountPath, "utf8")) + 1;
+fs.writeFileSync(spawnCountPath, String(spawn));
+
+parentPort.on("message", (message) => {
+  if (message?.id !== 0) return;
+  fs.appendFileSync(logPath, "warmup:" + spawn + "\\n");
+  process.exit(1);
+});
+`,
+  );
+  const pool = new DaemonWorkerPool({
+    name: 'always-crash-warmup',
+    kind: 'analyzer',
+    size: 1,
+    workerScript,
+    autoWarmup: false,
+    restartBackoffBaseMs: 5,
+    restartBackoffCapMs: 1000,
+    env: { ...process.env },
+  });
+  const spawnCount = () => Number(fs.readFileSync(spawnCountPath, 'utf8'));
+  const driveWarmupRecreation = async (label) => {
+    const before = spawnCount();
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const result = await settlePromise(withTimeout(pool.warmup(), 1000, label));
+      if (spawnCount() > before) {
+        assert.equal(result.status, 'rejected');
+        await waitFor(() => pool.stats().workers === 0, 1000);
+        return;
+      }
+      await waitMs(5);
+    }
+    assert.fail(`${label} did not recreate the dead pool`);
+  };
+
+  try {
+    await assert.rejects(
+      () => withTimeout(pool.warmup(), 2000, 'initial always-crash warmup'),
+      (error) => {
+        assert.equal(error.code, 'INTERNAL');
+        assert.match(error.message, /worker exited/);
+        return true;
+      },
+    );
+    await waitFor(() => pool.stats().workers === 0, 1000);
+    assert.ok(spawnCount() >= 4);
+
+    const beforeEnqueue = spawnCount();
+    const firstJob = settlePromise(
+      pool.run(
+        { type: 'analyzeQuery' },
+        {
+          deadline: Date.now() + 200,
+          cancellationId: 'dead-pool-recreate-enqueue',
+        },
+      ),
+    );
+    await waitFor(() => spawnCount() > beforeEnqueue, 500);
+    await waitFor(() => pool.stats().workers === 0, 1000);
+    const firstJobResult = await firstJob;
+    assert.equal(firstJobResult.status, 'rejected');
+    assert.equal(firstJobResult.reason.code, 'DEADLINE_EXCEEDED');
+
+    for (let episode = 2; episode <= 6; episode += 1) {
+      await driveWarmupRecreation(`always-crash recreation episode ${episode}`);
+    }
+
+    const beforeCooldownRun = spawnCount();
+    const cooldownJob = settlePromise(
+      pool.run(
+        { type: 'analyzeQuery' },
+        {
+          deadline: Date.now() + 30,
+          cancellationId: 'dead-pool-cooldown',
+        },
+      ),
+    );
+    assert.equal(spawnCount(), beforeCooldownRun);
+    await waitMs(40);
+    assert.equal(spawnCount(), beforeCooldownRun);
+    const cooldownResult = await cooldownJob;
+    assert.equal(cooldownResult.status, 'rejected');
+    assert.equal(cooldownResult.reason.code, 'DEADLINE_EXCEEDED');
+
+    await waitMs(150);
+    const beforePastCooldownRun = spawnCount();
+    const pastCooldownJob = settlePromise(
+      pool.run(
+        { type: 'analyzeQuery' },
+        {
+          deadline: Date.now() + 100,
+          cancellationId: 'dead-pool-past-cooldown',
+        },
+      ),
+    );
+    await waitFor(() => spawnCount() > beforePastCooldownRun, 500);
+    const pastCooldownResult = await pastCooldownJob;
+    assert.equal(pastCooldownResult.status, 'rejected');
+  } finally {
+    await pool.close();
+  }
+});
+
+test('worker pool recreates a dead pool and recovers after transient startup crashes', async () => {
+  const { DaemonWorkerPool } = await import('../src/daemon/worker-pool.ts');
+  const root = tempRoot();
+  const workerScript = path.join(root, 'transient-startup-crashes.mjs');
+  const spawnCountPath = path.join(root, 'spawns.txt');
+  const logPath = path.join(root, 'events.log');
+  fs.writeFileSync(spawnCountPath, '0');
+  fs.writeFileSync(logPath, '');
+  fs.writeFileSync(
+    workerScript,
+    `
+import fs from "node:fs";
+import { parentPort } from "node:worker_threads";
+
+const spawnCountPath = ${JSON.stringify(spawnCountPath)};
+const logPath = ${JSON.stringify(logPath)};
+const crashUntil = 5;
+const spawn = Number(fs.readFileSync(spawnCountPath, "utf8")) + 1;
+fs.writeFileSync(spawnCountPath, String(spawn));
+
+parentPort.on("message", (message) => {
+  if (message?.id === 0) {
+    fs.appendFileSync(logPath, "warmup:" + spawn + "\\n");
+    if (spawn <= crashUntil) process.exit(1);
+    parentPort.postMessage({ id: 0, ok: true, result: { spawn }, memoryRss: process.memoryUsage().rss });
+    return;
+  }
+  parentPort.postMessage({
+    id: message.id,
+    ok: true,
+    result: { spawn, type: message.request?.type ?? "unknown" },
+    memoryRss: process.memoryUsage().rss
+  });
+});
+`,
+  );
+  const pool = new DaemonWorkerPool({
+    name: 'transient-startup-crashes',
+    kind: 'analyzer',
+    size: 1,
+    workerScript,
+    autoWarmup: false,
+    restartBackoffBaseMs: 10,
+    restartBackoffCapMs: 50,
+    env: { ...process.env },
+  });
+  try {
+    await assert.rejects(() => withTimeout(pool.warmup(), 2000, 'initial transient-crash warmup'));
+    await waitFor(() => pool.stats().workers === 0, 1000);
+
+    const result = await withTimeout(
+      pool.run(
+        { type: 'analyzeQuery' },
+        {
+          deadline: Date.now() + 2000,
+          cancellationId: 'transient-startup-crashes',
+        },
+      ),
+      2000,
+      'transient dead-pool job',
+    );
+
+    assert.deepEqual(result, { spawn: 6, type: 'analyzeQuery' });
+    assert.equal(pool.stats().ready, 1);
+    assert.equal(fs.readFileSync(logPath, 'utf8'), 'warmup:1\nwarmup:2\nwarmup:3\nwarmup:4\nwarmup:5\nwarmup:6\n');
   } finally {
     await pool.close();
   }

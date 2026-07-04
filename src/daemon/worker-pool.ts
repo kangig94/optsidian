@@ -39,6 +39,8 @@ export type WorkerPoolOptions = {
   rssGuardExempt?: boolean;
   microbatchSize?: number;
   autoWarmup?: boolean;
+  restartBackoffBaseMs?: number;
+  restartBackoffCapMs?: number;
 };
 
 type WorkerEnvelope = {
@@ -141,6 +143,8 @@ export class DaemonWorkerPool {
   private lastRestartReason: string | undefined;
   private lastRestartAt: string | undefined;
   private lastReadyError: Error | undefined;
+  private recreationEpisodeFailures = 0;
+  private coolDownUntil = 0;
 
   constructor(options: WorkerPoolOptions) {
     const size = Math.max(1, Math.floor(options.size));
@@ -159,6 +163,8 @@ export class DaemonWorkerPool {
       microbatchSize: DEFAULT_MICROBATCH_SIZE,
       autoWarmup: true,
       ...options,
+      restartBackoffBaseMs: options.restartBackoffBaseMs ?? SLOT_RESTART_BACKOFF_BASE_MS,
+      restartBackoffCapMs: options.restartBackoffCapMs ?? SLOT_RESTART_BACKOFF_CAP_MS,
       memoryLimitBytes: heapGuardBytes,
       heapGuardBytes,
       rssGuardBytes: options.rssGuardBytes ?? envBytes(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB') ?? 0,
@@ -180,10 +186,11 @@ export class DaemonWorkerPool {
     return this.options.microbatchSize;
   }
 
-  async warmup<T = unknown>(minimumReady = this.slots.length): Promise<T[]> {
-    const target = Math.max(1, Math.min(this.slots.length, Math.floor(minimumReady)));
-    for (const slot of this.slots) this.startWarmup(slot);
+  async warmup<T = unknown>(minimumReady?: number): Promise<T[]> {
+    this.recreateDeadPoolIfDue();
+    const target = Math.max(1, Math.min(this.slots.length, Math.floor(minimumReady ?? this.slots.length)));
     while (!this.closed) {
+      for (const slot of this.slots) this.startWarmup(slot);
       const ready = this.readySlots();
       if (ready.length >= target) return ready.map((slot) => slot.warmupResult as T);
       const pending = this.slots
@@ -271,6 +278,7 @@ export class DaemonWorkerPool {
     if (this.cancelled.has(options.cancellationId)) {
       return Promise.reject(poolError('CANCELLED', `${this.options.name} request was cancelled before admission`));
     }
+    this.recreateDeadPoolIfDue();
     if (this.queue.length >= this.options.maxQueueSize && this.idleSlot() === undefined) {
       return Promise.reject(poolError('BACKPRESSURE', `${this.options.name} queue is full`));
     }
@@ -372,6 +380,7 @@ export class DaemonWorkerPool {
       resolveReady = resolve;
       rejectReady = reject;
     });
+    void ready.catch(() => undefined);
     const worker = new Worker(this.options.workerScript, {
       workerData: {
         optsidianSearchWorker: true,
@@ -444,6 +453,7 @@ export class DaemonWorkerPool {
       if (message.ok) {
         slot.warmupResult = message.result;
         slot.readyState = true;
+        this.recordPoolRecovery();
         readyCallbacks.resolveReady();
         this.drain();
       } else {
@@ -463,6 +473,7 @@ export class DaemonWorkerPool {
     this.clearDeadline(item);
     if (message.ok) {
       slot.completedJobs += 1;
+      this.recordPoolRecovery();
       item.resolve(message.result);
       const restartReason = memoryRestartReason(message, slot, this.options);
       if (restartReason) this.restartSlot(slot, undefined, undefined, restartReason);
@@ -478,6 +489,7 @@ export class DaemonWorkerPool {
       slot.restarting = true;
       const index = this.slots.indexOf(slot);
       if (index >= 0) this.slots.splice(index, 1);
+      this.recordSlotRetirement();
       void slot.worker.terminate().catch(() => 0);
     }
     readyCallbacks.rejectReady(error);
@@ -516,6 +528,7 @@ export class DaemonWorkerPool {
     const plan = this.restartPlan(slot);
     slot.restarting = true;
     slot.leased = false;
+    if (!slot.readyState) readyCallbacks?.rejectReady(restartError);
     const restartReason = reason ?? error?.message ?? 'restart';
     const restartedAt = new Date().toISOString();
     slot.lastRestartReason = restartReason;
@@ -530,9 +543,11 @@ export class DaemonWorkerPool {
         .catch(() => 0)
         .finally(() => {
           const index = this.slots.indexOf(slot);
-          if (index >= 0) this.slots.splice(index, 1);
+          if (index >= 0) {
+            this.slots.splice(index, 1);
+            this.recordSlotRetirement();
+          }
         });
-      readyCallbacks?.rejectReady(restartError);
       return;
     }
     void slot.worker
@@ -549,7 +564,7 @@ export class DaemonWorkerPool {
             const replacement = this.createSlot(plan.restartAttempts);
             this.slots[index] = replacement;
             this.retargetQueuedItems(previousSlotId, replacement.id);
-            if (readyCallbacks) void replacement.ready.then(readyCallbacks.resolveReady, readyCallbacks.rejectReady);
+            if (slot.warmupStarted) this.startWarmup(replacement);
             void replacement.ready.then(
               () => {
                 this.drain();
@@ -570,6 +585,42 @@ export class DaemonWorkerPool {
       if (nextSlotId === undefined) delete item.targetSlotId;
       else item.targetSlotId = nextSlotId;
     }
+  }
+
+  private recreateDeadPoolIfDue(): void {
+    if (this.closed || this.slots.length > 0) return;
+    const now = Date.now();
+    if (now < this.coolDownUntil) return;
+    this.recreationEpisodeFailures += 1;
+    this.coolDownUntil =
+      now +
+      restartBackoffMs(
+        this.recreationEpisodeFailures,
+        this.options.restartBackoffBaseMs,
+        this.options.restartBackoffCapMs,
+      );
+    for (let index = 0; index < this.options.size; index += 1) this.slots.push(this.createSlot(0));
+  }
+
+  private recordPoolRecovery(): void {
+    this.recreationEpisodeFailures = 0;
+    this.coolDownUntil = 0;
+  }
+
+  private recordSlotRetirement(): void {
+    if (this.closed || this.slots.length > 0) return;
+    if (this.recreationEpisodeFailures > 0) {
+      this.coolDownUntil = Math.max(
+        this.coolDownUntil,
+        Date.now() +
+          restartBackoffMs(
+            this.recreationEpisodeFailures,
+            this.options.restartBackoffBaseMs,
+            this.options.restartBackoffCapMs,
+          ),
+      );
+    }
+    this.drain();
   }
 
   private drain(): void {
@@ -697,7 +748,7 @@ export class DaemonWorkerPool {
       const restartAttempts = slot.restartAttempts + 1;
       return {
         restartAttempts,
-        delayMs: restartBackoffMs(restartAttempts),
+        delayMs: restartBackoffMs(restartAttempts, this.options.restartBackoffBaseMs, this.options.restartBackoffCapMs),
       };
     }
     return undefined;
@@ -769,8 +820,8 @@ function memoryRestartReason(
   return `rss guard exceeded (${rss} > ${options.rssGuardBytes})`;
 }
 
-function restartBackoffMs(attempts: number): number {
-  return Math.min(SLOT_RESTART_BACKOFF_CAP_MS, SLOT_RESTART_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
+function restartBackoffMs(attempts: number, baseMs: number, capMs: number): number {
+  return Math.min(capMs, baseMs * 2 ** Math.max(0, attempts - 1));
 }
 
 function delay(ms: number): Promise<void> {
