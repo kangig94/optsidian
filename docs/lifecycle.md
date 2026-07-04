@@ -26,22 +26,27 @@ in-process search fallback: if the daemon cannot be reached, the client throws
 `ensureReady()` is a lock-free verdict loop:
 
 1. Read the daemon-authored tenancy record from the registry. If it matches the desired slot and the
-   single socket answers `Status`, reuse it.
-2. If no usable owner exists, spawn `node <bin> __search-daemon`. The client does **not** write the
-   owner record and does not take a directory lock; the daemon's successful `listen()` is the exclusive
-   tenancy commit.
+   recorded per-incarnation socket answers `Status`, reuse it.
+2. If no usable owner exists, spawn `node <bin> __search-daemon` with a fresh per-incarnation socket
+   nonce. The client does **not** write the owner record and does not take a directory lock; the daemon
+   binds its own unique socket and then writes the record. Ownership is arbitrated by the append-only
+   owner record (monotonic `epoch`, last-writer-wins) and enforced by the write-fence at commit time —
+   not by socket contention.
 3. While the daemon is constructing, the same socket serves `Status` and `WaitReady` from a boot
    responder. `WaitReady` is a long poll, so clients do not busy-poll readiness.
 4. Lifecycle failures (`STALE_INCARNATION`, `DAEMON_STARTING`, `DAEMON_DRAINING`, transient connect
    errors) resync until the caller's deadline. Semantic failures such as malformed payloads, invalid
    vaults, and real protocol mismatches surface immediately.
 
-### Owner registry, incarnation, and the single socket
+### Owner registry, incarnation, and per-incarnation sockets
 
 The daemon is **per-user, per-runtime**. The tenancy slot is `(uid, runtimeHash, protocolVersion)`;
 the record also carries `binaryVersion`, `epoch`, `incarnationId`, `pid`, `socketPath`, and
-`startedAt`. It listens on exactly **one Unix domain socket** under the runtime directory
-(`socketPathForOwner`; default dir from `XDG_RUNTIME_DIR` else `os.tmpdir()/optsidian-<uid>`).
+`startedAt`. Each incarnation listens on its **own** Unix domain socket under the runtime directory —
+the path carries a per-incarnation nonce (`socketPathForOwner(runtimeDir, desired, nonce)`; default dir
+from `XDG_RUNTIME_DIR` else `os.tmpdir()/optsidian-<uid>`), so incarnations never contend for one path.
+The owner-record _file_ name is still deterministic per slot, so clients find it and read the live
+`owner.socketPath` from it — they never recompute the socket path to connect.
 
 The single dispatcher preserves the method-level capability split:
 
@@ -56,6 +61,9 @@ incarnation is a retryable `STALE_INCARNATION`. The protocol version is
 The **ready handshake**: the daemon binds first, then writes the tenancy record. The record is therefore
 never observable until the socket is established. During construction, `Status` returns
 `phase:"starting"` and `WaitReady` waits for the monotonic phase transition to `ready` or `draining`.
+Previously, a single deterministic socket path was the mutual-exclusion point (`bind` was the tenancy
+commit); now each incarnation binds a private nonce'd path, so exclusivity comes solely from the
+owner-record epoch, with the ownership poll reaping the loser of an equal-epoch cold-start tie.
 
 ### What keeps the daemon alive
 
@@ -65,6 +73,16 @@ and still honors `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS` / `settings.search.daemonIdle
 `SearchDaemon.handleRequest` clears it at request admission and re-arms it in `finally` after the
 request completes. When the timer fires, it runs the same `drain("draining")` path as explicit
 `Shutdown`. A later CLI or MCP call auto-boots the daemon through `ensureReady()`.
+
+Separately, the daemon polls its own ownership every `OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS`
+(default 30s). If the owner record names a different incarnation at an `epoch >=` its own — a
+supersession, including the loser of an equal-epoch cold-start race — it runs the same
+`drain("draining")` path and exits (`SearchDaemon.superseded`/`armOwnershipPoll`). This reaps a
+superseded daemon within one poll interval instead of leaving it to linger until the idle timer, and
+because each incarnation owns a unique socket, its exit only ever unlinks its own socket file. A
+missing, older, or identical record never triggers a step-down, so a healthy sole owner stays warm.
+`OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS` is an internal robustness knob, intentionally env-only
+rather than a `settings.search.*` key; unlike `daemonIdleMs`, it is not user-facing runtime policy.
 
 > **DO** treat the daemon as warm between requests within the idle window.
 > **DON'T** confuse daemon idle shutdown with model idle unload; embedding model sessions keep their
@@ -85,34 +103,47 @@ runtime.
 ### Explicit shutdown
 
 The `Shutdown` control method replies `{ok, shuttingDown}` and schedules `drain("draining")` on an
-`unref`'d timer. `drain(phase)` is the only daemon teardown path for explicit shutdown, idle expiry, and
-startup failure after bind. It moves the monotonic phase to `draining`, wakes `WaitReady` waiters,
+`unref`'d timer. `drain(phase)` is the only daemon teardown path for explicit shutdown, idle expiry,
+ownership-poll supersession, and startup failure after bind. It moves the monotonic phase to `draining`,
+wakes `WaitReady` waiters,
 relinquishes the RPC server/socket, unlinks the socket path, and removes the owner record **before**
 slow teardown of profile runtimes (`profiles.close()`) and the embed scheduler (`embedScheduler.close()`).
 The RPC server then waits for admitted handlers to drain or observe cancellation, preventing
 use-after-close and un-journaled save loss.
 
-The socket path and owner slot must be fully relinquished _before_ slow teardown (the 2fe1f70 ordering):
-otherwise a client arriving mid-shutdown can auto-boot a successor daemon that binds the same socket path,
-and this daemon's later teardown would delete the successor's live socket.
+The socket path and owner slot are relinquished _before_ slow teardown (the 2fe1f70 ordering) so a
+client arriving mid-shutdown sees the slot free and can boot a successor promptly. Per-incarnation
+socket paths make graceful paths robust: idle expiry, ownership-poll supersession, and explicit
+`Shutdown` unlink only their **own** socket, so they can never delete a successor's live socket. An
+ungraceful death runs no teardown and leaves a stale socket file; the next daemon's boot sweep reclaims
+stale per-incarnation sockets only after a failed connect probe. Owner-record removal is
+incarnation-guarded (`removeOwner`), so a superseded daemon's drain never clears the successor's record.
+Unique socket paths let a successor bind and come up, but a wedged incumbent with a blocked event loop
+can still stall a client's liveness probe because the RPC client has no client-side call timeout, only
+a server-checked deadline.
 
 ### Startup partial-failure cleanup & crash recovery
 
 - **Partial-start cleanup**: if construction fails after the socket is opened, startup enters the same
   `drain("draining")` ordering. The daemon relinquishes the socket and removes its owner record before
   slow scheduler/profile teardown, so no half-established tenancy is advertised.
-- **Stale socket recovery**: a stale socket path is unlinked only after a connect probe proves that no
-  listener is present (`ECONNREFUSED`). A provably live listener is not reclaimed.
+- **Stale socket recovery**: deterministic fallback bind recovery and the boot-time stale socket sweep
+  unlink a stale socket path only after a connect probe proves that no listener is present
+  (`ECONNREFUSED`) or the path is already missing. A provably live listener is not reclaimed.
 - **Process error handlers**: uncaught exceptions / unhandled rejections log to stderr and
   `process.exit(1)` for both the daemon (`server.ts:540-558`) and its workers
   (`worker-entry.ts:377-395`).
-- **Crash / restart recovery**: a fresh daemon re-derives its desired slot from env, binds the single
-  socket, reads the previous record, writes `epoch + 1` with a fresh random `incarnationId`, and starts
-  serving. Process liveness is proven through `ProcessToken` start identity, so pid reuse cannot
-  deadlock or cause a live holder to be mis-reclaimed. On the index side, `recoverVault` ensures the
+- **Crash / restart recovery**: a normal client-driven respawn re-derives its desired slot from env,
+  binds a fresh nonce'd per-incarnation socket, reads the previous record, writes `epoch + 1` with a
+  fresh random `incarnationId`, and starts serving; it does not need to prove that the predecessor's old
+  socket is free. The deterministic no-nonce fallback path used by manual starts / `--print-info`-style
+  flows probes before reclaiming a refused socket path. Process liveness is proven through
+  `ProcessToken` start identity, so pid reuse cannot deadlock or cause a live holder to be
+  mis-reclaimed. On the index side, `recoverVault` ensures the
   cache directories exist and queues the edition-derived background GC; readable state is re-derived
   from committed edition records. At the daemon ready transition, `recoverRetrievalStartupState` sweeps
-  orphan vector staging/tmp directories and search-store tmp directories; there is no persisted
+  orphan vector staging/tmp directories and search-store tmp directories, and the daemon separately
+  starts a best-effort stale socket sweep for dead per-incarnation socket files; there is no persisted
   retrieval freshness reconcile.
 - **Write fencing**: the production `TenancyFenceProvider` is bind-backed. Snapshot publish CAS receives
   `(epoch, incarnationId, claimId, processToken)`, so stale cross-incarnation publish work cannot commit
@@ -129,6 +160,7 @@ and this daemon's later teardown would delete the successor's live socket.
 | Epoch                            | previous owner record epoch + 1                            | `nextOwnerEpoch`, `owner-registry.ts`                                                         |
 | Runtime dir override             | `OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR`                      | `owner-registry.ts:85-91`                                                                     |
 | Idle-ms override                 | `OPTSIDIAN_SEARCH_DAEMON_IDLE_MS`                          | `daemonIdleMs`                                                                                |
+| Ownership poll interval          | 30s default                                                | `OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS`, `ownershipPollMs`, `server.ts`                   |
 
 ---
 
@@ -544,9 +576,9 @@ doubles live under `tests/` and are injected directly through `VectorGenerationP
 ### (a) Cold first query after daemon start
 
 1. Client `ensureReady` finds no usable owner and detaches `node <bin> __search-daemon`.
-2. Daemon binds the single socket, writes the tenancy record with a fresh `incarnationId` and monotonic
-   `epoch`, constructs the runtime, and transitions from `starting` to `ready`. Clients wait through
-   `WaitReady` rather than polling.
+2. Daemon binds a fresh per-incarnation socket, writes the tenancy record with a fresh `incarnationId`
+   and monotonic `epoch`, constructs the runtime, and transitions from `starting` to `ready`. Clients
+   wait through `WaitReady` rather than polling.
 3. Lexical `search` → `Search` RPC → `store.pin` builds the corpus snapshot on first touch
    (`ensureActiveSnapshot` → `publishFreshSnapshot`), warms one search-execution worker on that
    snapshot, then runs the positional query (`service.ts:294-358`).
@@ -604,8 +636,9 @@ encode re-loads on demand.
 
 ### (f) Daemon restart with a dirty index
 
-1. New daemon binds the single owner socket, proves the previous holder is not listening when needed,
-   increments the slot epoch, and writes a fresh tenancy record.
+1. New daemon binds a fresh per-incarnation socket, increments the slot epoch, and writes a fresh
+   tenancy record. Only the deterministic no-nonce fallback path probes before reclaiming a refused
+   socket path; normal nonce'd respawn never touches the predecessor's path.
 2. On the next lifecycle/query, `recoverVault` ensures the search-store directories exist and queues
    the edition-derived background GC.
 3. The daemon schedules startup recovery after `phase = "ready"`: `recoverRetrievalStartupState` sweeps

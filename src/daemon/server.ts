@@ -16,7 +16,7 @@ import {
   type EmbedLaneConcurrency,
   type CacheConcurrency,
 } from './protocol.js';
-import { createRpcServer, type RpcRequestLike, type RpcServer } from './transport.js';
+import { createRpcServer, probeSocketPath, type RpcRequestLike, type RpcServer } from './transport.js';
 import { DaemonMetrics } from './metrics.js';
 import {
   computeBinaryVersion,
@@ -29,7 +29,9 @@ import {
   defaultSearchDaemonRuntimeDir,
   nextOwnerEpoch,
   randomIncarnationId,
+  sameOwnerIncarnation,
   socketPathForOwner,
+  sweepStaleDaemonSockets,
   type DesiredOwnerIdentity,
   type OwnerRecord,
   type OwnerRegistry,
@@ -128,6 +130,7 @@ class SearchDaemon {
   private readonly activeCancellationIds = new Map<string, string>();
   private readonly readyWaiters = new Set<() => void>();
   private idleTimer: NodeJS.Timeout | undefined;
+  private ownershipTimer: NodeJS.Timeout | undefined;
 
   constructor(
     registry: OwnerRegistry,
@@ -228,7 +231,10 @@ class SearchDaemon {
         logSearchDaemonProcessError('socket relinquish cleanup failed', cleanupError);
       }
       try {
-        removeSocketPath(ownerSeed.socketPath);
+        // Only unlink the socket if we actually bound it (rpcServer is set only after a successful
+        // listen). If the bind itself failed — e.g. EADDRINUSE against a live incumbent on the
+        // fallback deterministic path — the path is not ours to remove.
+        if (rpcServer) removeSocketPath(ownerSeed.socketPath);
       } catch (cleanupError) {
         logSearchDaemonProcessError('socket unlink cleanup failed', cleanupError);
       }
@@ -272,6 +278,15 @@ class SearchDaemon {
     this.phase = 'ready';
     this.wakeReadyWaiters();
     this.armIdleTimer();
+    this.armOwnershipPoll();
+    void sweepStaleDaemonSockets(
+      this.registry.runtimeDir,
+      desiredFromOwner(this.owner),
+      this.owner.socketPath,
+      probeSocketPath,
+    ).catch((error: unknown) => {
+      logSearchDaemonProcessError('stale daemon socket sweep failed', error);
+    });
   }
 
   private async handleRpcRequest(request: RpcRequestLike): Promise<unknown> {
@@ -554,10 +569,11 @@ class SearchDaemon {
     await this.drain('draining');
   }
 
-  private async drain(phase: Extract<SearchDaemonPhase, 'draining'>): Promise<void> {
+  private async drain(phase: Extract<SearchDaemonPhase, 'draining'>, bounded = false): Promise<void> {
     if (this.phase === 'draining') return;
     this.phase = phase;
     this.clearIdleTimer();
+    this.clearOwnershipTimer();
     this.wakeReadyWaiters();
     try {
       await this.rpcServer.relinquish();
@@ -565,6 +581,8 @@ class SearchDaemon {
       // Best-effort shutdown step.
     }
     try {
+      // Each incarnation binds its own unique socket path, so this only ever removes this daemon's
+      // own file — never a successor's. `registry.removeOwner` is incarnation-guarded separately.
       removeSocketPath(this.owner.socketPath);
     } catch {
       // Best-effort shutdown step.
@@ -575,7 +593,10 @@ class SearchDaemon {
       // Best-effort shutdown step.
     }
     try {
-      await this.rpcServer.drain();
+      // Bound only the supersession self-drain path: a superseded daemon's remaining work is doomed
+      // because its writer lease is gone. Normal Shutdown/idle drains wait for legitimate in-flight
+      // Rebuild/Refresh/Compact work to finish.
+      await (bounded ? withDeadline(this.rpcServer.drain(), DRAIN_DEADLINE_MS) : this.rpcServer.drain());
     } catch {
       // Best-effort shutdown step.
     }
@@ -613,6 +634,42 @@ class SearchDaemon {
     if (!this.idleTimer) return;
     clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
+  }
+
+  private armOwnershipPoll(): void {
+    this.clearOwnershipTimer();
+    this.ownershipTimer = setInterval(() => {
+      if (this.phase !== 'ready') return;
+      if (!this.superseded()) return;
+      // A newer incarnation now owns the registry slot. This daemon's writer lease is gone, so its
+      // commits are fenced out as not-current, but it would otherwise keep a full worker pool and
+      // Kiwi WASM resident while still answering requests until the idle timer finally fires.
+      void this.drain('draining', true).catch((error: unknown) => {
+        logSearchDaemonProcessError('supersession shutdown failed', error);
+      });
+    }, ownershipPollMs(this.env));
+    this.ownershipTimer.unref();
+  }
+
+  private clearOwnershipTimer(): void {
+    if (!this.ownershipTimer) return;
+    clearInterval(this.ownershipTimer);
+    this.ownershipTimer = undefined;
+  }
+
+  private superseded(): boolean {
+    let current: OwnerRecord | undefined;
+    try {
+      current = this.registry.readOwner();
+    } catch {
+      // A transient read failure is not proof of supersession; keep serving and re-check next tick.
+      return false;
+    }
+    // The owner file is the sole arbiter now that unique socket paths no longer serialize ownership.
+    // Step down for a present, different incarnation at an epoch >= ours: `>=` (not `>`) reaps the
+    // loser of an equal-epoch cold-start race — exactly the tie the shared socket bind used to break.
+    // A missing/older/identical record never triggers a step-down, so a healthy sole owner stays.
+    return current !== undefined && current.epoch >= this.owner.epoch && !sameOwnerIncarnation(current, this.owner);
   }
 
   private requestContext(
@@ -653,10 +710,13 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   idleMs: number;
   env?: NodeJS.ProcessEnv;
   embedScheduler: EmbedScheduler;
+  rpcServer?: RpcServer;
 }): {
   waitForShutdown(): Promise<void>;
   close(): Promise<void>;
   ownerRemoved(): boolean;
+  owner: OwnerRecord;
+  replaceOwner(record: OwnerRecord | undefined): void;
   socketPath: string;
 } {
   const env = options.env ?? process.env;
@@ -673,17 +733,22 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     socketPath: `/tmp/optsidian-search-daemon-test-${process.pid}-${Math.random().toString(16).slice(2)}.sock`,
     startedAt: new Date().toISOString(),
   };
+  let currentOwner: OwnerRecord | undefined = owner;
   let removed = false;
   const registry: OwnerRegistry = {
     runtimeDir: '/tmp',
     ownerPath: '/tmp/optsidian-search-daemon-test.owner',
-    readOwner: () => owner,
-    writeOwner: () => undefined,
-    removeOwner: () => {
+    readOwner: () => currentOwner,
+    writeOwner: (record) => {
+      currentOwner = record;
+    },
+    removeOwner: (record) => {
+      if (record && currentOwner && !sameOwnerIncarnation(currentOwner, record)) return;
+      currentOwner = undefined;
       removed = true;
     },
   };
-  const rpcServer: RpcServer = {
+  const rpcServer: RpcServer = options.rpcServer ?? {
     relinquish: async () => undefined,
     drain: async () => undefined,
     close: async () => undefined,
@@ -695,6 +760,10 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     waitForShutdown: () => daemon.waitForShutdown(),
     close: () => daemon.closeForTests(),
     ownerRemoved: () => removed,
+    owner,
+    replaceOwner(record) {
+      currentOwner = record;
+    },
     socketPath: owner.socketPath,
   };
 }
@@ -774,6 +843,24 @@ function snapshotIdFromResult(result: unknown): string | undefined {
 
 function daemonIdleMs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
   return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_IDLE_MS, settings.search?.daemonIdleMs) ?? 6 * 60 * 60 * 1000;
+}
+
+function ownershipPollMs(env: NodeJS.ProcessEnv): number {
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS, undefined) ?? 30_000;
+}
+
+const DRAIN_DEADLINE_MS = 5_000;
+
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(undefined);
+      }, ms);
+      timer.unref();
+    }),
+  ]);
 }
 
 function settingNumber(raw: string | undefined, fallback: number | undefined): number | undefined {

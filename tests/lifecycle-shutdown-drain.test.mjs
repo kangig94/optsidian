@@ -113,6 +113,68 @@ test('AC9 daemon drain relinquishes socket and owner before slow teardown', asyn
   await closing;
 });
 
+test('supersession drain is bounded while explicit shutdown drain waits for in-flight work', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+
+  const boundedRpcServer = {
+    relinquish: async () => undefined,
+    drain: async () => new Promise(() => {}),
+    close: async () => undefined,
+  };
+  const boundedHarness = createSearchDaemonIdleIsolationHarnessForTests({
+    idleMs: 3_600_000,
+    env: {
+      ...process.env,
+      OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS: '10',
+    },
+    embedScheduler: createScheduler(),
+    rpcServer: boundedRpcServer,
+  });
+  let supersessionSettled = false;
+  const supersessionShutdown = boundedHarness.waitForShutdown().then(() => {
+    supersessionSettled = true;
+  });
+
+  boundedHarness.replaceOwner({
+    ...boundedHarness.owner,
+    incarnationId: 'successor-incarnation',
+    socketPath: `${boundedHarness.socketPath}.successor`,
+  });
+  t.mock.timers.tick(10);
+  await flushAsyncTurns();
+  assert.equal(supersessionSettled, false);
+
+  t.mock.timers.tick(5000);
+  await flushAsyncTurns();
+  assert.equal(supersessionSettled, true);
+  await supersessionShutdown;
+
+  const explicitDrain = deferred();
+  const explicitRpcServer = {
+    relinquish: async () => undefined,
+    drain: async () => explicitDrain.promise,
+    close: async () => undefined,
+  };
+  const explicitHarness = createSearchDaemonIdleIsolationHarnessForTests({
+    idleMs: 3_600_000,
+    embedScheduler: createScheduler(),
+    rpcServer: explicitRpcServer,
+  });
+  let explicitSettled = false;
+  const explicitShutdown = explicitHarness.close().then(() => {
+    explicitSettled = true;
+  });
+
+  await flushAsyncTurns();
+  t.mock.timers.tick(5000);
+  await flushAsyncTurns();
+  assert.equal(explicitSettled, false);
+
+  explicitDrain.resolve();
+  await explicitShutdown;
+  assert.equal(explicitSettled, true);
+});
+
 function createPublisher(root, fence, options = {}) {
   const retrievalIdentity = {
     vaultStateHash: 'vault-a',
@@ -138,6 +200,13 @@ function editionIdentity(identity) {
   };
 }
 
+function createScheduler() {
+  return {
+    cancel() {},
+    async close() {},
+  };
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -146,6 +215,10 @@ function deferred() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+async function flushAsyncTurns() {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
 }
 
 function tempRoot() {

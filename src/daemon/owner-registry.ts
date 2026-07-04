@@ -115,13 +115,46 @@ export function desiredOwnerIdentity(binaryPath: string): DesiredOwnerIdentity {
   };
 }
 
-export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIdentity): string {
-  const name = `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}.sock`;
+export function randomSocketNonce(): string {
+  return crypto.randomBytes(4).toString('hex');
+}
+
+export function socketPathForOwner(runtimeDir: string, desired: DesiredOwnerIdentity, nonce?: string): string {
+  const suffix = nonce ? `-${nonce}` : '';
+  const name = `${daemonSocketStem(desired)}${suffix}.sock`;
   const candidate = path.join(runtimeDir, name);
   if (candidate.length < 100) return candidate;
   const socketDir = path.join(os.tmpdir(), `od-${desired.uid}-${sha256(path.resolve(runtimeDir)).slice(0, 12)}`);
   ensurePrivateDirSync(socketDir, 'Optsidian search daemon socket directory');
   return path.join(socketDir, name);
+}
+
+export async function sweepStaleDaemonSockets(
+  runtimeDir: string,
+  desired: DesiredOwnerIdentity,
+  keepSocketPath: string,
+  probe: (socketPath: string) => Promise<'listening' | 'refused' | 'missing' | 'unavailable'>,
+): Promise<void> {
+  const ownerPath = path.join(runtimeDir, `${ownerRegistryStem(desired)}.owner`);
+  const socketDir = path.dirname(keepSocketPath);
+  const stem = daemonSocketStem(desired);
+  const entries = fs.readdirSync(socketDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.name.startsWith(stem) || !entry.name.endsWith('.sock')) continue;
+    const socketPath = path.join(socketDir, entry.name);
+    if (socketPath === keepSocketPath) continue;
+    if (socketPath === readOwnerFile(ownerPath)?.socketPath) continue;
+    const before = lstatMaybe(socketPath);
+    const verdict = await probe(socketPath);
+    if (verdict === 'listening' || verdict === 'unavailable') continue;
+    if (verdict === 'missing') continue;
+    if (verdict === 'refused') {
+      const after = lstatMaybe(socketPath);
+      if (!before || !after || !sameFileStat(before, after)) continue;
+    }
+    if (socketPath === readOwnerFile(ownerPath)?.socketPath) continue;
+    fs.rmSync(socketPath, { force: true });
+  }
 }
 
 export function createOwnerRecord(
@@ -174,7 +207,7 @@ export function createBindBackedTenancyFenceProvider(
   };
 }
 
-function sameOwnerIncarnation(left: OwnerRecord, right: OwnerRecord): boolean {
+export function sameOwnerIncarnation(left: OwnerRecord, right: OwnerRecord): boolean {
   return (
     left.epoch === right.epoch &&
     left.incarnationId === right.incarnationId &&
@@ -271,8 +304,25 @@ function ownerRegistryStem(desired: DesiredOwnerIdentity): string {
   return `search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}`;
 }
 
+function daemonSocketStem(desired: DesiredOwnerIdentity): string {
+  return `optsidian-search-daemon-v${desired.protocolVersion}-${desired.uid}-${daemonScopeHash(desired.runtimeHash)}`;
+}
+
 function daemonScopeHash(runtimeHash: string): string {
   return sha256(runtimeHash).slice(0, DAEMON_SCOPE_HASH_PREFIX_LENGTH);
+}
+
+function lstatMaybe(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (isNoEntryError(error)) return undefined;
+    throw error;
+  }
+}
+
+function sameFileStat(left: fs.Stats, right: fs.Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.mtimeMs === right.mtimeMs;
 }
 
 function readOwnerFile(ownerPath: string): OwnerRecord | undefined {

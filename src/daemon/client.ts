@@ -36,6 +36,7 @@ import {
   ownerMatchesDesired,
   ownerSharesDesiredSlot,
   randomIncarnationId,
+  randomSocketNonce,
   socketPathForOwner,
   type OwnerRecord,
   type OwnerRegistry,
@@ -159,7 +160,9 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
   async function spawnOwner(): Promise<void> {
     const intended = createOwnerRecord(
       desired,
-      socketPathForOwner(registry.runtimeDir, desired),
+      // A per-spawn nonce gives each incarnation its own socket path, so a superseded daemon's exit
+      // unlinks only its own file — never the successor's — and spawns never contend for one path.
+      socketPathForOwner(registry.runtimeDir, desired, randomSocketNonce()),
       0,
       randomIncarnationId(),
       process.pid,
