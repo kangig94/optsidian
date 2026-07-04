@@ -291,6 +291,7 @@ function providerForPayload(payload: ModelProviderPayload, device: ModelDevice =
     return new LocalOnnxProvider({
       model: payload.model,
       executionProvider: payload.executionProvider ?? executionProviderForDevice(device),
+      executionPolicy: payload.executionPolicy,
     });
   }
   throw Object.assign(
@@ -306,10 +307,23 @@ function executionProviderForDevice(device: ModelDevice) {
 }
 
 function stableProviderKey(payload: ModelProviderPayload): string {
+  if (payload.kind === 'local-onnx') {
+    return JSON.stringify({
+      kind: payload.kind,
+      model: payload.model ?? null,
+      executionProvider: payload.executionProvider ?? null,
+      executionPolicy: {
+        intraOpNumThreads: payload.executionPolicy.intraOpNumThreads,
+        interOpNumThreads: payload.executionPolicy.interOpNumThreads,
+      },
+    });
+  }
   return JSON.stringify(payload, (_key: string, value: unknown): unknown =>
     value instanceof Map ? Array.from((value as ReadonlyMap<unknown, unknown>).entries()) : value,
   );
 }
+
+export const stableProviderKeyForTests = stableProviderKey;
 
 function modelRequiredVramBytes(): number {
   return envBytes(process.env.OPTSIDIAN_SEARCH_MODEL_REQUIRED_VRAM_MB) ?? 0;

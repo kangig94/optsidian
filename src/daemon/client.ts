@@ -7,6 +7,7 @@ import type {
   ControlDaemonRequest,
   ExplainRequestPayload,
   ExplainResult,
+  HeartbeatResult,
   PruneRequestPayload,
   RefreshResult,
   QueryDaemonMethod,
@@ -22,7 +23,8 @@ import {
   queryDeadlineFromNow,
   SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS,
   SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS,
-  SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
+  SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS,
+  SEARCH_DAEMON_PULSE_STALENESS_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   vaultLifecycleDeadlineMs,
   type ControlDaemonResultByMethod,
@@ -39,9 +41,14 @@ import {
   randomIncarnationId,
   randomSocketNonce,
   socketPathForOwner,
+  startupGraceMs,
+  tryClaimSuccessor,
+  type SuccessorHealthProof,
+  type OwnerPulse,
   type OwnerRecord,
   type OwnerRegistry,
 } from './owner-registry.js';
+import { createProcessToken } from '../core/lifecycle/process-token.js';
 import type {
   SearchIndexMutationResult,
   SearchIndexPruneResult,
@@ -57,6 +64,7 @@ export type SearchDaemonClient = {
   search(request: SearchClientRequest): Promise<SearchResult & { snapshotId?: string }>;
   explain(request: ExplainClientRequest): Promise<ExplainResult>;
   status(options?: ClientRequestOptions): Promise<StatusResult>;
+  heartbeat(options?: ClientRequestOptions): Promise<HeartbeatResult>;
   loadVault(request: VaultClientRequest): Promise<SearchIndexWarmResult>;
   rebuild(request: VaultClientRequest): Promise<SearchIndexMutationResult>;
   refresh(request: VaultClientRequest): Promise<RefreshResult>;
@@ -85,46 +93,60 @@ export type SearchDaemonClientOptions = {
   env?: NodeJS.ProcessEnv;
   registry?: OwnerRegistry;
   runtimeProfile?: SearchRuntimeProfile;
-  spawnDaemon?(record: OwnerRecord): Promise<{ pid?: number } | void> | { pid?: number } | void;
+  now?: () => number;
+  spawnDaemon?(
+    record: OwnerRecord,
+    successorEnv: Record<string, string>,
+  ): Promise<{ pid?: number } | void> | { pid?: number } | void;
   connect?(record: OwnerRecord): Promise<RpcConnection> | RpcConnection;
 };
 
 export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}): SearchDaemonClient {
   const env = options.env ?? process.env;
   const binaryPath = options.binaryPath ?? defaultSearchDaemonBinaryPath(env);
-  const desired = desiredOwnerIdentity(binaryPath);
+  const desired = desiredOwnerIdentity(binaryPath, env);
   const registry = options.registry ?? createOwnerRegistry({ runtimeDir: options.runtimeDir, env, desired });
   const runtimeProfile = options.runtimeProfile ?? effectiveSearchRuntimeProfile(process.cwd(), env);
   const readyTimeoutMs = options.readyTimeoutMs ?? SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS;
+  const now = options.now ?? Date.now;
   const connect = options.connect ?? ((owner: OwnerRecord) => connectRpc(owner.socketPath));
   const spawnDaemon =
-    options.spawnDaemon ?? ((record: OwnerRecord) => spawnDefaultDaemon(binaryPath, record, registry.runtimeDir, env));
+    options.spawnDaemon ??
+    ((record: OwnerRecord, successorEnv: Record<string, string>) =>
+      spawnDefaultDaemon(binaryPath, record, registry.runtimeDir, env, successorEnv));
 
   async function ensureReady(deadline: number): Promise<OwnerRecord> {
     let spawnedForThisPass = false;
     let lastError: unknown;
-    while (Date.now() < deadline) {
+    while (now() < deadline) {
       const current = registry.readOwner();
+      let observedOwner: OwnerRecord | undefined;
+      let healthProof: SuccessorHealthProof | undefined;
       if (current && ownerSharesDesiredSlot(current, desired)) {
         const verdict = await ownerVerdict(current, deadline);
         if (verdict.kind === 'use') return verdict.owner;
         if (verdict.kind === 'wait') {
           lastError = verdict.error;
-          await waitForRegistryChange(deadline);
+          await waitForRegistryChange(deadline, now);
           continue;
         }
         if (verdict.kind === 'replace') {
           lastError = verdict.error;
+          observedOwner = current;
+          healthProof = verdict.healthProof;
         }
       } else if (current) {
-        registry.removeOwner(current);
+        observedOwner = current;
+        healthProof = { kind: 'identity-mismatch', observedAtMs: now() };
+      } else {
+        healthProof = { kind: 'cold', observedAtMs: now() };
       }
 
       if (!spawnedForThisPass) {
-        await spawnOwner();
-        spawnedForThisPass = true;
+        const spawned = await spawnOwner(observedOwner, healthProof ?? { kind: 'cold', observedAtMs: now() }, deadline);
+        spawnedForThisPass = spawned;
       } else {
-        await waitForRegistryChange(deadline);
+        await waitForRegistryChange(deadline, now);
       }
     }
     throw daemonUnavailable(
@@ -136,32 +158,59 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     owner: OwnerRecord,
     deadline: number,
   ): Promise<
-    { kind: 'use'; owner: OwnerRecord } | { kind: 'wait'; error?: unknown } | { kind: 'replace'; error?: unknown }
+    | { kind: 'use'; owner: OwnerRecord }
+    | { kind: 'wait'; error?: unknown }
+    | { kind: 'replace'; healthProof: SuccessorHealthProof; error?: unknown }
   > {
-    if (!ownerMatchesDesired(owner, desired)) return { kind: 'replace' };
+    const observedAtMs = now();
+    if (!ownerMatchesDesired(owner, desired)) {
+      return { kind: 'replace', healthProof: { kind: 'identity-mismatch', observedAtMs } };
+    }
+    const pulseProof = readOwnerPulseProof(registry, owner, { nowMs: observedAtMs });
+    if (pulseProof.valid && pulseProof.pulse.phase === 'draining') {
+      return { kind: 'replace', healthProof: { kind: 'draining', observedAtMs } };
+    }
+    const withinGrace = ownerWithinStartupGrace(owner, observedAtMs, startupGraceMs(env));
     try {
-      const status = await statusOnce(
+      const heartbeat = await heartbeatOnce(
         owner,
-        Math.min(SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS, Math.max(1, deadline - Date.now())),
+        Math.min(SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS, Math.max(1, deadline - now())),
       );
-      const statusOwner = status.owner;
-      if (!statusOwner || !ownerMatchesDesired(statusOwner, desired)) return { kind: 'replace' };
-      if (status.phase === 'ready' && status.ready) return { kind: 'use', owner: statusOwner };
-      if (status.phase === 'draining') return { kind: 'replace' };
-      const ready = await waitReadyOnce(statusOwner, Math.max(1, deadline - Date.now()));
-      if (ready.phase === 'ready' && ready.ready) return { kind: 'use', owner: ready.owner };
-      if (ready.phase === 'draining') return { kind: 'replace' };
+      const heartbeatOwner = heartbeat.owner;
+      if (!heartbeatOwner || !ownerMatchesDesired(heartbeatOwner, desired)) {
+        return { kind: 'replace', healthProof: { kind: 'identity-mismatch', observedAtMs } };
+      }
+      if (heartbeat.phase === 'draining') {
+        return { kind: 'replace', healthProof: { kind: 'draining', observedAtMs } };
+      }
+      if (heartbeat.phase === 'ready') return { kind: 'use', owner: heartbeatOwner };
+      if (heartbeat.phase === 'starting') {
+        if (withinGrace || pulseProof.valid) return { kind: 'wait' };
+        return {
+          kind: 'replace',
+          healthProof: { kind: 'wedged', observedAtMs, startupGraceExpired: true },
+        };
+      }
       return { kind: 'wait' };
     } catch (error) {
       if (isSemanticError(error)) throw error;
-      if (errorCode(error) === 'DAEMON_STARTING' || errorCode(error) === 'SEARCH_DAEMON_NOT_READY') {
+      if (pulseProof.valid) {
         return { kind: 'wait', error };
       }
-      return { kind: 'replace', error };
+      if (withinGrace) return { kind: 'wait', error };
+      return {
+        kind: 'replace',
+        healthProof: { kind: 'wedged', observedAtMs, startupGraceExpired: !withinGrace, error },
+        error,
+      };
     }
   }
 
-  async function spawnOwner(): Promise<void> {
+  async function spawnOwner(
+    observedOwner: OwnerRecord | undefined,
+    healthProof: SuccessorHealthProof,
+    deadline: number,
+  ): Promise<boolean> {
     const intended = createOwnerRecord(
       desired,
       // A per-spawn nonce gives each incarnation its own socket path, so a superseded daemon's exit
@@ -170,20 +219,34 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
       0,
       randomIncarnationId(),
       process.pid,
+      new Date(now()).toISOString(),
     );
+    const successor = await tryClaimSuccessor(registry, observedOwner, healthProof, {
+      desired,
+      intendedOwner: intended,
+      deadlineMs: deadline,
+      now,
+      env,
+      token: createProcessToken(process.pid),
+    });
+    if (successor.kind === 'wait') {
+      if (successor.reason === 'backoff' && successor.untilMs !== undefined) {
+        await waitForRegistryChange(Math.min(deadline, successor.untilMs), now);
+      }
+      return false;
+    }
+    if (successor.kind === 'unavailable') throw successor.error;
     try {
-      await spawnDaemon(intended);
+      await spawnDaemon(intended, successor.handle.childEnv);
+      return true;
     } catch (error) {
+      successor.handle.markSpawnFailure(error);
       throw daemonUnavailable(`search daemon could not start or become ready: ${errorMessage(error)}`);
     }
   }
 
-  async function statusOnce(owner: OwnerRecord, deadlineMs: number): Promise<StatusResult> {
-    return requestOnce(owner, 'query', 'Status', {}, { deadlineMs });
-  }
-
-  async function waitReadyOnce(owner: OwnerRecord, deadlineMs: number): Promise<StatusResult> {
-    return requestOnce(owner, 'query', 'WaitReady', {}, { deadlineMs });
+  async function heartbeatOnce(owner: OwnerRecord, deadlineMs: number): Promise<HeartbeatResult> {
+    return requestOnce(owner, 'query', 'Heartbeat', {}, { deadlineMs });
   }
 
   async function requestOnce<M extends QueryDaemonMethod>(
@@ -234,7 +297,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     payload: QueryDaemonRequest['payload'] | ControlDaemonRequest['payload'],
     options: ClientRequestOptions = {},
   ): Promise<unknown> {
-    const deadline = Date.now() + lifecycleDeadlineMs(capability, method, payload, options, readyTimeoutMs);
+    const deadline = now() + lifecycleDeadlineMs(capability, method, payload, options, readyTimeoutMs);
     let lastError: unknown;
     const send = requestOnce as (
       owner: OwnerRecord,
@@ -243,7 +306,7 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
       payload: QueryDaemonRequest['payload'] | ControlDaemonRequest['payload'],
       options?: ClientRequestOptions,
     ) => Promise<unknown>;
-    while (Date.now() < deadline) {
+    while (now() < deadline) {
       const owner = await ensureReady(deadline);
       try {
         return await send(owner, capability, method, payload, options);
@@ -324,6 +387,9 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
     status(options = {}) {
       return withDaemon('query', 'Status', {}, options);
     },
+    heartbeat(options = {}) {
+      return withDaemon('query', 'Heartbeat', {}, options);
+    },
     loadVault(request) {
       const { deadlineMs, cancellationId, traceId, ...payload } = request;
       return controlReady('LoadVault', withRuntimeProfile(payload, runtimeProfile), {
@@ -372,6 +438,54 @@ export function createSearchDaemonClient(options: SearchDaemonClientOptions = {}
       return withDaemon('control', 'Shutdown', {}, options);
     },
   };
+}
+
+type OwnerPulseProofInvalidReason =
+  | 'missing'
+  | 'unreadable'
+  | 'incarnation-mismatch'
+  | 'epoch-mismatch'
+  | 'socket-mismatch'
+  | 'invalid-updated-at'
+  | 'stale';
+
+export type OwnerPulseProof =
+  | { valid: true; pulse: OwnerPulse; ageMs: number }
+  | { valid: false; reason: OwnerPulseProofInvalidReason; pulse?: OwnerPulse; ageMs?: number; error?: unknown };
+
+export type OwnerPulseProofOptions = {
+  nowMs?: number;
+};
+
+export function readOwnerPulseProof(
+  registry: Pick<OwnerRegistry, 'readOwnerPulse'>,
+  observedOwner: OwnerRecord,
+  options: OwnerPulseProofOptions = {},
+): OwnerPulseProof {
+  let pulse: OwnerPulse | undefined;
+  try {
+    pulse = registry.readOwnerPulse();
+  } catch (error) {
+    return { valid: false, reason: 'unreadable', error };
+  }
+  if (!pulse) return { valid: false, reason: 'missing' };
+  if (pulse.incarnationId !== observedOwner.incarnationId) {
+    return { valid: false, reason: 'incarnation-mismatch', pulse };
+  }
+  if (pulse.epoch !== observedOwner.epoch) return { valid: false, reason: 'epoch-mismatch', pulse };
+  if (pulse.socket !== observedOwner.socketPath) return { valid: false, reason: 'socket-mismatch', pulse };
+
+  const updatedAtMs = Date.parse(pulse.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return { valid: false, reason: 'invalid-updated-at', pulse };
+  const nowMs = options.nowMs !== undefined && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const ageMs = Math.max(0, nowMs - updatedAtMs);
+  if (ageMs > SEARCH_DAEMON_PULSE_STALENESS_MS) return { valid: false, reason: 'stale', pulse, ageMs };
+  return { valid: true, pulse, ageMs };
+}
+
+function ownerWithinStartupGrace(owner: OwnerRecord, nowMs: number, graceMs = startupGraceMs()): boolean {
+  const startedAtMs = Date.parse(owner.startedAt);
+  return Number.isFinite(startedAtMs) && nowMs - startedAtMs <= graceMs;
 }
 
 function withRuntimeProfile<T extends { profile?: SearchRuntimeProfile }>(
@@ -450,7 +564,8 @@ function incarnationField(
   method: QueryDaemonMethod | ControlDaemonMethod,
   owner: OwnerRecord,
 ): { incarnation?: string } {
-  return method === 'Status' || method === 'WaitReady' ? {} : { incarnation: owner.incarnationId };
+  if (method === 'Status' || method === 'WaitReady') return {};
+  return { incarnation: owner.incarnationId };
 }
 
 function isVaultLifecycleMethod(method: ControlDaemonMethod): boolean {
@@ -507,6 +622,7 @@ function spawnDefaultDaemon(
   record: OwnerRecord,
   runtimeDir: string,
   env: NodeJS.ProcessEnv,
+  successorEnv: Record<string, string>,
 ): Promise<{ pid?: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath, ['__search-daemon'], {
@@ -518,8 +634,12 @@ function spawnDefaultDaemon(
         OPTSIDIAN_SEARCH_DAEMON_BINARY: binaryPath,
         OPTSIDIAN_SEARCH_DAEMON_UID: String(record.slot.uid),
         OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH: record.slot.runtimeHash,
+        ...(record.slot.runtimeScopeHash
+          ? { OPTSIDIAN_SEARCH_DAEMON_RUNTIME_SCOPE_HASH: record.slot.runtimeScopeHash }
+          : {}),
         OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION: record.binaryVersion,
         OPTSIDIAN_SEARCH_DAEMON_SOCKET: record.socketPath,
+        ...successorEnv,
       },
     });
     child.once('error', reject);
@@ -568,8 +688,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function waitForRegistryChange(deadline: number): Promise<void> {
-  const remainingMs = deadline - Date.now();
+function waitForRegistryChange(deadline: number, now: () => number = Date.now): Promise<void> {
+  const remainingMs = deadline - now();
   if (remainingMs <= 0) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, Math.min(25, remainingMs)));
 }

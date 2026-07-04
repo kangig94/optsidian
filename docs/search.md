@@ -109,6 +109,27 @@ The search daemon owns the hot search path:
 `N` in load sweeps means daemon worker count. Default quality evaluation is optimized for quick
 completion, not latency measurement.
 
+## ONNX Thread Policy
+
+Local ONNX dense embeddings use one daemon-resolved execution policy for build-time document
+embeds, query-vector encodes, and the worker model-session key. The default CPU policy is:
+
+```text
+intra_op = max(1, available_cores - 1)
+inter_op = 1
+```
+
+`OPTSIDIAN_SEARCH_ONNX_INTRA_OP_THREADS` overrides `intra_op`. When OpenMP is enabled through
+`OPTSIDIAN_SEARCH_ONNX_OPENMP` or `OMP_NUM_THREADS` is already present, the daemon also exports
+`OMP_NUM_THREADS=<intra_op>` to the worker environment. The reserved core is part of the liveness
+design: Heartbeat, OwnerPulse writes, supersession, and teardown must keep running during a dense
+index build.
+
+The ONNX execution policy is not folded into the dense embedding-space identity on the default
+no-variance branch. If byte-variance is ever proven across CPU thread counts, the escape hatch is to
+fold the policy into `EmbeddingRecipeIdentity.executionPolicy`; that changes `embeddingSpaceId`, makes
+pre-cap generations `spaceMatch=false`, and forces re-embedding instead of dense carry-forward.
+
 ## Evaluation Modes
 
 Use the same evaluation script for both search-quality and index-lifecycle benchmarks. The default

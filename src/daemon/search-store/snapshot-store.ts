@@ -3138,6 +3138,8 @@ function denseUsabilityForRecords(
   return { spaceMatch, usableDocumentIds, pendingDocumentIds };
 }
 
+export const denseUsabilityForRecordsForTests = denseUsabilityForRecords;
+
 function coldDenseSignal(pendingCount: number): DenseSignal {
   return {
     state: 'cold',

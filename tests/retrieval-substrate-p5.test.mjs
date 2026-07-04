@@ -1864,6 +1864,17 @@ test('AC9 hybrid search requests Retrieve on query capability', async () => {
     connect: (record) => ({
       async request(request) {
         requests.push({ request });
+        if (request.method === 'Heartbeat') {
+          return {
+            owner: record,
+            phase: 'ready',
+            protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+            incarnationId: record.incarnationId,
+            pulseSeq: 1,
+            progressSeq: 0,
+            updatedAt: record.startedAt,
+          };
+        }
         if (request.method === 'Status') {
           return {
             ok: true,

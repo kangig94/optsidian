@@ -562,8 +562,8 @@ test('optsidian bundle exposes hidden search-daemon dispatch without a third pub
   });
   assert.equal(result.status, 0, result.stderr);
   const info = JSON.parse(result.stdout);
-  assert.equal(info.protocolVersion, 4);
-  assert.match(info.socketPath, /optsidian-search-daemon-v4-/);
+  assert.equal(info.protocolVersion, 5);
+  assert.match(info.socketPath, /optsidian-search-daemon-v5-/);
   assert.equal('querySocketPath' in info, false);
   assert.equal('controlSocketPath' in info, false);
   const packageJson = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));

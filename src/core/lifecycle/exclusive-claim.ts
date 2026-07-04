@@ -1,7 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ensurePrivateDirSync, fsyncDirSync, fsyncFileSync, writePrivateFileSync } from '../private-path.js';
+import {
+  PRIVATE_FILE_MODE,
+  ensurePrivateDirSync,
+  fsyncDirSync,
+  fsyncFileSync,
+  writePrivateFileSync,
+} from '../private-path.js';
 import {
   createProcessToken,
   defaultProcessStartIdentityProvider,
@@ -33,6 +39,11 @@ export type ExclusiveClaimReclaimOptions = {
   backstopTtlMs?: number;
   now?: () => number;
   isAlive?: (token: ProcessToken) => boolean;
+};
+
+export type ExclusiveClaimRebindOptions = {
+  token?: ProcessToken;
+  startIdentityProvider?: ProcessStartIdentityProvider;
 };
 
 export class ExclusiveClaimBusyError extends Error {
@@ -92,6 +103,26 @@ export class ExclusiveClaim {
       }
       await sleep(pollMs);
     }
+  }
+
+  static rebindToken(
+    claimDir: string,
+    expectedClaimId: string,
+    options: ExclusiveClaimRebindOptions = {},
+  ): ExclusiveClaim | undefined {
+    const current = readExclusiveClaimOwner(claimDir);
+    if (!current || current.claimId !== expectedClaimId) return undefined;
+    const token =
+      options.token ??
+      createProcessToken(process.pid, options.startIdentityProvider ?? defaultProcessStartIdentityProvider);
+    const owner: ExclusiveClaimOwner = {
+      token,
+      claimId: current.claimId,
+      acquiredAtMs: current.acquiredAtMs,
+    };
+    return rebindExclusiveClaimOwner(claimDir, expectedClaimId, owner)
+      ? new ExclusiveClaim(claimDir, owner)
+      : undefined;
   }
 
   get owner(): ExclusiveClaimOwner {
@@ -185,6 +216,37 @@ function writeOwner(claimDir: string, owner: ExclusiveClaimOwner): void {
   writePrivateFileSync(ownerPath, `${JSON.stringify(owner)}\n`, 'Exclusive claim owner file');
   fsyncFileSync(ownerPath);
   fsyncDirSync(claimDir);
+}
+
+function rebindExclusiveClaimOwner(claimDir: string, expectedClaimId: string, owner: ExclusiveClaimOwner): boolean {
+  const ownerPath = path.join(claimDir, 'owner.json');
+  const tmpPath = path.join(claimDir, `.owner.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, `${JSON.stringify(owner)}\n`, { flag: 'wx', mode: PRIVATE_FILE_MODE });
+    fsyncFileSync(tmpPath);
+
+    const current = readExclusiveClaimOwner(claimDir);
+    if (!current || current.claimId !== expectedClaimId) return false;
+
+    fs.renameSync(tmpPath, ownerPath);
+    fsyncDirSync(claimDir);
+    const rebound = readExclusiveClaimOwner(claimDir);
+    return Boolean(
+      rebound &&
+      rebound.claimId === expectedClaimId &&
+      rebound.acquiredAtMs === owner.acquiredAtMs &&
+      processTokenEquals(rebound.token, owner.token),
+    );
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  } finally {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
 }
 
 function removeClaimDir(claimDir: string): void {

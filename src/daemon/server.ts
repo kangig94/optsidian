@@ -1,16 +1,27 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { ensurePrivateDirSync } from '../core/private-path.js';
-import { createProcessToken } from '../core/lifecycle/process-token.js';
+import {
+  createProcessToken,
+  isAlive,
+  processStartIdIsAuthoritative,
+  type ProcessToken,
+} from '../core/lifecycle/process-token.js';
+import { ExclusiveClaim } from '../core/lifecycle/exclusive-claim.js';
 import {
   SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
+  SEARCH_DAEMON_PULSE_STALENESS_MS,
+  SEARCH_DAEMON_PULSE_TICK_MS,
   SEARCH_DAEMON_PROTOCOL_VERSION,
   type ControlDaemonRequest,
   type MutatingControlDaemonMethod,
   type QueryDaemonRequest,
   type SearchIndexProgressUpdate,
   type SearchDaemonPhase,
+  type ShutdownSupersessionPayload,
   type DaemonRequestBase,
+  type HeartbeatResult,
   type StatusResult,
   type DaemonConcurrencyStatus,
   type DaemonPoolConcurrency,
@@ -22,20 +33,40 @@ import { DaemonMetrics } from './metrics.js';
 import {
   computeBinaryVersion,
   computeRuntimeHash,
+  computeRuntimeScopeHash,
   createBindBackedTenancyFenceProvider,
   createOwnerRecord,
   createOwnerRegistry,
   currentUid,
   defaultSearchDaemonBinaryPath,
   defaultSearchDaemonRuntimeDir,
+  discoverDaemonPredecessors,
   nextOwnerEpoch,
+  ownerMatchesDesired,
+  publishOwnerAndInitialPulse,
   randomIncarnationId,
+  readOwnerPulse,
+  readOwnerRecordAtPath,
+  readReapedMarker,
+  readSupersessionSentinel,
+  reapedMarkerMatchesSupersession,
+  reapedMarkerPath,
+  recordSuccessorClaimHolder,
+  resetSuccessorBreaker,
   sameOwnerIncarnation,
   socketPathForOwner,
+  successorClaimDir,
+  startupGraceMs,
   sweepStaleDaemonSockets,
+  supersessionSentinelPath,
+  writeReapedMarker,
+  writeSupersessionSentinel,
   type DesiredOwnerIdentity,
+  type OwnerPulse,
   type OwnerRecord,
   type OwnerRegistry,
+  type SupersessionSentinelPredecessor,
+  type VerifiedDaemonPredecessor,
 } from './owner-registry.js';
 import { createRequestScheduler } from './scheduler.js';
 import { ProfileManager, type ProfileRuntime, type ProfileRuntimeStatus } from './profile-manager.js';
@@ -100,6 +131,7 @@ export async function runSearchDaemon(options: RunSearchDaemonOptions = {}): Pro
         protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
         socketPath: owner.socketPath,
         runtimeHash: owner.slot.runtimeHash,
+        runtimeScopeHash: owner.slot.runtimeScopeHash,
         binaryVersion: owner.binaryVersion,
       })}\n`,
     );
@@ -112,6 +144,15 @@ export async function runSearchDaemon(options: RunSearchDaemonOptions = {}): Pro
 
 type StartOptions = {
   env: NodeJS.ProcessEnv;
+};
+
+type SupersessionTargetKind = 'upgrade' | 'same-protocol-wedged';
+
+type SupersessionTarget = VerifiedDaemonPredecessor & {
+  kind: SupersessionTargetKind;
+  markerPath: string;
+  supersession: ShutdownSupersessionPayload;
+  sigtermSent?: boolean;
 };
 
 class SearchDaemon {
@@ -131,8 +172,14 @@ class SearchDaemon {
   private readonly env: NodeJS.ProcessEnv;
   private readonly activeCancellationIds = new Map<string, string>();
   private readonly readyWaiters = new Set<() => void>();
+  private pulseSeq = 0;
+  private progressSeq = 0;
+  private pulseUpdatedAt: string;
+  private pulseTimer: NodeJS.Timeout | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
   private ownershipTimer: NodeJS.Timeout | undefined;
+  private ownershipWatcher: fs.FSWatcher | undefined;
+  private reapedMarker: ShutdownSupersessionPayload | undefined;
 
   constructor(
     registry: OwnerRegistry,
@@ -150,6 +197,7 @@ class SearchDaemon {
     this.profiles = profiles;
     this.idleMs = idleMs;
     this.env = env;
+    this.pulseUpdatedAt = owner.startedAt;
     this.queryServer = createQueryServer(queryRegistry(), this);
     this.controlServer = createControlServer(controlRegistry(), this);
     this.shutdownPromise = new Promise((resolve) => {
@@ -158,7 +206,14 @@ class SearchDaemon {
   }
 
   static async start(options: StartOptions): Promise<SearchDaemon> {
-    const ownerSeed = resolveOwnerFromEnv(options.env);
+    let ownerSeed = resolveOwnerFromEnv(options.env);
+    if (ownerSeed.incarnationId === 'pending') {
+      // Standalone boot (not spawned through a client that pre-acquired the lease and passed an
+      // intended incarnation): self-mint one, matching pre-admission behavior. A client-provided
+      // incarnation is adopted as-is above; the successor claim below is likewise self-acquired
+      // when no client-provided claim id is present, so the ExclusiveClaim still arbitrates ≤1 owner.
+      ownerSeed = { ...ownerSeed, incarnationId: randomIncarnationId() };
+    }
     const desired = desiredFromOwner(ownerSeed);
     const registry = createOwnerRegistry({
       env: options.env,
@@ -166,7 +221,8 @@ class SearchDaemon {
     });
     ensurePrivateDirSync(registry.runtimeDir, 'Optsidian search daemon runtime directory');
     const processToken = createProcessToken();
-    const claimId = crypto.randomUUID();
+    const successorClaim = await bindSuccessorClaimOrExit(registry, options.env, processToken);
+    const tenancyFenceClaimId = crypto.randomUUID();
     let rpcServer: RpcServer | undefined;
     let embedScheduler: EmbedScheduler | undefined;
     let profiles: ProfileManager | undefined;
@@ -179,13 +235,15 @@ class SearchDaemon {
       bootWaiters.clear();
     };
     try {
+      recordSuccessorClaimHolder(registry, desired, successorClaim, ownerSeed, { env: options.env });
       rpcServer = await createRpcServer({
         socketPath: ownerSeed.socketPath,
         handleRequest: async (request) => {
           if (daemon) return daemon.handleRpcRequest(request);
           return handleBootRequest(
             request,
-            owner ?? ownerSeed,
+            ownerSeed,
+            () => owner,
             bootWaiters,
             () => daemon,
             () => bootFailed,
@@ -198,19 +256,53 @@ class SearchDaemon {
           }
         },
       });
-      const predecessor = registry.readOwner();
+      const supersessionStartedAtMs = Date.now();
+      const supersessionId = `${ownerSeed.incarnationId}:${crypto.randomUUID()}`;
+      const predecessors = prepareSupersessionTargets(
+        registry,
+        desired,
+        ownerSeed,
+        options.env,
+        supersessionId,
+        supersessionStartedAtMs,
+      );
+      await preSignalSameProtocolWedgedTargets(predecessors);
+      assertSuccessorPublicationStillSafe(registry, desired, options.env);
       owner = createOwnerRecord(
         desired,
         ownerSeed.socketPath,
         nextOwnerEpoch(registry),
-        randomIncarnationId(),
+        ownerSeed.incarnationId,
         process.pid,
         ownerSeed.startedAt,
       );
-      registry.writeOwner(owner);
+      publishOwnerAndInitialPulse(registry, owner);
+      writeSupersessionSentinel(
+        registry.runtimeDir,
+        desired,
+        owner,
+        predecessors.map((target): SupersessionSentinelPredecessor => ({
+          owner: target.owner,
+          reapedMarkerPath: target.markerPath,
+        })),
+        supersessionId,
+        supersessionStartedAtMs,
+      );
+      resetSuccessorBreaker(registry, successorClaim);
+      if (!successorClaim.release()) {
+        throw Object.assign(new Error('search daemon successor claim could not be consumed after publication'), {
+          code: 'SEARCH_DAEMON_UNAVAILABLE',
+        });
+      }
+      const reapingBarrier =
+        predecessors.length > 0 ? reapSupersessionTargets(predecessors, options.env) : Promise.resolve();
       const settings = readOptsidianSettings(process.cwd(), options.env);
-      embedScheduler = createEmbedScheduler({ env: options.env, settings });
-      const tenancyFence = createBindBackedTenancyFenceProvider(registry, owner, claimId, processToken);
+      embedScheduler = createEmbedScheduler({
+        env: options.env,
+        settings,
+        modelLoadBarrier: () => reapingBarrier,
+      });
+      const tenancyFence = createBindBackedTenancyFenceProvider(registry, owner, tenancyFenceClaimId, processToken);
       profiles = new ProfileManager(options.env, embedScheduler, {
         tenancyFence,
       });
@@ -224,8 +316,12 @@ class SearchDaemon {
         options.env,
       );
       daemon.initialize();
-      if (predecessor && predecessor.incarnationId !== owner.incarnationId) {
-        superviseBackground('predecessor-courtesy-shutdown', () => sendCourtesyShutdown(predecessor));
+      if (predecessors.length > 0) {
+        superviseBackground('predecessor-reaping', () =>
+          reapingBarrier.catch((error: unknown) => {
+            logSearchDaemonProcessError('predecessor reaping failed', error);
+          }),
+        );
       }
       wakeBootWaiters();
       return daemon;
@@ -248,6 +344,11 @@ class SearchDaemon {
         if (owner) registry.removeOwner(owner);
       } catch (cleanupError) {
         logSearchDaemonProcessError('owner cleanup failed', cleanupError);
+      }
+      try {
+        successorClaim.release();
+      } catch (cleanupError) {
+        logSearchDaemonProcessError('successor claim cleanup failed', cleanupError);
       }
       try {
         await rpcServer?.drain();
@@ -283,6 +384,7 @@ class SearchDaemon {
     }
     this.phase = 'ready';
     this.wakeReadyWaiters();
+    this.armPulseTimer();
     this.armIdleTimer();
     this.armOwnershipPoll();
     void sweepStaleDaemonSockets(
@@ -296,7 +398,13 @@ class SearchDaemon {
   }
 
   private async handleRpcRequest(request: RpcRequestLike): Promise<unknown> {
+    if (request.method === 'Heartbeat') return this.handleHeartbeatRequest(request);
     return this.handleRequest(request, this.dispatchServer(request));
+  }
+
+  private handleHeartbeatRequest(request: RpcRequestLike): HeartbeatResult {
+    validateHeartbeatRequest(request, this.owner, { requireIncarnation: true });
+    return heartbeatResult(this.owner, this.phase, this.pulseSeq, this.progressSeq, this.pulseUpdatedAt);
   }
 
   private async handleRequest(request: RpcRequestLike, capabilityServer: CapabilityDispatchServer): Promise<unknown> {
@@ -380,6 +488,8 @@ class SearchDaemon {
         return this.status(request);
       case 'WaitReady':
         return this.waitReady(request);
+      case 'Heartbeat':
+        return this.handleHeartbeatRequest(request);
       case 'Search': {
         return this.profiles.withRuntimeFor(
           request.payload,
@@ -417,6 +527,8 @@ class SearchDaemon {
         return this.status(request);
       case 'WaitReady':
         return this.waitReady(request);
+      case 'Heartbeat':
+        return this.handleHeartbeatRequest(request);
       case 'LoadVault': {
         return this.profiles.withRuntimeFor(
           request.payload,
@@ -499,11 +611,14 @@ class SearchDaemon {
       }
       case 'Prune':
         return this.profiles.pruneSearchCaches(request.payload);
-      case 'Shutdown':
+      case 'Shutdown': {
+        const supersession = shutdownSupersessionPayload(request.payload);
+        if (supersession) this.reapedMarker = supersession;
         setTimeout(() => {
-          void this.drain('draining').catch(() => {});
+          void this.drain('draining', Boolean(supersession), supersession).catch(() => {});
         }, 0).unref();
         return { ok: true, shuttingDown: true };
+      }
     }
   }
 
@@ -583,12 +698,19 @@ class SearchDaemon {
     await this.drain('draining');
   }
 
-  private async drain(phase: Extract<SearchDaemonPhase, 'draining'>, bounded = false): Promise<void> {
+  private async drain(
+    phase: Extract<SearchDaemonPhase, 'draining'>,
+    bounded = false,
+    reapedMarker?: ShutdownSupersessionPayload,
+  ): Promise<void> {
     if (this.phase === 'draining') return;
     this.phase = phase;
+    const marker = reapedMarker ?? this.reapedMarker;
     this.clearIdleTimer();
+    this.clearPulseTimer();
     this.clearOwnershipTimer();
     this.wakeReadyWaiters();
+    if (bounded) this.cancelActiveRequestsForSupersession();
     try {
       await this.rpcServer.relinquish();
     } catch {
@@ -614,17 +736,59 @@ class SearchDaemon {
     } catch {
       // Best-effort shutdown step.
     }
+    let profilesClosed = false;
     try {
-      await this.profiles.close();
+      profilesClosed = bounded
+        ? await withDeadlineSettled(this.profiles.close(), DRAIN_DEADLINE_MS)
+        : await this.profiles.close().then(() => true);
     } catch {
       // Best-effort shutdown step.
     }
+    let embedSchedulerClosed = false;
     try {
-      await this.embedScheduler.close();
+      if (bounded) {
+        await withDeadline(this.embedScheduler.drain({ cancel: true }), DRAIN_DEADLINE_MS);
+      }
+      embedSchedulerClosed = bounded
+        ? await withDeadlineSettled(this.embedScheduler.close(), DRAIN_DEADLINE_MS)
+        : await this.embedScheduler.close().then(() => true);
     } catch {
       // Best-effort shutdown step.
+    }
+    if (marker && profilesClosed && embedSchedulerClosed) {
+      try {
+        writeReapedMarker(marker.reapedMarkerPath, marker);
+      } catch {
+        // The marker is proof for a successor, not a reason to keep this process alive.
+      }
     }
     this.resolveShutdown();
+  }
+
+  private cancelActiveRequestsForSupersession(): void {
+    const cancellationIds = new Set<string>();
+    for (const [requestId, cancellationId] of this.activeCancellationIds.entries()) {
+      cancellationIds.add(requestId);
+      cancellationIds.add(cancellationId);
+    }
+    cancellationIds.add('supersession-drain');
+    for (const cancellationId of cancellationIds) {
+      try {
+        this.scheduler.cancel(cancellationId);
+      } catch {
+        // Best-effort supersession cancellation.
+      }
+      try {
+        this.profiles.cancel(cancellationId);
+      } catch {
+        // Best-effort supersession cancellation.
+      }
+      try {
+        this.embedScheduler.cancel(cancellationId);
+      } catch {
+        // Best-effort supersession cancellation.
+      }
+    }
   }
 
   private wakeReadyWaiters(): void {
@@ -652,23 +816,53 @@ class SearchDaemon {
 
   private armOwnershipPoll(): void {
     this.clearOwnershipTimer();
-    this.ownershipTimer = setInterval(() => {
+    const check = () => {
       if (this.phase !== 'ready') return;
-      if (!this.superseded()) return;
+      const marker = this.supersessionReapedMarker();
+      if (!marker && !this.superseded()) return;
       // A newer incarnation now owns the registry slot. This daemon's writer lease is gone, so its
       // commits are fenced out as not-current, but it would otherwise keep a full worker pool and
       // Kiwi WASM resident while still answering requests until the idle timer finally fires.
-      void this.drain('draining', true).catch((error: unknown) => {
+      void this.drain('draining', true, marker).catch((error: unknown) => {
         logSearchDaemonProcessError('supersession shutdown failed', error);
       });
-    }, ownershipPollMs(this.env));
+    };
+    try {
+      const ownerFileName = path.basename(this.registry.ownerPath);
+      const sentinelFileName = path.basename(
+        supersessionSentinelPath(this.registry.runtimeDir, desiredFromOwner(this.owner)),
+      );
+      this.ownershipWatcher = fs.watch(this.registry.runtimeDir, (_event, fileName) => {
+        if (fileName !== ownerFileName && fileName !== sentinelFileName) return;
+        setTimeout(check, 0).unref();
+      });
+      this.ownershipWatcher.unref();
+    } catch {
+      // Slow polling below is the compatibility path for WSL/network filesystems and watch failures.
+    }
+    this.ownershipTimer = setInterval(check, ownershipPollMs(this.env));
     this.ownershipTimer.unref();
   }
 
   private clearOwnershipTimer(): void {
-    if (!this.ownershipTimer) return;
-    clearInterval(this.ownershipTimer);
+    if (this.ownershipTimer) clearInterval(this.ownershipTimer);
     this.ownershipTimer = undefined;
+    this.ownershipWatcher?.close();
+    this.ownershipWatcher = undefined;
+  }
+
+  private armPulseTimer(): void {
+    this.clearPulseTimer();
+    this.pulseTimer = setInterval(() => {
+      this.bumpPulse();
+    }, SEARCH_DAEMON_PULSE_TICK_MS);
+    this.pulseTimer.unref();
+  }
+
+  private clearPulseTimer(): void {
+    if (!this.pulseTimer) return;
+    clearInterval(this.pulseTimer);
+    this.pulseTimer = undefined;
   }
 
   private superseded(): boolean {
@@ -684,6 +878,29 @@ class SearchDaemon {
     // loser of an equal-epoch cold-start race — exactly the tie the shared socket bind used to break.
     // A missing/older/identical record never triggers a step-down, so a healthy sole owner stays.
     return current !== undefined && current.epoch >= this.owner.epoch && !sameOwnerIncarnation(current, this.owner);
+  }
+
+  private supersessionReapedMarker(): ShutdownSupersessionPayload | undefined {
+    let sentinel: ReturnType<typeof readSupersessionSentinel> | undefined;
+    try {
+      sentinel = readSupersessionSentinel(this.registry.runtimeDir, desiredFromOwner(this.owner));
+    } catch {
+      return undefined;
+    }
+    if (!sentinel) return undefined;
+    const predecessor = sentinel.predecessors.find((candidate) => sameOwnerIncarnation(candidate.owner, this.owner));
+    if (!predecessor) return undefined;
+    return {
+      id: sentinel.supersessionId,
+      predecessor: {
+        uid: this.owner.slot.uid,
+        epoch: this.owner.epoch,
+        incarnationId: this.owner.incarnationId,
+        pid: this.owner.pid,
+      },
+      reapedMarkerPath: predecessor.reapedMarkerPath,
+      startedAtMs: sentinel.startedAtMs,
+    };
   }
 
   private requestContext(
@@ -709,14 +926,48 @@ class SearchDaemon {
   ): (progress: SearchIndexProgressUpdate) => void {
     const startedAt = new Date().toISOString();
     return (progress) => {
+      const updatedAt = this.bumpProgressPulse();
       runtime.vaults.transition(vault, state, {
         progress: {
           ...progress,
           startedAt,
-          updatedAt: new Date().toISOString(),
+          updatedAt,
         },
       });
     };
+  }
+
+  private bumpPulse(updatedAt = new Date().toISOString()): string {
+    this.pulseSeq += 1;
+    this.pulseUpdatedAt = updatedAt;
+    this.writeOwnerPulseBestEffort();
+    return updatedAt;
+  }
+
+  private bumpProgressPulse(): string {
+    const updatedAt = new Date().toISOString();
+    this.progressSeq += 1;
+    return this.bumpPulse(updatedAt);
+  }
+
+  private ownerPulse(): OwnerPulse {
+    return {
+      epoch: this.owner.epoch,
+      incarnationId: this.owner.incarnationId,
+      socket: this.owner.socketPath,
+      phase: this.phase,
+      pulseSeq: this.pulseSeq,
+      progressSeq: this.progressSeq,
+      updatedAt: this.pulseUpdatedAt,
+    };
+  }
+
+  private writeOwnerPulseBestEffort(): void {
+    try {
+      this.registry.writeOwnerPulse(this.ownerPulse());
+    } catch {
+      // The pulse sidecar is advisory liveness evidence; write failures must not take down the daemon.
+    }
   }
 }
 
@@ -725,9 +976,12 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   env?: NodeJS.ProcessEnv;
   embedScheduler: EmbedScheduler;
   rpcServer?: RpcServer;
+  profiles?: ProfileManager;
 }): {
   waitForShutdown(): Promise<void>;
   close(): Promise<void>;
+  handle(request: RpcRequestLike): Promise<unknown>;
+  metrics(): ReturnType<DaemonMetrics['snapshot']>;
   ownerRemoved(): boolean;
   owner: OwnerRecord;
   replaceOwner(record: OwnerRecord | undefined): void;
@@ -748,6 +1002,7 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     startedAt: new Date().toISOString(),
   };
   let currentOwner: OwnerRecord | undefined = owner;
+  let currentPulse: OwnerPulse | undefined;
   let removed = false;
   const registry: OwnerRegistry = {
     runtimeDir: '/tmp',
@@ -755,6 +1010,10 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     readOwner: () => currentOwner,
     writeOwner: (record) => {
       currentOwner = record;
+    },
+    readOwnerPulse: () => currentPulse,
+    writeOwnerPulse: (pulse) => {
+      currentPulse = pulse;
     },
     removeOwner: (record) => {
       if (record && currentOwner && !sameOwnerIncarnation(currentOwner, record)) return;
@@ -767,12 +1026,15 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
     drain: async () => undefined,
     close: async () => undefined,
   };
-  const profiles = new ProfileManager(env, options.embedScheduler);
+  const profiles = options.profiles ?? new ProfileManager(env, options.embedScheduler);
   const daemon = new SearchDaemon(registry, owner, rpcServer, options.embedScheduler, profiles, options.idleMs, env);
   daemon.initialize();
   return {
     waitForShutdown: () => daemon.waitForShutdown(),
     close: () => daemon.closeForTests(),
+    handle: (request) =>
+      (daemon as unknown as { handleRpcRequest(request: RpcRequestLike): Promise<unknown> }).handleRpcRequest(request),
+    metrics: () => (daemon as unknown as { metrics: DaemonMetrics }).metrics.snapshot(),
     ownerRemoved: () => removed,
     owner,
     replaceOwner(record) {
@@ -782,16 +1044,379 @@ export function createSearchDaemonIdleIsolationHarnessForTests(options: {
   };
 }
 
+export function hasReapingProofForTests(input: {
+  markerPath: string;
+  supersession: ShutdownSupersessionPayload;
+  token: ProcessToken;
+}): boolean {
+  return hasReapingProof(input as SupersessionTarget);
+}
+
+export function reapingSignalPlanForTests(input: {
+  kind: SupersessionTargetKind;
+  initialProof?: boolean;
+  recoveredBeforeSignal?: boolean;
+  authoritativeStartId?: boolean;
+  sigtermAlreadySent?: boolean;
+  identityBeforeTerm?: boolean;
+  proofAfterTerm?: boolean;
+  identityBeforeKill?: boolean;
+  proofAfterKill?: boolean;
+}): { outcome: 'reaped' | 'abort-recovered' | 'unavailable'; signals: NodeJS.Signals[] } {
+  const signals: NodeJS.Signals[] = [];
+  if (input.initialProof) return { outcome: 'reaped', signals };
+  if (input.kind === 'same-protocol-wedged' && input.recoveredBeforeSignal) {
+    return { outcome: 'abort-recovered', signals };
+  }
+  if (!input.authoritativeStartId) return { outcome: 'unavailable', signals };
+  if (!input.sigtermAlreadySent) {
+    if (input.identityBeforeTerm === false) return { outcome: 'unavailable', signals };
+    signals.push('SIGTERM');
+  }
+  if (input.proofAfterTerm) return { outcome: 'reaped', signals };
+  if (input.identityBeforeKill === false) return { outcome: 'unavailable', signals };
+  signals.push('SIGKILL');
+  return { outcome: input.proofAfterKill ? 'reaped' : 'unavailable', signals };
+}
+
+export async function handleBootRequestForTests(
+  request: RpcRequestLike,
+  ownerSeed: OwnerRecord,
+  owner?: OwnerRecord,
+): Promise<StatusResult | HeartbeatResult> {
+  return handleBootRequest(
+    request,
+    ownerSeed,
+    () => owner,
+    new Set(),
+    () => undefined,
+    () => false,
+  );
+}
+
+async function bindSuccessorClaimOrExit(
+  registry: OwnerRegistry,
+  env: NodeJS.ProcessEnv,
+  processToken: ReturnType<typeof createProcessToken>,
+): Promise<ExclusiveClaim> {
+  const expectedClaimId = env.OPTSIDIAN_SEARCH_DAEMON_SUCCESSOR_CLAIM_ID?.trim();
+  if (!expectedClaimId) {
+    // Standalone boot: no client pre-acquired the lease, so self-acquire the exclusive successor
+    // claim. It still arbitrates a single owner (a competing boot fails to acquire and exits), and
+    // it is released after owner publication exactly like the client-provided path.
+    return ExclusiveClaim.acquire(successorClaimDir(registry.ownerPath), {
+      claimId: randomIncarnationId(),
+      token: processToken,
+    });
+  }
+  const claim = ExclusiveClaim.rebindToken(successorClaimDir(registry.ownerPath), expectedClaimId, {
+    token: processToken,
+  });
+  if (!claim) {
+    throw Object.assign(new Error('search daemon successor claim was lost before boot'), {
+      code: 'SEARCH_DAEMON_UNAVAILABLE',
+    });
+  }
+  return claim;
+}
+
+function assertSuccessorPublicationStillSafe(
+  registry: OwnerRegistry,
+  desired: DesiredOwnerIdentity,
+  env: NodeJS.ProcessEnv,
+): void {
+  const current = registry.readOwner();
+  if (!current) return;
+
+  const observed = observedOwnerFromEnv(env);
+  if (observed) {
+    if (
+      current.epoch !== observed.epoch ||
+      current.incarnationId !== observed.incarnationId ||
+      (observed.socketPath !== undefined && current.socketPath !== observed.socketPath)
+    ) {
+      throw Object.assign(new Error('search daemon successor incumbent changed before publication'), {
+        code: 'SEARCH_DAEMON_UNAVAILABLE',
+      });
+    }
+  } else if (ownerMatchesDesired(current, desired)) {
+    throw Object.assign(new Error('search daemon owner recovered before successor publication'), {
+      code: 'SEARCH_DAEMON_UNAVAILABLE',
+    });
+  }
+
+  if (!ownerMatchesDesired(current, desired)) return;
+
+  let pulse: OwnerPulse | undefined;
+  try {
+    pulse = registry.readOwnerPulse();
+  } catch {
+    pulse = undefined;
+  }
+  if (pulse && pulseMatchesOwner(pulse, current)) {
+    if (pulse.phase === 'draining') return;
+    const updatedAtMs = Date.parse(pulse.updatedAt);
+    if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs <= SEARCH_DAEMON_PULSE_STALENESS_MS) {
+      throw Object.assign(new Error('search daemon owner recovered before successor publication'), {
+        code: 'SEARCH_DAEMON_UNAVAILABLE',
+      });
+    }
+  }
+
+  if (ownerWithinStartupGrace(current, Date.now(), startupGraceMs(env))) {
+    throw Object.assign(new Error('search daemon owner remains within startup grace'), {
+      code: 'SEARCH_DAEMON_UNAVAILABLE',
+    });
+  }
+}
+
+function observedOwnerFromEnv(
+  env: NodeJS.ProcessEnv,
+): { epoch: number; incarnationId: string; socketPath?: string } | undefined {
+  const rawEpoch = env.OPTSIDIAN_SEARCH_DAEMON_OBSERVED_OWNER_EPOCH?.trim();
+  const incarnationId = env.OPTSIDIAN_SEARCH_DAEMON_OBSERVED_OWNER_INCARNATION?.trim();
+  if (!rawEpoch || !incarnationId) return undefined;
+  const epoch = Number(rawEpoch);
+  if (!Number.isInteger(epoch)) return undefined;
+  const socketPath = env.OPTSIDIAN_SEARCH_DAEMON_OBSERVED_OWNER_SOCKET?.trim();
+  return {
+    epoch,
+    incarnationId,
+    ...(socketPath ? { socketPath } : {}),
+  };
+}
+
+function successorHealthKindFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.OPTSIDIAN_SEARCH_DAEMON_SUCCESSOR_HEALTH_KIND?.trim();
+  return raw ? raw : undefined;
+}
+
+function prepareSupersessionTargets(
+  registry: OwnerRegistry,
+  desired: DesiredOwnerIdentity,
+  ownerSeed: OwnerRecord,
+  env: NodeJS.ProcessEnv,
+  supersessionId: string,
+  supersessionStartedAtMs: number,
+): SupersessionTarget[] {
+  const observed = observedOwnerFromEnv(env);
+  const healthKind = successorHealthKindFromEnv(env);
+  const predecessors = registry.discoverPredecessors
+    ? registry.discoverPredecessors(desired, ownerSeed)
+    : discoverDaemonPredecessors(registry.runtimeDir, desired, ownerSeed);
+  const targets = new Map<string, SupersessionTarget>();
+  for (const predecessor of predecessors) {
+    const owner = predecessor.owner;
+    const sameProtocol = owner.slot.protocolVersion === desired.protocolVersion;
+    const sameBinary = owner.binaryVersion === desired.binaryVersion;
+    const observedMatch = Boolean(
+      observed &&
+      owner.epoch === observed.epoch &&
+      owner.incarnationId === observed.incarnationId &&
+      (!observed.socketPath || owner.socketPath === observed.socketPath),
+    );
+    const kind: SupersessionTargetKind | undefined =
+      !sameProtocol || !sameBinary
+        ? 'upgrade'
+        : healthKind === 'wedged' && observedMatch
+          ? 'same-protocol-wedged'
+          : undefined;
+    if (!kind) continue;
+    const markerPath = reapedMarkerPath(registry.runtimeDir, owner);
+    const key = `${owner.slot.protocolVersion}:${owner.epoch}:${owner.incarnationId}:${owner.pid}`;
+    targets.set(key, {
+      ...predecessor,
+      kind,
+      markerPath,
+      supersession: {
+        id: supersessionId,
+        predecessor: {
+          uid: owner.slot.uid,
+          epoch: owner.epoch,
+          incarnationId: owner.incarnationId,
+          pid: owner.pid,
+        },
+        reapedMarkerPath: markerPath,
+        startedAtMs: supersessionStartedAtMs,
+      },
+    });
+  }
+  return [...targets.values()];
+}
+
+async function preSignalSameProtocolWedgedTargets(targets: SupersessionTarget[]): Promise<void> {
+  for (const target of targets) {
+    if (target.kind !== 'same-protocol-wedged') continue;
+    if (await sameProtocolPredecessorRecovered(target)) {
+      throw Object.assign(new Error('search daemon predecessor recovered before supersession termination'), {
+        code: 'SEARCH_DAEMON_UNAVAILABLE',
+      });
+    }
+    if (!processStartIdIsAuthoritative(target.token.startId)) continue;
+    if (!predecessorIdentityStillMatches(target)) continue;
+    signalProcess(target.token, 'SIGTERM');
+    target.sigtermSent = true;
+  }
+}
+
+async function sameProtocolPredecessorRecovered(target: SupersessionTarget): Promise<boolean> {
+  if (freshPulseForOwner(target.ownerPath, target.owner)) return true;
+  try {
+    const heartbeat = await heartbeatPredecessor(target.owner);
+    if (!sameOwnerIncarnation(heartbeat.owner, target.owner)) return false;
+    if (heartbeat.phase === 'draining') return false;
+    const updatedAtMs = Date.parse(heartbeat.updatedAt);
+    return Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs <= SEARCH_DAEMON_PULSE_STALENESS_MS;
+  } catch {
+    return freshPulseForOwner(target.ownerPath, target.owner);
+  }
+}
+
+function freshPulseForOwner(ownerPath: string, owner: OwnerRecord): boolean {
+  let pulse: OwnerPulse | undefined;
+  try {
+    pulse = readOwnerPulse(ownerPath);
+  } catch {
+    return false;
+  }
+  if (!pulse || !pulseMatchesOwner(pulse, owner) || pulse.phase === 'draining') return false;
+  const updatedAtMs = Date.parse(pulse.updatedAt);
+  return Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs <= SEARCH_DAEMON_PULSE_STALENESS_MS;
+}
+
+async function reapSupersessionTargets(targets: readonly SupersessionTarget[], env: NodeJS.ProcessEnv): Promise<void> {
+  await Promise.all(targets.map((target) => reapSupersessionTarget(target, env)));
+}
+
+async function reapSupersessionTarget(target: SupersessionTarget, env: NodeJS.ProcessEnv): Promise<void> {
+  if (await waitForReapingProof(target, 0, env)) return;
+  if (target.kind === 'upgrade') {
+    const shutdownAccepted = await sendCourtesyShutdown(target.owner, target.supersession).then(
+      () => true,
+      () => false,
+    );
+    if (shutdownAccepted && (await waitForReapingProof(target, reapingRpcGraceMs(env), env))) return;
+  }
+  await terminateWithVerifiedProof(target, env);
+}
+
+async function terminateWithVerifiedProof(target: SupersessionTarget, env: NodeJS.ProcessEnv): Promise<void> {
+  if (await waitForReapingProof(target, 0, env)) return;
+  if (!processStartIdIsAuthoritative(target.token.startId)) {
+    if (await waitForReapingProof(target, reapingRpcGraceMs(env), env)) return;
+    throw Object.assign(new Error('cannot terminate predecessor with unverified process start identity'), {
+      code: 'SEARCH_DAEMON_UNAVAILABLE',
+    });
+  }
+  if (!target.sigtermSent) {
+    if (!predecessorIdentityStillMatches(target)) {
+      if (await waitForReapingProof(target, 0, env)) return;
+      throw Object.assign(new Error('predecessor process identity changed before SIGTERM'), {
+        code: 'SEARCH_DAEMON_UNAVAILABLE',
+      });
+    }
+    signalProcess(target.token, 'SIGTERM');
+    target.sigtermSent = true;
+  }
+  if (await waitForReapingProof(target, reapingTermWaitMs(env), env)) return;
+  if (!predecessorIdentityStillMatches(target)) {
+    if (await waitForReapingProof(target, 0, env)) return;
+    throw Object.assign(new Error('predecessor process identity changed before SIGKILL'), {
+      code: 'SEARCH_DAEMON_UNAVAILABLE',
+    });
+  }
+  signalProcess(target.token, 'SIGKILL');
+  if (await waitForReapingProof(target, reapingKillWaitMs(env), env)) return;
+  throw Object.assign(new Error('predecessor did not provide verified reaping proof before deadline'), {
+    code: 'SEARCH_DAEMON_UNAVAILABLE',
+  });
+}
+
+function predecessorIdentityStillMatches(target: SupersessionTarget): boolean {
+  const current = readOwnerRecordAtPath(target.ownerPath);
+  if (
+    target.kind === 'upgrade' &&
+    current &&
+    (!sameOwnerIncarnation(current, target.owner) || current.pid !== target.owner.pid)
+  ) {
+    return false;
+  }
+  return isAlive(target.token);
+}
+
+async function waitForReapingProof(
+  target: SupersessionTarget,
+  waitMs: number,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  while (true) {
+    if (hasReapingProof(target)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(Math.min(reapingPollMs(env), Math.max(1, deadline - Date.now())));
+  }
+}
+
+function hasReapingProof(target: SupersessionTarget): boolean {
+  try {
+    if (reapedMarkerMatchesSupersession(readReapedMarker(target.markerPath), target.supersession)) return true;
+  } catch {
+    // A marker read failure is not teardown proof.
+  }
+  return processStartIdIsAuthoritative(target.token.startId) && !isAlive(target.token);
+}
+
+function signalProcess(token: ProcessToken, signal: NodeJS.Signals): void {
+  if (!processStartIdIsAuthoritative(token.startId)) return;
+  if (!isAlive(token)) return;
+  try {
+    process.kill(token.pid, signal);
+  } catch (error) {
+    if (errorCode(error) === 'ESRCH') return;
+    throw error;
+  }
+}
+
+async function heartbeatPredecessor(owner: OwnerRecord): Promise<HeartbeatResult> {
+  const connection = await connectRpc<Extract<QueryDaemonRequest, { method: 'Heartbeat' }>>(owner.socketPath);
+  try {
+    return (await connection.request({
+      protocolVersion: owner.slot.protocolVersion,
+      requestId: crypto.randomUUID(),
+      method: 'Heartbeat',
+      deadline: Date.now() + Math.min(SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS, SEARCH_DAEMON_PULSE_STALENESS_MS),
+      incarnation: owner.incarnationId,
+      payload: {},
+    })) as HeartbeatResult;
+  } finally {
+    await connection.close();
+  }
+}
+
+function pulseMatchesOwner(pulse: OwnerPulse, owner: OwnerRecord): boolean {
+  return (
+    pulse.epoch === owner.epoch && pulse.incarnationId === owner.incarnationId && pulse.socket === owner.socketPath
+  );
+}
+
+function ownerWithinStartupGrace(owner: OwnerRecord, nowMs: number, graceMs: number): boolean {
+  const startedAtMs = Date.parse(owner.startedAt);
+  return Number.isFinite(startedAtMs) && nowMs - startedAtMs <= graceMs;
+}
+
 function resolveOwnerFromEnv(env: NodeJS.ProcessEnv): OwnerRecord {
   const runtimeDir = defaultSearchDaemonRuntimeDir(env);
   const binaryPath = defaultSearchDaemonBinaryPath(env);
   const runtimeHash = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_HASH?.trim();
+  const runtimeScopeHash = env.OPTSIDIAN_SEARCH_DAEMON_RUNTIME_SCOPE_HASH?.trim();
   const binaryVersion = env.OPTSIDIAN_SEARCH_DAEMON_BINARY_VERSION?.trim();
   const socketPathOverride = env.OPTSIDIAN_SEARCH_DAEMON_SOCKET?.trim();
   const incarnation = env.OPTSIDIAN_SEARCH_DAEMON_INCARNATION?.trim();
+  const uid = env.OPTSIDIAN_SEARCH_DAEMON_UID ? Number(env.OPTSIDIAN_SEARCH_DAEMON_UID) : currentUid();
   const desired: DesiredOwnerIdentity = {
-    uid: env.OPTSIDIAN_SEARCH_DAEMON_UID ? Number(env.OPTSIDIAN_SEARCH_DAEMON_UID) : currentUid(),
+    uid,
     runtimeHash: runtimeHash ? runtimeHash : computeRuntimeHash(binaryPath),
+    runtimeScopeHash: runtimeScopeHash ? runtimeScopeHash : computeRuntimeScopeHash(binaryPath, uid, env),
     binaryVersion: binaryVersion ? binaryVersion : computeBinaryVersion(binaryPath),
     protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
   };
@@ -818,21 +1443,25 @@ function desiredFromOwner(owner: OwnerRecord): DesiredOwnerIdentity {
   return {
     uid: owner.slot.uid,
     runtimeHash: owner.slot.runtimeHash,
+    runtimeScopeHash: owner.slot.runtimeScopeHash ?? owner.slot.runtimeHash,
     binaryVersion: owner.binaryVersion,
     protocolVersion: owner.slot.protocolVersion,
   };
 }
 
-async function sendCourtesyShutdown(predecessor: OwnerRecord): Promise<void> {
+async function sendCourtesyShutdown(
+  predecessor: OwnerRecord,
+  supersession: ShutdownSupersessionPayload,
+): Promise<void> {
   const connection = await connectRpc<Extract<ControlDaemonRequest, { method: 'Shutdown' }>>(predecessor.socketPath);
   try {
     await connection.request({
-      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+      protocolVersion: predecessor.slot.protocolVersion,
       requestId: crypto.randomUUID(),
       method: 'Shutdown',
       deadline: Date.now() + SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS,
       incarnation: predecessor.incarnationId,
-      payload: {},
+      payload: { supersession },
     });
   } finally {
     await connection.close();
@@ -870,6 +1499,22 @@ function ownershipPollMs(env: NodeJS.ProcessEnv): number {
   return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_OWNERSHIP_POLL_MS, undefined) ?? 30_000;
 }
 
+function reapingRpcGraceMs(env: NodeJS.ProcessEnv): number {
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_REAP_RPC_GRACE_MS, undefined) ?? 1_000;
+}
+
+function reapingTermWaitMs(env: NodeJS.ProcessEnv): number {
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_REAP_TERM_WAIT_MS, undefined) ?? 1_000;
+}
+
+function reapingKillWaitMs(env: NodeJS.ProcessEnv): number {
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_REAP_KILL_WAIT_MS, undefined) ?? 1_000;
+}
+
+function reapingPollMs(env: NodeJS.ProcessEnv): number {
+  return settingNumber(env.OPTSIDIAN_SEARCH_DAEMON_REAP_POLL_MS, undefined) ?? 50;
+}
+
 const DRAIN_DEADLINE_MS = 5_000;
 
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
@@ -884,6 +1529,67 @@ function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined
   ]);
 }
 
+function withDeadlineSettled<T>(promise: Promise<T>, ms: number): Promise<boolean> {
+  return Promise.race([
+    promise.then(
+      () => true,
+      () => false,
+    ),
+    new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(false);
+      }, ms);
+      timer.unref();
+    }),
+  ]);
+}
+
+function shutdownSupersessionPayload(payload: unknown): ShutdownSupersessionPayload | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const supersession = (payload as { supersession?: unknown }).supersession;
+  if (!supersession || typeof supersession !== 'object') return undefined;
+  const candidate = supersession as Partial<ShutdownSupersessionPayload>;
+  const predecessor = candidate.predecessor;
+  if (
+    typeof candidate.id !== 'string' ||
+    !predecessor ||
+    typeof predecessor !== 'object' ||
+    !Number.isInteger(predecessor.uid) ||
+    !Number.isInteger(predecessor.epoch) ||
+    typeof predecessor.incarnationId !== 'string' ||
+    !Number.isInteger(predecessor.pid) ||
+    typeof candidate.reapedMarkerPath !== 'string' ||
+    typeof candidate.startedAtMs !== 'number' ||
+    !Number.isFinite(candidate.startedAtMs)
+  ) {
+    return undefined;
+  }
+  return {
+    id: candidate.id,
+    predecessor: {
+      uid: predecessor.uid,
+      epoch: predecessor.epoch,
+      incarnationId: predecessor.incarnationId,
+      pid: predecessor.pid,
+    },
+    reapedMarkerPath: candidate.reapedMarkerPath,
+    startedAtMs: candidate.startedAtMs,
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
+}
+
 function settingNumber(raw: string | undefined, fallback: number | undefined): number | undefined {
   if (raw !== undefined && raw.trim() !== '' && /^\d+$/.test(raw.trim())) return Number(raw);
   return fallback;
@@ -893,6 +1599,7 @@ function queryRegistry(): Record<QueryDaemonRequest['method'], RegistryHandler<Q
   return {
     Status: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     WaitReady: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
+    Heartbeat: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     Search: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
     Retrieve: (request, runtime) => runtime.dispatchQuery(request as QueryDaemonRequest),
   };
@@ -902,6 +1609,7 @@ function controlRegistry(): Record<ControlDaemonRequest['method'], RegistryHandl
   return {
     Status: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     WaitReady: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
+    Heartbeat: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     LoadVault: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     Rebuild: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
     Refresh: (request, runtime) => runtime.dispatchControl(request as ControlDaemonRequest),
@@ -934,12 +1642,19 @@ function capabilityLabel(server: CapabilityDispatchServer): string {
 
 async function handleBootRequest(
   request: RpcRequestLike,
-  owner: OwnerRecord,
+  ownerSeed: OwnerRecord,
+  getOwner: () => OwnerRecord | undefined,
   bootWaiters: Set<() => void>,
   getDaemon: () => SearchDaemon | undefined,
   bootFailed: () => boolean,
-): Promise<StatusResult> {
+): Promise<StatusResult | HeartbeatResult> {
   validateBootRequest(request);
+  const realOwner = getOwner();
+  const owner = realOwner ?? ownerSeed;
+  if (request.method === 'Heartbeat') {
+    validateBootHeartbeatIncarnation(request, ownerSeed, realOwner);
+    return heartbeatResult(owner, 'starting', 0, 0, owner.startedAt || new Date().toISOString());
+  }
   if (request.method === 'Status') return emptyStatus(owner, 'starting');
   if (request.method !== 'WaitReady') {
     throw Object.assign(new Error('search daemon is starting'), { code: 'DAEMON_STARTING' });
@@ -963,6 +1678,33 @@ function validateBootRequest(request: RpcRequestLike): void {
   }
   if (request.payload === null || typeof request.payload !== 'object' || Array.isArray(request.payload)) {
     throw Object.assign(new Error('request payload must be an object'), { code: 'BAD_REQUEST' });
+  }
+}
+
+function validateHeartbeatRequest(
+  request: RpcRequestLike,
+  owner: OwnerRecord,
+  options: { requireIncarnation: boolean },
+): void {
+  validateBootRequest(request);
+  if (request.method !== 'Heartbeat') {
+    throw Object.assign(new Error('request is not a Heartbeat'), { code: 'BAD_REQUEST' });
+  }
+  if (options.requireIncarnation && request.incarnation !== owner.incarnationId) {
+    throw Object.assign(new Error('search daemon incarnation is stale'), { code: 'STALE_INCARNATION' });
+  }
+}
+
+function validateBootHeartbeatIncarnation(
+  request: RpcRequestLike,
+  ownerSeed: OwnerRecord,
+  owner: OwnerRecord | undefined,
+): void {
+  if (request.method !== 'Heartbeat') return;
+  const expectedIncarnation =
+    owner?.incarnationId ?? (ownerSeed.incarnationId !== 'pending' ? ownerSeed.incarnationId : undefined);
+  if (expectedIncarnation !== undefined && request.incarnation !== expectedIncarnation) {
+    throw Object.assign(new Error('search daemon incarnation is stale'), { code: 'STALE_INCARNATION' });
   }
 }
 
@@ -999,6 +1741,24 @@ function statusBase(owner: OwnerRecord, phase: SearchDaemonPhase) {
     socketPath: owner.socketPath,
     startedAt: owner.startedAt,
     owner,
+  };
+}
+
+function heartbeatResult(
+  owner: OwnerRecord,
+  phase: SearchDaemonPhase,
+  pulseSeq: number,
+  progressSeq: number,
+  updatedAt: string,
+): HeartbeatResult {
+  return {
+    owner,
+    phase,
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+    incarnationId: owner.incarnationId,
+    pulseSeq,
+    progressSeq,
+    updatedAt,
   };
 }
 
@@ -1082,7 +1842,15 @@ export function searchExecutionCacheSummary(
 }
 
 function incarnationOptionalMethod(method: string): boolean {
-  return method === 'Status' || method === 'WaitReady';
+  switch (method) {
+    case 'Status':
+    case 'WaitReady':
+      return true;
+    case 'Heartbeat':
+      return false;
+    default:
+      return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

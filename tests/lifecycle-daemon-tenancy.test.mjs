@@ -65,7 +65,12 @@ test('AC8 pid reuse cannot deadlock stale daemon replacement', async () => {
   const binaryPath = process.execPath;
   const desired = desiredOwnerIdentity(binaryPath);
   const registry = createOwnerRegistry({ runtimeDir, desired });
-  const stale = createOwnerRecord(desired, socketPathForOwner(runtimeDir, desired), 1, 'stale', process.pid);
+  // A genuinely-stale owner: booted well beyond the startup-grace window so a refused socket is
+  // judged WEDGED (route around + replace) rather than a daemon still binding within grace.
+  const stale = {
+    ...createOwnerRecord(desired, socketPathForOwner(runtimeDir, desired), 1, 'stale', process.pid),
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+  };
   registry.writeOwner(stale);
   const published = [];
   const client = createSearchDaemonClient({
@@ -90,6 +95,7 @@ test('AC8 pid reuse cannot deadlock stale daemon replacement', async () => {
       }
       return {
         async request(request) {
+          if (request.method === 'Heartbeat') return heartbeatResult(record);
           assert.equal(request.method, 'Status');
           return statusResult(record);
         },
@@ -187,6 +193,18 @@ function statusResult(owner) {
     searchStore: {},
     profiles: {},
     vaults: [],
+  };
+}
+
+function heartbeatResult(owner) {
+  return {
+    owner,
+    phase: 'ready',
+    protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+    incarnationId: owner.incarnationId,
+    pulseSeq: 1,
+    progressSeq: 0,
+    updatedAt: owner.startedAt,
   };
 }
 

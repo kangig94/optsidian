@@ -31,6 +31,11 @@ import { RuntimeError } from '../../../errors.js';
 export type OnnxExecutionProvider = 'cuda' | 'coreml' | 'cpu';
 export type OnnxExecutionProviderPreference = 'auto' | OnnxExecutionProvider;
 
+export type OnnxExecutionPolicy = {
+  intraOpNumThreads: number;
+  interOpNumThreads: number;
+};
+
 export type LocalOnnxProviderSelection = {
   kind: 'local-onnx';
   model: LocalOnnxModelKey;
@@ -65,7 +70,11 @@ export type LocalOnnxRuntime = {
   InferenceSession: {
     create(
       modelPath: string,
-      options: { executionProviders: readonly OnnxExecutionProvider[] },
+      options: {
+        executionProviders: readonly OnnxExecutionProvider[];
+        intraOpNumThreads?: number;
+        interOpNumThreads?: number;
+      },
     ): Promise<LocalOnnxSession>;
   };
 };
@@ -74,6 +83,7 @@ export type LocalOnnxProviderOptions = {
   model?: LocalOnnxModelAlias | string;
   env?: NodeJS.ProcessEnv;
   executionProvider?: OnnxExecutionProviderPreference;
+  executionPolicy?: OnnxExecutionPolicy;
   ort?: LocalOnnxRuntime;
   tokenizer?: LocalOnnxTokenizer;
   ensureArtifact?: (descriptor: LocalOnnxModelDescriptor, env: NodeJS.ProcessEnv) => Promise<void>;
@@ -96,6 +106,7 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   readonly descriptor: LocalOnnxModelDescriptor;
   private readonly env: NodeJS.ProcessEnv;
   private readonly executionProviderPreference: OnnxExecutionProviderPreference;
+  private readonly executionPolicy: OnnxExecutionPolicy | undefined;
   private readonly injectedOrt: LocalOnnxRuntime | undefined;
   private readonly injectedTokenizer: LocalOnnxTokenizer | undefined;
   private readonly ensureArtifactImpl: (descriptor: LocalOnnxModelDescriptor, env: NodeJS.ProcessEnv) => Promise<void>;
@@ -110,6 +121,7 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   private ortAttempt: Attempt<LocalOnnxRuntime> | undefined;
   private tokenizerAttempt: Attempt<LocalOnnxTokenizer> | undefined;
   private sessionAttempt: Attempt<LocalOnnxSessionSelection> | undefined;
+  private sessionAttemptKey: string | undefined;
   private selectedExecutionProvider: OnnxExecutionProvider | undefined;
   private activeOrt: LocalOnnxRuntime | undefined;
   private activeSessionSelection: LocalOnnxSessionSelection | undefined;
@@ -118,6 +130,7 @@ export class LocalOnnxProvider implements EmbeddingProvider {
     this.descriptor = localOnnxModelDescriptor(options.model);
     this.env = options.env ?? process.env;
     this.executionProviderPreference = options.executionProvider ?? 'auto';
+    this.executionPolicy = normalizeOnnxExecutionPolicy(options.executionPolicy);
     this.injectedOrt = options.ort;
     this.injectedTokenizer = options.tokenizer;
     this.platform = options.platform ?? process.platform;
@@ -156,6 +169,7 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   async close(): Promise<void> {
     const attempt = this.sessionAttempt;
     this.sessionAttempt = undefined;
+    this.sessionAttemptKey = undefined;
     if (attempt && this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
     // Await the in-flight load attempt's settlement AFTER detaching ownership. A superseded attempt
     // closes its own produced session asynchronously (the Attempt `close` callback); if close()
@@ -186,18 +200,25 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   }
 
   private async session(): Promise<LocalOnnxSessionSelection> {
-    if (this.sessionAttempt) return this.sessionAttempt.wait();
+    const modelPath = localOnnxSessionModelPath(this.descriptor.key, this.env);
+    const sessionKey = localOnnxSessionCacheKey({
+      modelPath,
+      executionProvider: this.executionProviderPreference,
+      executionPolicy: this.executionPolicy,
+    });
+    if (this.sessionAttempt && this.sessionAttemptKey === sessionKey) return this.sessionAttempt.wait();
+    if (this.sessionAttempt) await this.close();
     const attempt = Attempt.start(
       this.sessionAttemptOwner,
       async () => {
         await this.ensureArtifact();
         const ort = await this.ort();
         this.activeOrt = ort;
-        const modelPath = localOnnxSessionModelPath(this.descriptor.key, this.env);
         const selection = await createOnnxSessionWithFallback({
           ort,
           modelPath,
           executionProvider: this.executionProviderPreference,
+          executionPolicy: this.executionPolicy,
           platform: this.platform,
         });
         return selection;
@@ -211,9 +232,11 @@ export class LocalOnnxProvider implements EmbeddingProvider {
       },
     );
     this.sessionAttempt = attempt;
+    this.sessionAttemptKey = sessionKey;
     attempt.result.catch(() => {
       if (this.sessionAttempt !== attempt) return;
       this.sessionAttempt = undefined;
+      this.sessionAttemptKey = undefined;
       if (this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
     });
     return attempt.wait();
@@ -352,6 +375,7 @@ export async function createOnnxSessionWithFallback(input: {
   ort: LocalOnnxRuntime;
   modelPath: string;
   executionProvider?: OnnxExecutionProviderPreference;
+  executionPolicy?: OnnxExecutionPolicy;
   platform?: NodeJS.Platform;
 }): Promise<LocalOnnxSessionSelection> {
   const attempted = candidateExecutionProviders(input.executionProvider ?? 'auto', input.platform ?? process.platform);
@@ -360,6 +384,12 @@ export async function createOnnxSessionWithFallback(input: {
     try {
       const session = await input.ort.InferenceSession.create(input.modelPath, {
         executionProviders: [executionProvider],
+        ...(input.executionPolicy
+          ? {
+              intraOpNumThreads: input.executionPolicy.intraOpNumThreads,
+              interOpNumThreads: input.executionPolicy.interOpNumThreads,
+            }
+          : {}),
       });
       return { session, executionProvider, attempted, failures };
     } catch (error) {
@@ -372,6 +402,26 @@ export async function createOnnxSessionWithFallback(input: {
   }
   const detail = failures.map((failure) => `${failure.executionProvider}: ${failure.message}`).join('; ');
   throw new RuntimeError(`failed to create ONNX inference session${detail ? ` (${detail})` : ''}`);
+}
+
+function normalizeOnnxExecutionPolicy(policy: OnnxExecutionPolicy | undefined): OnnxExecutionPolicy | undefined {
+  if (!policy) return undefined;
+  return {
+    intraOpNumThreads: Math.max(1, Math.floor(policy.intraOpNumThreads)),
+    interOpNumThreads: Math.max(1, Math.floor(policy.interOpNumThreads)),
+  };
+}
+
+function localOnnxSessionCacheKey(input: {
+  modelPath: string;
+  executionProvider: OnnxExecutionProviderPreference;
+  executionPolicy?: OnnxExecutionPolicy;
+}): string {
+  return JSON.stringify({
+    modelPath: input.modelPath,
+    executionProvider: input.executionProvider,
+    executionPolicy: input.executionPolicy ?? null,
+  });
 }
 
 function candidateExecutionProviders(

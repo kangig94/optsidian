@@ -12,18 +12,19 @@ import type { ExplainTrace } from '../core/search/contracts.js';
 import type { SearchAnalyzerIdentity } from '../core/search/analyzer.js';
 import type { EmbeddingInputKind, EmbeddingVector } from '../core/search/dense/provider.js';
 import type { LocalOnnxModelKey } from '../core/search/dense/artifacts.js';
-import type { OnnxExecutionProviderPreference } from '../core/search/dense/local-onnx.js';
+import type { OnnxExecutionPolicy, OnnxExecutionProviderPreference } from '../core/search/dense/local-onnx.js';
 import type { SearchRuntimeProfile } from './runtime-profile.js';
 import type { BuiltSegment, ParsedBuildDocument } from './search-store/types.js';
 import type { CoralChunkRecord, CoralEmbeddingSpec, VectorStoreKey } from './vector-store/types.js';
 
-export const SEARCH_DAEMON_PROTOCOL_VERSION = 4;
+export const SEARCH_DAEMON_PROTOCOL_VERSION = 5;
 
-export const QUERY_DAEMON_METHODS = ['Status', 'WaitReady', 'Search', 'Retrieve'] as const;
+export const QUERY_DAEMON_METHODS = ['Status', 'WaitReady', 'Heartbeat', 'Search', 'Retrieve'] as const;
 
 export const CONTROL_DAEMON_METHODS = [
   'Status',
   'WaitReady',
+  'Heartbeat',
   'LoadVault',
   'Rebuild',
   'Refresh',
@@ -35,16 +36,28 @@ export const CONTROL_DAEMON_METHODS = [
 
 export const SEARCH_DAEMON_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS = 15000;
-export const SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS = 1000;
+export const SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS = 1000;
+export const SEARCH_DAEMON_PULSE_STALENESS_MS = 1000; // P = H by design
+export const SEARCH_DAEMON_PULSE_TICK_MS = 250;
+export const SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS = 1000; // = H (snappy liveness probe)
 export const SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS = 3000;
 const SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS = 60_000;
 const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_FILE_DEADLINE_MS = 750;
 const SEARCH_DAEMON_DEFAULT_LIFECYCLE_PER_MIB_DEADLINE_MS = 5000;
 export const SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS = SEARCH_DAEMON_DEFAULT_LIFECYCLE_BASE_DEADLINE_MS;
-export type QueryDaemonMethod = 'Status' | 'WaitReady' | 'Search' | 'Retrieve';
+export type QueryDaemonMethod = 'Status' | 'WaitReady' | 'Heartbeat' | 'Search' | 'Retrieve';
 export type ControlDaemonMethod =
-  'Status' | 'WaitReady' | 'LoadVault' | 'Rebuild' | 'Refresh' | 'Compact' | 'Clear' | 'Prune' | 'Shutdown';
-export type MutatingControlDaemonMethod = Exclude<ControlDaemonMethod, 'Status' | 'WaitReady'>;
+  | 'Status'
+  | 'WaitReady'
+  | 'Heartbeat'
+  | 'LoadVault'
+  | 'Rebuild'
+  | 'Refresh'
+  | 'Compact'
+  | 'Clear'
+  | 'Prune'
+  | 'Shutdown';
+export type MutatingControlDaemonMethod = Exclude<ControlDaemonMethod, 'Status' | 'WaitReady' | 'Heartbeat'>;
 
 export type SearchDaemonErrorCode =
   | 'BAD_REQUEST'
@@ -97,6 +110,7 @@ type LocalOnnxModelProviderPayload = {
   kind: 'local-onnx';
   model?: LocalOnnxModelKey;
   executionProvider?: OnnxExecutionProviderPreference;
+  executionPolicy: OnnxExecutionPolicy;
 };
 
 export type ModelProviderPayload = DeterministicHashModelProviderPayload | LocalOnnxModelProviderPayload;
@@ -197,17 +211,35 @@ type StatusRequestPayload = Record<string, never>;
 
 type WaitReadyRequestPayload = Record<string, never>;
 
-type ShutdownRequestPayload = Record<string, never>;
+type HeartbeatRequestPayload = Record<string, never>;
+
+export type ShutdownSupersessionPayload = {
+  id: string;
+  predecessor: {
+    uid: number;
+    epoch: number;
+    incarnationId: string;
+    pid: number;
+  };
+  reapedMarkerPath: string;
+  startedAtMs: number;
+};
+
+type ShutdownRequestPayload = {
+  supersession?: ShutdownSupersessionPayload;
+};
 
 export type QueryDaemonRequest =
   | DaemonRequestBase<'Status', StatusRequestPayload>
   | DaemonRequestBase<'WaitReady', WaitReadyRequestPayload>
+  | DaemonRequestBase<'Heartbeat', HeartbeatRequestPayload>
   | DaemonRequestBase<'Search', SearchRequestPayload>
   | DaemonRequestBase<'Retrieve', RetrieveRequestPayload>;
 
 export type ControlDaemonRequest =
   | DaemonRequestBase<'Status', StatusRequestPayload>
   | DaemonRequestBase<'WaitReady', WaitReadyRequestPayload>
+  | DaemonRequestBase<'Heartbeat', HeartbeatRequestPayload>
   | DaemonRequestBase<'LoadVault', VaultRequestPayload>
   | DaemonRequestBase<'Rebuild', VaultRequestPayload>
   | DaemonRequestBase<'Refresh', VaultRequestPayload>
@@ -219,6 +251,7 @@ export type ControlDaemonRequest =
 export type TenancySlot = {
   uid: number;
   runtimeHash: string;
+  runtimeScopeHash?: string;
   protocolVersion: number;
 };
 
@@ -319,6 +352,16 @@ export type StatusResult = {
   }>;
 };
 
+export type HeartbeatResult = {
+  owner: TenancyRecord;
+  phase: SearchDaemonPhase;
+  protocolVersion: number;
+  incarnationId: string;
+  pulseSeq: number;
+  progressSeq: number;
+  updatedAt: string;
+};
+
 export type ExplainResult = {
   ok: true;
   command: 'explain';
@@ -351,6 +394,7 @@ export type ShutdownResult = {
 export type QueryDaemonResultByMethod = {
   Status: StatusResult;
   WaitReady: StatusResult;
+  Heartbeat: HeartbeatResult;
   Search: SearchResult;
   Retrieve: RetrieveResult;
 };
@@ -358,6 +402,7 @@ export type QueryDaemonResultByMethod = {
 export type ControlDaemonResultByMethod = {
   Status: StatusResult;
   WaitReady: StatusResult;
+  Heartbeat: HeartbeatResult;
   LoadVault: SearchIndexWarmResult;
   Rebuild: SearchIndexMutationResult;
   Refresh: RefreshResult;
@@ -405,11 +450,13 @@ export function encodeFrame(message: unknown): Buffer {
 function queryMethodDefaultDeadlineMs(method: QueryDaemonMethod): number {
   if (method === 'Retrieve') return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
   if (method === 'Status' || method === 'WaitReady') return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
+  if (method === 'Heartbeat') return SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_SEARCH_DEADLINE_MS;
 }
 
 function controlMethodDefaultDeadlineMs(method: ControlDaemonMethod): number {
   if (method === 'Status' || method === 'WaitReady') return SEARCH_DAEMON_DEFAULT_STATUS_DEADLINE_MS;
+  if (method === 'Heartbeat') return SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS;
   return SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
 }
 

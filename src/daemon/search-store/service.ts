@@ -27,6 +27,7 @@ import type {
 } from '../protocol.js';
 import { remainingDeadlineMs } from '../protocol.js';
 import type { EmbedSchedulerLane } from '../embed-scheduler.js';
+import type { OnnxExecutionPolicy } from '../../core/search/dense/local-onnx.js';
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from '../query-analysis-cache-defaults.js';
 import { QueryAnalysisCache } from '../query-analysis-cache.js';
 import {
@@ -110,6 +111,7 @@ export class DaemonSearchStoreService {
   private readonly searchSettings: IndexAffectingSearchSettings;
   private readonly searchSettingsHash: string;
   private readonly rankingTuning: SearchRankingTuning;
+  private readonly onnxExecutionPolicy: OnnxExecutionPolicy | undefined;
 
   constructor(
     store: DaemonSnapshotStore,
@@ -122,6 +124,7 @@ export class DaemonSearchStoreService {
       rankingTuning?: Partial<SearchRankingTuning>;
       settings?: OptsidianSettings;
       env?: NodeJS.ProcessEnv;
+      onnxExecutionPolicy?: OnnxExecutionPolicy;
     } = {},
   ) {
     this.store = store;
@@ -131,6 +134,7 @@ export class DaemonSearchStoreService {
     this.queryScheduler = new SearchQueryScheduler(searchExecution);
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
+    this.onnxExecutionPolicy = options.onnxExecutionPolicy;
     this.rankingTuning = normalizeRankingTuning(
       options.rankingTuning,
       options.settings ?? readOptsidianSettings(process.cwd(), options.env ?? process.env),
@@ -159,7 +163,7 @@ export class DaemonSearchStoreService {
         {
           texts: [queryText],
           inputKind: 'query',
-          provider: modelProviderPayloadForEmbeddingSet(densePin.embeddingSet),
+          provider: modelProviderPayloadForEmbeddingSet(densePin.embeddingSet, this.onnxExecutionPolicy),
         },
         {
           deadline: context.deadline,
@@ -937,11 +941,18 @@ function assertRetrieveProviderModel(payload: RetrieveRequestPayload, activeMode
   );
 }
 
-function modelProviderPayloadForEmbeddingSet(embeddingSet: DenseGenerationPin['embeddingSet']): ModelProviderPayload {
+function modelProviderPayloadForEmbeddingSet(
+  embeddingSet: DenseGenerationPin['embeddingSet'],
+  onnxExecutionPolicy: OnnxExecutionPolicy | undefined,
+): ModelProviderPayload {
   if (embeddingSet.recipe.provider.id === 'local-onnx') {
+    if (!onnxExecutionPolicy) {
+      throw new UsageError('Local ONNX query encoding requires a resolved ONNX execution policy');
+    }
     return {
       kind: 'local-onnx',
       model: embeddingSet.recipe.provider.model === 'multilingual-e5-small' ? 'multilingual-e5-small' : 'bge-m3',
+      executionPolicy: onnxExecutionPolicy,
     };
   }
   if (embeddingSet.recipe.provider.id === 'deterministic-hash') {
@@ -953,6 +964,8 @@ function modelProviderPayloadForEmbeddingSet(embeddingSet: DenseGenerationPin['e
   }
   throw new UsageError(`Unsupported embedding provider ${embeddingSet.recipe.provider.id}`);
 }
+
+export const modelProviderPayloadForEmbeddingSetForTests = modelProviderPayloadForEmbeddingSet;
 
 function filterMatchesByMinScore(matches: readonly SearchMatch[], minScore: number | undefined): SearchMatch[] {
   if (minScore === undefined || minScore <= 0) return [...matches];

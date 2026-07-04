@@ -292,6 +292,19 @@ function statusResult(owner, overrides = {}) {
   };
 }
 
+function heartbeatResult(owner, overrides = {}) {
+  return {
+    owner,
+    phase: 'ready',
+    protocolVersion: CURRENT_SEARCH_DAEMON_PROTOCOL_VERSION,
+    incarnationId: owner.incarnationId,
+    pulseSeq: 1,
+    progressSeq: 0,
+    updatedAt: owner.startedAt,
+    ...overrides,
+  };
+}
+
 function publishFakeOwner(registry, record, pid = record.pid || process.pid) {
   const current = registry.readOwner();
   const owner = {
@@ -2475,6 +2488,7 @@ test('AC1 stale incarnations reject work while status handshakes and client retr
     connect: async (record) => ({
       request: async (request) => {
         seen.push({ record, request });
+        if (request.method === 'Heartbeat') return heartbeatResult(record);
         if (request.method === 'Status') return statusResult(record);
         assert.equal(request.method, 'Search');
         searchAttempts += 1;
@@ -2504,7 +2518,7 @@ test('AC1 stale incarnations reject work while status handshakes and client retr
   assert.equal(result.snapshotId, 'snap-live');
   assert.deepEqual(
     seen.map(({ request }) => request.method),
-    ['Status', 'Search', 'Status', 'Search'],
+    ['Heartbeat', 'Search', 'Heartbeat', 'Search'],
   );
   assert.deepEqual(
     seen.filter(({ request }) => request.method === 'Search').map(({ request }) => request.incarnation),
@@ -2831,13 +2845,20 @@ test('AC1 protocol method coverage is split by query and control capability', as
   const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { createOwnerRecord, createOwnerRegistry, desiredOwnerIdentity, socketPathForOwner } =
     await import('../src/daemon/owner-registry.ts');
-  const { CONTROL_DAEMON_METHODS, QUERY_DAEMON_METHODS, SEARCH_DAEMON_PROTOCOL_VERSION } =
-    await import('../src/daemon/protocol.ts');
+  const {
+    CONTROL_DAEMON_METHODS,
+    QUERY_DAEMON_METHODS,
+    SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS,
+    SEARCH_DAEMON_PROTOCOL_VERSION,
+    SEARCH_DAEMON_PULSE_STALENESS_MS,
+    SEARCH_DAEMON_PULSE_TICK_MS,
+  } = await import('../src/daemon/protocol.ts');
 
-  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ['Retrieve', 'Search', 'Status', 'WaitReady']);
+  assert.deepEqual([...QUERY_DAEMON_METHODS].sort(), ['Heartbeat', 'Retrieve', 'Search', 'Status', 'WaitReady']);
   assert.deepEqual([...CONTROL_DAEMON_METHODS].sort(), [
     'Clear',
     'Compact',
+    'Heartbeat',
     'LoadVault',
     'Prune',
     'Rebuild',
@@ -2851,13 +2872,16 @@ test('AC1 protocol method coverage is split by query and control capability', as
     assert.equal(CONTROL_DAEMON_METHODS.includes(mutating), true);
   }
   assert.equal(Number.isInteger(SEARCH_DAEMON_PROTOCOL_VERSION), true);
-  assert.equal(SEARCH_DAEMON_PROTOCOL_VERSION, 4);
+  assert.equal(SEARCH_DAEMON_PROTOCOL_VERSION, 5);
+  assert.equal(SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS, 1000);
+  assert.equal(SEARCH_DAEMON_PULSE_STALENESS_MS, SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS);
+  assert.equal(SEARCH_DAEMON_PULSE_TICK_MS, 250);
 
   const runtimeDir = tempRoot();
   const desired = desiredOwnerIdentity(process.execPath);
   assert.equal(desired.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
   const socketPath = socketPathForOwner(runtimeDir, desired);
-  assert.match(socketPath, /optsidian-search-daemon-v4-/);
+  assert.match(socketPath, /optsidian-search-daemon-v5-/);
   assert.doesNotMatch(socketPath, /optsidian-search-daemon-query-/);
   assert.doesNotMatch(socketPath, /optsidian-search-daemon-control-/);
 
@@ -2880,6 +2904,321 @@ test('AC1 protocol method coverage is split by query and control capability', as
   assert.equal(requests.length > 0, true);
   assert.equal(requests[0].record.slot.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
   assert.equal(requests[0].request.protocolVersion, SEARCH_DAEMON_PROTOCOL_VERSION);
+});
+
+test('AC2 Heartbeat fast path bypasses profile status and request activity metrics', async () => {
+  const { createSearchDaemonIdleIsolationHarnessForTests } = await import('../src/daemon/server.ts');
+  const { SEARCH_DAEMON_PROTOCOL_VERSION } = await import('../src/daemon/protocol.ts');
+  let profileStatusCalls = 0;
+  let embedCloseCalls = 0;
+  const harness = createSearchDaemonIdleIsolationHarnessForTests({
+    idleMs: 60_000,
+    embedScheduler: {
+      cancel: () => {},
+      drain: async () => {},
+      close: async () => {
+        embedCloseCalls += 1;
+      },
+      laneStats: () => ({ runningLane: undefined, lanes: {}, activeLaneScopes: {}, querySingleFlights: 0 }),
+    },
+    profiles: {
+      status: async () => {
+        profileStatusCalls += 1;
+        return {};
+      },
+      listVaults: () => [],
+      cancel: () => {},
+      close: async () => {},
+    },
+  });
+
+  try {
+    const heartbeat = await harness.handle({
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: 'heartbeat-fast-path',
+      method: 'Heartbeat',
+      incarnation: harness.owner.incarnationId,
+      deadline: Date.now() + 1000,
+      payload: {},
+    });
+    assert.equal(heartbeat.phase, 'ready');
+    assert.equal(Number.isInteger(heartbeat.pulseSeq), true);
+    assert.equal(profileStatusCalls, 0);
+    assert.deepEqual(harness.metrics(), {
+      requests: 0,
+      failures: 0,
+      activeRequests: 0,
+      startedAt: harness.metrics().startedAt,
+    });
+
+    const status = await harness.handle({
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: 'status-accounted',
+      method: 'Status',
+      deadline: Date.now() + 1000,
+      payload: {},
+    });
+    assert.equal(status.metrics.requests, 1);
+    assert.equal(profileStatusCalls, 1);
+    assert.equal(harness.metrics().requests, 1);
+  } finally {
+    await harness.close();
+  }
+  assert.equal(embedCloseCalls, 1);
+});
+
+test('AC5 boot Heartbeat returns starting zero sequences and optional pre-publication incarnation', async () => {
+  const { handleBootRequestForTests } = await import('../src/daemon/server.ts');
+  const { createOwnerRecord, desiredOwnerIdentity, socketPathForOwner } =
+    await import('../src/daemon/owner-registry.ts');
+  const { SEARCH_DAEMON_PROTOCOL_VERSION } = await import('../src/daemon/protocol.ts');
+  const runtimeDir = tempRoot();
+  const desired = desiredOwnerIdentity(process.execPath);
+  const ownerSeed = createOwnerRecord(
+    desired,
+    socketPathForOwner(runtimeDir, desired, 'boot'),
+    0,
+    'pending',
+    process.pid,
+    '2026-01-01T00:00:00.000Z',
+  );
+  const heartbeat = await handleBootRequestForTests(
+    {
+      protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+      requestId: 'boot-heartbeat',
+      method: 'Heartbeat',
+      deadline: Date.now() + 1000,
+      payload: {},
+    },
+    ownerSeed,
+  );
+
+  assert.equal(heartbeat.phase, 'starting');
+  assert.equal(heartbeat.pulseSeq, 0);
+  assert.equal(heartbeat.progressSeq, 0);
+  assert.equal(heartbeat.updatedAt, ownerSeed.startedAt);
+
+  const realOwner = { ...ownerSeed, incarnationId: 'real-incarnation' };
+  await assert.rejects(
+    () =>
+      handleBootRequestForTests(
+        {
+          protocolVersion: SEARCH_DAEMON_PROTOCOL_VERSION,
+          requestId: 'boot-heartbeat-stale',
+          method: 'Heartbeat',
+          incarnation: 'wrong-incarnation',
+          deadline: Date.now() + 1000,
+          payload: {},
+        },
+        ownerSeed,
+        realOwner,
+      ),
+    (error) => {
+      assert.equal(error.code, 'STALE_INCARNATION');
+      return true;
+    },
+  );
+});
+
+test('AC2 draining pulse and binary-version mismatch verdicts route to replacement', async () => {
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createOwnerRecord, createOwnerRegistry, desiredOwnerIdentity, initialOwnerPulse, socketPathForOwner } =
+    await import('../src/daemon/owner-registry.ts');
+  const binaryPath = process.execPath;
+  const desired = desiredOwnerIdentity(binaryPath);
+
+  for (const scenario of ['draining', 'binary-mismatch']) {
+    const runtimeDir = tempRoot();
+    const registry = createOwnerRegistry({ runtimeDir, desired });
+    const owner = createOwnerRecord(
+      desired,
+      socketPathForOwner(runtimeDir, desired, scenario),
+      1,
+      `${scenario}-owner`,
+      process.pid,
+      new Date(0).toISOString(),
+    );
+    registry.writeOwner(scenario === 'binary-mismatch' ? { ...owner, binaryVersion: 'old-binary' } : owner);
+    if (scenario === 'draining') {
+      registry.writeOwnerPulse({ ...initialOwnerPulse(owner, 'draining'), updatedAt: new Date(10_000).toISOString() });
+    }
+    const healthKinds = [];
+    const client = createSearchDaemonClient({
+      registry,
+      binaryPath,
+      now: () => 10_000,
+      spawnDaemon(record, successorEnv) {
+        healthKinds.push(successorEnv.OPTSIDIAN_SEARCH_DAEMON_SUCCESSOR_HEALTH_KIND);
+        registry.writeOwner(createOwnerRecord(desired, record.socketPath, 2, record.incarnationId, process.pid));
+      },
+      connect(record) {
+        return {
+          async request(request) {
+            if (request.method === 'Heartbeat') return heartbeatResult(record);
+            assert.equal(request.method, 'Status');
+            return statusResult(record);
+          },
+          async close() {},
+        };
+      },
+    });
+
+    const status = await client.status({ deadlineMs: 1000 });
+    assert.notEqual(status.incarnationId, `${scenario}-owner`);
+    assert.deepEqual(healthKinds, [scenario === 'draining' ? 'draining' : 'identity-mismatch']);
+  }
+});
+
+test('AC5 detector loci distinguish post-ready wedge, pre-ready grace, and crash-loop budget', async () => {
+  const { createOwnerRecord, createOwnerRegistry, desiredOwnerIdentity, socketPathForOwner, tryClaimSuccessor } =
+    await import('../src/daemon/owner-registry.ts');
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { createProcessToken } = await import('../src/core/lifecycle/process-token.ts');
+  const binaryPath = process.execPath;
+  const desired = desiredOwnerIdentity(binaryPath);
+  const nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+
+  const postReadyRuntime = tempRoot();
+  const postReadyRegistry = createOwnerRegistry({ runtimeDir: postReadyRuntime, desired });
+  const postReadyOwner = createOwnerRecord(
+    desired,
+    socketPathForOwner(postReadyRuntime, desired, 'post-ready'),
+    1,
+    'post-ready-wedged',
+    process.pid,
+    new Date(nowMs - 60_000).toISOString(),
+  );
+  postReadyRegistry.writeOwner(postReadyOwner);
+  const postReadyHealth = [];
+  const postReadyClient = createSearchDaemonClient({
+    registry: postReadyRegistry,
+    binaryPath,
+    now: () => nowMs,
+    spawnDaemon(record, successorEnv) {
+      postReadyHealth.push(successorEnv.OPTSIDIAN_SEARCH_DAEMON_SUCCESSOR_HEALTH_KIND);
+      postReadyRegistry.writeOwner(createOwnerRecord(desired, record.socketPath, 2, record.incarnationId, process.pid));
+    },
+    connect(record) {
+      return {
+        async request(request) {
+          if (record.incarnationId === postReadyOwner.incarnationId) {
+            assert.equal(request.method, 'Heartbeat');
+            throw Object.assign(new Error('main loop blocked after ready'), { code: 'ETIMEDOUT' });
+          }
+          if (request.method === 'Heartbeat') return heartbeatResult(record);
+          assert.equal(request.method, 'Status');
+          return statusResult(record);
+        },
+        async close() {},
+      };
+    },
+  });
+  await postReadyClient.status({ deadlineMs: 1000 });
+  assert.deepEqual(postReadyHealth, ['wedged']);
+
+  const preReadyRuntime = tempRoot();
+  const preReadyRegistry = createOwnerRegistry({ runtimeDir: preReadyRuntime, desired });
+  const preReadyOwner = createOwnerRecord(
+    desired,
+    socketPathForOwner(preReadyRuntime, desired, 'pre-ready'),
+    1,
+    'pre-ready-starting',
+    process.pid,
+    new Date(nowMs).toISOString(),
+  );
+  preReadyRegistry.writeOwner(preReadyOwner);
+  const preReadyAttempt = await tryClaimSuccessor(
+    preReadyRegistry,
+    preReadyOwner,
+    { kind: 'wedged', observedAtMs: nowMs, startupGraceExpired: true },
+    {
+      desired,
+      intendedOwner: createOwnerRecord(
+        desired,
+        socketPathForOwner(preReadyRuntime, desired, 'pre-ready-successor'),
+        2,
+        'pre-ready-successor',
+        process.pid,
+      ),
+      deadlineMs: nowMs + 1000,
+      now: () => nowMs,
+      env: { ...process.env, OPTSIDIAN_SEARCH_DAEMON_STARTUP_GRACE_MS: '10000' },
+      claimId: 'pre-ready-grace',
+      token: createProcessToken(process.pid),
+      pollMs: 0,
+    },
+  );
+  assert.deepEqual(
+    { kind: preReadyAttempt.kind, reason: preReadyAttempt.reason },
+    { kind: 'wait', reason: 'not-needed' },
+  );
+
+  const crashRuntime = tempRoot();
+  const crashRegistry = createOwnerRegistry({ runtimeDir: crashRuntime, desired });
+  const crashedOwner = createOwnerRecord(
+    desired,
+    socketPathForOwner(crashRuntime, desired, 'crash-loop'),
+    1,
+    'crash-loop-owner',
+    process.pid,
+    new Date(0).toISOString(),
+  );
+  crashRegistry.writeOwner(crashedOwner);
+  const churnEnv = {
+    ...process.env,
+    OPTSIDIAN_SEARCH_DAEMON_CHURN_MAX_FAILURES: '3',
+    OPTSIDIAN_SEARCH_DAEMON_CHURN_WINDOW_MS: '60000',
+    OPTSIDIAN_SEARCH_DAEMON_CHURN_BACKOFF_BASE_MS: '0',
+    OPTSIDIAN_SEARCH_DAEMON_CHURN_BACKOFF_MAX_MS: '0',
+  };
+  for (const claimId of ['crash-a', 'crash-b', 'crash-c']) {
+    const result = await tryClaimSuccessor(
+      crashRegistry,
+      crashedOwner,
+      { kind: 'wedged', observedAtMs: nowMs, startupGraceExpired: true },
+      {
+        desired,
+        intendedOwner: createOwnerRecord(
+          desired,
+          socketPathForOwner(crashRuntime, desired, claimId),
+          2,
+          claimId,
+          process.pid,
+        ),
+        deadlineMs: nowMs + 1000,
+        now: () => nowMs,
+        env: churnEnv,
+        claimId,
+        token: createProcessToken(process.pid),
+        pollMs: 0,
+      },
+    );
+    assert.equal(result.kind, 'claimed');
+    result.handle.markSpawnFailure(new Error('boot crashed'));
+  }
+  const exhausted = await tryClaimSuccessor(
+    crashRegistry,
+    crashedOwner,
+    { kind: 'wedged', observedAtMs: nowMs, startupGraceExpired: true },
+    {
+      desired,
+      intendedOwner: createOwnerRecord(
+        desired,
+        socketPathForOwner(crashRuntime, desired, 'crash-d'),
+        2,
+        'crash-d',
+        process.pid,
+      ),
+      deadlineMs: nowMs + 1000,
+      now: () => nowMs,
+      env: churnEnv,
+      claimId: 'crash-d',
+      token: createProcessToken(process.pid),
+      pollMs: 0,
+    },
+  );
+  assert.equal(exhausted.kind, 'unavailable');
+  assert.equal(exhausted.error.code, 'SEARCH_DAEMON_UNAVAILABLE');
 });
 
 test('lifecycle deadlines scale with vault markdown count and bytes', async () => {
@@ -2908,6 +3247,9 @@ test('lifecycle deadlines scale with vault markdown count and bytes', async () =
     connect: async (record) => ({
       request: async (request) => {
         requests.push(request);
+        if (request.method === 'Heartbeat') {
+          return heartbeatResult(record);
+        }
         if (request.method === 'Status') {
           return statusResult(record);
         }
@@ -2970,6 +3312,9 @@ test('daemon client sends prune as a global cache request', async () => {
     connect: async (record) => ({
       request: async (request) => {
         requests.push(request);
+        if (request.method === 'Heartbeat') {
+          return heartbeatResult(record);
+        }
         if (request.method === 'Status') {
           return statusResult(record);
         }
@@ -3365,8 +3710,7 @@ test('AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   const calls = [];
   const spawns = [];
   const responses = [
-    { method: 'Status', result: { ready: false, phase: 'starting' } },
-    { method: 'WaitReady', result: { ready: true, phase: 'ready' } },
+    { method: 'Heartbeat', result: { phase: 'ready' } },
     {
       method: 'Search',
       result: {
@@ -3395,9 +3739,7 @@ test('AC1 shared search-daemon client starts daemon, waits ready, and has no dir
         const next = responses.shift();
         assert.equal(request.method, next.method);
         if (next.method === 'Search') assert.equal(request.incarnation, spawns[0].incarnationId);
-        return request.method === 'Status' || request.method === 'WaitReady'
-          ? statusResult(record, next.result)
-          : next.result;
+        return request.method === 'Heartbeat' ? heartbeatResult(record, next.result) : next.result;
       },
       close: async () => {},
     }),
@@ -3408,7 +3750,7 @@ test('AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   assert.equal(spawns.length, 1);
   assert.deepEqual(
     calls.map((call) => call.method),
-    ['Status', 'WaitReady', 'Search'],
+    ['Heartbeat', 'Search'],
   );
   assert.equal(result.snapshotId, 'snap-a');
   assert.deepEqual(
@@ -3438,7 +3780,7 @@ test('AC1 shared search-daemon client starts daemon, waits ready, and has no dir
   );
 });
 
-test('daemon client sends incarnation on work requests and omits nonce from v4', async () => {
+test('daemon client sends incarnation on Heartbeat and work requests under protocol v5', async () => {
   const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { createOwnerRegistry, desiredOwnerIdentity } = await import('../src/daemon/owner-registry.ts');
   const runtimeDir = tempRoot();
@@ -3456,6 +3798,9 @@ test('daemon client sends incarnation on work requests and omits nonce from v4',
     connect: async (record) => ({
       request: async (request) => {
         seen.push(request);
+        if (request.method === 'Heartbeat') {
+          return heartbeatResult(record);
+        }
         if (request.method === 'Status') {
           return statusResult(record);
         }
@@ -3480,9 +3825,9 @@ test('daemon client sends incarnation on work requests and omits nonce from v4',
   await client.search({ vault: runtimeDir, query: 'alpha', limit: 1 });
   assert.deepEqual(
     seen.map((request) => request.method),
-    ['Status', 'Search'],
+    ['Heartbeat', 'Search'],
   );
-  assert.equal('incarnation' in seen[0], false);
+  assert.equal(seen[0].incarnation, published[0].incarnationId);
   assert.equal(seen[1].incarnation, published[0].incarnationId);
 });
 
@@ -3505,6 +3850,9 @@ test('daemon client sends runtime profile per request even when owner is reused'
   const registry = createOwnerRegistry({ runtimeDir, desired: desiredOwnerIdentity(binaryPath) });
   const connect = async (record) => ({
     request: async (request) => {
+      if (request.method === 'Heartbeat') {
+        return heartbeatResult(record);
+      }
       if (request.method === 'Status') {
         return statusResult(record);
       }
@@ -3816,7 +4164,7 @@ test('runtime profile folds partitionBits into the lexical store identity from o
   );
 });
 
-test('daemon readiness handshake publishes protocol-v4 tenancy status over RPC integration', async () => {
+test('daemon readiness handshake publishes protocol-v5 tenancy status over RPC integration', async () => {
   const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const runtimeDir = tempRoot();
   const env = {
@@ -3852,7 +4200,7 @@ test('daemon readiness handshake publishes protocol-v4 tenancy status over RPC i
   }
 });
 
-test('daemon Status returns one protocol-v4 shape without nonce', async () => {
+test('daemon Status returns one protocol-v5 shape without nonce', async () => {
   const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { encodeFrame } = await import('../src/daemon/protocol.ts');
   const runtimeDir = tempRoot();

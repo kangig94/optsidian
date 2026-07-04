@@ -39,6 +39,10 @@ export type EmbeddingRecipeIdentity = {
     opset: number;
     runtime: { name: string; version: string };
   };
+  executionPolicy?: {
+    intraOpNumThreads: number;
+    interOpNumThreads: number;
+  };
   quantization?: string;
   dtype?: string;
   dim?: number;
@@ -187,6 +191,12 @@ export function embeddingSpaceIdForRecipe(recipe: EmbeddingRecipeIdentity): Embe
           }
         : null,
       onnx: recipe.onnx ?? null,
+      executionPolicy: recipe.executionPolicy
+        ? {
+            intraOpNumThreads: recipe.executionPolicy.intraOpNumThreads,
+            interOpNumThreads: recipe.executionPolicy.interOpNumThreads,
+          }
+        : null,
       quantization: recipe.quantization ?? null,
       dtype: recipe.dtype ?? null,
       maxTokens: recipe.maxTokens ?? null,

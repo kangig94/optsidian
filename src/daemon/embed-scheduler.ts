@@ -1,5 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import os from 'node:os';
 import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
+import type { OnnxExecutionPolicy } from '../core/search/dense/local-onnx.js';
 import {
   SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   type ModelEncodeWorkerPayload,
@@ -25,10 +27,12 @@ export type EmbedSchedulerOptions = {
   env?: NodeJS.ProcessEnv;
   settings?: OptsidianSettings;
   embedding?: EmbeddingWorkerPool;
+  onnxExecutionPolicy?: OnnxExecutionPolicy;
   ownsEmbedding?: boolean;
   vectorManager?: VectorGenerationManager;
   vectorManagerOptions?: VectorGenerationPoolOptions;
   ownsVectorManager?: boolean;
+  modelLoadBarrier?: () => Promise<void>;
   now?: () => number;
 };
 
@@ -60,13 +64,17 @@ type QueryEncodeFlight = {
 
 const LANE_ORDER: readonly EmbedSchedulerLane[] = ['query', 'save', 'refresh', 'rebuild'];
 const MAX_CANCELLED_IDS = 4096;
+const OPTSIDIAN_SEARCH_ONNX_INTRA_OP_THREADS = 'OPTSIDIAN_SEARCH_ONNX_INTRA_OP_THREADS';
+const OPTSIDIAN_SEARCH_ONNX_OPENMP = 'OPTSIDIAN_SEARCH_ONNX_OPENMP';
 
 export class EmbedScheduler {
   readonly embedding: EmbeddingWorkerPool;
+  readonly onnxExecutionPolicy: OnnxExecutionPolicy;
   readonly vectorManager: VectorGenerationManager;
 
   private readonly ownsEmbedding: boolean;
   private readonly ownsVectorManager: boolean;
+  private readonly modelLoadBarrier: (() => Promise<void>) | undefined;
   private readonly now: () => number;
   private readonly activeLaneContext = new AsyncLocalStorage<EmbedSchedulerLane>();
   private readonly lanes: Record<EmbedSchedulerLane, Array<SchedulerJob<unknown>>> = {
@@ -95,25 +103,30 @@ export class EmbedScheduler {
   private nextQueryFlightId = 1;
   private closing = false;
   private closed = false;
+  private modelLoadBarrierPromise: Promise<void> | undefined;
   private drainWaiters: Array<() => void> = [];
 
   constructor(options: EmbedSchedulerOptions = {}) {
-    const env = options.env ?? process.env;
+    const baseEnv = options.env ?? process.env;
+    this.onnxExecutionPolicy = options.onnxExecutionPolicy ?? resolveDaemonOnnxExecutionPolicy(baseEnv);
+    const env = envForDaemonOnnxExecutionPolicy(baseEnv, this.onnxExecutionPolicy);
     const settings = options.settings ?? readOptsidianSettings(process.cwd(), env);
     this.embedding = options.embedding ?? createEmbeddingWorkerPool(env, settings);
     this.vectorManager = options.vectorManager ?? new VectorGenerationManager(options.vectorManagerOptions);
     this.ownsEmbedding = options.ownsEmbedding ?? options.embedding === undefined;
     this.ownsVectorManager = options.ownsVectorManager ?? true;
+    this.modelLoadBarrier = options.modelLoadBarrier;
     this.now = options.now ?? Date.now;
   }
 
   // Model execution is intentionally process-size-1. Same-model profiles get lane fairness here;
   // different-model profiles serialize in worker-entry by evicting and reloading the resident model.
-  encode(
+  async encode(
     payload: ModelEncodeWorkerPayload,
     options: WorkerPoolRunOptions,
     lane: EmbedSchedulerLane = payload.inputKind === 'query' ? 'query' : 'rebuild',
   ): Promise<ModelEncodeWorkerResult> {
+    await this.waitForModelLoadBarrier();
     if (lane === 'query' && payload.inputKind === 'query') {
       const key = queryEncodeSingleFlightKey(payload);
       const existing = this.querySingleFlights.get(key);
@@ -172,6 +185,14 @@ export class EmbedScheduler {
         ),
       options,
     );
+  }
+
+  private waitForModelLoadBarrier(): Promise<void> {
+    if (!this.modelLoadBarrier) return Promise.resolve();
+    this.modelLoadBarrierPromise ??= Promise.resolve()
+      .then(() => this.modelLoadBarrier?.())
+      .then(() => undefined);
+    return this.modelLoadBarrierPromise;
   }
 
   run<T>(lane: EmbedSchedulerLane, task: () => Promise<T>, options: WorkerPoolRunOptions): Promise<T> {
@@ -423,6 +444,43 @@ export class EmbedScheduler {
 
 export function createEmbedScheduler(options: EmbedSchedulerOptions = {}): EmbedScheduler {
   return new EmbedScheduler(options);
+}
+
+function resolveDaemonOnnxExecutionPolicy(env: NodeJS.ProcessEnv): OnnxExecutionPolicy {
+  const availableCores = os.availableParallelism?.() ?? os.cpus().length;
+  const cores = Math.max(1, Math.floor(availableCores || 1));
+  const override = envPositiveInteger(env[OPTSIDIAN_SEARCH_ONNX_INTRA_OP_THREADS]);
+  return {
+    intraOpNumThreads: Math.max(1, override ?? cores - 1),
+    interOpNumThreads: 1,
+  };
+}
+
+export function envForDaemonOnnxExecutionPolicy(
+  env: NodeJS.ProcessEnv,
+  executionPolicy: OnnxExecutionPolicy,
+): NodeJS.ProcessEnv {
+  if (!onnxOpenMpThreadEnvEnabled(env)) return env;
+  return {
+    ...env,
+    OMP_NUM_THREADS: String(executionPolicy.intraOpNumThreads),
+  };
+}
+
+function onnxOpenMpThreadEnvEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env.OMP_NUM_THREADS !== undefined || envFlagEnabled(env[OPTSIDIAN_SEARCH_ONNX_OPENMP]);
+}
+
+function envFlagEnabled(raw: string | undefined): boolean {
+  if (!raw) return false;
+  return /^(1|true|yes|on)$/iu.test(raw.trim());
+}
+
+function envPositiveInteger(raw: string | undefined): number | undefined {
+  if (!raw || !/^\d+$/u.test(raw.trim())) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) return undefined;
+  return parsed;
 }
 
 function queryEncodeSingleFlightKey(payload: ModelEncodeWorkerPayload): string {

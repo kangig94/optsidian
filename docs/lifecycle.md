@@ -13,6 +13,49 @@ version, ranking tuning hash, analyzer identity)`; latency may vary, results may
 and _lifecycle_ half — the resident daemon, the load/unload of the model, and the build/publish/GC of
 caches — none of which may change a served result.
 
+## Current lifecycle contract (protocol v5)
+
+Protocol v5 separates liveness from search capacity. `Heartbeat` is a control-plane fast path that
+is answered before scheduler/profile/pool dispatch and before request activity accounting. A healthy
+daemon may be slow or starved on `Status`, search, or worker warmup and still be **ALIVE** when the
+main loop answers `Heartbeat` or its `OwnerPulse` sidecar advances for the observed
+`epoch + incarnationId + socket`.
+
+Client verdicts use this invariant:
+
+- **ALIVE**: matching owner identity and `phase` is `ready`, or `phase` is `starting` inside the
+  startup grace, or a matching fresh `OwnerPulse` proves forward progress.
+- **WEDGED**: Heartbeat is silent, the matching pulse is stale, and startup grace has expired.
+- **Replace**: WEDGED, `phase:"draining"`, protocol/binary identity mismatch, or a supersession
+  proof that the old owner cannot serve the desired binary.
+
+The heartbeat deadline `H` is 1000 ms. The pulse staleness window `P` defaults to `H` and must not be
+raised independently because WEDGED detection is bounded by that window. The pulse tick is 250 ms and
+also advances on index progress. `Heartbeat` is intentionally not user activity: a monitoring loop
+does not reset the idle timer and does not increment request metrics.
+
+Supersession is publication-lease based. The parent client acquires the successor claim, spawns the
+child with the claim id, and the child conditionally rebinds that claim to its own process token
+before it may publish ownership. Owner publication and the initial `OwnerPulse` are one durable step,
+and the claim is released only after that step. If another process reclaims and recreates the claim
+between the child's gate-read and rebind write, the claim-id CAS fails and the child exits before
+loading a model.
+
+Before a successor may load the embedding model, it must prove predecessor teardown for any
+same-protocol WEDGED owner or cross-protocol upgrade owner. Proof is either process identity death
+(`pid + authoritative startId`) or a fresh reaped marker scoped to the predecessor
+`incarnation + pid + epoch` and this supersession id. Owner/socket disappearance alone is not proof:
+an old daemon can accept shutdown, remove RPC files, and still keep the model resident while it drains.
+If proof does not arrive, the successor uses bounded termination: `SIGTERM`, wait for proof,
+`SIGKILL`, wait again. Immediately before signalling a same-protocol WEDGED predecessor, the successor
+rechecks Heartbeat/pulse and aborts if the predecessor recovered.
+
+Dense model CPU use is also part of the lifecycle contract. The daemon resolves one ONNX execution
+policy at startup (`intra_op = max(1, cores - 1)`, `inter_op = 1`, override
+`OPTSIDIAN_SEARCH_ONNX_INTRA_OP_THREADS`) so one core remains available for the event loop, Heartbeat,
+pulse writes, and teardown. When OpenMP is enabled or already configured, `OMP_NUM_THREADS` is set to
+the same intra-op value.
+
 ---
 
 ## 1. Daemon lifecycle (birth & death)
@@ -26,7 +69,7 @@ in-process search fallback: if the daemon cannot be reached, the client throws
 `ensureReady()` is a lock-free verdict loop:
 
 1. Read the daemon-authored tenancy record from the registry. If it matches the desired slot and the
-   recorded per-incarnation socket answers `Status`, reuse it.
+   recorded per-incarnation socket answers `Heartbeat` or has a fresh matching `OwnerPulse`, reuse it.
 2. If no usable owner exists, spawn `node <bin> __search-daemon` with a fresh per-incarnation socket
    nonce. The client does **not** write the owner record and does not take a directory lock; the daemon
    binds its own unique socket and then writes the record. Ownership is arbitrated by the append-only
@@ -50,13 +93,14 @@ The owner-record _file_ name is still deterministic per slot, so clients find it
 
 The single dispatcher preserves the method-level capability split:
 
-- **Query methods** (`QUERY_DAEMON_METHODS`): `Status`, `WaitReady`, `Search`, `Retrieve`.
-- **Control methods** (`CONTROL_DAEMON_METHODS`): `Status`, `WaitReady`, `LoadVault`, `Rebuild`,
+- **Query methods** (`QUERY_DAEMON_METHODS`): `Status`, `WaitReady`, `Heartbeat`, `Search`, `Retrieve`.
+- **Control methods** (`CONTROL_DAEMON_METHODS`): `Status`, `WaitReady`, `Heartbeat`, `LoadVault`, `Rebuild`,
   `Refresh`, `Compact`, `Clear`, `Prune`, `Shutdown`.
 
 Every method except `Status` and `WaitReady` must carry the current `incarnation` value. A mismatched
-incarnation is a retryable `STALE_INCARNATION`. The protocol version is
-`SEARCH_DAEMON_PROTOCOL_VERSION = 4`, and a genuine protocol mismatch is a semantic `BAD_REQUEST`.
+incarnation is a retryable `STALE_INCARNATION`. `Heartbeat` also carries the observed incarnation so
+a stale socket cannot prove the wrong daemon alive. The protocol version is
+`SEARCH_DAEMON_PROTOCOL_VERSION = 5`, and a genuine protocol mismatch is a semantic `BAD_REQUEST`.
 
 The **ready handshake**: the daemon binds first, then writes the tenancy record. The record is therefore
 never observable until the socket is established. During construction, `Status` returns
@@ -153,7 +197,10 @@ a server-checked deadline.
 
 | Name                             | Value                                                      | Source                                                                                        |
 | -------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `SEARCH_DAEMON_PROTOCOL_VERSION` | `4`                                                        | `protocol.ts`                                                                                 |
+| `SEARCH_DAEMON_PROTOCOL_VERSION` | `5`                                                        | `protocol.ts`                                                                                 |
+| Heartbeat deadline `H`           | `1000` ms                                                  | `SEARCH_DAEMON_HEARTBEAT_DEADLINE_MS`, `protocol.ts`                                          |
+| Pulse staleness `P`              | `1000` ms                                                  | `SEARCH_DAEMON_PULSE_STALENESS_MS`, `protocol.ts`                                             |
+| Pulse tick                       | `250` ms                                                   | `SEARCH_DAEMON_PULSE_TICK_MS`, `protocol.ts`                                                  |
 | Ready wait timeout               | `15000` ms                                                 | `SEARCH_DAEMON_DEFAULT_READY_TIMEOUT_MS`, `protocol.ts`                                       |
 | Daemon idle timeout              | `6 hours` by default; armed after startup and each request | `daemonIdleMs`, `SearchDaemon.initialize`, `SearchDaemon.handleRequest`, `SearchDaemon.drain` |
 | Incarnation id                   | random per daemon bind winner                              | `randomIncarnationId`, `owner-registry.ts`                                                    |

@@ -9,6 +9,7 @@ import type { DaemonSnapshotStore, SnapshotDirtyMark } from './search-store/snap
 import { SearchCacheCatalog } from './search-store/cache-catalog.js';
 import {
   createEmbedScheduler,
+  envForDaemonOnnxExecutionPolicy,
   type EmbedScheduler,
   type EmbedSchedulerLaneStats,
   type VectorGenerationManager,
@@ -148,14 +149,16 @@ export class ProfileRuntime {
   ): Promise<ProfileRuntime> {
     const normalized = normalizeSearchRuntimeProfile(profile);
     const profileHash = searchRuntimeProfileHash(normalized);
-    const env = envForSearchRuntimeProfile(normalized, baseEnv);
+    const profileEnv = envForSearchRuntimeProfile(normalized, baseEnv);
+    const onnxExecutionPolicy = embedScheduler.onnxExecutionPolicy;
+    const env = envForDaemonOnnxExecutionPolicy(profileEnv, onnxExecutionPolicy);
     const settings = settingsForSearchRuntimeProfile(normalized);
     const pools = await createDaemonPools(env, settings, { embedding: embedScheduler.embedding });
     const vectorPool = embedScheduler.vectorManager;
     const embeddingProvider =
       normalized.embedding.provider === 'deterministic-hash'
         ? new DeterministicHashProvider()
-        : createLocalOnnxProviderFromConfig(settings, env);
+        : createLocalOnnxProviderFromConfig(settings, env, { executionPolicy: onnxExecutionPolicy });
     const providerPayload =
       normalized.embedding.provider === 'deterministic-hash'
         ? {
@@ -166,6 +169,7 @@ export class ProfileRuntime {
         : {
             kind: 'local-onnx' as const,
             model: normalized.embedding.model,
+            executionPolicy: onnxExecutionPolicy,
           };
     const snapshotStore = createDaemonSnapshotStore({
       env,
@@ -220,6 +224,7 @@ export class ProfileRuntime {
         searchSettings: normalized.index,
         settings,
         env,
+        onnxExecutionPolicy,
       },
     );
     return new ProfileRuntime(normalized, pools, vectorPool, snapshotStore, searchStore, embedScheduler, options);

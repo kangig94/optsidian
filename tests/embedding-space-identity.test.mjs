@@ -9,6 +9,10 @@ import {
   embeddingRecipeFreshnessId,
   embeddingSpaceIdForRecipe,
 } from '../src/core/search/dense/embedding-set.ts';
+import { LocalOnnxProvider } from '../src/core/search/dense/local-onnx.ts';
+import { corpusSnapshotIdFromManifest } from '../src/core/search/segments/canonical.ts';
+import { snapshotIdentityTupleForAnalyzerIdentity } from '../src/daemon/search-store/builder.ts';
+import { denseUsabilityForRecordsForTests } from '../src/daemon/search-store/snapshot-store.ts';
 import { SNAPSHOT_PERSISTENCE_SCHEMA } from '../src/daemon/search-store/types.ts';
 import { computeRetrievalSnapshotId } from '../src/daemon/search-store/snapshot-store.ts';
 import { vectorGenerationDir, vectorStoreCachePaths } from '../src/daemon/vector-store/cache-paths.ts';
@@ -236,4 +240,69 @@ test('AC3 legacy vector generation metadata without embeddingSpaceId still loads
   assert.ok(loaded);
   assert.equal(loaded.embeddingSpaceId, undefined);
   assert.equal(loaded.embeddingRecipeFreshnessId, undefined);
+});
+
+test('AC9 no-variance branch keeps ONNX execution policy out of default recipe identity', () => {
+  const policyA = { intraOpNumThreads: 1, interOpNumThreads: 1 };
+  const policyB = { intraOpNumThreads: 4, interOpNumThreads: 1 };
+  const providerA = new LocalOnnxProvider({ executionPolicy: policyA });
+  const providerB = new LocalOnnxProvider({ executionPolicy: policyB });
+
+  assert.equal(providerA.recipeIdentity.executionPolicy, undefined);
+  assert.equal(providerB.recipeIdentity.executionPolicy, undefined);
+  assert.equal(
+    embeddingSpaceIdForRecipe(providerA.recipeIdentity),
+    embeddingSpaceIdForRecipe(providerB.recipeIdentity),
+  );
+});
+
+test('AC9 variance branch policy fold changes embeddingSpaceId and disables dense carry-forward', () => {
+  const base = baseRecipe();
+  const preCapRecipe = clone(base);
+  const cappedRecipe = clone(base);
+  cappedRecipe.executionPolicy = { intraOpNumThreads: 3, interOpNumThreads: 1 };
+
+  const preCapSpace = embeddingSpaceIdForRecipe(preCapRecipe);
+  const cappedSpace = embeddingSpaceIdForRecipe(cappedRecipe);
+  assert.notEqual(cappedSpace, preCapSpace);
+
+  const liveDocuments = new Map([
+    ['doc-a', { documentId: 'doc-a', contentHash: 'content-a' }],
+    ['doc-b', { documentId: 'doc-b', contentHash: 'content-b' }],
+  ]);
+  const records = new Map([
+    ['doc-a', { contentHash: 'content-a' }],
+    ['doc-b', { contentHash: 'content-b' }],
+  ]);
+  const usability = denseUsabilityForRecordsForTests(liveDocuments, records, preCapSpace === cappedSpace);
+  assert.equal(usability.spaceMatch, false);
+  assert.deepEqual([...usability.usableDocumentIds], []);
+  assert.deepEqual([...usability.pendingDocumentIds].sort(), ['doc-a', 'doc-b']);
+});
+
+test('lexical corpusSnapshotId changes when INDEX_BUILD_VERSION changes', () => {
+  const identityTuple = snapshotIdentityTupleForAnalyzerIdentity({
+    name: 'test-analyzer',
+    version: '1',
+    node: 'test',
+  });
+  const manifest = {
+    identityTuple,
+    liveDocumentManifestHash: 'live-documents',
+    tombstoneHash: 'tombstones',
+    bm25StatsSchemaId: 1,
+    corpusStats: [],
+    bm25GlobalStatsRows: [],
+    bm25GlobalStatsHash: 'bm25',
+    partitions: [],
+  };
+  const bumped = {
+    ...manifest,
+    identityTuple: {
+      ...identityTuple,
+      buildVersion: `${identityTuple.buildVersion}+next`,
+    },
+  };
+
+  assert.notEqual(corpusSnapshotIdFromManifest(bumped), corpusSnapshotIdFromManifest(manifest));
 });
