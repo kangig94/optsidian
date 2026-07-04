@@ -75,12 +75,12 @@ request completes. When the timer fires, it runs the same `drain("draining")` pa
 The daemon multiplexes **profile runtimes** keyed by a hash of the `SearchRuntimeProfile` (analyzer
 mode, ngram, embedding provider/model, ranking, worker counts, caps —
 `runtime-profile.ts:13-56`, `searchRuntimeProfileHash` `:179-181`). `ProfileManager`
-(`profile-manager.ts:226-243`) lazily creates one `ProfileRuntime` per distinct profile
-(`ProfileRuntime.create`, `profile-manager.ts:101-153`) — each with profile-scoped analyzer/search
-resources and a search store, plus leases on the process-scoped `EmbedScheduler` and
-`VectorGenerationManager`. Profile runtimes remain resident while the daemon is alive and are torn down
-by `ProfileManager.close()` during daemon shutdown (`profile-manager.ts:329-334`). A single default
-profile is the norm; a distinct `profile` in the request payload spins up a second resident runtime.
+(`ProfileManager.entryFor`) lazily creates one `ProfileRuntime` per distinct profile
+(`ProfileRuntime.create`) — each with profile-scoped analyzer/search resources and a search store, plus
+leases on the process-scoped `EmbedScheduler` and `VectorGenerationManager`. Profile runtimes remain
+resident while the daemon is alive and are torn down by `ProfileManager.close()` during daemon shutdown. A
+single default profile is the norm; a distinct `profile` in the request payload spins up a second resident
+runtime.
 
 ### Explicit shutdown
 
@@ -139,7 +139,7 @@ demand and unloads on idle. The daemon now creates one process-scoped `EmbedSche
 startup (`server.ts:159-163`) and passes it into `ProfileManager`; the scheduler owns the embedding
 worker pool and one `VectorGenerationManager` (`embed-scheduler.ts:57-100`). Profile runtimes lease
 those process owners rather than constructing their own vector/model owners
-(`profile-manager.ts:101-153`), while still owning their profile-specific analyzer/search resources.
+(`ProfileRuntime.create`), while still owning their profile-specific analyzer/search resources.
 
 The model itself still lives inside the **embedding worker** (`worker-entry.ts`, `kind:
 "embedding"`), which owns a single module-level `ModelSessionLifecycle` keyed by a stable provider key
@@ -159,9 +159,8 @@ The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` -> `e
   `resolveRetrieveOriginVector` returns without calling `encodeRetrieveQueryVector`
   (`service.ts:699-716`).
 - **Document embed** during retrieval generation build — `createWorkerEmbeddingSetBuilder` batches
-  document dense text through the scheduler in 32-document slices (`snapshot-store.ts:334,
-1883-1991`). Load/rebuild/refresh use their corresponding lanes, and save-on-write uses the `save`
-  lane through `publishSaveSnapshot` (`snapshot-store.ts:456-461`).
+  document dense text through the scheduler in 32-document slices. Load/rebuild/refresh use their
+  corresponding lanes, and save-on-write uses the `save` lane through `publishSaveSnapshot`.
 
 **`origin=note`, `origin=pair`, and `origin=global` do NOT load the model.** They resolve source text
 from the pinned lexical corpus, then use stored vectors from the attached dense generation
@@ -251,7 +250,7 @@ through one socket dispatcher.
 `executeSearch` (`service.ts:350-359`):
 
 1. **Pin** the active corpus snapshot: `store.pin(vault, snapshotId?, ...)`
-   (`snapshot-store.ts:517-537`) — ensures an active snapshot exists (building it if needed via
+   (`DaemonSnapshotStore.pin`) — ensures an active snapshot exists (building it if needed via
    `ensureActiveSnapshot`), loads it, `refCount += 1`, adds a `pinToken`.
 2. Analyze the query once (latency analyzer pool or inline analyzer, cached by analyzer identity + raw
    query + settings hash; `queryAnalysis`, `service.ts:533-579`).
@@ -259,7 +258,7 @@ through one socket dispatcher.
    (`service.ts:361-418`), which fans shard tasks onto the search-execution pool.
 4. **Release** the pin in `finally` (`service.ts:356-358`). Release is **refcount-only** — it deletes
    the pin token and decrements `refCount`; no file deletion or GC happens on the query path
-   (`snapshot-store.ts:869-877`).
+   (`DaemonSnapshotStore.release`).
 
 A metadata-only search (tag filter, no query text) skips positional retrieval and scans document
 metadata (`executeMetadataSearchFromSnapshotHandle`, `service.ts:323-331`).
@@ -385,6 +384,21 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
 - ONNX embedding model + tokenizer artifacts: under the same cache root, fetched from Hugging Face
   (`local-onnx.ts` / `dense/artifacts.ts:466`).
 
+### Publisher lane
+
+`VaultPublisher` is the daemon's single in-process appender for edition publication. It wraps
+`EditionLedger` and `FrontierJournal` with a serial, coalescing `LevelReconciler` structural lane
+(`structuralReconciler` -> `VaultPublisher.actStructuralLane`), and production build outputs append
+through `VaultPublisher.commitBuildOutput` -> `EditionLedger.commit`. Build intents are `rebuild`,
+`refresh`, `save`, and `dense-publication`; barrier intents are `dirty-frontier`, `diagnostic-frontier`,
+and `clear`. Consecutive build intents coalesce only within the same `buildLaneForIntent` group:
+`rebuild`/`refresh`/`save` are lexical, while `dense-publication` is dense.
+
+Dense publication is a distinct sequential same-frontier edition commit. A lexical build can publish an
+edition whose dense arm is `unavailable` with reason `dense-publication-pending`; after that edition is
+committed, `enqueueDensePublication` enqueues a dense intent on the same publisher lane. Search GC is
+deliberately outside this lane (see the GC section).
+
 ### Build / publish path
 
 - **`LoadVault`** → `ensureIndexedSnapshot` → `refreshIndexedSnapshot`.
@@ -392,19 +406,25 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
   (`DaemonSnapshotStore.rebuild`) with **no reusable base**, so it is always a full rebuild.
 - **`Refresh`** → `refreshIndexedSnapshot`: computes a **content delta**
   (sha256 per file vs stored `contentHash`, `snapshotContentDelta`); if `changedCount === 0` it keeps
-  the current edition's corpus snapshot and only ensures the retrieval snapshot matches
-  (`prepareRetrievalSnapshotForSnapshot`); otherwise it reports the delta
-  (`reportRefreshDelta`) and rebuilds — **incrementally when the active snapshot is a reusable base**
-  (`reusableBaseForSnapshot`: index identity tuple *and* base-reuse implementation identity both match),
-  reusing untouched partitions' segment bytes and re-parsing only the affected partitions; on an identity
-  mismatch or an absent/invalid base it does a full rebuild (recording an `incrementalFallbackReason`).
+  the current edition's corpus snapshot, ensures the lexical snapshot is loaded, checks
+  `retrievalReadyForEdition`, and fire-and-forgets `enqueueDensePublication(..., {force:true})` when dense
+  is not ready; otherwise it reports the delta (`reportRefreshDelta`) and rebuilds — **incrementally when
+  the active snapshot is a reusable base** (`reusableBaseForSnapshot`: index identity tuple _and_
+  base-reuse implementation identity both match), reusing untouched partitions' segment bytes and
+  re-parsing only the affected partitions; on an identity mismatch or an absent/invalid base it does a full
+  rebuild (recording an `incrementalFallbackReason`).
 - **`publishSaveSnapshot`**: save-on-write entrypoint. It runs the same incremental-with-full-fallback
-  rebuild as refresh (`reusableActiveBase` → `publishOptionsFromReusableBase`), but tags embedding work
-  with the scheduler `save` lane and prepares a retrieval publication for the new corpus revision.
-- **`publishFreshSnapshot`**: calls `recoverVault`, records the expected ledger head, builds the corpus,
-  starts the retrieval publication (embedding + vector build) **concurrently** when requested, writes the
-  corpus artifacts, stores the retrieval envelope if it built successfully, and commits one edition
-  record through `commitEditionForSnapshot`. The commit is the durable publication step.
+  rebuild as refresh, but tags embedding work with the scheduler `save` lane and prepares dense
+  publication for the new corpus revision. It passes `useActiveBase: true` on the queued intent; the
+  publisher lane resolves that inside `publisherLaneSnapshotOptions` by calling `reusableBaseForSnapshot`
+  against the lane head.
+- **`publishFreshSnapshot`**: calls `recoverVault`, records a scan boundary, enqueues the lexical
+  `rebuild`/`refresh`/`save` intent, and waits for the publisher lane to commit the lexical edition.
+  `publisherLaneEffects.buildSnapshot` builds the corpus, publishes the corpus artifacts, and returns a
+  lexical edition candidate whose dense arm is `unavailable` with reason `dense-publication-pending` when
+  retrieval was requested. If `prepareRetrieval` is set, `publishFreshSnapshot` then calls
+  `enqueueDensePublication`; it awaits that follow-up only when `awaitDense` is true or no embedding lane
+  was provided.
 - **`publishBuiltSnapshot`**: stores the link-graph sidecar, writes + fsyncs + content-verifies each
   segment (skips segments already present with matching hash), writes the snapshot manifest with
   temp-file + fsync + rename, then calls `recoverVault`.
@@ -414,12 +434,14 @@ Where the caches live on disk (`cache-paths.ts`; root = `XDG_CACHE_HOME` else `~
   `promoteBuiltGeneration`), constructs the retrieval envelope, and returns a `DenseEditionFresh` arm for
   the edition.
 - **`publishRetrievalSnapshot`**: for an already-committed lexical edition, builds/stores a retrieval
-  envelope and commits a same-frontier edition whose dense arm names the fresh generation.
+  envelope by enqueuing `dense-publication`; the publisher lane commits a same-frontier edition whose dense
+  arm names the fresh generation.
 
 Embedding happens on load/rebuild/refresh and on save-on-write. Save-on-write is a debounced
 **incremental lexical rebuild** — reusing the active snapshot's untouched partition segments and
-re-parsing only the affected partitions — followed by dense generation for that exact lexical
-revision. It falls back to a full rebuild when no reusable base is available (details in §6).
+re-parsing only the affected partitions — followed by a `dense-publication` intent that commits dense for
+that exact lexical revision. It falls back to a full rebuild when no reusable base is available (details in
+§6).
 
 ### Vector generation swap (drain by refcount)
 
@@ -451,9 +473,16 @@ soft-not-ready retrieve responses and is never part of scoring or a read-path ga
 ### Garbage collection — background, refcount-gated
 
 `markSweepGc` → `queueGc` schedules a **background** sweep on `setImmediate(...)` + `unref()`,
-serialized per vault. `runBackgroundGc` runs `markSweepSearchGc` (retrieval envelopes, snapshots,
-segments, link graphs) → `markSweepVectorGc` (vector generation dirs, then empty store roots) → stale
-tmp sweep.
+serialized on a coalesced per-vault GC chain outside the publisher lane. GC is best-effort cleanup,
+not part of the edition publication contract; `recoverVault` only prepares storage, and explicit
+`requestGc` drains the chain when callers/tests need quiescence. `runBackgroundGc` runs
+`markSweepSearchGc` (retrieval envelopes, snapshots, segments, link graphs) → `markSweepVectorGc`
+(vector generation dirs, then empty store roots) → stale tmp sweep.
+
+Search GC remains safe under concurrent commits by recomputing roots for each candidate and validating
+the current writer token immediately before every search-artifact unlink. `DaemonSnapshotStore.close`
+cancels pending GC timers and waits for any active GC chain before releasing publisher leases, so a
+closed store cannot leave a stale sweeper racing a restarted store's in-memory vector pins.
 
 **GC roots** (`gcRootsAsync`) are refcount-, ledger-, and in-flight-gated:
 
@@ -473,20 +502,18 @@ survives.
 **Retention** (`retentionCount`) defaults to `2` in the running daemon — `ProfileManager` passes
 `normalized.cache.snapshotRetention` (`runtime-profile.ts:98`, default 2; env
 `OPTSIDIAN_SEARCH_SNAPSHOT_RETENTION_COUNT`) into `createDaemonSnapshotStore`
-(`profile-manager.ts:95`). The store's own fallback when constructed without that option is
-`DEFAULT_RETENTION_COUNT = 8` (`snapshot-store.ts:245, 293-297`). In-memory loaded-snapshot budgets
-are separate: count cap and byte cap (`enforceBudget`, evicts only `refCount === 0`, LRU;
-`snapshot-store.ts:1407-1424`).
+(`ProfileRuntime.create`). The store's own fallback when constructed without that option is
+`DEFAULT_RETENTION_COUNT = 8` (`createDaemonSnapshotStore`). In-memory loaded-snapshot budgets are
+separate: count cap and byte cap (`DaemonSnapshotStore.enforceBudget`, evicts only `refCount === 0`, LRU).
 
 **Manual GC**: `Prune` (`SearchCacheCatalog.prune`) removes store directories unused for
 `unusedDays` (default in catalog), skipping store ids protected by any live pin
-(`profile-manager.ts:270-290`).
+(`ProfileManager.pruneSearchCaches`).
 
 **Vector dedup**: there is **no per-vector deduplication before build** —
-`vectorChunksForEmbeddingSet` maps 1 record → 1 chunk (`snapshot-store.ts:2209-2223`). "Dedup" in this
-subsystem is only cache-catalog record dedup by `storeId` (`cache-catalog.ts:369`). Content-addressing
-comes from the `embeddingSetId` being a hash over projected vectors, so identical corpora yield an
-identical generation.
+`vectorChunksForEmbeddingSet` maps 1 record → 1 chunk. "Dedup" in this subsystem is only cache-catalog
+record dedup by `storeId` (`cache-catalog.ts:369`). Content-addressing comes from the `embeddingSetId`
+being a hash over projected vectors, so identical corpora yield an identical generation.
 
 ### coral-needle runtime artifact lifecycle
 
@@ -528,16 +555,21 @@ doubles live under `tests/` and are injected directly through `VectorGenerationP
 ### (b) Note edit → save producer → lexical publish → dense attach
 
 A profile/vault runtime starts one `VaultChangeProducer` when a vault is known
-(`profile-manager.ts:161-174`). The producer coalesces `.md` file changes into dirty marks and falls
-back to periodic content-delta scanning when native watch registration fails (`watcher.ts:42-274`).
-Dirty marks enqueue `publishSaveSnapshot` on the scheduler `save` lane (`profile-manager.ts:205-223`).
+(`ProfileRuntime.startSaveWatcherForVault`). The producer coalesces `.md` file changes into dirty marks
+and falls back to periodic content-delta scanning when native watch registration fails
+(`watcher.ts:42-274`). Dirty marks enqueue `publishSaveSnapshot` on the scheduler `save` lane
+(`ProfileRuntime.enqueueSaveSnapshot`).
 
-The save lane performs a debounced **full lexical rebuild** through the canonical
-`buildCanonicalSearchSnapshot` -> `publishFreshSnapshot` path, reusing unchanged segment bytes/hashes on
-disk through `publishBuiltSnapshot`. The final durable publication is the edition commit; dense
-generation is built and promoted for the same lexical corpus revision when retrieval preparation
-completes. During the gap, reads pin the new lexical revision and changed/new docs simply ride
-lexical-only because their dense records are absent or `contentHash`-mismatched.
+The save drain performs a debounced lexical publish through `publishSaveSnapshot` ->
+`publishFreshSnapshot`. The publisher lane resolves the active reusable base with
+`publisherLaneSnapshotOptions` -> `reusableBaseForSnapshot`, so the rebuild is incremental when the lane
+head is reusable and falls back to full otherwise; `publishBuiltSnapshot` still reuses unchanged
+segment bytes/hashes on disk. Dense requested by the save path is durable in two sequential edition
+commits: first a lexical-only edition with dense `unavailable` / `dense-publication-pending`, then a
+follow-up `dense-publication` intent builds and promotes dense for that same corpus/frontier and commits a
+same-frontier edition naming the fresh generation. During the gap, reads pin the new lexical revision and
+changed/new docs simply ride lexical-only because their dense records are absent or
+`contentHash`-mismatched.
 
 ### (c) `origin=text` hybrid query — model cold vs warm
 
@@ -553,14 +585,15 @@ lexical-only because their dense records are absent or `contentHash`-mismatched.
 
 ### (d) Generation swap while a query is in flight
 
-1. Query A pins lexical and attaches dense through `pinReadableGeneration`, which returns a vector
-   lease for the committed generation (`snapshot-store.ts:614-739`, `pool.ts:240-280`).
+1. Query A pins lexical and attaches dense through `DaemonSnapshotStore.tryAttachDenseGeneration`, which
+   calls `pinReadableGeneration` to return a vector lease for the committed generation
+   (`pool.ts:240-280`).
 2. A `Rebuild`, `Refresh`, or save-lane build promotes a new generation. The manager keeps handles
    separate by vector key and generation id, and old handles drain by refcount (`pool.ts:88-99,
 240-280`).
 3. Query A's `searchVector` on the old lease completes; `releaseReadContext` drops the vector lease/GC
-   pin and lexical pin (`snapshot-store.ts:741-750`). Query B can attach the new generation. No query
-   ever reads a half-closed index.
+   pin and lexical pin (`DaemonSnapshotStore.releaseReadContext`). Query B can attach the new generation.
+   No query ever reads a half-closed index.
 
 ### (e) Model idle-unload
 
@@ -588,9 +621,9 @@ encode re-loads on demand.
 
 True incremental lexical rebuild is **implemented** (not deferred). `Refresh`, `LoadVault`, and
 save-on-write reuse the active snapshot as a validated base (`reusableBaseForSnapshot` /
-`reusableActiveBase`); `buildCanonicalSearchSnapshotIncremental` then reuses the untouched partitions'
-segment bytes and re-parses only the affected partitions' fresh paths (deletions force-affect their own
-partition). Base reuse is gated on two fences: the index identity tuple must match, **and** the
+`publisherLaneSnapshotOptions`); `buildCanonicalSearchSnapshotIncremental` then reuses the untouched
+partitions' segment bytes and re-parses only the affected partitions' fresh paths (deletions force-affect
+their own partition). Base reuse is gated on two fences: the index identity tuple must match, **and** the
 `baseReuseImplementationIdentity` (analyzer identity + daemon binary hash) must match — a binary change
 forces one full recompute but never changes `corpusSnapshotId`/`lexicalIdentityHash`.
 

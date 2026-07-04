@@ -58,6 +58,7 @@ type ProfileRuntimeAcquireOptions = {
 type SavePublicationState = {
   pendingMarks: Map<string, SnapshotDirtyMark>;
   pendingJournalSeqs: Set<number>;
+  journalChain: Promise<void>;
   foldChain: Promise<void>;
   running?: Promise<void>;
 };
@@ -173,6 +174,17 @@ export class ProfileRuntime {
       publisherRegistry,
       reclamationAuthority,
       tenancyFence: options.tenancyFence,
+      publisherLaneCancellation: {
+        cancelSnapshotEffects: (cancellationId) => {
+          pools.throughputAnalyzer.cancel(cancellationId);
+        },
+        cancelEmbedScheduler: (cancellationId) => {
+          embedScheduler.cancel(cancellationId);
+        },
+        cancelWorkerPools: (cancellationId) => {
+          pools.cancel(cancellationId);
+        },
+      },
       embeddingSetBuilder: createWorkerEmbeddingSetBuilder({
         provider: embeddingProvider,
         providerPayload,
@@ -265,12 +277,33 @@ export class ProfileRuntime {
   private enqueueSaveSnapshot(vaultRoot: string, marks: readonly VaultDirtyMark[]): void {
     if (marks.length === 0) return;
     const saveMarks = marks.map(snapshotDirtyMarkFromVaultMark);
-    const journalSeqs = this.snapshotStore.journalSaveDirtyMarks(vaultRoot, saveMarks);
     const state = this.savePublicationState(vaultRoot);
     mergeDirtyMarks(state.pendingMarks, saveMarks);
-    for (const journalSeq of journalSeqs) state.pendingJournalSeqs.add(journalSeq);
+    this.enqueueSaveDirtyJournal(vaultRoot, saveMarks, state);
     if (state.running) this.enqueueActiveSaveFold(vaultRoot, saveMarks, state);
     else this.startSavePublicationDrain(vaultRoot, state);
+  }
+
+  private enqueueSaveDirtyJournal(
+    vaultRoot: string,
+    marks: readonly SnapshotDirtyMark[],
+    state: SavePublicationState,
+  ): void {
+    const batchJournalSeqs: number[] = [];
+    const journal = state.journalChain.then(async () => {
+      const journalSeqs = await this.snapshotStore.journalSaveDirtyMarks(vaultRoot, marks);
+      batchJournalSeqs.push(...journalSeqs);
+      for (const journalSeq of journalSeqs) state.pendingJournalSeqs.add(journalSeq);
+    });
+    state.journalChain = journal.catch(async (error) => {
+      for (const journalSeq of batchJournalSeqs) state.pendingJournalSeqs.delete(journalSeq);
+      for (const mark of marks) {
+        const key = dirtyMarkKey(mark);
+        if (state.pendingMarks.get(key) === mark) state.pendingMarks.delete(key);
+      }
+      await this.snapshotStore.recordSaveFailure(vaultRoot, batchJournalSeqs, error).catch(() => undefined);
+    });
+    void journal.catch(() => undefined);
   }
 
   private savePublicationState(vaultRoot: string): SavePublicationState {
@@ -279,6 +312,7 @@ export class ProfileRuntime {
       state = {
         pendingMarks: new Map(),
         pendingJournalSeqs: new Set(),
+        journalChain: Promise.resolve(),
         foldChain: Promise.resolve(),
       };
       this.savePublications.set(vaultRoot, state);
@@ -300,6 +334,8 @@ export class ProfileRuntime {
 
   private async drainSavePublications(vaultRoot: string, state: SavePublicationState): Promise<void> {
     while (state.pendingMarks.size > 0) {
+      await state.journalChain;
+      if (state.pendingMarks.size === 0) continue;
       const journalSeqs = [...state.pendingJournalSeqs];
       drainDirtyMarks(state.pendingMarks);
       state.pendingJournalSeqs.clear();

@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ensurePrivateDirSync, writePrivateFileSync } from '../../core/private-path.js';
 import {
+  Attempt,
+  AttemptCancelledError,
   currentWriterTokensEqual,
   type ConditionalCommitResult,
   type CurrentWriterToken,
+  type MaybePromise,
   type TenancyFenceProvider,
 } from '../../core/lifecycle/conditional-commit.js';
 import {
@@ -36,6 +39,7 @@ import {
   type RetrievalIdentity,
 } from './publication.js';
 import { safeStoreFileName } from './cache-paths.js';
+import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS } from '../protocol.js';
 
 export type EditionCandidate = {
   baseEditionSeq?: number;
@@ -87,19 +91,188 @@ export type VaultPublisherOptions = {
   paths: VaultPublisherPaths;
   retrievalIdentity: RetrievalIdentity;
   tenancyFence: TenancyFenceProvider;
+  effects?: VaultPublisherEffects;
   now?: () => number;
   beforeAppendForTests?: () => void | Promise<void>;
 };
 
-type PublisherIntent =
-  { kind: 'dirty'; operations: FrontierAppendOperation[] } | { kind: 'diagnostic'; diagnostic: SaveDiagnosticRecord };
+type PublisherIntentBase = {
+  deadline?: number;
+  cancellationId?: string;
+  signal?: AbortSignal;
+};
 
-type PublisherWorld = {
+type RebuildIntent = PublisherIntentBase & {
+  kind: 'rebuild';
+  scanBoundary: FrontierScanBoundary;
+  requestContext?: unknown;
+  prepareRetrieval?: boolean;
+  useActiveBase?: boolean;
+  incrementalFallbackReason?: string;
+};
+
+type RefreshIntent = PublisherIntentBase & {
+  kind: 'refresh';
+  scanBoundary: FrontierScanBoundary;
+  requestContext?: unknown;
+  prepareRetrieval?: boolean;
+  useActiveBase?: boolean;
+  incrementalFallbackReason?: string;
+};
+
+type SaveIntent = PublisherIntentBase & {
+  kind: 'save';
+  scanBoundary: FrontierScanBoundary;
+  requestContext?: unknown;
+  prepareRetrieval?: boolean;
+  useActiveBase?: boolean;
+  incrementalFallbackReason?: string;
+};
+
+type DensePublicationIntent = PublisherIntentBase & {
+  kind: 'dense-publication';
+  force?: boolean;
+  scanBoundary?: FrontierScanBoundary;
+  targetEditionSeq?: number;
+  targetCorpusSnapshotId?: string;
+  targetLinkGraphId?: EditionRecord['linkGraphId'];
+  targetRetrievalSnapshotId?: string;
+  requestContext?: unknown;
+};
+
+type DirtyFrontierIntent = PublisherIntentBase & {
+  kind: 'dirty-frontier';
+  operations: readonly FrontierAppendOperation[];
+};
+
+type DiagnosticFrontierIntent = PublisherIntentBase & {
+  kind: 'diagnostic-frontier';
+  diagnostic: SaveDiagnosticRecord;
+};
+
+type ClearIntent = PublisherIntentBase & {
+  kind: 'clear';
+};
+
+export type VaultPublisherIntent =
+  | RebuildIntent
+  | RefreshIntent
+  | SaveIntent
+  | DensePublicationIntent
+  | DirtyFrontierIntent
+  | DiagnosticFrontierIntent
+  | ClearIntent;
+
+type VaultPublisherBuildIntent = RebuildIntent | RefreshIntent | SaveIntent | DensePublicationIntent;
+
+export type VaultPublisherBuildInput<TIntent extends VaultPublisherBuildIntent = VaultPublisherBuildIntent> = {
+  intent: TIntent;
+  intents: readonly TIntent[];
+  head: EditionRecord | undefined;
+  pendingOperations: readonly FrontierDirtyOperation[];
+  signal: AbortSignal;
+  deadline: number;
+  cancellationId: string;
+  cancellationIds: readonly string[];
+};
+
+export type VaultPublisherBuildOutput =
+  | {
+      kind: 'candidate';
+      candidate: EditionCandidate;
+      cleanup?: () => MaybePromise<void>;
+    }
+  | { kind: 'drop'; reason: string };
+
+type VaultPublisherBarrierInput<TIntent extends VaultPublisherIntent = VaultPublisherIntent> = {
+  intent: TIntent;
+  head: EditionRecord | undefined;
+  pendingOperations: readonly FrontierDirtyOperation[];
+  signal: AbortSignal;
+  deadline: number;
+  cancellationId: string;
+  cancellationIds: readonly string[];
+};
+
+type VaultPublisherCancellationInput = {
+  cancellationId: string;
+  reason: unknown;
+  intents: readonly VaultPublisherIntent[];
+};
+
+type VaultPublisherLateResultInput = {
+  result: VaultPublisherBuildOutput;
+  intent: VaultPublisherBuildIntent;
+  intents: readonly VaultPublisherBuildIntent[];
+  reason: unknown;
+};
+
+type VaultPublisherLaneErrorInput = {
+  error: unknown;
+  intents: readonly VaultPublisherIntent[];
+};
+
+export type VaultPublisherEffects = {
+  buildSnapshot?(
+    input: VaultPublisherBuildInput<RebuildIntent | RefreshIntent | SaveIntent>,
+  ): MaybePromise<VaultPublisherBuildOutput>;
+  buildDense?(input: VaultPublisherBuildInput<DensePublicationIntent>): MaybePromise<VaultPublisherBuildOutput>;
+  appendDirtyFrontier?(input: VaultPublisherBarrierInput<DirtyFrontierIntent>): MaybePromise<void>;
+  clear?(input: VaultPublisherBarrierInput<ClearIntent>): MaybePromise<void>;
+  cancelSnapshotEffects?(input: VaultPublisherCancellationInput): MaybePromise<void>;
+  cancelEmbedScheduler?(input: VaultPublisherCancellationInput): MaybePromise<void>;
+  cancelWorkerPools?(input: VaultPublisherCancellationInput): MaybePromise<void>;
+  discardLateResult?(input: VaultPublisherLateResultInput): MaybePromise<void>;
+  onError?(input: VaultPublisherLaneErrorInput): MaybePromise<void>;
+};
+
+export type VaultPublisherIntentResult =
+  | {
+      status: 'covered';
+      intentKind: VaultPublisherIntent['kind'];
+      head: EditionRecord;
+    }
+  | {
+      status: 'committed';
+      intentKind: VaultPublisherIntent['kind'];
+      edition: EditionRecord;
+      ackedJournalSeqs: number[];
+      reason?: string;
+    }
+  | {
+      status: 'completed';
+      intentKind: VaultPublisherIntent['kind'];
+      journaledOperations?: FrontierDirtyOperation[];
+    }
+  | {
+      status: 'not-ready';
+      intentKind: VaultPublisherIntent['kind'];
+      reason: string;
+      head?: EditionRecord;
+    }
+  | {
+      status: 'dropped';
+      intentKind: VaultPublisherIntent['kind'];
+      reason: string;
+    };
+
+type StructuralLaneEnvelope = {
+  intent: VaultPublisherIntent;
+  deferred: Deferred<VaultPublisherIntentResult>;
+  settled: boolean;
+};
+
+type BuildStructuralLaneEnvelope = StructuralLaneEnvelope & {
+  intent: VaultPublisherBuildIntent;
+};
+
+type StructuralLaneWorld = {
+  head: EditionRecord | undefined;
   pendingOperations: readonly FrontierDirtyOperation[];
 };
 
-type PublisherFold = {
-  intents: readonly PublisherIntent[];
+type StructuralLaneFold = StructuralLaneWorld & {
+  intents: readonly StructuralLaneEnvelope[];
 };
 
 export class EditionLedger {
@@ -309,14 +482,23 @@ export class VaultPublisher {
   readonly frontierJournal: FrontierJournal;
   readonly ledger: EditionLedger;
 
+  private readonly effects: VaultPublisherEffects;
+  private readonly tenancyFence: TenancyFenceProvider;
   private readonly now: () => number;
   private readonly inFlightWork = new Set<Promise<unknown>>();
   private readonly pendingDebounceOperations: FrontierAppendOperation[] = [];
-  private readonly reconciler: LevelReconciler<PublisherWorld, PublisherFold, void, PublisherIntent>;
+  private readonly structuralIntentQueue: StructuralLaneEnvelope[] = [];
+  private readonly structuralReconciler: LevelReconciler<StructuralLaneWorld, StructuralLaneFold, void, void>;
+  private activeStructuralErrorScope: readonly StructuralLaneEnvelope[] = [];
+  private structuralStopped = false;
+  private retiredByClear = false;
+  private nextStructuralAttemptId = 1;
 
   constructor(options: VaultPublisherOptions) {
     this.retrievalIdentity = options.retrievalIdentity;
     this.paths = options.paths;
+    this.effects = options.effects ?? {};
+    this.tenancyFence = options.tenancyFence;
     this.now = options.now ?? Date.now;
     ensureVaultPublisherPaths(options.paths);
     this.frontierJournal = new FrontierJournal(options.paths.frontierDir);
@@ -327,20 +509,26 @@ export class VaultPublisher {
       now: this.now,
       beforeAppendForTests: options.beforeAppendForTests,
     });
-    this.reconciler = new LevelReconciler<PublisherWorld, PublisherFold, void, PublisherIntent>({
-      enumerate: () => ({ pendingOperations: this.frontierJournal.pendingOperations() }),
-      fold: (_world, batch) => ({ intents: batch.intents }),
-      act: async (folded) => {
-        for (const intent of folded.intents) {
-          if (intent.kind === 'dirty') {
-            for (const operation of intent.operations) this.frontierJournal.append(operation);
-          } else {
-            this.writeDiagnostic(intent.diagnostic);
-          }
-        }
+    this.structuralReconciler = new LevelReconciler<StructuralLaneWorld, StructuralLaneFold, void, void>({
+      enumerate: () =>
+        this.retiredByClear
+          ? { head: undefined, pendingOperations: [] }
+          : {
+              head: this.ledger.current(),
+              pendingOperations: this.frontierJournal.pendingOperations(),
+            },
+      fold: (world) => {
+        const intents = this.structuralIntentQueue.splice(0);
+        this.activeStructuralErrorScope = intents;
+        return {
+          ...world,
+          intents,
+        };
       },
+      act: (folded, batch) => this.actStructuralLane(folded, batch.signal),
+      onError: (error, context) => this.handleStructuralLaneError(error, context),
     });
-    this.reconciler.start();
+    this.structuralReconciler.start();
   }
 
   static pathsFor(rootDir: string): VaultPublisherPaths {
@@ -355,30 +543,54 @@ export class VaultPublisher {
   }
 
   markDirty(operation: FrontierAppendOperation): FrontierDirtyOperation {
+    this.assertNotRetiredByClear();
     return this.frontierJournal.append(operation);
   }
 
   enqueueDirty(operation: FrontierAppendOperation): void {
-    this.pendingDebounceOperations.push(operation);
-    this.reconciler.enqueueIntent({ kind: 'dirty', operations: [operation] });
+    void this.enqueueDirtyOperations([operation]).catch(() => undefined);
   }
 
-  enqueueDirtyMarks(marks: readonly { docId: string; path: string; contentHash?: string }[]): FrontierDirtyOperation[] {
-    return marks.map((mark) => this.markDirty(snapshotDirtyMarkToFrontierOperation(mark, this.now())));
+  enqueueDirtyMarks(
+    marks: readonly { docId: string; path: string; contentHash?: string }[],
+  ): Promise<FrontierDirtyOperation[]> {
+    return this.enqueueDirtyOperations(marks.map((mark) => snapshotDirtyMarkToFrontierOperation(mark, this.now())));
   }
 
   enqueueDebouncedDirtyMarks(marks: readonly { docId: string; path: string; contentHash?: string }[]): void {
+    this.assertNotRetiredByClear();
     for (const mark of marks)
       this.pendingDebounceOperations.push(snapshotDirtyMarkToFrontierOperation(mark, this.now()));
   }
 
-  flushPendingDebounce(): FrontierDirtyOperation[] {
+  async flushPendingDebounce(): Promise<FrontierDirtyOperation[]> {
     const operations = this.pendingDebounceOperations.splice(0);
-    return operations.map((operation) => this.frontierJournal.append(operation));
+    return this.enqueueDirtyOperations(operations);
   }
 
   recordScanBoundary(): FrontierScanBoundary {
+    this.assertNotRetiredByClear();
     return this.frontierJournal.recordScanBoundary();
+  }
+
+  enqueue(intent: VaultPublisherIntent): Promise<VaultPublisherIntentResult> {
+    const deferred = createDeferred<VaultPublisherIntentResult>();
+    const envelope: StructuralLaneEnvelope = { intent, deferred, settled: false };
+    if (this.retiredByClear) {
+      this.dropStructuralEnvelope(envelope, new Error('VaultPublisher was reset by clear.'));
+      return deferred.promise;
+    }
+    if (this.structuralStopped || this.structuralReconciler.isStopped) {
+      this.rejectStructuralEnvelope(envelope, new Error('VaultPublisher structural lane is stopped.'));
+      return deferred.promise;
+    }
+    if (intent.signal?.aborted) {
+      this.dropStructuralEnvelope(envelope, abortReason(intent.signal) ?? new Error('Publisher intent was cancelled.'));
+      return deferred.promise;
+    }
+    this.structuralIntentQueue.push(envelope);
+    this.structuralReconciler.enqueueIntent();
+    return deferred.promise;
   }
 
   commit(
@@ -386,6 +598,7 @@ export class VaultPublisher {
     expectedHeadSeq: number | undefined,
     writerToken: CurrentWriterToken,
   ): Promise<EditionCommitResult> {
+    this.assertNotRetiredByClear();
     return this.trackWork(this.ledger.commit(candidate, expectedHeadSeq, writerToken));
   }
 
@@ -405,8 +618,14 @@ export class VaultPublisher {
       failedAt: new Date(this.now()).toISOString(),
       writerToken: input.writerToken,
     };
-    this.writeDiagnostic(diagnostic);
-    for (const journalSeq of diagnostic.journalSeqs) this.frontierJournal.fail(journalSeq, diagnostic.diagnosticId);
+    const result = await this.enqueue({ kind: 'diagnostic-frontier', diagnostic });
+    if (result.status !== 'completed') {
+      throw new Error(
+        result.status === 'dropped'
+          ? result.reason
+          : `diagnostic frontier transition did not complete: ${result.status}`,
+      );
+    }
     return diagnostic;
   }
 
@@ -421,14 +640,489 @@ export class VaultPublisher {
   }
 
   async drain(): Promise<void> {
-    await this.reconciler.drain();
+    if (!this.retiredByClear) {
+      await bestEffort(async () => {
+        await this.flushPendingDebounce();
+      });
+    }
+    await this.structuralReconciler.drain();
     await Promise.allSettled([...this.inFlightWork]);
   }
 
   async stop(options: { drain?: boolean } = {}): Promise<void> {
-    this.flushPendingDebounce();
-    await this.reconciler.stop({ drain: options.drain ?? true });
+    if (!this.retiredByClear && options.drain !== false) {
+      await bestEffort(async () => {
+        await this.flushPendingDebounce();
+      });
+    } else {
+      this.pendingDebounceOperations.length = 0;
+    }
+    this.structuralStopped = true;
+    if (options.drain === false) {
+      const waiters = this.structuralIntentQueue.splice(0);
+      const error = new Error('VaultPublisher structural lane stopped without drain.');
+      for (const waiter of waiters) this.rejectStructuralEnvelope(waiter, error);
+    }
+    await this.structuralReconciler.stop({ drain: options.drain ?? true });
     if (options.drain !== false) await Promise.allSettled([...this.inFlightWork]);
+  }
+
+  private async actStructuralLane(folded: StructuralLaneFold, laneSignal: AbortSignal): Promise<void> {
+    let head = folded.head;
+    try {
+      for (let index = 0; index < folded.intents.length; index += 1) {
+        const envelope = folded.intents[index];
+        if (!envelope || envelope.settled) continue;
+        const intent = envelope.intent;
+        if (this.retiredByClear && intent.kind !== 'clear') {
+          this.dropStructuralEnvelope(envelope, new Error('VaultPublisher was reset by clear.'));
+          continue;
+        }
+        if (isBuildIntent(intent)) {
+          const group: StructuralLaneEnvelope[] = [envelope];
+          while (index + 1 < folded.intents.length) {
+            const next = folded.intents[index + 1];
+            if (!next || next.settled || !isBuildIntent(next.intent)) break;
+            if (buildLaneForIntent(next.intent) !== buildLaneForIntent(intent)) break;
+            group.push(next);
+            index += 1;
+          }
+          this.activeStructuralErrorScope = group;
+          head = await this.actBuildGroup(group, head, folded.pendingOperations, laneSignal);
+          this.activeStructuralErrorScope = [];
+          continue;
+        }
+        this.activeStructuralErrorScope = [envelope];
+        head = await this.actBarrierIntent(envelope, head, folded.pendingOperations, laneSignal);
+        this.activeStructuralErrorScope = [];
+      }
+    } catch (error) {
+      await this.handleStructuralLaneError(error);
+    } finally {
+      this.activeStructuralErrorScope = [];
+    }
+  }
+
+  private async actBuildGroup(
+    envelopes: readonly StructuralLaneEnvelope[],
+    head: EditionRecord | undefined,
+    _pendingOperations: readonly FrontierDirtyOperation[],
+    laneSignal: AbortSignal,
+  ): Promise<EditionRecord | undefined> {
+    const buildEnvelopes: BuildStructuralLaneEnvelope[] = [];
+    for (const envelope of envelopes) {
+      if (isBuildIntent(envelope.intent)) buildEnvelopes.push(envelope as BuildStructuralLaneEnvelope);
+    }
+    const remaining = this.unsettledBuildEnvelopes(buildEnvelopes, head);
+    if (remaining.length === 0) return head;
+    const timing = this.buildAttemptTiming(remaining.map((envelope) => envelope.intent));
+
+    // Coalesced lexical intents must stay in enqueue order: publishFreshSnapshot records the scan
+    // boundary and immediately enqueues, so later envelopes represent monotonic journal boundaries.
+    // Add a second producer only if it preserves that ordering contract.
+    return this.commitWithRetry({
+      remaining,
+      head,
+      laneSignal,
+      timing,
+    });
+  }
+
+  private async commitWithRetry(input: {
+    remaining: BuildStructuralLaneEnvelope[];
+    head: EditionRecord | undefined;
+    laneSignal: AbortSignal;
+    timing: { deadline: number; cancellationId: string; cancellationIds: readonly string[] };
+  }): Promise<EditionRecord | undefined> {
+    let { remaining, head } = input;
+    const { laneSignal, timing } = input;
+    while (remaining.length > 0) {
+      const representative = remaining[remaining.length - 1]?.intent;
+      if (!representative || !isBuildIntent(representative)) return head;
+      const buildEffect = this.buildEffectForIntent(representative);
+      if (!buildEffect) {
+        for (const envelope of remaining) {
+          this.dropStructuralEnvelope(
+            envelope,
+            new Error(`no publisher lane build effect for ${envelope.intent.kind}`),
+          );
+        }
+        return head;
+      }
+
+      let output: VaultPublisherBuildOutput;
+      try {
+        output = await this.runBuildAttempt({
+          envelopes: remaining,
+          representative,
+          head,
+          pendingOperations: this.frontierJournal.pendingOperations(),
+          laneSignal,
+          timing,
+          buildEffect,
+        });
+      } catch (error) {
+        if (!isLaneAbort(error)) throw error;
+        await this.cancelAttemptCleanup(
+          timing.cancellationIds,
+          error,
+          remaining.map((envelope) => envelope.intent),
+        );
+        for (const envelope of remaining) this.dropStructuralEnvelope(envelope, error);
+        return head;
+      }
+
+      if (output.kind === 'drop') {
+        for (const envelope of remaining) this.dropStructuralEnvelope(envelope, new Error(output.reason));
+        return head;
+      }
+
+      try {
+        const committed = await this.commitBuildOutput(output);
+        if (!committed.ok) {
+          if (committed.reason !== 'not-head') {
+            for (const envelope of remaining) {
+              this.dropStructuralEnvelope(
+                envelope,
+                new Error(
+                  `edition commit rejected: ${committed.reason}${committed.message ? `: ${committed.message}` : ''}`,
+                ),
+              );
+            }
+            return head;
+          }
+          head = this.ledger.current();
+          remaining = this.unsettledBuildEnvelopes(remaining, head);
+          continue;
+        }
+        const nextHead = committed.value.record;
+        this.resolveCommittedEnvelopes(remaining, nextHead, committed.value);
+        return nextHead;
+      } finally {
+        await cleanupBuildOutput(output);
+      }
+    }
+    return head;
+  }
+
+  private resolveCommittedEnvelopes(
+    envelopes: readonly BuildStructuralLaneEnvelope[],
+    nextHead: EditionRecord,
+    commitValue: EditionCommitValue,
+  ): void {
+    for (const envelope of envelopes) {
+      if (envelope.intent.kind === 'dense-publication' && !denseHeadSatisfiesIntent(nextHead, envelope.intent)) {
+        this.resolveStructuralEnvelope(envelope, {
+          status: 'not-ready',
+          intentKind: envelope.intent.kind,
+          reason: 'dense-head-not-fresh-for-target',
+          head: nextHead,
+        });
+        continue;
+      }
+      this.resolveStructuralEnvelope(envelope, {
+        status: 'committed',
+        intentKind: envelope.intent.kind,
+        edition: nextHead,
+        ackedJournalSeqs: commitValue.ackedJournalSeqs,
+      });
+    }
+  }
+
+  private unsettledBuildEnvelopes(
+    envelopes: readonly BuildStructuralLaneEnvelope[],
+    head: EditionRecord | undefined,
+  ): BuildStructuralLaneEnvelope[] {
+    return envelopes.filter((envelope) => {
+      if (envelope.settled) return false;
+      const intent = envelope.intent;
+      if (!head) {
+        if (intent.kind === 'dense-publication') {
+          this.resolveStructuralEnvelope(envelope, {
+            status: 'not-ready',
+            intentKind: intent.kind,
+            reason: 'no-lexical-head',
+          });
+          return false;
+        }
+        return true;
+      }
+      if (intent.kind === 'dense-publication') {
+        if (!intent.force && denseHeadSatisfiesIntent(head, intent)) {
+          this.resolveStructuralEnvelope(envelope, { status: 'covered', intentKind: intent.kind, head });
+          return false;
+        }
+        if (denseIntentSupersededByHead(head, intent)) {
+          this.resolveStructuralEnvelope(envelope, {
+            status: 'not-ready',
+            intentKind: intent.kind,
+            reason: 'dense-target-superseded',
+            head,
+          });
+          return false;
+        }
+        return true;
+      }
+      if (!headCoversScanBoundary(head, intent.scanBoundary)) return true;
+      this.resolveStructuralEnvelope(envelope, { status: 'covered', intentKind: intent.kind, head });
+      return false;
+    });
+  }
+
+  private async actBarrierIntent(
+    envelope: StructuralLaneEnvelope,
+    head: EditionRecord | undefined,
+    pendingOperations: readonly FrontierDirtyOperation[],
+    laneSignal: AbortSignal,
+  ): Promise<EditionRecord | undefined> {
+    const intent = envelope.intent;
+    const timing = this.buildAttemptTiming([intent]);
+    if (intent.kind === 'dirty-frontier') {
+      const journaled: FrontierDirtyOperation[] = [];
+      for (const operation of intent.operations) journaled.push(this.frontierJournal.append(operation));
+      await this.effects.appendDirtyFrontier?.({
+        intent,
+        head,
+        pendingOperations,
+        signal: laneSignal,
+        deadline: timing.deadline,
+        cancellationId: timing.cancellationId,
+        cancellationIds: timing.cancellationIds,
+      });
+      this.resolveStructuralEnvelope(envelope, {
+        status: 'completed',
+        intentKind: intent.kind,
+        journaledOperations: journaled,
+      });
+      return head;
+    }
+    if (intent.kind === 'diagnostic-frontier') {
+      this.writeDiagnostic(intent.diagnostic);
+      for (const journalSeq of intent.diagnostic.journalSeqs) {
+        this.frontierJournal.fail(journalSeq, intent.diagnostic.diagnosticId);
+      }
+      this.resolveStructuralEnvelope(envelope, { status: 'completed', intentKind: intent.kind });
+      return head;
+    }
+    if (intent.kind === 'clear') {
+      this.retireForClear();
+      await this.effects.clear?.({
+        intent,
+        head,
+        pendingOperations,
+        signal: laneSignal,
+        deadline: timing.deadline,
+        cancellationId: timing.cancellationId,
+        cancellationIds: timing.cancellationIds,
+      });
+      this.resolveStructuralEnvelope(envelope, { status: 'completed', intentKind: intent.kind });
+      return undefined;
+    }
+    this.dropStructuralEnvelope(
+      envelope,
+      new Error(`unhandled publisher lane intent ${(intent as VaultPublisherIntent).kind}`),
+    );
+    return head;
+  }
+
+  private buildEffectForIntent(
+    intent: VaultPublisherBuildIntent,
+  ):
+    | ((input: VaultPublisherBuildInput<VaultPublisherBuildIntent>) => MaybePromise<VaultPublisherBuildOutput>)
+    | undefined {
+    if (intent.kind === 'dense-publication') {
+      const buildDense = this.effects.buildDense;
+      if (!buildDense) return undefined;
+      return (input) => buildDense(input as VaultPublisherBuildInput<DensePublicationIntent>);
+    }
+    const buildSnapshot = this.effects.buildSnapshot;
+    if (!buildSnapshot) return undefined;
+    return (input) => buildSnapshot(input as VaultPublisherBuildInput<RebuildIntent | RefreshIntent | SaveIntent>);
+  }
+
+  private buildAttemptTiming(intents: readonly VaultPublisherIntent[]): {
+    deadline: number;
+    cancellationId: string;
+    cancellationIds: readonly string[];
+  } {
+    const deadlines = intents
+      .map((intent) => intent.deadline)
+      .filter((deadline): deadline is number => isFiniteNumber(deadline));
+    const deadline =
+      deadlines.length > 0 ? Math.min(...deadlines) : this.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS;
+    const suppliedCancellationIds = intents
+      .map((intent) => intent.cancellationId)
+      .filter(
+        (cancellationId): cancellationId is string => typeof cancellationId === 'string' && cancellationId.length > 0,
+      );
+    const cancellationId =
+      suppliedCancellationIds[0] ??
+      `publisher-lane:${retrievalIdentityKey(this.retrievalIdentity)}:${this.nextStructuralAttemptId++}`;
+    const cancellationIds = [...new Set([...suppliedCancellationIds, cancellationId])];
+    return { deadline, cancellationId, cancellationIds };
+  }
+
+  private async runBuildAttempt(input: {
+    envelopes: readonly BuildStructuralLaneEnvelope[];
+    representative: VaultPublisherBuildIntent;
+    head: EditionRecord | undefined;
+    pendingOperations: readonly FrontierDirtyOperation[];
+    laneSignal: AbortSignal;
+    timing: { deadline: number; cancellationId: string; cancellationIds: readonly string[] };
+    buildEffect: (
+      buildInput: VaultPublisherBuildInput<VaultPublisherBuildIntent>,
+    ) => MaybePromise<VaultPublisherBuildOutput>;
+  }): Promise<VaultPublisherBuildOutput> {
+    const timeoutController = new AbortController();
+    const owner: { current: Attempt<VaultPublisherBuildOutput> | undefined } = { current: undefined };
+    let fanInCleanup: (() => void) | undefined;
+    const intents = input.envelopes.map((envelope) => envelope.intent);
+    const timeoutError = new PublisherLaneTimeoutError(
+      `publisher lane build deadline exceeded for ${input.representative.kind}`,
+    );
+    const timeoutMs = Math.max(0, input.timing.deadline - this.now());
+    const timeout = setTimeout(() => {
+      timeoutController.abort(timeoutError);
+    }, timeoutMs);
+    timeout.unref?.();
+    // fanInCleanup is assigned by the producer; Attempt.start must invoke that producer synchronously.
+    const attempt = Attempt.start(
+      owner,
+      (attemptSignal) => {
+        const fanIn = fanInAbortSignal([attemptSignal, timeoutController.signal, input.laneSignal]);
+        fanInCleanup = fanIn.cleanup;
+        const buildInput = {
+          intent: input.representative,
+          intents,
+          head: input.head,
+          pendingOperations: input.pendingOperations,
+          signal: fanIn.signal,
+          deadline: input.timing.deadline,
+          cancellationId: input.timing.cancellationId,
+          cancellationIds: input.timing.cancellationIds,
+        };
+        return (async () => input.buildEffect(buildInput))();
+      },
+      {
+        close: async (result) => {
+          await cleanupBuildOutput(result);
+          await this.effects.discardLateResult?.({
+            result,
+            intent: input.representative,
+            intents,
+            reason:
+              abortReason(timeoutController.signal) ?? abortReason(input.laneSignal) ?? abortReason(attempt.signal),
+          });
+        },
+      },
+    );
+    const waiters = input.envelopes.map((envelope) => {
+      const waiter = attempt.join({ signal: envelope.intent.signal });
+      waiter.promise.catch((error: unknown) => {
+        if (envelope.intent.signal?.aborted) {
+          this.dropStructuralEnvelope(envelope, abortReason(envelope.intent.signal) ?? error);
+        }
+      });
+      return waiter;
+    });
+    const timeoutPromise = rejectOnAbort(timeoutController.signal, timeoutError);
+    const attemptAbortPromise = rejectOnAbort(attempt.signal);
+    const laneAbortPromise = rejectOnAbort(input.laneSignal);
+    try {
+      return await Promise.race([attempt.result, timeoutPromise, attemptAbortPromise, laneAbortPromise]);
+    } catch (error) {
+      for (const waiter of waiters) waiter.leave();
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      fanInCleanup?.();
+    }
+  }
+
+  private async commitBuildOutput(
+    output: Extract<VaultPublisherBuildOutput, { kind: 'candidate' }>,
+  ): Promise<EditionCommitResult> {
+    const writerToken = await this.tenancyFence.currentWriterToken();
+    if (!writerToken) return { ok: false, reason: 'not-current', message: 'writer token is no longer current' };
+    return this.trackWork(this.ledger.commit(output.candidate, this.ledger.current()?.editionSeq, writerToken));
+  }
+
+  private async cancelAttemptCleanup(
+    cancellationIds: readonly string[],
+    reason: unknown,
+    intents: readonly VaultPublisherIntent[],
+  ): Promise<void> {
+    for (const cancellationId of cancellationIds) {
+      const input: VaultPublisherCancellationInput = { cancellationId, reason, intents };
+      await bestEffort(() => this.effects.cancelSnapshotEffects?.(input));
+      await bestEffort(() => this.effects.cancelEmbedScheduler?.(input));
+      await bestEffort(() => this.effects.cancelWorkerPools?.(input));
+    }
+  }
+
+  private async enqueueDirtyOperations(
+    operations: readonly FrontierAppendOperation[],
+  ): Promise<FrontierDirtyOperation[]> {
+    if (operations.length === 0) return [];
+    const result = await this.enqueue({ kind: 'dirty-frontier', operations });
+    if (result.status === 'completed') return result.journaledOperations ?? [];
+    if (result.status === 'dropped') throw new Error(result.reason);
+    throw new Error(`dirty frontier append did not complete: ${result.status}`);
+  }
+
+  private retireForClear(): void {
+    if (this.retiredByClear) return;
+    this.retiredByClear = true;
+    this.structuralStopped = true;
+    this.pendingDebounceOperations.length = 0;
+    const queued = this.structuralIntentQueue.splice(0);
+    for (const envelope of queued)
+      this.dropStructuralEnvelope(envelope, new Error('VaultPublisher was reset by clear.'));
+  }
+
+  private assertNotRetiredByClear(): void {
+    if (this.retiredByClear) throw new Error('VaultPublisher was reset by clear.');
+  }
+
+  private async handleStructuralLaneError(error: unknown, context?: { phase?: string }): Promise<void> {
+    const scoped = this.activeStructuralErrorScope.filter((envelope) => !envelope.settled);
+    const failedBeforeAct = context?.phase === 'enumerate' || context?.phase === 'fold';
+    const affected =
+      scoped.length > 0
+        ? scoped
+        : failedBeforeAct
+          ? this.structuralIntentQueue.splice(0).filter((envelope) => !envelope.settled)
+          : [];
+    await bestEffort(() =>
+      this.effects.onError?.({
+        error,
+        intents: affected.map((envelope) => envelope.intent),
+      }),
+    );
+    for (const envelope of affected) this.rejectStructuralEnvelope(envelope, error);
+    this.activeStructuralErrorScope = [];
+  }
+
+  private resolveStructuralEnvelope(envelope: StructuralLaneEnvelope, value: VaultPublisherIntentResult): void {
+    if (envelope.settled) return;
+    envelope.settled = true;
+    envelope.deferred.resolve(value);
+  }
+
+  private dropStructuralEnvelope(envelope: StructuralLaneEnvelope, reason: unknown): void {
+    if (envelope.settled) return;
+    envelope.settled = true;
+    envelope.deferred.resolve({
+      status: 'dropped',
+      intentKind: envelope.intent.kind,
+      reason: errorMessage(reason),
+    });
+  }
+
+  private rejectStructuralEnvelope(envelope: StructuralLaneEnvelope, error: unknown): void {
+    if (envelope.settled) return;
+    envelope.settled = true;
+    envelope.deferred.reject(error instanceof Error ? error : new Error(String(error)));
   }
 
   private async trackWork<T>(work: Promise<T>): Promise<T> {
@@ -757,6 +1451,151 @@ function sameStableIdentity(left: EditionIdentity, right: EditionIdentity): bool
     JSON.stringify(left.retrievalIdentity) === JSON.stringify(right.retrievalIdentity) &&
     JSON.stringify(left.analyzerIdentity) === JSON.stringify(right.analyzerIdentity)
   );
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+};
+
+class PublisherLaneTimeoutError extends Error {
+  readonly code = 'DEADLINE_EXCEEDED';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'PublisherLaneTimeoutError';
+  }
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function isBuildIntent(intent: VaultPublisherIntent): intent is VaultPublisherBuildIntent {
+  return (
+    intent.kind === 'rebuild' ||
+    intent.kind === 'refresh' ||
+    intent.kind === 'save' ||
+    intent.kind === 'dense-publication'
+  );
+}
+
+function buildLaneForIntent(intent: VaultPublisherBuildIntent): 'lexical' | 'dense' {
+  return intent.kind === 'dense-publication' ? 'dense' : 'lexical';
+}
+
+function headCoversScanBoundary(head: EditionRecord, boundary: FrontierScanBoundary): boolean {
+  return (
+    head.frontierSeq >= boundary.frontierSeq && (head.scanBoundaryJournalSeq ?? 0) >= boundary.scanBoundaryJournalSeq
+  );
+}
+
+function denseHeadSatisfiesIntent(head: EditionRecord, intent: DensePublicationIntent): boolean {
+  if (head.dense.state !== 'fresh' || !head.identity.retrievalSnapshotId) return false;
+  if (intent.targetCorpusSnapshotId && head.corpus.corpusSnapshotId !== intent.targetCorpusSnapshotId) return false;
+  if (intent.targetLinkGraphId && head.linkGraphId !== intent.targetLinkGraphId) return false;
+  if (intent.targetRetrievalSnapshotId && head.identity.retrievalSnapshotId !== intent.targetRetrievalSnapshotId)
+    return false;
+  return true;
+}
+
+function denseIntentSupersededByHead(head: EditionRecord, intent: DensePublicationIntent): boolean {
+  if (intent.targetCorpusSnapshotId && head.corpus.corpusSnapshotId !== intent.targetCorpusSnapshotId) return true;
+  if (intent.targetLinkGraphId && head.linkGraphId !== intent.targetLinkGraphId) return true;
+  return false;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function rejectOnAbort(signal: AbortSignal, fallback?: unknown): Promise<never> {
+  if (signal.aborted) return Promise.reject(abortError(signal, fallback));
+  return new Promise<never>((_resolve, reject) => {
+    signal.addEventListener(
+      'abort',
+      () => {
+        reject(abortError(signal, fallback));
+      },
+      {
+        once: true,
+      },
+    );
+  });
+}
+
+function fanInAbortSignal(signals: readonly AbortSignal[]): { signal: AbortSignal; cleanup(): void } {
+  const controller = new AbortController();
+  const listeners: Array<() => void> = [];
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) {
+      controller.abort(abortError(signal));
+    }
+  };
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abort(signal);
+      break;
+    }
+    const listener = () => {
+      abort(signal);
+    };
+    signal.addEventListener('abort', listener, { once: true });
+    listeners.push(() => {
+      signal.removeEventListener('abort', listener);
+    });
+  }
+  return {
+    signal: controller.signal,
+    cleanup() {
+      for (const cleanup of listeners.splice(0)) cleanup();
+    },
+  };
+}
+
+function abortReason(signal: AbortSignal | undefined): unknown {
+  return signal && 'reason' in signal ? (signal as { readonly reason?: unknown }).reason : undefined;
+}
+
+function abortError(signal: AbortSignal | undefined, fallback?: unknown): Error {
+  const reason = abortReason(signal) ?? fallback;
+  if (reason instanceof Error) return reason;
+  if (reason === undefined) return new AttemptCancelledError();
+  const message = typeof reason === 'string' ? reason : 'operation aborted';
+  return Object.assign(new Error(message), { code: 'CANCELLED' });
+}
+
+async function cleanupBuildOutput(output: VaultPublisherBuildOutput): Promise<void> {
+  if (output.kind === 'candidate') await output.cleanup?.();
+}
+
+async function bestEffort(work: () => MaybePromise<void> | undefined): Promise<void> {
+  try {
+    await work();
+  } catch {
+    // Cleanup hooks must not kill the long-lived publisher lane.
+  }
+}
+
+function isLaneAbort(error: unknown): boolean {
+  return (
+    error instanceof PublisherLaneTimeoutError ||
+    error instanceof AttemptCancelledError ||
+    (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) ||
+    errorCode(error) === 'DEADLINE_EXCEEDED' ||
+    errorCode(error) === 'CANCELLED'
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isDenseLifecycleTransition(_current: DenseEdition, candidate: DenseEdition): boolean {

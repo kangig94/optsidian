@@ -48,6 +48,72 @@ test('LevelReconciler recomputes from enumerable world and drains before stop', 
   assert.equal(acted.length, 2);
 });
 
+test('LevelReconciler hands enumerate and fold failures the undrained batch', async () => {
+  await assertFailurePhaseSettlesWaiter('enumerate');
+  await assertFailurePhaseSettlesWaiter('fold');
+});
+
+async function assertFailurePhaseSettlesWaiter(failingPhase) {
+  let failNext = true;
+  const errors = [];
+  const acted = [];
+  const reconciler = new LevelReconciler({
+    enumerate() {
+      if (failingPhase === 'enumerate' && failNext) {
+        failNext = false;
+        throw new Error('enumerate failed');
+      }
+      return {};
+    },
+    fold(_world, batch) {
+      if (failingPhase === 'fold' && failNext) {
+        failNext = false;
+        throw new Error('fold failed');
+      }
+      return [...batch.intents];
+    },
+    act(intents) {
+      for (const intent of intents) {
+        acted.push(intent.name);
+        intent.resolve(`acted:${intent.name}`);
+      }
+    },
+    onError(error, context) {
+      errors.push({ error, phase: context.phase, intents: context.batch.intents.map((intent) => intent.name) });
+      for (const intent of context.batch.intents) intent.reject(error);
+    },
+  });
+
+  reconciler.start();
+  const failed = createIntent('failed');
+  reconciler.enqueueIntent(failed);
+  await assert.rejects(failed.promise, new RegExp(`${failingPhase} failed`));
+  assert.deepEqual(errors, [
+    {
+      error: errors[0].error,
+      phase: failingPhase,
+      intents: ['failed'],
+    },
+  ]);
+
+  const subsequent = createIntent('subsequent');
+  reconciler.enqueueIntent(subsequent);
+  assert.equal(await subsequent.promise, 'acted:subsequent');
+  assert.deepEqual(acted, ['subsequent']);
+
+  await reconciler.stop({ drain: true });
+}
+
+function createIntent(name) {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { name, promise, resolve, reject };
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

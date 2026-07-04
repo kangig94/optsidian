@@ -117,9 +117,15 @@ import {
   VaultPublisherRegistry,
   type BuildReservation,
   type EditionCandidate,
+  type VaultPublisherEffects,
+  type VaultPublisherIntentResult,
   type VaultPublisherLease,
 } from './publisher.js';
-import type { CurrentWriterToken, TenancyFenceProvider } from '../../core/lifecycle/conditional-commit.js';
+import {
+  currentWriterTokensEqual,
+  type CurrentWriterToken,
+  type TenancyFenceProvider,
+} from '../../core/lifecycle/conditional-commit.js';
 import {
   buildLinkGraphSidecar,
   LINK_GRAPH_RESOLVER_VERSION,
@@ -170,6 +176,11 @@ export type DaemonSnapshotStoreOptions = {
   publisherRegistry?: VaultPublisherRegistry;
   reclamationAuthority?: SharedReclamationAuthority;
   tenancyFence?: TenancyFenceProvider & { writerToken?: CurrentWriterToken };
+  publisherLaneCancellation?: {
+    cancelSnapshotEffects?(cancellationId: string): void;
+    cancelEmbedScheduler?(cancellationId: string): void;
+    cancelWorkerPools?(cancellationId: string): void;
+  };
 };
 
 export type LoadVaultResult = {
@@ -217,7 +228,10 @@ type SnapshotBuilderInput = {
 };
 
 type PublishFreshSnapshotOptions = {
+  intentKind?: 'rebuild' | 'refresh' | 'save';
   prepareRetrieval?: boolean;
+  awaitDense?: boolean;
+  useActiveBase?: boolean;
   base?: BuildSnapshotBase;
   incrementalFallbackReason?: string;
 };
@@ -407,6 +421,17 @@ type GcRoots = {
   vectorGenerationKeys: Set<string>;
 };
 
+type InFlightSearchArtifactRoots = {
+  snapshotIds: Map<string, number>;
+  segmentHashes: Map<string, number>;
+  linkGraphIds: Map<LinkGraphId, number>;
+  retrievalSnapshotIds: Map<RetrievalSnapshotId, number>;
+};
+
+type SearchArtifactGcReservation = {
+  release(): void;
+};
+
 const DEFAULT_COUNT_CAP = 8;
 const DEFAULT_BYTE_CAP = 128 * 1024 * 1024;
 const DEFAULT_RETENTION_COUNT = 8;
@@ -436,18 +461,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private readonly publisherRegistry: VaultPublisherRegistry;
   private readonly reclamationAuthority: SharedReclamationAuthority;
   private readonly tenancyFence: TenancyFenceProvider & { writerToken?: CurrentWriterToken };
+  private readonly publisherLaneCancellation: NonNullable<DaemonSnapshotStoreOptions['publisherLaneCancellation']>;
   private readonly loaded = new Map<string, LoadedSnapshot>();
   private readonly activeByVault = new Map<string, string>();
-  private readonly inFlightPublishManifests = new Map<string, SnapshotEnvelope>();
-  private readonly inFlightPublishLinkGraphs = new Set<LinkGraphId>();
-  private readonly inFlightRetrievalSnapshots = new Map<RetrievalSnapshotId, RetrievalSnapshotEnvelope>();
   private readonly queuedGcVaults = new Set<string>();
-  private readonly runningGcByVault = new Map<string, Promise<void>>();
+  private readonly gcChains = new Map<string, Promise<void>>();
+  private readonly gcImmediateHandles = new Set<NodeJS.Immediate>();
+  private readonly gcRetryHandles = new Set<NodeJS.Timeout>();
+  private gcClosed = false;
   private readonly lifecycleStoreRefs = new Map<string, number>();
   private readonly pinnedVectorGenerations = new Map<string, number>();
   private readonly vaultAccessMs = new Map<string, number>();
   private readonly releasedReadContexts = new WeakSet<PinnedRetrievalReadContext>();
   private readonly publisherLeases = new Map<string, VaultPublisherLease>();
+  private readonly inFlightSearchArtifactRoots = new Map<string, InFlightSearchArtifactRoots>();
 
   constructor(options: DaemonSnapshotStoreOptions = {}) {
     this.env = options.env ?? process.env;
@@ -498,6 +525,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.publisherRegistry = options.publisherRegistry ?? new VaultPublisherRegistry();
     this.reclamationAuthority = options.reclamationAuthority ?? new SharedReclamationAuthority();
     this.tenancyFence = options.tenancyFence ?? createLocalTenancyFenceProvider();
+    this.publisherLaneCancellation = options.publisherLaneCancellation ?? {};
   }
 
   searchAnalyzerIdentity(): SearchAnalyzerIdentity {
@@ -519,6 +547,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
     try {
       const paths = this.paths(vaultRoot);
       const snapshotId = await this.withLifecycleStore(paths, () => this.ensureIndexedSnapshot(paths, context));
+      if (!context.embeddingLane) {
+        const loadedBefore = new Set(this.loaded.keys());
+        try {
+          const retrieval = await this.ensureActiveRetrievalSnapshot(paths.vaultRoot, context);
+          if (retrieval.status === 'ready') {
+            const key = loadedKey(paths.storeId, retrieval.pin.snapshotId);
+            this.release(retrieval.pin);
+            const loaded = this.loaded.get(key);
+            if (!loadedBefore.has(key) && loaded?.refCount === 0) this.loaded.delete(key);
+          }
+        } catch {
+          // Lexical warmup can succeed while dense publication remains unavailable.
+        }
+      }
       return {
         ok: true,
         command: 'index',
@@ -539,7 +581,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async rebuild(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<SnapshotMutationResult> {
     const paths = this.paths(vaultRoot);
     const snapshotId = await this.withLifecycleStore(paths, async () => {
-      return this.publishFreshSnapshot(paths.vaultRoot, context, { prepareRetrieval: true });
+      return this.publishFreshSnapshot(paths.vaultRoot, context, { intentKind: 'rebuild', prepareRetrieval: true });
     });
     return {
       ok: true,
@@ -552,22 +594,20 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async publishSaveSnapshot(vaultRoot: string, context: SnapshotRequestContext = {}): Promise<string> {
     const paths = this.paths(vaultRoot);
     return this.withLifecycleStore(paths, async () => {
-      await this.recoverVault(paths);
-      const baseCandidate = this.reusableActiveBase(paths);
+      const awaitDense = context.embeddingLane === undefined;
       return this.publishFreshSnapshot(
         paths.vaultRoot,
         { ...context, embeddingLane: 'save' },
-        { prepareRetrieval: true, ...publishOptionsFromReusableBase(baseCandidate) },
+        { intentKind: 'save', prepareRetrieval: true, awaitDense, useActiveBase: true },
       );
     });
   }
 
-  journalSaveDirtyMarks(vaultRoot: string, dirtyMarks: readonly SnapshotDirtyMark[]): number[] {
+  async journalSaveDirtyMarks(vaultRoot: string, dirtyMarks: readonly SnapshotDirtyMark[]): Promise<number[]> {
     if (dirtyMarks.length === 0) return [];
     const paths = this.paths(vaultRoot);
-    return this.publisherFor(paths)
-      .enqueueDirtyMarks(dirtyMarks)
-      .map((operation) => operation.journalSeq);
+    const operations = await this.publisherFor(paths).enqueueDirtyMarks(dirtyMarks);
+    return operations.map((operation) => operation.journalSeq);
   }
 
   journalPendingDebounce(vaultRoot: string, dirtyMarks: readonly SnapshotDirtyMark[]): void {
@@ -578,10 +618,11 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   async drainPublishers(): Promise<void> {
     await Promise.all([...this.publisherLeases.values()].map((lease) => lease.publisher.drain()));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await Promise.allSettled([...this.gcChains.values()]);
   }
 
   async recordSaveFailure(vaultRoot: string, journalSeqs: readonly number[], error: unknown): Promise<void> {
-    if (journalSeqs.length === 0) return;
     const paths = this.paths(vaultRoot);
     await this.publisherFor(paths).persistFailureDiagnostic({
       journalSeqs,
@@ -671,12 +712,15 @@ export class DaemonSnapshotStore implements SnapshotStore {
   async clear(vaultRoot: string): Promise<SnapshotMutationResult> {
     const paths = this.paths(vaultRoot);
     await this.withLifecycleStore(paths, async () => {
-      await this.recoverVault(paths);
-      fs.rmSync(paths.ledgersDir, { recursive: true, force: true });
-      fsyncDirSync(paths.rootDir);
-      this.activeByVault.delete(paths.storeId);
-      this.markSweepGc(paths);
-      this.cacheCatalog.recordCleared(paths);
+      const publisher = this.publisherFor(paths);
+      await this.releasePublisherLeasesForStore(paths, publisher);
+      const result = await publisher.enqueue({ kind: 'clear' });
+      if (result.status !== 'completed') {
+        throw new Error(
+          result.status === 'dropped' ? result.reason : `clear intent did not complete: ${result.status}`,
+        );
+      }
+      await this.releasePublisherLeasesForStore(paths);
     });
     return {
       ok: true,
@@ -1014,41 +1058,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
     this.release(readContext.lexicalPin);
   }
 
-  private async prepareRetrievalSnapshotForSnapshot(
-    paths: SearchStoreCachePaths,
-    snapshotId: string,
-    context: SnapshotRequestContext,
-  ): Promise<boolean> {
-    const loadedBefore = new Set(this.loaded.keys());
-    const releasePreparedPin = (pin: PinnedRetrievalSnapshot): void => {
-      const key = loadedKey(paths.storeId, pin.snapshotId);
-      this.release(pin);
-      const loaded = this.loaded.get(key);
-      if (!loadedBefore.has(key) && loaded?.refCount === 0) this.loaded.delete(key);
-    };
-    const loaded = await this.ensureLoaded(paths, snapshotId);
-    const current = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
-    if (
-      current.status === 'ready' &&
-      current.pin.snapshotId === snapshotId &&
-      current.pin.corpusSnapshotId === loaded.envelope.corpusSnapshotId
-    ) {
-      releasePreparedPin(current.pin);
-      return false;
-    }
-    if (current.status === 'ready') releasePreparedPin(current.pin);
-    await this.publishRetrievalSnapshot(
-      paths,
-      retrievalSnapshotSourceFromEnvelope(loaded.envelope),
-      loaded.envelope,
-      context,
-    );
-    const result = await this.tryPinActiveRetrievalSnapshot(paths.vaultRoot);
-    if (result.status !== 'ready') throw new Error(`retrieval snapshot is not ready after indexing: ${result.reason}`);
-    releasePreparedPin(result.pin);
-    return true;
-  }
-
   async tryPinActiveRetrievalSnapshot(vaultRoot: string): Promise<RetrievalPinResult> {
     const paths = this.paths(vaultRoot);
     const edition = this.currentEdition(paths);
@@ -1203,6 +1212,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     context: SnapshotRequestContext = {},
   ): Promise<{ snapshotId: string; rebuilt: boolean }> {
     await this.recoverVault(paths);
+    this.markSweepGc(paths);
     const active = this.currentEdition(paths);
     if (active && this.snapshotIdentityMatches(paths, active.corpus.snapshotId)) {
       const delta = this.snapshotContentDelta(paths, active.corpus.snapshotId);
@@ -1217,27 +1227,23 @@ export class DaemonSnapshotStore implements SnapshotStore {
           };
         }
         this.activeByVault.set(paths.storeId, active.corpus.snapshotId);
-        const retrievalPrepared = await this.prepareRetrievalSnapshotForSnapshot(
-          paths,
-          active.corpus.snapshotId,
-          context,
-        );
-        if (!retrievalPrepared) {
-          context.progress?.({
-            phase: 'scanning',
-            total: 0,
-            completed: 0,
-            message: 'already fresh',
-          });
+        if (!this.retrievalReadyForEdition(paths, active)) {
+          void this.enqueueDensePublication(paths, active, context, { force: true });
         }
+        context.progress?.({
+          phase: 'scanning',
+          total: 0,
+          completed: 0,
+          message: 'already fresh',
+        });
         return { snapshotId: active.corpus.snapshotId, rebuilt: false };
       }
       if (delta) reportRefreshDelta(context, delta);
-      const baseCandidate = this.reusableBaseForSnapshot(paths, active.corpus.snapshotId);
       return {
         snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, {
+          intentKind: 'refresh',
           prepareRetrieval: true,
-          ...publishOptionsFromReusableBase(baseCandidate),
+          useActiveBase: true,
         }),
         rebuilt: true,
       };
@@ -1246,6 +1252,7 @@ export class DaemonSnapshotStore implements SnapshotStore {
     const fallbackReason = fallbackCandidate && !fallbackCandidate.ok ? fallbackCandidate.reason : undefined;
     return {
       snapshotId: await this.publishFreshSnapshot(paths.vaultRoot, context, {
+        intentKind: 'refresh',
         prepareRetrieval: true,
         ...(fallbackReason ? { incrementalFallbackReason: fallbackReason } : {}),
       }),
@@ -1270,7 +1277,10 @@ export class DaemonSnapshotStore implements SnapshotStore {
         this.loaded.delete(loadedKey(paths.storeId, active.corpus.snapshotId));
       }
     }
-    return this.publishFreshSnapshot(vaultRoot, context);
+    return this.publishFreshSnapshot(vaultRoot, context, {
+      intentKind: 'refresh',
+      useActiveBase: active !== undefined,
+    });
   }
 
   private async publishFreshSnapshot(
@@ -1280,92 +1290,30 @@ export class DaemonSnapshotStore implements SnapshotStore {
   ): Promise<string> {
     const paths = this.paths(vaultRoot);
     await this.recoverVault(paths);
+    this.markSweepGc(paths);
     const publisher = this.publisherFor(paths);
-    const expectedHeadSeq = publisher.ledger.current()?.editionSeq;
     const scanBoundary = publisher.recordScanBoundary();
-    const built = await this.buildSnapshotWithIncrementalFallback(paths, context, options);
-    const envelope = snapshotEnvelope(built, this.baseReuseImplementationIdentity.identity);
-    const retrievalPublicationPromise: Promise<RetrievalSnapshotPublication | { error: unknown }> | undefined =
-      options.prepareRetrieval
-        ? this.buildRetrievalSnapshotPublication(
-            paths,
-            retrievalSnapshotSourceFromEnvelope(envelope),
-            envelope,
-            context,
-          ).catch((error: unknown) => ({ error }))
-        : undefined;
-    retrievalPublicationPromise?.catch(() => undefined);
-    context.progress?.({
-      phase: 'publishing',
-      total: built.segments.length,
-      completed: 0,
+    const result = await publisher.enqueue({
+      kind: options.intentKind ?? 'refresh',
+      scanBoundary,
+      deadline: context.deadline,
+      cancellationId: context.cancellationId,
+      requestContext: context,
+      prepareRetrieval: options.prepareRetrieval,
+      useActiveBase: options.useActiveBase,
+      incrementalFallbackReason: options.incrementalFallbackReason,
     });
-    let retrievalPublished = false;
-    try {
-      await this.publishBuiltSnapshot(paths, built, context, envelope);
-      this.cacheCatalog.recordIndexed(paths, {
-        snapshotId: built.snapshotId,
-        documentCount: built.documents.length,
-      });
-      let dense: DenseEdition = {
-        state: 'unavailable',
-        reason: options.prepareRetrieval ? 'dense-publication-not-built' : 'dense-publication-not-requested',
-      };
-      let retrievalPublication: RetrievalSnapshotPublication | undefined;
-      if (retrievalPublicationPromise) {
-        const result = await retrievalPublicationPromise;
-        if ('error' in result) {
-          dense = {
-            state: 'failed',
-            buildId: `${built.snapshotId}:dense`,
-            cause: result.error instanceof Error ? result.error.message : String(result.error),
-            diagnosticId: `${built.snapshotId}:dense-failed`,
-          };
-        } else {
-          retrievalPublication = result;
-          dense = result.dense;
-          this.inFlightRetrievalSnapshots.set(result.envelope.retrievalSnapshotId, result.envelope);
-          await storeRetrievalSnapshotEnvelope(paths, result.envelope);
-          retrievalPublished = true;
-        }
-      }
-      try {
-        const commit = await this.commitEditionForSnapshot({
-          paths,
-          envelope,
-          dense,
-          retrieval: retrievalPublication?.envelope,
-          scanBoundary,
-          expectedHeadSeq,
-        });
-        if (!commit.ok)
-          throw new Error(`edition commit rejected: ${commit.reason}${commit.message ? `: ${commit.message}` : ''}`);
-      } finally {
-        if (retrievalPublication)
-          this.inFlightRetrievalSnapshots.delete(retrievalPublication.envelope.retrievalSnapshotId);
-        retrievalPublication?.reservation?.release();
-      }
-      this.activeByVault.set(paths.storeId, built.snapshotId);
-    } catch (error) {
-      // If the corpus publish failed before the (concurrent) retrieval publication was consumed, its
-      // build reservation would leak — release it when it eventually resolves to a publication.
-      if (retrievalPublicationPromise && !retrievalPublished) {
-        void retrievalPublicationPromise.then(
-          (result) => {
-            if (result && !('error' in result)) result.reservation?.release();
-          },
-          () => undefined,
-        );
-      }
-      throw error;
+    const edition = lexicalEditionFromPublisherResult(result);
+    this.activeByVault.set(paths.storeId, edition.corpus.snapshotId);
+    const densePublication = options.prepareRetrieval
+      ? this.enqueueDensePublication(paths, edition, context)
+      : undefined;
+    if (densePublication && (options.awaitDense || !context.embeddingLane)) {
+      await densePublication.catch(() => undefined);
     }
-    context.progress?.({
-      phase: 'publishing',
-      total: built.segments.length,
-      completed: built.segments.length,
-    });
+    this.markSweepGc(paths);
     this.enforceBudget();
-    return built.snapshotId;
+    return edition.corpus.snapshotId;
   }
 
   private async buildSnapshotWithIncrementalFallback(
@@ -1432,94 +1380,125 @@ export class DaemonSnapshotStore implements SnapshotStore {
     envelope: SnapshotEnvelope = snapshotEnvelope(built),
   ): Promise<void> {
     this.ensureDirs(paths);
-    this.inFlightPublishManifests.set(built.snapshotId, envelope);
-    this.inFlightPublishLinkGraphs.add(built.linkGraphId);
-    try {
-      const linkGraphSidecar = buildLinkGraphSidecar({
-        corpusSnapshotId: built.corpusSnapshotId,
-        edges: built.linkEdges,
-      });
-      if (linkGraphSidecar.linkGraphId !== built.linkGraphId) {
-        throw new Error(`built snapshot linkGraphId mismatch for ${built.snapshotId}`);
-      }
-      await storeLinkGraphSidecar(paths, linkGraphSidecar, { durableRenameLinkGraph: this.renameLinkGraph });
-
-      for (const [index, segment] of built.segments.entries()) {
-        assertValidContentHash(segment.hash, 'segment hash');
-        const target = safeSegmentPath(paths.segmentsDir, segment.hash);
-        let published = false;
-        if (fs.existsSync(target)) {
-          const existingHash = sha256(fs.readFileSync(target));
-          if (existingHash === segment.hash) published = true;
-          else fs.rmSync(target, { force: true });
-        }
-        if (!published) {
-          const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.${randomTmpSuffix()}.segment.tmp`);
-          writePrivateFileSync(tmp, segment.bytes, 'Optsidian search segment');
-          fsyncFileSync(tmp);
-          fsyncDirSync(paths.tmpDir);
-          const actual = sha256(fs.readFileSync(tmp));
-          if (actual !== segment.hash) throw new Error(`segment hash verification failed for ${segment.hash}`);
-          await this.renameSegment(tmp, target);
-          fsyncDirSync(paths.segmentsDir);
-        }
-        context.progress?.({
-          phase: 'publishing',
-          total: built.segments.length,
-          completed: index + 1,
-          current: segment.hash,
-        });
-      }
-
-      const manifestPath = path.join(paths.snapshotsDir, built.snapshotId);
-      const manifestTmp = path.join(
-        paths.tmpDir,
-        `${built.snapshotId}.${process.pid}.${randomTmpSuffix()}.manifest.tmp`,
-      );
-      writePrivateFileSync(manifestTmp, `${JSON.stringify(envelope)}\n`, 'Optsidian search snapshot manifest');
-      fsyncFileSync(manifestTmp);
-      await this.renameManifest(manifestTmp, manifestPath);
-      fsyncDirSync(paths.snapshotsDir);
-
-      await this.recoverVault(paths);
-    } finally {
-      this.inFlightPublishManifests.delete(built.snapshotId);
-      this.inFlightPublishLinkGraphs.delete(built.linkGraphId);
+    const linkGraphSidecar = buildLinkGraphSidecar({
+      corpusSnapshotId: built.corpusSnapshotId,
+      edges: built.linkEdges,
+    });
+    if (linkGraphSidecar.linkGraphId !== built.linkGraphId) {
+      throw new Error(`built snapshot linkGraphId mismatch for ${built.snapshotId}`);
     }
+    await storeLinkGraphSidecar(paths, linkGraphSidecar, { durableRenameLinkGraph: this.renameLinkGraph });
+
+    for (const [index, segment] of built.segments.entries()) {
+      assertValidContentHash(segment.hash, 'segment hash');
+      const target = safeSegmentPath(paths.segmentsDir, segment.hash);
+      let published = false;
+      if (fs.existsSync(target)) {
+        const existingHash = sha256(fs.readFileSync(target));
+        if (existingHash === segment.hash) published = true;
+        else fs.rmSync(target, { force: true });
+      }
+      if (!published) {
+        const tmp = path.join(paths.tmpDir, `${segment.hash}.${process.pid}.${randomTmpSuffix()}.segment.tmp`);
+        writePrivateFileSync(tmp, segment.bytes, 'Optsidian search segment');
+        fsyncFileSync(tmp);
+        fsyncDirSync(paths.tmpDir);
+        const actual = sha256(fs.readFileSync(tmp));
+        if (actual !== segment.hash) throw new Error(`segment hash verification failed for ${segment.hash}`);
+        await this.renameSegment(tmp, target);
+        fsyncDirSync(paths.segmentsDir);
+      }
+      context.progress?.({
+        phase: 'publishing',
+        total: built.segments.length,
+        completed: index + 1,
+        current: segment.hash,
+      });
+    }
+
+    const manifestPath = path.join(paths.snapshotsDir, built.snapshotId);
+    const manifestTmp = path.join(paths.tmpDir, `${built.snapshotId}.${process.pid}.${randomTmpSuffix()}.manifest.tmp`);
+    writePrivateFileSync(manifestTmp, `${JSON.stringify(envelope)}\n`, 'Optsidian search snapshot manifest');
+    fsyncFileSync(manifestTmp);
+    await this.renameManifest(manifestTmp, manifestPath);
+    fsyncDirSync(paths.snapshotsDir);
+
+    await this.recoverVault(paths);
   }
 
   private async publishRetrievalSnapshot(
     paths: SearchStoreCachePaths,
-    source: RetrievalSnapshotSource,
+    _source: RetrievalSnapshotSource,
     envelope: SnapshotEnvelope,
     context: SnapshotRequestContext = {},
   ): Promise<void> {
+    const targetCorpusSnapshotId = envelope.corpusSnapshotId ?? corpusSnapshotIdFromManifest(envelope.manifest);
+    const result = await this.enqueueDensePublication(paths, this.currentEdition(paths), context, {
+      targetCorpusSnapshotId,
+      targetLinkGraphId: envelope.linkGraphId,
+      force: true,
+    });
+    if (result.status === 'dropped') throw new Error(`dense publication dropped: ${result.reason}`);
+    if (result.status === 'not-ready') throw new Error(`retrieval snapshot is not ready: ${result.reason}`);
+  }
+
+  private enqueueDensePublication(
+    paths: SearchStoreCachePaths,
+    target: EditionRecord | undefined,
+    context: SnapshotRequestContext = {},
+    options: { targetCorpusSnapshotId?: string; targetLinkGraphId?: LinkGraphId; force?: boolean } = {},
+  ): Promise<VaultPublisherIntentResult> {
     const publisher = this.publisherFor(paths);
-    const head = publisher.ledger.current();
-    if (!head) throw new Error('cannot publish dense edition without a committed lexical edition');
-    const publication = await this.buildRetrievalSnapshotPublication(paths, source, envelope, context);
-    this.inFlightRetrievalSnapshots.set(publication.envelope.retrievalSnapshotId, publication.envelope);
-    try {
-      await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
-      const commit = await this.commitEditionForSnapshot({
-        paths,
-        envelope,
-        dense: publication.dense,
-        retrieval: publication.envelope,
-        scanBoundary: {
-          frontierSeq: head.frontierSeq,
-          scanBoundaryJournalSeq: head.scanBoundaryJournalSeq ?? 0,
-        },
-        expectedHeadSeq: head.editionSeq,
-      });
-      if (!commit.ok)
-        throw new Error(
-          `dense edition commit rejected: ${commit.reason}${commit.message ? `: ${commit.message}` : ''}`,
-        );
-    } finally {
-      this.inFlightRetrievalSnapshots.delete(publication.envelope.retrievalSnapshotId);
-      publication.reservation?.release();
+    return publisher.enqueue({
+      kind: 'dense-publication',
+      ...(options.force ? { force: true } : {}),
+      ...(target
+        ? {
+            scanBoundary: {
+              frontierSeq: target.frontierSeq,
+              scanBoundaryJournalSeq: target.scanBoundaryJournalSeq ?? 0,
+            },
+            targetEditionSeq: target.editionSeq,
+            targetCorpusSnapshotId: options.targetCorpusSnapshotId ?? target.corpus.corpusSnapshotId,
+            targetLinkGraphId: options.targetLinkGraphId ?? target.linkGraphId,
+            ...(target.identity.retrievalSnapshotId
+              ? { targetRetrievalSnapshotId: target.identity.retrievalSnapshotId }
+              : {}),
+          }
+        : {}),
+      deadline: context.deadline,
+      cancellationId: context.cancellationId,
+      requestContext: context,
+    });
+  }
+
+  private retrievalReadyForEdition(paths: SearchStoreCachePaths, edition: EditionRecord): boolean {
+    if (edition.dense.state !== 'fresh' || !edition.identity.retrievalSnapshotId) return false;
+    const retrieval = this.readRetrievalSnapshotEnvelope(paths, edition.identity.retrievalSnapshotId);
+    if (!retrieval || !retrievalEnvelopeMatchesEdition(retrieval, edition)) return false;
+    const envelope = this.readSnapshotEnvelope(paths, retrieval.snapshotId);
+    if (!envelope || envelope.corpusSnapshotId !== retrieval.corpusSnapshotId) return false;
+    if (envelope.linkGraphId !== retrieval.linkGraphId || !linkGraphSidecarExists(paths, retrieval.linkGraphId)) {
+      return false;
     }
+    if (
+      edition.dense.generationId !== retrieval.vector.generationId ||
+      edition.dense.embeddingSetId !== retrieval.embeddingSetId ||
+      edition.dense.specId !== retrieval.vector.specId ||
+      edition.dense.dbPath !== retrieval.vector.dbPath ||
+      edition.dense.manifestHash !== retrieval.vector.manifestHash
+    ) {
+      return false;
+    }
+    if (retrieval.embeddingSet.embeddingSetId !== retrieval.embeddingSetId) return false;
+    const expectedRetrievalSnapshotId = computeRetrievalSnapshotId({
+      corpusSnapshotId: retrieval.corpusSnapshotId,
+      linkGraphId: retrieval.linkGraphId,
+      embeddingSetId: retrieval.embeddingSetId,
+      retrieverPlanIdentity: retrieval.retrieverPlanIdentity,
+      rankingFeatureVersion: retrieval.rankingFeatureVersion,
+    });
+    return expectedRetrievalSnapshotId === retrieval.retrievalSnapshotId;
   }
 
   private async buildRetrievalSnapshotPublication(
@@ -1694,34 +1673,21 @@ export class DaemonSnapshotStore implements SnapshotStore {
     }
   }
 
-  private async publishRetrievalSnapshotPublication(
-    paths: SearchStoreCachePaths,
-    publication: RetrievalSnapshotPublication,
-  ): Promise<void> {
-    this.inFlightRetrievalSnapshots.set(publication.envelope.retrievalSnapshotId, publication.envelope);
-    try {
-      await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
-    } finally {
-      this.inFlightRetrievalSnapshots.delete(publication.envelope.retrievalSnapshotId);
-    }
-  }
-
-  private async commitEditionForSnapshot(input: {
+  private editionCandidateForSnapshot(input: {
     paths: SearchStoreCachePaths;
     envelope: SnapshotEnvelope;
     dense: DenseEdition;
     retrieval?: RetrievalSnapshotEnvelope;
     scanBoundary: { frontierSeq: number; scanBoundaryJournalSeq: number };
-    expectedHeadSeq: number | undefined;
-  }) {
+    head: EditionRecord | undefined;
+  }): EditionCandidate {
     const publisher = this.publisherFor(
       input.paths,
       denseEmbeddingSpaceForEdition(input.dense, this.currentEmbeddingSpaceId()),
     );
-    const currentHead = publisher.ledger.current();
     const identityTuple = input.envelope.manifest.identityTuple;
-    const candidate: EditionCandidate = {
-      ...(currentHead ? { baseEditionSeq: currentHead.editionSeq } : {}),
+    return {
+      ...(input.head ? { baseEditionSeq: input.head.editionSeq } : {}),
       frontierSeq: input.scanBoundary.frontierSeq,
       scanBoundaryJournalSeq: input.scanBoundary.scanBoundaryJournalSeq,
       corpus: {
@@ -1767,7 +1733,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
           })),
       }),
     };
-    return publisher.commit(candidate, input.expectedHeadSeq, this.currentWriterToken());
   }
 
   private async ensureLoaded(
@@ -1904,14 +1869,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
         if (retrieval) await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
       }
     }
-    for (const [snapshotId, envelope] of this.inFlightPublishManifests) {
-      snapshotIds.add(snapshotId);
-      addSnapshotEnvelopeGcRoots(roots, envelope);
-    }
-    for (const linkGraphId of this.inFlightPublishLinkGraphs) linkGraphIds.add(linkGraphId);
-    for (const retrieval of this.inFlightRetrievalSnapshots.values()) {
-      await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
-    }
     for (const snapshot of this.loaded.values()) {
       if (snapshot.vaultKey !== paths.storeId) continue;
       linkGraphIds.add(snapshot.linkGraph.linkGraphId);
@@ -1929,9 +1886,72 @@ export class DaemonSnapshotStore implements SnapshotStore {
       if (!retrieval) continue;
       await this.addRetrievalSnapshotGcRoots(roots, paths, retrieval);
     }
+    this.addInFlightSearchArtifactGcRoots(paths, roots);
     const vaultVectorPrefix = vectorGenerationGcPrefix(this.profileHash, paths.vaultStateHash);
     for (const key of this.pinnedVectorGenerations.keys()) {
       if (key.startsWith(vaultVectorPrefix)) vectorGenerationKeys.add(key);
+    }
+    return roots;
+  }
+
+  private reserveInFlightSearchArtifacts(
+    paths: SearchStoreCachePaths,
+    input: { snapshot?: SnapshotEnvelope; retrieval?: RetrievalSnapshotEnvelope },
+  ): SearchArtifactGcReservation {
+    const snapshotIds = new Set<string>();
+    const segmentHashes = new Set<string>();
+    const linkGraphIds = new Set<LinkGraphId>();
+    const retrievalSnapshotIds = new Set<RetrievalSnapshotId>();
+    const addSnapshot = (envelope: SnapshotEnvelope) => {
+      snapshotIds.add(envelope.snapshotId);
+      linkGraphIds.add(envelope.linkGraphId);
+      for (const partition of envelope.manifest.partitions) segmentHashes.add(partition.segmentHash);
+    };
+    if (input.snapshot) addSnapshot(input.snapshot);
+    if (input.retrieval) {
+      retrievalSnapshotIds.add(input.retrieval.retrievalSnapshotId);
+      snapshotIds.add(input.retrieval.snapshotId);
+      linkGraphIds.add(input.retrieval.linkGraphId);
+    }
+    const roots = this.inFlightSearchArtifactRootsFor(paths.storeId);
+    for (const value of snapshotIds) retainCountedRoot(roots.snapshotIds, value);
+    for (const value of segmentHashes) retainCountedRoot(roots.segmentHashes, value);
+    for (const value of linkGraphIds) retainCountedRoot(roots.linkGraphIds, value);
+    for (const value of retrievalSnapshotIds) retainCountedRoot(roots.retrievalSnapshotIds, value);
+
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        for (const value of snapshotIds) releaseCountedRoot(roots.snapshotIds, value);
+        for (const value of segmentHashes) releaseCountedRoot(roots.segmentHashes, value);
+        for (const value of linkGraphIds) releaseCountedRoot(roots.linkGraphIds, value);
+        for (const value of retrievalSnapshotIds) releaseCountedRoot(roots.retrievalSnapshotIds, value);
+        if (inFlightSearchArtifactRootsEmpty(roots)) this.inFlightSearchArtifactRoots.delete(paths.storeId);
+      },
+    };
+  }
+
+  private addInFlightSearchArtifactGcRoots(paths: SearchStoreCachePaths, roots: GcRoots): void {
+    const inFlight = this.inFlightSearchArtifactRoots.get(paths.storeId);
+    if (!inFlight) return;
+    for (const value of inFlight.snapshotIds.keys()) roots.snapshotIds.add(value);
+    for (const value of inFlight.segmentHashes.keys()) roots.segmentHashes.add(value);
+    for (const value of inFlight.linkGraphIds.keys()) roots.linkGraphIds.add(value);
+    for (const value of inFlight.retrievalSnapshotIds.keys()) roots.retrievalSnapshotIds.add(value);
+  }
+
+  private inFlightSearchArtifactRootsFor(storeId: string): InFlightSearchArtifactRoots {
+    let roots = this.inFlightSearchArtifactRoots.get(storeId);
+    if (!roots) {
+      roots = {
+        snapshotIds: new Map(),
+        segmentHashes: new Map(),
+        linkGraphIds: new Map(),
+        retrievalSnapshotIds: new Map(),
+      };
+      this.inFlightSearchArtifactRoots.set(storeId, roots);
     }
     return roots;
   }
@@ -1950,22 +1970,63 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   private queueGc(paths: SearchStoreCachePaths): void {
+    if (this.gcClosed) return;
     const vaultKey = paths.vaultStateHash;
     if (this.queuedGcVaults.has(vaultKey)) return;
     this.queuedGcVaults.add(vaultKey);
     const scheduled = setImmediate(() => {
-      this.queuedGcVaults.delete(vaultKey);
-      const previous = this.runningGcByVault.get(vaultKey) ?? Promise.resolve();
-      const run = previous
-        .catch(() => undefined)
-        .then(() => this.runBackgroundGc(paths))
-        .catch(() => undefined)
-        .finally(() => {
-          if (this.runningGcByVault.get(vaultKey) === run) this.runningGcByVault.delete(vaultKey);
-        });
-      this.runningGcByVault.set(vaultKey, run);
+      this.gcImmediateHandles.delete(scheduled);
+      if (this.gcClosed) {
+        this.queuedGcVaults.delete(vaultKey);
+        return;
+      }
+      void this.requestGc(paths).catch(() => undefined);
     });
+    this.gcImmediateHandles.add(scheduled);
     scheduled.unref?.();
+  }
+
+  private async requestGc(paths: SearchStoreCachePaths): Promise<void> {
+    this.ensureDirs(paths);
+    const vaultKey = paths.vaultStateHash;
+    if (this.gcClosed) {
+      this.queuedGcVaults.delete(vaultKey);
+      return;
+    }
+    const previous = this.gcChains.get(vaultKey) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.gcClosed) {
+          this.queuedGcVaults.delete(vaultKey);
+          return;
+        }
+        if ((this.lifecycleStoreRefs.get(paths.storeId) ?? 0) > 0) {
+          const retry = setTimeout(() => {
+            this.gcRetryHandles.delete(retry);
+            if (this.gcClosed) {
+              this.queuedGcVaults.delete(vaultKey);
+              return;
+            }
+            void this.requestGc(paths).catch(() => undefined);
+          }, 10);
+          this.gcRetryHandles.add(retry);
+          retry.unref?.();
+          return;
+        }
+        this.queuedGcVaults.delete(vaultKey);
+        // GC is best-effort cleanup, not part of the edition publication contract. Keep it on a
+        // coalesced per-vault chain so publisher-lane drains and save/dense intents cannot wedge
+        // behind sweeping. Safety still comes from per-candidate root recompute plus writer-token
+        // validation immediately before each search-artifact unlink.
+        if (this.gcClosed) return;
+        await this.runBackgroundGc(paths);
+      })
+      .finally(() => {
+        if (this.gcChains.get(vaultKey) === current) this.gcChains.delete(vaultKey);
+      });
+    this.gcChains.set(vaultKey, current);
+    await current;
   }
 
   private async runBackgroundGc(paths: SearchStoreCachePaths): Promise<void> {
@@ -1978,20 +2039,37 @@ export class DaemonSnapshotStore implements SnapshotStore {
   private async markSweepSearchGc(paths: SearchStoreCachePaths): Promise<void> {
     for (const file of await safeReadDirAsync(paths.retrievalsDir)) {
       if (await this.retrievalSnapshotIsProtected(paths, file)) continue;
-      await rmBestEffort(path.join(paths.retrievalsDir, file), { force: true });
+      await this.unlinkSearchGcCandidate(path.join(paths.retrievalsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.snapshotsDir)) {
       if (await this.snapshotIsProtectedForGc(paths, file)) continue;
-      await rmBestEffort(path.join(paths.snapshotsDir, file), { force: true });
+      await this.unlinkSearchGcCandidate(path.join(paths.snapshotsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.segmentsDir)) {
       if (await this.segmentIsProtectedForGc(paths, file)) continue;
-      await rmBestEffort(path.join(paths.segmentsDir, file), { force: true });
+      await this.unlinkSearchGcCandidate(path.join(paths.segmentsDir, file), { force: true });
     }
     for (const file of await safeReadDirAsync(paths.linkGraphsDir)) {
       if (!isValidSnapshotId(file)) continue;
       if (await this.linkGraphIsProtectedForGc(paths, file)) continue;
-      await rmBestEffort(path.join(paths.linkGraphsDir, file), { force: true });
+      await this.unlinkSearchGcCandidate(path.join(paths.linkGraphsDir, file), { force: true });
+    }
+  }
+
+  private async unlinkSearchGcCandidate(
+    target: string,
+    options: { recursive?: boolean; force?: boolean },
+  ): Promise<void> {
+    await this.assertCurrentWriterForSearchGcUnlink();
+    await rmBestEffort(target, options);
+  }
+
+  private async assertCurrentWriterForSearchGcUnlink(): Promise<void> {
+    const writerToken = this.tenancyFence.writerToken;
+    if (!writerToken) throw new Error('search GC deletion rejected: writer token is unavailable');
+    const current = await this.tenancyFence.currentWriterToken();
+    if (!current || !currentWriterTokensEqual(current, writerToken)) {
+      throw new Error('search GC deletion rejected: writer token is no longer current');
     }
   }
 
@@ -2131,12 +2209,6 @@ export class DaemonSnapshotStore implements SnapshotStore {
 
   private async recoverVault(paths: SearchStoreCachePaths): Promise<void> {
     this.ensureDirs(paths);
-    this.markSweepGc(paths);
-  }
-
-  private reusableActiveBase(paths: SearchStoreCachePaths): ReusableBaseCandidate | undefined {
-    const active = this.currentEdition(paths);
-    return active ? this.reusableBaseForSnapshot(paths, active.corpus.snapshotId) : undefined;
   }
 
   private reusableBaseForSnapshot(paths: SearchStoreCachePaths, snapshotId: string): ReusableBaseCandidate {
@@ -2321,9 +2393,175 @@ export class DaemonSnapshotStore implements SnapshotStore {
       paths: VaultPublisher.pathsFor(searchStoreLedgerRootDir(paths, embeddingSpaceId)),
       retrievalIdentity,
       tenancyFence: this.tenancyFence,
+      effects: this.publisherLaneEffects(paths),
     });
     this.publisherLeases.set(key, lease);
     return lease.publisher;
+  }
+
+  private async releasePublisherLeasesForStore(paths: SearchStoreCachePaths, except?: VaultPublisher): Promise<void> {
+    const leases: VaultPublisherLease[] = [];
+    for (const [key, lease] of this.publisherLeases) {
+      const identity = lease.publisher.retrievalIdentity;
+      if (identity.vaultStateHash !== paths.vaultStateHash) continue;
+      if (identity.lexicalIdentityHash !== paths.lexicalIdentityHash) continue;
+      if (except && lease.publisher === except) continue;
+      this.publisherLeases.delete(key);
+      leases.push(lease);
+    }
+    await Promise.all(leases.map((lease) => lease.release()));
+  }
+
+  private publisherLaneEffects(paths: SearchStoreCachePaths): VaultPublisherEffects {
+    return {
+      buildSnapshot: async (input) => {
+        throwIfAborted(input.signal);
+        const context = publisherLaneSnapshotContext(input.intent.requestContext, input.deadline, input.cancellationId);
+        const options = this.publisherLaneSnapshotOptions(paths, input.intent, input.head);
+        const built = await this.buildSnapshotWithIncrementalFallback(paths, context, options);
+        throwIfAborted(input.signal);
+        const envelope = snapshotEnvelope(built, this.baseReuseImplementationIdentity.identity);
+        context.progress?.({
+          phase: 'publishing',
+          total: built.segments.length,
+          completed: 0,
+        });
+        const reservation = this.reserveInFlightSearchArtifacts(paths, { snapshot: envelope });
+        try {
+          await this.publishBuiltSnapshot(paths, built, context, envelope);
+          this.cacheCatalog.recordIndexed(paths, {
+            snapshotId: built.snapshotId,
+            documentCount: built.documents.length,
+          });
+          context.progress?.({
+            phase: 'publishing',
+            total: built.segments.length,
+            completed: built.segments.length,
+          });
+          const dense: DenseEdition = {
+            state: 'unavailable',
+            reason: input.intent.prepareRetrieval ? 'dense-publication-pending' : 'dense-publication-not-requested',
+          };
+          return {
+            kind: 'candidate',
+            candidate: this.editionCandidateForSnapshot({
+              paths,
+              envelope,
+              dense,
+              scanBoundary: input.intent.scanBoundary,
+              head: input.head,
+            }),
+            cleanup: () => {
+              reservation.release();
+            },
+          };
+        } catch (error) {
+          reservation.release();
+          throw error;
+        }
+      },
+      buildDense: async (input) => {
+        throwIfAborted(input.signal);
+        const head = input.head;
+        if (!head) return { kind: 'drop', reason: 'cannot publish dense edition without a committed lexical edition' };
+        const envelope = this.readSnapshotEnvelope(paths, head.corpus.snapshotId);
+        if (!envelope) return { kind: 'drop', reason: 'dense target corpus is missing' };
+        if (envelope.linkGraphId !== head.linkGraphId || !linkGraphSidecarExists(paths, head.linkGraphId)) {
+          return { kind: 'drop', reason: 'dense target link graph is missing' };
+        }
+        const context = publisherLaneSnapshotContext(input.intent.requestContext, input.deadline, input.cancellationId);
+        let publication: RetrievalSnapshotPublication;
+        try {
+          publication = await this.buildRetrievalSnapshotPublication(
+            paths,
+            retrievalSnapshotSourceFromEnvelope(envelope),
+            envelope,
+            context,
+          );
+        } catch (error) {
+          const dense: DenseEdition = {
+            state: 'failed',
+            buildId: `${head.corpus.snapshotId}:dense`,
+            cause: errorMessage(error),
+            diagnosticId: `${head.corpus.snapshotId}:dense-failed`,
+          };
+          return {
+            kind: 'candidate',
+            candidate: this.editionCandidateForSnapshot({
+              paths,
+              envelope,
+              dense,
+              scanBoundary: {
+                frontierSeq: head.frontierSeq,
+                scanBoundaryJournalSeq: head.scanBoundaryJournalSeq ?? 0,
+              },
+              head,
+            }),
+          };
+        }
+        const searchReservation = this.reserveInFlightSearchArtifacts(paths, { retrieval: publication.envelope });
+        try {
+          await storeRetrievalSnapshotEnvelope(paths, publication.envelope);
+          return {
+            kind: 'candidate',
+            candidate: this.editionCandidateForSnapshot({
+              paths,
+              envelope,
+              dense: publication.dense,
+              retrieval: publication.envelope,
+              scanBoundary: {
+                frontierSeq: head.frontierSeq,
+                scanBoundaryJournalSeq: head.scanBoundaryJournalSeq ?? 0,
+              },
+              head,
+            }),
+            cleanup: () => {
+              searchReservation.release();
+              publication.reservation?.release();
+            },
+          };
+        } catch (error) {
+          searchReservation.release();
+          publication.reservation?.release();
+          throw error;
+        }
+      },
+      clear: async ({ signal }) => {
+        throwIfAborted(signal);
+        await this.recoverVault(paths);
+        throwIfAborted(signal);
+        fs.rmSync(paths.ledgersDir, { recursive: true, force: true });
+        fsyncDirSync(paths.rootDir);
+        this.activeByVault.delete(paths.storeId);
+        this.markSweepGc(paths);
+        this.cacheCatalog.recordCleared(paths);
+      },
+      cancelSnapshotEffects: ({ cancellationId }) => {
+        this.publisherLaneCancellation.cancelSnapshotEffects?.(cancellationId);
+      },
+      cancelEmbedScheduler: ({ cancellationId }) => {
+        this.publisherLaneCancellation.cancelEmbedScheduler?.(cancellationId);
+      },
+      cancelWorkerPools: ({ cancellationId }) => {
+        this.publisherLaneCancellation.cancelWorkerPools?.(cancellationId);
+      },
+    };
+  }
+
+  private publisherLaneSnapshotOptions(
+    paths: SearchStoreCachePaths,
+    intent: {
+      useActiveBase?: boolean;
+      incrementalFallbackReason?: string;
+    },
+    head: EditionRecord | undefined,
+  ): PublishFreshSnapshotOptions {
+    if (intent.useActiveBase && head) {
+      const baseCandidate = this.reusableBaseForSnapshot(paths, head.corpus.snapshotId);
+      if (baseCandidate.ok) return { base: baseCandidate.base };
+      return { incrementalFallbackReason: baseCandidate.reason };
+    }
+    return intent.incrementalFallbackReason ? { incrementalFallbackReason: intent.incrementalFallbackReason } : {};
   }
 
   private currentEdition(
@@ -2347,6 +2585,13 @@ export class DaemonSnapshotStore implements SnapshotStore {
   }
 
   async close(): Promise<void> {
+    this.gcClosed = true;
+    for (const scheduled of this.gcImmediateHandles) clearImmediate(scheduled);
+    this.gcImmediateHandles.clear();
+    for (const retry of this.gcRetryHandles) clearTimeout(retry);
+    this.gcRetryHandles.clear();
+    this.queuedGcVaults.clear();
+    await Promise.allSettled([...this.gcChains.values()]);
     const leases = [...this.publisherLeases.values()];
     this.publisherLeases.clear();
     await Promise.all(leases.map((lease) => lease.release()));
@@ -2541,6 +2786,13 @@ export function createWorkerEmbeddingSetBuilder(input: {
 // mtime in sweepStaleTmpDir.
 function randomTmpSuffix(): string {
   return crypto.randomBytes(8).toString('hex');
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const reason = 'reason' in signal ? (signal as { readonly reason?: unknown }).reason : undefined;
+  if (reason instanceof Error) throw reason;
+  throw Object.assign(new Error(typeof reason === 'string' ? reason : 'operation aborted'), { code: 'CANCELLED' });
 }
 
 function embeddingBuildLane(lane: EmbedSchedulerLane | undefined): RetrievalEmbeddingBuildLane {
@@ -3059,6 +3311,25 @@ function addSnapshotEnvelopeGcRoots(
   for (const partition of envelope.manifest.partitions) roots.segmentHashes.add(partition.segmentHash);
 }
 
+function retainCountedRoot<T>(roots: Map<T, number>, value: T): void {
+  roots.set(value, (roots.get(value) ?? 0) + 1);
+}
+
+function releaseCountedRoot<T>(roots: Map<T, number>, value: T): void {
+  const count = roots.get(value) ?? 0;
+  if (count <= 1) roots.delete(value);
+  else roots.set(value, count - 1);
+}
+
+function inFlightSearchArtifactRootsEmpty(roots: InFlightSearchArtifactRoots): boolean {
+  return (
+    roots.snapshotIds.size === 0 &&
+    roots.segmentHashes.size === 0 &&
+    roots.linkGraphIds.size === 0 &&
+    roots.retrievalSnapshotIds.size === 0
+  );
+}
+
 function vectorGenerationGcKey(input: {
   vaultStateHash: string;
   embeddingSetId: string;
@@ -3209,11 +3480,33 @@ function currentContentHashes(vaultRoot: string): Map<string, string> {
   return hashes;
 }
 
-function publishOptionsFromReusableBase(
-  candidate: ReusableBaseCandidate | undefined,
-): Partial<PublishFreshSnapshotOptions> {
-  if (!candidate) return {};
-  return candidate.ok ? { base: candidate.base } : { incrementalFallbackReason: candidate.reason };
+function lexicalEditionFromPublisherResult(result: VaultPublisherIntentResult): EditionRecord {
+  if (result.status === 'covered') return result.head;
+  if (result.status === 'committed') return result.edition;
+  if (result.status === 'dropped') throw new Error(result.reason);
+  if (result.status === 'not-ready')
+    throw new Error(`lexical publication did not produce a ready head: ${result.reason}`);
+  throw new Error(`unexpected publisher result for lexical publication: ${result.intentKind}`);
+}
+
+function publisherLaneSnapshotContext(
+  value: unknown,
+  deadline: number,
+  cancellationId: string,
+): SnapshotRequestContext {
+  const context: SnapshotRequestContext = {
+    deadline,
+    cancellationId,
+  };
+  if (!isRecord(value)) return context;
+  const progress = value.progress;
+  if (typeof progress === 'function') context.progress = progress as SnapshotRequestContext['progress'];
+  if (isEmbedSchedulerLane(value.embeddingLane)) context.embeddingLane = value.embeddingLane;
+  return context;
+}
+
+function isEmbedSchedulerLane(value: unknown): value is EmbedSchedulerLane {
+  return value === 'query' || value === 'save' || value === 'refresh' || value === 'rebuild';
 }
 
 function reportIncrementalFallback(context: SnapshotRequestContext, reason: string): string {

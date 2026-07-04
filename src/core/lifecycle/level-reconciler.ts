@@ -6,12 +6,19 @@ type LevelReconcilerBatch<TIntent> = {
   signal: AbortSignal;
 };
 
+type LevelReconcilerErrorPhase = 'enumerate' | 'fold' | 'act' | 'ack';
+
+type LevelReconcilerErrorContext<TIntent> = {
+  batch: LevelReconcilerBatch<TIntent>;
+  phase: LevelReconcilerErrorPhase;
+};
+
 export type LevelReconcilerOptions<TWorld, TFolded, TActionResult, TIntent> = {
   enumerate(signal: AbortSignal): MaybePromise<TWorld>;
   fold(world: TWorld, batch: LevelReconcilerBatch<TIntent>): MaybePromise<TFolded>;
   act(folded: TFolded, batch: LevelReconcilerBatch<TIntent>): MaybePromise<TActionResult>;
   ack?(result: TActionResult, batch: LevelReconcilerBatch<TIntent>): MaybePromise<void>;
-  onError?(error: unknown): MaybePromise<void>;
+  onError?(error: unknown, context: LevelReconcilerErrorContext<TIntent>): MaybePromise<void>;
 };
 
 export type StopOptions = {
@@ -112,13 +119,18 @@ export class LevelReconciler<TWorld, TFolded, TActionResult = void, TIntent = vo
         };
         this.dirty = false;
         this.running = true;
+        let phase: LevelReconcilerErrorPhase = 'enumerate';
         try {
+          phase = 'enumerate';
           const world = await this.options.enumerate(this.abortController.signal);
+          phase = 'fold';
           const folded = await this.options.fold(world, batch);
+          phase = 'act';
           const result = await this.options.act(folded, batch);
+          phase = 'ack';
           await this.options.ack?.(result, batch);
         } catch (error) {
-          if (this.options.onError) await this.options.onError(error);
+          if (this.options.onError) await this.options.onError(error, { batch, phase });
           else throw error;
         } finally {
           this.running = false;

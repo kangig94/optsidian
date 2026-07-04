@@ -125,17 +125,22 @@ function deferred() {
 // Load-headroom timeout for heavy embedding work under full-suite parallelism.
 async function waitFor(predicate, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
+  let lastError;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    try {
+      if (predicate()) return;
+    } catch (error) {
+      lastError = error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+  if (lastError) throw lastError;
   assert.equal(predicate(), true);
 }
 
-async function drainBackgroundGc(store, paths) {
+async function drainBackgroundGc(store, _paths) {
   await new Promise((resolve) => setImmediate(resolve));
-  const running = store.runningGcByVault.get(paths.vaultStateHash);
-  if (running) await running;
+  await store.drainPublishers();
 }
 
 function readJson(file) {
@@ -442,6 +447,7 @@ test('AC12 identical-content rebuild reuses the active vector generation directo
   const hits = await attached.densePin.vectorLease.searchVector(queryVector, 1);
   assert.equal(hits.length, 1);
   store.releaseReadContext(readContext);
+  await store.close();
   await vectorPool.close();
 });
 
@@ -532,6 +538,9 @@ test('AC6 watcher save folds queued docs in place and embedded docs into the nex
 
       embedding.releaseNextDocument();
       await waitFor(() => embedding.calls.length >= initialCallCount + 4);
+      await waitFor(
+        () => activeRetrieval(paths).active.retrievalSnapshotId !== initialRetrieval.active.retrievalSnapshotId,
+      );
       const firstSaveRetrieval = activeRetrieval(paths);
       assert.notEqual(firstSaveRetrieval.active.retrievalSnapshotId, initialRetrieval.active.retrievalSnapshotId);
       const firstSaveEmbedded = firstSaveRetrieval.envelope.embeddingSet.records.find(
@@ -568,6 +577,7 @@ test('AC6 watcher save folds queued docs in place and embedded docs into the nex
       lease.release();
     }
   } finally {
+    embedding.setGateDocuments(false);
     embedding.releaseAllDocuments();
     await manager.close();
     await scheduler.close();
@@ -618,6 +628,7 @@ test('AC1 post-restart lazy-open GC pin protects the opening vector generation',
     env,
   });
   const oldGenerationDir = generationDirForEnvelope(oldVectorPaths, oldEnvelope);
+  await firstStore.close();
   await firstPool.close();
 
   const lazyOpenEntered = deferred();
@@ -671,6 +682,7 @@ test('AC1 post-restart lazy-open GC pin protects the opening vector generation',
   restartedStore.releaseReadContext(readContext);
   await restartedStore.runBackgroundGc(paths);
   assert.equal(fs.existsSync(oldGenerationDir), false);
+  await restartedStore.close();
   await restartedPool.close();
 });
 
@@ -708,6 +720,7 @@ test('AC1 a thrown lazy-open releases the retained dense GC pin (B5)', async () 
   await firstStore.rebuild(vault, context('b5-first'));
   const paths = searchStoreCachePaths(vault, env);
   await drainBackgroundGc(firstStore, paths);
+  await firstStore.close();
   await firstPool.close();
 
   const restartedPool = new VectorGenerationPool({ factory: createMemoryCoralNeedleInstanceFactory() });
@@ -746,6 +759,7 @@ test('AC1 a thrown lazy-open releases the retained dense GC pin (B5)', async () 
   // B5: the thrown lazy-open must not leak the retained vector GC pin.
   assert.equal(restartedStore.densePinnedGenerationCountForTests(), 0);
   restartedStore.releaseReadContext(readContext);
+  await restartedStore.close();
   await restartedPool.close();
 });
 
@@ -888,6 +902,7 @@ test('AC6 queued save folds in place while in-flight save folds to next incremen
   await rebuild;
 
   const paths = searchStoreCachePaths(vault, env);
+  await waitFor(() => activeRetrieval(paths));
   const { envelope } = activeRetrieval(paths);
   const firstRecord = envelope.embeddingSet.records.find((record) => record.documentId === firstOldDocument.documentId);
   const queuedRecord = envelope.embeddingSet.records.find(
@@ -921,5 +936,6 @@ test('AC6 queued save folds in place while in-flight save folds to next incremen
   assert.equal(envelope.vector.generationId, expectedGenerationId);
   assert.equal(envelope.vector.generationId.startsWith('save-'), false);
 
+  await store.close();
   await vectorPool.close();
 });

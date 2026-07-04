@@ -139,7 +139,7 @@ test('AC3 publisher persists failed save diagnostics', async () => {
   try {
     const fence = createLocalTenancyFenceProvider();
     const publisher = createPublisher(root, fence);
-    const [operation] = publisher.enqueueDirtyMarks([{ docId: 'doc-a', path: 'A.md', contentHash: 'hash-a' }]);
+    const [operation] = await publisher.enqueueDirtyMarks([{ docId: 'doc-a', path: 'A.md', contentHash: 'hash-a' }]);
     const error = Object.assign(new Error('save failed'), { code: 'E_SAVE' });
     const diagnostic = await publisher.persistFailureDiagnostic({
       journalSeqs: [operation.journalSeq],

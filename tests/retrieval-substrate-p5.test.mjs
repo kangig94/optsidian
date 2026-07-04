@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 
 import { parseArgs } from '../src/cli/args.ts';
 import {
@@ -45,6 +45,12 @@ import { activeRetrievalFromEdition, editionDense, generationDirForEnvelope } fr
 const PROFILE_HASH = 'retrieval-p5-profile';
 const REMOVED_STUB_NAME = ['similarity', 'Unavailable', 'Result'].join('');
 const REMOVED_VECTOR_SECTION = ['vector', 'Block'].join('');
+const openHarnesses = new Set();
+
+afterEach(async () => {
+  const harnesses = [...openHarnesses].reverse();
+  for (const harness of harnesses) await closeHarness(harness);
+});
 
 function tempRoot(prefix = 'optsidian-retrieval-p5-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -431,7 +437,7 @@ function createHarness(options = {}) {
     createSearchExecutionPool(),
     { queryCacheSize: 8, searchSettings: { ngram: false }, vectorPool },
   );
-  return {
+  const harness = {
     root,
     vault,
     env,
@@ -442,6 +448,13 @@ function createHarness(options = {}) {
     vectorPool,
     buildCount: () => buildCount,
   };
+  openHarnesses.add(harness);
+  return harness;
+}
+
+async function closeHarness(harness) {
+  openHarnesses.delete(harness);
+  await Promise.all([harness.store.close(), harness.vectorPool.close(), harness.embedding.close?.()]);
 }
 
 function writeSampleVault(vault) {
@@ -662,7 +675,7 @@ test('AC1 service Retrieve lazy-opens a committed dense generation after restart
   const firstVector = createTrackingMemoryVectorFactory();
   const first = await readyHarness({ vector: firstVector });
   const { envelope } = await ensureActiveRetrieval(first);
-  await first.vectorPool.close();
+  await closeHarness(first);
 
   const lazyOpenEntered = deferred();
   const releaseLazyOpen = deferred();
@@ -734,7 +747,7 @@ test('AC1 service Retrieve lazy-opens a committed dense generation after restart
     );
   } finally {
     if (!releaseLazyOpen.settled) releaseLazyOpen.resolve();
-    await restarted.vectorPool.close();
+    await closeHarness(restarted);
   }
 });
 

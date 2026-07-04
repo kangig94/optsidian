@@ -1497,7 +1497,7 @@ test('search store loadVault can warm the query analyzer alongside preload', asy
   );
 });
 
-test('index rebuild overlaps retrieval vector build with lexical snapshot publish', async () => {
+test('index rebuild defers retrieval vector build until lexical snapshot publish', async () => {
   const { buildCanonicalSearchSnapshot } = await import('../src/daemon/search-store/builder.ts');
   const { createDaemonSnapshotStore, createProviderEmbeddingSetBuilder } =
     await import('../src/daemon/search-store/snapshot-store.ts');
@@ -1511,11 +1511,16 @@ test('index rebuild overlaps retrieval vector build with lexical snapshot publis
   });
   const innerEmbedding = createProviderEmbeddingSetBuilder(new DeterministicHashProvider());
   const progress = [];
+  let embeddingHasStarted = false;
   let resolveEmbeddingStarted;
+  let resolvePublishBlocked;
   let releaseEmbedding;
   let releasePublish;
   const embeddingStarted = new Promise((resolve) => {
     resolveEmbeddingStarted = resolve;
+  });
+  const publishBlocked = new Promise((resolve) => {
+    resolvePublishBlocked = resolve;
   });
   const embeddingReleased = new Promise((resolve) => {
     releaseEmbedding = resolve;
@@ -1531,6 +1536,7 @@ test('index rebuild overlaps retrieval vector build with lexical snapshot publis
       embeddingSetBuilder: {
         providerIdentity: innerEmbedding.providerIdentity,
         build: async (input) => {
+          embeddingHasStarted = true;
           resolveEmbeddingStarted();
           await embeddingReleased;
           return innerEmbedding.build(input);
@@ -1539,16 +1545,7 @@ test('index rebuild overlaps retrieval vector build with lexical snapshot publis
       durableRenameLinkGraph: async (from, to) => {
         await fs.promises.mkdir(path.dirname(to), { recursive: true });
         if (path.basename(to) === built.linkGraphId) {
-          await Promise.race([
-            embeddingStarted,
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error('retrieval vector build did not start while lexical publish was blocked')),
-                250,
-              ),
-            ),
-          ]);
-          releaseEmbedding();
+          resolvePublishBlocked();
           await publishReleased;
         }
         await fs.promises.rename(from, to);
@@ -1559,8 +1556,12 @@ test('index rebuild overlaps retrieval vector build with lexical snapshot publis
   const rebuild = store.rebuild(vault, {
     progress: (update) => progress.push(update),
   });
-  await embeddingStarted;
+  await publishBlocked;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(embeddingHasStarted, false, 'dense build must not start while lexical publish is blocked');
   releasePublish();
+  await embeddingStarted;
+  releaseEmbedding();
   const result = await rebuild;
   assert.equal(result.snapshotId, built.snapshotId);
   assert.ok(
@@ -4089,7 +4090,11 @@ test('refresh repairs missing retrieval without rebuilding a fresh corpus snapsh
   assert.equal(refreshed.rebuilt, false);
   assert.equal(refreshed.snapshotId, rebuilt.snapshotId);
   assert.equal(corpusBuilds, 1);
+  await waitFor(() => retrievalBuilds === 2);
   assert.equal(retrievalBuilds, 2);
+  // Refresh keeps the corpus, so the repaired retrieval is content-addressed to the same id; the
+  // decoupled dense repair re-stores its (deleted) envelope file post-commit — wait for that.
+  await waitFor(() => fs.existsSync(path.join(paths.retrievalsDir, staleRetrieval.retrievalSnapshotId)));
   const repairedRetrieval = activeRetrievalFromEdition(paths);
   assert.ok(fs.existsSync(path.join(paths.retrievalsDir, repairedRetrieval.retrievalSnapshotId)));
   assert.ok(progress.some((update) => update.phase === 'vector-indexing'));
@@ -4140,9 +4145,14 @@ test('refresh surfaces retrieval repair failures without rebuilding a fresh corp
   fs.rmSync(path.join(paths.retrievalsDir, staleRetrieval.retrievalSnapshotId), { force: true });
   failRetrieval = true;
 
-  await assert.rejects(() => store.refresh(vault), /embedding unavailable/);
+  const refreshed = await store.refresh(vault);
+  assert.equal(refreshed.rebuilt, false);
   assert.equal(corpusBuilds, 1);
+  await waitFor(() => currentEdition(paths).dense.state === 'failed');
   assert.equal(retrievalBuilds, 2);
+  const dense = currentEdition(paths).dense;
+  assert.equal(dense.state, 'failed');
+  assert.equal(dense.cause, 'embedding unavailable');
 });
 
 test('query-analysis cache key is deterministic and does not become result identity', async () => {

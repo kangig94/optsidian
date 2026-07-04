@@ -302,6 +302,7 @@ async function createHarness() {
     vectorPool,
     segmentRenames,
     async close() {
+      await store.close();
       await scheduler.close();
       await vectorPool.close();
     },
@@ -382,6 +383,9 @@ test('AC11 watcher save debounce publishes a coherent lexical revision and dense
       ]),
     );
     await Promise.all(scheduledSaveJobs);
+    await waitFor(
+      () => activeRetrieval(paths).active.retrievalSnapshotId !== initialRetrieval.active.retrievalSnapshotId,
+    );
 
     const finalSnapshot = activeSnapshot(paths);
     const finalRetrieval = activeRetrieval(paths);
