@@ -10,6 +10,7 @@ import {
   inspectLocalOnnxModelArtifact,
   localOnnxManifestPath,
   localOnnxModelDir,
+  localOnnxModelArtifactHash,
   localOnnxModelDescriptor,
 } from '../src/core/search/dense/artifacts.ts';
 import {
@@ -20,6 +21,176 @@ import {
 import { ExclusiveClaim } from '../src/core/lifecycle/exclusive-claim.ts';
 import { createProcessToken } from '../src/core/lifecycle/process-token.ts';
 import { tokenizeRoutedText } from '../src/core/search/analyzer.ts';
+
+const LOCAL_ONNX_REQUIRED_VRAM_BASELINE_FIXTURES = {
+  'bge-m3': {
+    requiredVramBytes: 4_294_967_296,
+    artifactHash: 'cfcbb6240aa55fe29e0453106b12b928acf7687f82313ee98af59c6ff45fd295',
+    recipe: {
+      schemaVersion: 1,
+      provider: {
+        id: 'local-onnx',
+        model: 'bge-m3',
+        dim: 1024,
+        version: '1',
+      },
+      recipeVersion: 'local-onnx-embedding-recipe-v1',
+      projectionVersion: 'rendered-text-projection-v1',
+      normalization: 'l2',
+      modelArtifact: {
+        modelId: 'BAAI/bge-m3',
+        revision: '5617a9f61b028005a4858fdac845db406aefb181',
+        sha256: 'cfcbb6240aa55fe29e0453106b12b928acf7687f82313ee98af59c6ff45fd295',
+        files: [
+          {
+            path: 'onnx/model.onnx',
+            sha256: 'f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b',
+            sizeBytes: 724_923,
+          },
+          {
+            path: 'onnx/model.onnx_data',
+            sha256: '1eebfb28493f67bba03ce0ef64bfdc7fc5a3bd9d7493f818bb1d78cd798416b4',
+            sizeBytes: 2_266_820_608,
+          },
+          {
+            path: 'onnx/config.json',
+            sha256: 'f24afd5de914fba8c668426c43d208a1a54022500c63b2c160be20891686fce8',
+            sizeBytes: 698,
+          },
+        ],
+      },
+      tokenizer: {
+        sha256: '99f71a83a448cfaf4d8284927ce0194eabeea816d1a217e495a463a0e064d369',
+        runtime: {
+          name: '@huggingface/tokenizers',
+          version: '0.1.3',
+        },
+        files: [
+          {
+            path: 'onnx/tokenizer.json',
+            sha256: '6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            sizeBytes: 17_082_821,
+          },
+          {
+            path: 'onnx/tokenizer_config.json',
+            sha256: '7e4c1cc848840aeccdd763458c18dd525eb0f795c992e00ebe9c28554e7db2d4',
+            sizeBytes: 1_173,
+          },
+          {
+            path: 'onnx/special_tokens_map.json',
+            sha256: '8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835',
+            sizeBytes: 964,
+          },
+        ],
+      },
+      onnx: {
+        graphSha256: 'f84251230831afb359ab26d9fd37d5936d4d9bb5d1d5410e66442f630f24435b',
+        opset: 11,
+        runtime: {
+          name: 'onnxruntime-node',
+          version: '1.27.0',
+        },
+      },
+      quantization: 'none',
+      dtype: 'float32',
+      dim: 1024,
+      pooling: 'mean',
+      maxTokens: 8192,
+      chunking: {
+        strategy: 'truncate',
+        maxTokens: 8192,
+        overlapTokens: 0,
+      },
+      inputTemplate: {
+        default: '{text}',
+        query: '{text}',
+        document: '{text}',
+      },
+      renderedTextProjectionVersion: 'rendered-text-projection-v1',
+    },
+  },
+  'multilingual-e5-small': {
+    requiredVramBytes: 1_073_741_824,
+    artifactHash: '92e59b5a5ff29836c9e37982781d7a49f48ef0c1a9fa2e7372b4eac7ffc8b1a4',
+    recipe: {
+      schemaVersion: 1,
+      provider: {
+        id: 'local-onnx',
+        model: 'multilingual-e5-small',
+        dim: 384,
+        version: '1',
+      },
+      recipeVersion: 'local-onnx-embedding-recipe-v1',
+      projectionVersion: 'rendered-text-projection-v1',
+      normalization: 'l2',
+      modelArtifact: {
+        modelId: 'intfloat/multilingual-e5-small',
+        revision: '614241f622f53c4eeff9890bdc4f31cfecc418b3',
+        sha256: '92e59b5a5ff29836c9e37982781d7a49f48ef0c1a9fa2e7372b4eac7ffc8b1a4',
+        files: [
+          {
+            path: 'onnx/model.onnx',
+            sha256: 'ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665',
+            sizeBytes: 470_268_510,
+          },
+          {
+            path: 'onnx/config.json',
+            sha256: 'bbb7c1333fc4b3e27fbc9cd5d2070aabcc1d4dfb99917c3633e772f97545a6b6',
+            sizeBytes: 653,
+          },
+        ],
+      },
+      tokenizer: {
+        sha256: 'a057440fddbca4c76c43d053abff6bd490a9cf8364ebd3f453973aeb9d846478',
+        runtime: {
+          name: '@huggingface/tokenizers',
+          version: '0.1.3',
+        },
+        files: [
+          {
+            path: 'onnx/tokenizer.json',
+            sha256: '0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39',
+            sizeBytes: 17_082_730,
+          },
+          {
+            path: 'onnx/tokenizer_config.json',
+            sha256: 'a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b',
+            sizeBytes: 443,
+          },
+          {
+            path: 'onnx/special_tokens_map.json',
+            sha256: 'd05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7',
+            sizeBytes: 167,
+          },
+        ],
+      },
+      onnx: {
+        graphSha256: 'ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665',
+        opset: 11,
+        runtime: {
+          name: 'onnxruntime-node',
+          version: '1.27.0',
+        },
+      },
+      quantization: 'none',
+      dtype: 'float32',
+      dim: 384,
+      pooling: 'mean',
+      maxTokens: 512,
+      chunking: {
+        strategy: 'truncate',
+        maxTokens: 512,
+        overlapTokens: 0,
+      },
+      inputTemplate: {
+        default: 'passage: {text}',
+        query: 'query: {text}',
+        document: 'passage: {text}',
+      },
+      renderedTextProjectionVersion: 'rendered-text-projection-v1',
+    },
+  },
+};
 
 test('AC13 P6 provider selection defaults to BGE-M3 and selects multilingual-e5-small', () => {
   const defaultSelection = resolveLocalOnnxProviderSelection();
@@ -50,6 +221,20 @@ test('AC13 P6 provider selection defaults to BGE-M3 and selects multilingual-e5-
   assert.equal(e5.recipeIdentity.inputTemplate.document, 'passage: {text}');
 });
 
+test('AC12 required VRAM metadata is excluded from local ONNX identity inputs', () => {
+  for (const [model, fixture] of Object.entries(LOCAL_ONNX_REQUIRED_VRAM_BASELINE_FIXTURES)) {
+    const descriptor = localOnnxModelDescriptor(model);
+    const provider = new LocalOnnxProvider({ model });
+
+    assert.equal(descriptor.requiredVramBytes, fixture.requiredVramBytes);
+    assert.equal(localOnnxModelArtifactHash(descriptor), fixture.artifactHash);
+    assert.equal(JSON.stringify(provider.recipeIdentity), JSON.stringify(fixture.recipe));
+    assert.deepEqual(provider.recipeIdentity, fixture.recipe);
+    assert.equal('requiredVramBytes' in provider.recipeIdentity, false);
+    assert.equal('requiredVramBytes' in provider.recipeIdentity.modelArtifact, false);
+  }
+});
+
 test('AC13 P6 ONNX execution provider falls back from unavailable accelerator to CPU', async () => {
   const calls = [];
   const { ort } = mockOrt({
@@ -67,6 +252,27 @@ test('AC13 P6 ONNX execution provider falls back from unavailable accelerator to
   assert.equal(selection.executionProvider, 'cpu');
   assert.equal(selection.failures.length, 1);
   assert.match(selection.failures[0].message, /unavailable/);
+});
+
+test('P8 strict GPU ONNX execution provider failure does not fall back to CPU', async () => {
+  const calls = [];
+  const { ort } = mockOrt({
+    dim: 1024,
+    failProviders: new Set(['cuda']),
+    onCreate: (provider) => calls.push(provider),
+  });
+  await assert.rejects(
+    () =>
+      createOnnxSessionWithFallback({
+        ort,
+        modelPath: '/tmp/not-downloaded/model.onnx',
+        executionProvider: 'cuda',
+        allowCpuFallback: false,
+        platform: 'linux',
+      }),
+    (error) => error?.code === 'MODEL_DEVICE_UNAVAILABLE',
+  );
+  assert.deepEqual(calls, ['cuda']);
 });
 
 test('AC12 P6 dense path uses model-native tokenizer while lexical Hangul still routes through Kiwi', async () => {
@@ -136,6 +342,99 @@ test('local ONNX rejected session load self-invalidates and retries', async () =
   assert.equal(vector.length, 384);
   assert.equal(attempts, 2);
   await provider.close();
+});
+
+test('local ONNX GPU runtime device failure closes the resident session', async () => {
+  let releaseCalls = 0;
+  const { ort } = mockOrt({
+    dim: 384,
+    runError: new Error('CUDA out of memory during session.run'),
+    onRelease: () => {
+      releaseCalls += 1;
+    },
+  });
+  const provider = new LocalOnnxProvider({
+    model: 'multilingual-e5-small',
+    ort,
+    tokenizer: {
+      encode() {
+        return { ids: [1], attention_mask: [1] };
+      },
+    },
+    ensureArtifact: async () => {},
+    executionProvider: 'cuda',
+    allowCpuFallback: false,
+    platform: 'linux',
+  });
+
+  await provider.load();
+  assert.equal(provider.executionProvider, 'cuda');
+  await assert.rejects(() => provider.embed('first'), /CUDA out of memory/);
+  assert.equal(releaseCalls, 1);
+  assert.equal(provider.executionProvider, undefined);
+});
+
+test('local ONNX close serializes concurrent callers during session creation', async () => {
+  const createStarted = deferred();
+  const createGate = deferred();
+  const releaseGate = deferred();
+  let releaseCalls = 0;
+  class Tensor {
+    constructor(type, data, dims) {
+      this.type = type;
+      this.data = data;
+      this.dims = dims;
+    }
+  }
+  const provider = new LocalOnnxProvider({
+    model: 'multilingual-e5-small',
+    ort: {
+      Tensor,
+      InferenceSession: {
+        async create() {
+          createStarted.resolve();
+          await createGate.promise;
+          return {
+            inputNames: ['input_ids', 'attention_mask'],
+            async run() {
+              return {};
+            },
+            async release() {
+              releaseCalls += 1;
+              await releaseGate.promise;
+            },
+          };
+        },
+      },
+    },
+    tokenizer: {
+      encode() {
+        return { ids: [1], attention_mask: [1] };
+      },
+    },
+    ensureArtifact: async () => {},
+    executionProvider: 'cpu',
+    platform: 'linux',
+  });
+
+  const load = provider.load().then(
+    () => undefined,
+    (error) => error,
+  );
+  await createStarted.promise;
+  let closeDone = false;
+  const closeA = provider.close().then(() => {
+    closeDone = true;
+  });
+  const closeB = provider.close();
+  createGate.resolve();
+  await delay(20);
+  assert.equal(closeDone, false, 'close callers must wait for late-produced session release');
+  assert.equal(releaseCalls, 1);
+  releaseGate.resolve();
+  await Promise.all([closeA, closeB]);
+  assert.match(String((await load)?.message), /cancelled/);
+  assert.equal(releaseCalls, 1);
 });
 
 test('AC13 P6 README documents Linux GPU requirements and graceful CPU fallback', () => {
@@ -323,6 +622,7 @@ function tinyDescriptor(
     quantization: 'none',
     dtype: 'float32',
     opset: 11,
+    requiredVramBytes: 134_217_728,
     inputTemplate: {
       default: '{text}',
       query: '{text}',
@@ -334,6 +634,20 @@ function tinyDescriptor(
 
 function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mockRuntimeOptions(dim) {
@@ -370,6 +684,7 @@ function mockOrt(options) {
             inputNames: ['input_ids', 'attention_mask'],
             outputNames: ['last_hidden_state'],
             async run(feeds) {
+              if (options.runError) throw options.runError;
               const sequenceLength = Number(feeds.attention_mask.dims[1]);
               const data = new Float32Array(sequenceLength * options.dim);
               for (let token = 0; token < sequenceLength; token += 1) data[token * options.dim] = 1;
@@ -379,6 +694,9 @@ function mockOrt(options) {
                   dims: [1, sequenceLength, options.dim],
                 },
               };
+            },
+            async release() {
+              await options.onRelease?.(provider);
             },
           };
         },

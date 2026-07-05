@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { ModelSessionLifecycle } from '../src/daemon/model-session/lifecycle.ts';
+import { VRAM_PROBE_TTL_MS } from '../src/daemon/model-session/vram-probe.ts';
 import { executeSearchShardJob } from '../src/daemon/search-execution.ts';
 import { buildCanonicalSearchSnapshot } from '../src/daemon/search-store/builder.ts';
 import { searchStoreCachePaths } from '../src/daemon/search-store/cache-paths.ts';
@@ -685,8 +686,7 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
   {
     const calls = [];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 150 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 150 }) },
       loadSession: async (device) => {
         calls.push(device);
         return fakeSession(device);
@@ -701,8 +701,7 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
   {
     const calls = [];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 149 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 149 }) },
       loadSession: async (device) => {
         calls.push(device);
         return fakeSession(device);
@@ -717,8 +716,7 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
   {
     const sessions = [];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 0 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 0 }) },
       loadSession: async (device) => {
         const session = fakeSession(device);
         sessions.push(session);
@@ -738,8 +736,11 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     const sessions = [];
     const probes = [{ freeBytes: 0 }, { freeBytes: 200 }];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => probes.shift() ?? { freeBytes: 200 },
+      policy: {
+        mode: 'auto',
+        requiredVramBytes: required,
+        probeVram: () => probes.shift() ?? { freeBytes: 200 },
+      },
       loadSession: async (device) => {
         calls.push(device);
         const session = fakeSession(device);
@@ -760,8 +761,11 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     const sessions = [];
     const probes = [{ freeBytes: 0 }, { freeBytes: 200 }];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => probes.shift() ?? { freeBytes: 200 },
+      policy: {
+        mode: 'auto',
+        requiredVramBytes: required,
+        probeVram: () => probes.shift() ?? { freeBytes: 200 },
+      },
       loadSession: async (device) => {
         calls.push(device);
         const session = fakeSession(device);
@@ -771,17 +775,16 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
       idleMs: 1000,
     });
     await lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'query-text' });
-    assert.deepEqual(calls, ['cpu', 'gpu']);
-    assert.equal(sessions[0].closed, true);
-    assert.equal(lifecycle.stats().device, 'gpu');
+    assert.deepEqual(calls, ['cpu']);
+    assert.equal(sessions[0].closed, false);
+    assert.equal(lifecycle.stats().device, 'cpu');
     await lifecycle.unload();
   }
 
   {
     const calls = [];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 200 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 200 }) },
       loadSession: async (device) => {
         calls.push(device);
         if (device === 'gpu') throw new Error('CUDA out of memory');
@@ -799,8 +802,7 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     let loadCalls = 0;
     const gate = deferred();
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 0 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 0 }) },
       loadSession: async (device) => {
         loadCalls += 1;
         await gate.promise;
@@ -822,10 +824,9 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
   {
     const terminated = [];
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 200 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 200 }) },
       loadSession: async () => new Promise(() => {}),
-      terminateLoad: (device, reason) => terminated.push([device, reason]),
+      terminateLoad: (_loadId, device, reason) => terminated.push([device, reason]),
       idleMs: 1000,
     });
     await assert.rejects(
@@ -840,10 +841,9 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     const terminated = [];
     const controller = new AbortController();
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 200 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 200 }) },
       loadSession: async () => new Promise(() => {}),
-      terminateLoad: (device, reason) => terminated.push([device, reason]),
+      terminateLoad: (_loadId, device, reason) => terminated.push([device, reason]),
       idleMs: 1000,
     });
     const request = lifecycle.encode(['q'], {
@@ -855,7 +855,7 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     controller.abort();
     await assert.rejects(request, /aborted/);
     assert.deepEqual(terminated, [['gpu', 'abort']]);
-    assert.deepEqual(lifecycle.stats(), { loaded: false });
+    assert.equal(lifecycle.stats().loaded, false);
   }
 
   {
@@ -864,14 +864,13 @@ test('AC10 P4 model session lifecycle handles device pick idle unload promotion 
     const gate = deferred();
     const secondary = new AbortController();
     const lifecycle = new ModelSessionLifecycle({
-      requiredVramBytes: required,
-      probeVram: () => ({ freeBytes: 0 }),
+      policy: { mode: 'auto', requiredVramBytes: required, probeVram: () => ({ freeBytes: 0 }) },
       loadSession: async (device) => {
         loadCalls += 1;
         await gate.promise;
         return fakeSession(device);
       },
-      terminateLoad: (device, reason) => terminated.push([device, reason]),
+      terminateLoad: (_loadId, device, reason) => terminated.push([device, reason]),
       idleMs: 1000,
     });
     const primaryRequest = lifecycle.encode(['primary'], { deadline: Date.now() + 1000, origin: 'query-text' });
@@ -984,28 +983,201 @@ test('AC11 P4 stronger equivalent: edition ledger replay reports stale after res
   }
 });
 
-test('P4 pickDevice defaults to CPU when required VRAM is unconfigured (0) and never probes', async () => {
-  let probed = false;
+test('P4 CPU policy picks CPU', async () => {
   const lifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: 0,
-    probeVram: () => {
-      probed = true;
-      return { freeBytes: 1_000_000_000 };
-    },
+    policy: { mode: 'cpu' },
     loadSession: async (device) => fakeSession(device),
     idleMs: 1000,
   });
   await lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'query-text' });
   assert.equal(lifecycle.stats().device, 'cpu');
-  assert.equal(probed, false, 'probeVram must not be consulted when required VRAM is unconfigured');
+  await lifecycle.unload();
+});
+
+test('P7 idleMs=0 encode returns vectors and resident provider facts before unload', async () => {
+  const providerIdentity = { id: 'local-onnx', model: 'bge-m3', dim: 1024, version: '1' };
+  const lifecycle = new ModelSessionLifecycle({
+    policy: { mode: 'cpu' },
+    loadSession: async (device) => ({
+      ...fakeSession(device),
+      providerIdentity,
+      stableProviderKey: 'stable-key-idle-zero',
+    }),
+    idleMs: 0,
+  });
+
+  const encoded = await lifecycle.encode(['idle'], { deadline: Date.now() + 1000, origin: 'query-text' });
+
+  assert.deepEqual(encoded.vectors, [[4, 0, 0]]);
+  assert.deepEqual(encoded.providerIdentity, providerIdentity);
+  assert.equal(encoded.stableProviderKey, 'stable-key-idle-zero');
+  assert.equal(encoded.requestedLoadDevice, 'cpu');
+  assert.equal(encoded.device, 'cpu');
+  assert.equal(encoded.executionProvider, 'cpu');
+  await waitFor(() => lifecycle.stats().loaded === false);
+});
+
+test('P7 unload awaits abort-initiated owned-load termination', async () => {
+  const loadGate = deferred();
+  const closeGate = deferred();
+  let terminateStarted = 0;
+  let terminateFinished = false;
+  const controller = new AbortController();
+  const lifecycle = new ModelSessionLifecycle({
+    policy: { mode: 'gpu' },
+    loadSession: async (_device, options) => {
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+      await loadGate.promise;
+      throw Object.assign(new Error('load aborted'), { code: 'CANCELLED' });
+    },
+    terminateLoad: async () => {
+      terminateStarted += 1;
+      await closeGate.promise;
+      terminateFinished = true;
+    },
+    idleMs: 1000,
+  });
+
+  const request = lifecycle.encode(['q'], {
+    deadline: Date.now() + 1000,
+    origin: 'query-text',
+    signal: controller.signal,
+  });
+  await delay(5);
+  controller.abort();
+  await assert.rejects(request, /aborted/);
+  await waitFor(() => terminateStarted === 1);
+
+  let unloadDone = false;
+  const unload = lifecycle.unload().then(() => {
+    unloadDone = true;
+  });
+  loadGate.resolve();
+  await delay(20);
+  assert.equal(unloadDone, false, 'unload must wait for the abort-started provider close');
+  assert.equal(terminateFinished, false);
+
+  closeGate.resolve();
+  await unload;
+  assert.equal(terminateFinished, true);
+});
+
+test('P7 auto GPU runtime device failure closes GPU, retries CPU, and latches from now', async () => {
+  let nowMs = 100_000;
+  const staleProbeAt = nowMs - VRAM_PROBE_TTL_MS;
+  const probes = [];
+  const calls = [];
+  const gpuSessions = [];
+  const lifecycle = new ModelSessionLifecycle({
+    policy: {
+      mode: 'auto',
+      requiredVramBytes: 100,
+      probeVram: () => {
+        probes.push(nowMs);
+        return { freeBytes: 200, atMs: probes.length === 1 ? staleProbeAt : nowMs, fresh: true };
+      },
+    },
+    loadSession: async (device) => {
+      calls.push(device);
+      if (device === 'gpu') {
+        const session = fakeSession(device);
+        session.encode = async () => {
+          throw new Error('CUDA out of memory during session.run');
+        };
+        gpuSessions.push(session);
+        return session;
+      }
+      return fakeSession(device);
+    },
+    now: () => nowMs,
+    idleMs: 1000,
+  });
+
+  const first = await lifecycle.encode(['q'], { deadline: nowMs + 1000, origin: 'query-text' });
+  assert.deepEqual(first.vectors, [[1, 0, 0]]);
+  assert.deepEqual(calls, ['gpu', 'cpu']);
+  assert.equal(gpuSessions[0].closed, true);
+  assert.equal(lifecycle.stats().device, 'cpu');
+  assert.deepEqual(probes, [100_000]);
+
+  nowMs += VRAM_PROBE_TTL_MS - 1;
+  await lifecycle.encode(['q2'], { deadline: nowMs + 1000, origin: 'query-text' });
+  await delay(5);
+  assert.deepEqual(calls, ['gpu', 'cpu']);
+  assert.deepEqual(probes, [100_000]);
+
+  nowMs += 1;
+  await lifecycle.encode(['q3'], { deadline: nowMs + 1000, origin: 'query-text' });
+  await waitFor(() => calls.length === 3);
+  assert.deepEqual(calls, ['gpu', 'cpu', 'gpu']);
+  assert.deepEqual(probes, [100_000, 160_000]);
+  await lifecycle.unload();
+});
+
+test('P7 strict GPU runtime device failure surfaces MODEL_DEVICE_UNAVAILABLE and clears resident session', async () => {
+  const sessions = [];
+  const lifecycle = new ModelSessionLifecycle({
+    policy: { mode: 'gpu' },
+    loadSession: async (device) => {
+      const session = fakeSession(device);
+      session.encode = async () => {
+        throw new Error('CoreML device unavailable during session.run');
+      };
+      sessions.push(session);
+      return session;
+    },
+    idleMs: 1000,
+  });
+
+  await assert.rejects(
+    () => lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'query-text' }),
+    (error) => error?.code === 'MODEL_DEVICE_UNAVAILABLE',
+  );
+  assert.equal(sessions[0].closed, true);
+  assert.deepEqual(lifecycle.stats(), { loaded: false, devicePolicy: 'gpu' });
+});
+
+test('P7 CPU to GPU promotion is detached from the completed query', async () => {
+  let nowMs = 1_000;
+  const gpuStarted = deferred();
+  const calls = [];
+  const probes = [
+    { freeBytes: 0, atMs: nowMs, fresh: true },
+    { freeBytes: 200, atMs: nowMs, fresh: true },
+  ];
+  const lifecycle = new ModelSessionLifecycle({
+    policy: {
+      mode: 'auto',
+      requiredVramBytes: 100,
+      probeVram: () => probes.shift() ?? { freeBytes: 200, atMs: nowMs, fresh: true },
+    },
+    loadSession: async (device, options) => {
+      calls.push(device);
+      if (device === 'gpu') {
+        gpuStarted.resolve();
+        await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+        throw Object.assign(new Error('promotion cancelled'), { code: 'CANCELLED' });
+      }
+      return fakeSession(device);
+    },
+    now: () => nowMs,
+    idleMs: 1000,
+  });
+
+  await lifecycle.encode(['warm'], { deadline: nowMs + 1000, origin: 'document-embed' });
+  nowMs += VRAM_PROBE_TTL_MS;
+  const encoded = await lifecycle.encode(['query'], { deadline: nowMs + 1, origin: 'query-text' });
+
+  assert.deepEqual(encoded.vectors, [[5, 0, 0]]);
+  await gpuStarted.promise;
+  assert.deepEqual(calls, ['cpu', 'gpu']);
   await lifecycle.unload();
 });
 
 test('P4 a failed encode still re-arms idle unload so the session is not pinned resident forever', async () => {
   const sessions = [];
   const lifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: 100,
-    probeVram: () => ({ freeBytes: 0 }),
+    policy: { mode: 'auto', requiredVramBytes: 100, probeVram: () => ({ freeBytes: 0 }) },
     loadSession: async (device) => {
       const session = fakeSession(device);
       session.encode = async () => {
@@ -1021,6 +1193,111 @@ test('P4 a failed encode still re-arms idle unload so the session is not pinned 
   await delay(30);
   assert.equal(lifecycle.stats().loaded, false, 'idle unload must fire even though the encode failed');
   assert.equal(sessions[0].closed, true);
+});
+
+test('P7 strict GPU lifecycle failure surfaces MODEL_DEVICE_UNAVAILABLE with no resident session', async () => {
+  const lifecycle = new ModelSessionLifecycle({
+    policy: { mode: 'gpu' },
+    loadSession: async () => {
+      throw new Error('CUDA provider unavailable');
+    },
+    idleMs: 1000,
+  });
+  await assert.rejects(
+    () => lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'query-text' }),
+    (error) => error?.code === 'MODEL_DEVICE_UNAVAILABLE',
+  );
+  assert.deepEqual(lifecycle.stats(), { loaded: false, devicePolicy: 'gpu' });
+});
+
+test('P7 auto GPU load that lands on CPU reports true facts and does not immediately promote again', async () => {
+  const calls = [];
+  const lifecycle = new ModelSessionLifecycle({
+    policy: {
+      mode: 'auto',
+      requiredVramBytes: 100,
+      probeVram: () => ({ freeBytes: 200, atMs: Date.now(), fresh: true }),
+    },
+    loadSession: async (device) => {
+      calls.push(device);
+      return fakeSession(device, { actualDevice: 'cpu', executionProvider: 'cpu' });
+    },
+    idleMs: 1000,
+  });
+  await lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'query-text' });
+  assert.deepEqual(calls, ['gpu']);
+  assert.equal(lifecycle.stats().requestedLoadDevice, 'gpu');
+  assert.equal(lifecycle.stats().device, 'cpu');
+  assert.equal(lifecycle.stats().executionProvider, 'cpu');
+  await lifecycle.unload();
+});
+
+test('P7 auto promotion waits for the probe TTL before re-probing after a shortfall', async () => {
+  let nowMs = 10_000;
+  const probes = [
+    { freeBytes: 0, atMs: nowMs, fresh: true },
+    { freeBytes: 200, atMs: nowMs + VRAM_PROBE_TTL_MS, fresh: true },
+  ];
+  const calls = [];
+  const lifecycle = new ModelSessionLifecycle({
+    policy: {
+      mode: 'auto',
+      requiredVramBytes: 100,
+      probeVram: () => probes.shift() ?? { freeBytes: 200, atMs: nowMs, fresh: true },
+    },
+    loadSession: async (device) => {
+      calls.push(device);
+      return fakeSession(device);
+    },
+    now: () => nowMs,
+    idleMs: 1000,
+  });
+  await lifecycle.encode(['q'], { deadline: nowMs + 1000, origin: 'query-text' });
+  assert.deepEqual(calls, ['cpu']);
+  nowMs += VRAM_PROBE_TTL_MS - 1;
+  await lifecycle.encode(['q'], { deadline: nowMs + 1000, origin: 'query-text' });
+  assert.deepEqual(calls, ['cpu']);
+  nowMs += 1;
+  await lifecycle.encode(['q'], { deadline: nowMs + 1000, origin: 'query-text' });
+  await waitFor(() => calls.length === 2);
+  assert.deepEqual(calls, ['cpu', 'gpu']);
+  await waitFor(() => lifecycle.stats().device === 'gpu');
+  await lifecycle.unload();
+});
+
+test('P7 lifecycle stats are resident session facts', async () => {
+  const providerIdentity = { id: 'local-onnx', model: 'bge-m3', dim: 1024, version: '1' };
+  const lifecycle = new ModelSessionLifecycle({
+    policy: { mode: 'cpu' },
+    loadSession: async (device) => ({
+      ...fakeSession(device),
+      providerIdentity,
+      stableProviderKey: 'stable-key-a',
+    }),
+    idleMs: 1000,
+  });
+  await lifecycle.encode(['q'], { deadline: Date.now() + 1000, origin: 'document-embed' });
+  assert.deepEqual(
+    {
+      loaded: lifecycle.stats().loaded,
+      devicePolicy: lifecycle.stats().devicePolicy,
+      stableProviderKey: lifecycle.stats().stableProviderKey,
+      providerIdentity: lifecycle.stats().providerIdentity,
+      requestedLoadDevice: lifecycle.stats().requestedLoadDevice,
+      device: lifecycle.stats().device,
+      executionProvider: lifecycle.stats().executionProvider,
+    },
+    {
+      loaded: true,
+      devicePolicy: 'cpu',
+      stableProviderKey: 'stable-key-a',
+      providerIdentity,
+      requestedLoadDevice: 'cpu',
+      device: 'cpu',
+      executionProvider: 'cpu',
+    },
+  );
+  await lifecycle.unload();
 });
 
 test('P4 a retired generation whose close() rejects is still dropped from the pool', async () => {
@@ -1050,9 +1327,13 @@ test('P4 a retired generation whose close() rejects is still dropped from the po
   await pool.close();
 });
 
-function fakeSession(device) {
+function fakeSession(device, options = {}) {
+  const actualDevice = options.actualDevice ?? device;
+  const executionProvider = options.executionProvider ?? (actualDevice === 'gpu' ? 'cuda' : 'cpu');
   return {
-    device,
+    requestedLoadDevice: device,
+    device: actualDevice,
+    executionProvider,
     closed: false,
     async encode(texts) {
       return texts.map((text) => [text.length, device === 'gpu' ? 1 : 0, 0]);

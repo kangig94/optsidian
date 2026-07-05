@@ -33,6 +33,7 @@ export type LocalOnnxModelDescriptor = {
   quantization: 'none';
   dtype: 'float32';
   opset: number;
+  requiredVramBytes: number;
   inputTemplate: {
     default: string;
     query: string;
@@ -105,6 +106,9 @@ const LOCAL_ONNX_MODELS: Readonly<Record<LocalOnnxModelKey, LocalOnnxModelDescri
     quantization: 'none',
     dtype: 'float32',
     opset: 11,
+    // Conservative estimate (pending empirical peak-VRAM measurement) from the ~2.27 GB fp32
+    // artifact plus max-token runtime headroom.
+    requiredVramBytes: 4_294_967_296,
     inputTemplate: {
       default: '{text}',
       query: '{text}',
@@ -165,6 +169,9 @@ const LOCAL_ONNX_MODELS: Readonly<Record<LocalOnnxModelKey, LocalOnnxModelDescri
     quantization: 'none',
     dtype: 'float32',
     opset: 11,
+    // Conservative estimate (pending empirical peak-VRAM measurement) from the ~470 MB fp32
+    // artifact plus max-token runtime headroom.
+    requiredVramBytes: 1_073_741_824,
     inputTemplate: {
       default: 'passage: {text}',
       query: 'query: {text}',

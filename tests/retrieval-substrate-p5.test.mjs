@@ -159,12 +159,14 @@ function createLifecycleEmbeddingPool() {
   const provider = new DeterministicHashProvider();
   const calls = { load: 0, close: 0, encode: 0 };
   const lifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: 1,
-    probeVram: () => ({ freeBytes: 0 }),
+    policy: { mode: 'auto', requiredVramBytes: 1, probeVram: () => ({ freeBytes: 0 }) },
     loadSession: async (device) => {
       calls.load += 1;
       return {
+        requestedLoadDevice: device,
         device,
+        executionProvider: device === 'gpu' ? 'cuda' : 'cpu',
+        providerIdentity: provider.identity,
         async encode(texts, options) {
           calls.encode += 1;
           return Promise.all(texts.map((text) => provider.embed(text, { inputKind: options?.inputKind })));
@@ -179,13 +181,13 @@ function createLifecycleEmbeddingPool() {
   return {
     calls,
     async encode(payload, options) {
-      const vectors = await lifecycle.encode(payload.texts, {
+      const encoded = await lifecycle.encode(payload.texts, {
         deadline: options.deadline,
         origin: payload.inputKind === 'query' ? 'query-text' : 'document-embed',
       });
       return {
-        provider: provider.identity,
-        vectors,
+        provider: encoded.providerIdentity ?? provider.identity,
+        vectors: encoded.vectors,
       };
     },
     async unload() {

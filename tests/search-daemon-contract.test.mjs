@@ -4038,6 +4038,174 @@ test('profile manager keeps no-Kiwi and Kiwi runtimes isolated', async () => {
   }
 });
 
+test('profile manager status scopes resident model stats by stable provider key', async () => {
+  const { EmbedScheduler } = await import('../src/daemon/embed-scheduler.ts');
+  const { stableProviderKey } = await import('../src/daemon/model-session/provider-key.ts');
+  const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
+  const { effectiveSearchRuntimeProfile, normalizeSearchRuntimeProfile, searchRuntimeProfileHash } =
+    await import('../src/daemon/runtime-profile.ts');
+  const root = tempRoot('optsidian-profile-model-status-');
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(root, 'cache'),
+    XDG_CONFIG_HOME: path.join(root, 'config'),
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: '1',
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: '1',
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: '1',
+  };
+  const modelStatsCalls = [];
+  const embedding = {
+    async encode() {
+      throw new Error('encode should not run during status');
+    },
+    async unload() {
+      return { unloaded: true };
+    },
+    async modelStats(options) {
+      modelStatsCalls.push(options);
+      return residentStats;
+    },
+    async warmup() {},
+    cancel() {},
+    async close() {},
+    stats() {
+      return { modelStatsCalls: modelStatsCalls.length };
+    },
+  };
+  const scheduler = new EmbedScheduler({ embedding, ownsEmbedding: false });
+  const manager = new ProfileManager(env, scheduler);
+  const base = effectiveSearchRuntimeProfile(repoRoot, env);
+  const profileA = normalizeSearchRuntimeProfile({
+    ...base,
+    embedding: {
+      ...base.embedding,
+      provider: 'local-onnx',
+      model: 'bge-m3',
+      devicePolicy: 'cpu',
+    },
+  });
+  const profileB = normalizeSearchRuntimeProfile({
+    ...base,
+    embedding: {
+      ...base.embedding,
+      provider: 'local-onnx',
+      model: 'bge-m3',
+      devicePolicy: 'gpu',
+    },
+  });
+  const hashA = searchRuntimeProfileHash(profileA);
+  const hashB = searchRuntimeProfileHash(profileB);
+  const residentStableProviderKey = stableProviderKey({
+    kind: 'local-onnx',
+    model: profileA.embedding.model,
+    executionPolicy: scheduler.onnxExecutionPolicy,
+    devicePolicy: profileA.embedding.devicePolicy,
+  });
+  const residentStats = {
+    loaded: true,
+    devicePolicy: 'cpu',
+    stableProviderKey: residentStableProviderKey,
+    providerIdentity: {
+      id: 'local-onnx',
+      model: profileA.embedding.model,
+      dim: 1024,
+      version: '1',
+    },
+    requestedLoadDevice: 'cpu',
+    device: 'cpu',
+    executionProvider: 'cpu',
+    idleDeadline: '2026-07-05T00:00:00.000Z',
+  };
+
+  try {
+    await manager.withRuntimeFor({ profile: profileA }, async () => {});
+    await manager.withRuntimeFor({ profile: profileB }, async () => {});
+    const status = await manager.status({ deadline: Date.now() + 1000, cancellationId: 'profile-model-status' });
+
+    assert.equal(modelStatsCalls.length, 1);
+    assert.equal(status[hashA].model.loaded, true);
+    assert.equal(status[hashA].model.devicePolicy, 'cpu');
+    assert.equal(status[hashA].model.device, 'cpu');
+    assert.equal(status[hashA].model.executionProvider, 'cpu');
+    assert.equal(status[hashA].model.requestedLoadDevice, 'cpu');
+    assert.equal(status[hashA].model.stableProviderKey, residentStableProviderKey);
+    assert.equal(status[hashB].model.loaded, false);
+    assert.equal(status[hashB].model.devicePolicy, 'gpu');
+    assert.equal(status[hashB].model.reason, 'mismatched-resident');
+    assert.equal(status[hashB].model.residentStableProviderKey, residentStableProviderKey);
+    assert.equal(status[hashB].model.residentDevice, 'cpu');
+    assert.equal(status[hashB].model.residentExecutionProvider, 'cpu');
+    assert.equal(status[hashB].model.device, undefined);
+    assert.equal(status[hashB].model.executionProvider, undefined);
+  } finally {
+    await manager.close();
+    await scheduler.close();
+  }
+});
+
+test('profile manager status reports model busy without failing daemon status', async () => {
+  const { EmbedScheduler } = await import('../src/daemon/embed-scheduler.ts');
+  const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
+  const { effectiveSearchRuntimeProfile, searchRuntimeProfileHash } = await import('../src/daemon/runtime-profile.ts');
+  const root = tempRoot('optsidian-profile-model-busy-');
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(root, 'cache'),
+    XDG_CONFIG_HOME: path.join(root, 'config'),
+    OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: 'deterministic-hash',
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: '1',
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: '1',
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: '1',
+  };
+  const embedding = {
+    async encode() {
+      throw new Error('encode should not run during status');
+    },
+    async unload() {
+      return { unloaded: true };
+    },
+    async modelStats() {
+      throw Object.assign(new Error('embedding model worker is busy'), { code: 'BACKPRESSURE' });
+    },
+    async warmup() {},
+    cancel() {},
+    async close() {},
+    stats() {
+      return {};
+    },
+  };
+  const scheduler = new EmbedScheduler({ embedding, ownsEmbedding: false });
+  const manager = new ProfileManager(env, scheduler);
+  const profile = effectiveSearchRuntimeProfile(repoRoot, env);
+  const profileHash = searchRuntimeProfileHash(profile);
+
+  try {
+    await manager.withRuntimeFor({ profile }, async () => {});
+    const status = await manager.status({ deadline: Date.now() + 1000, cancellationId: 'profile-model-busy' });
+
+    assert.equal(status[profileHash].model.loaded, false);
+    assert.equal(status[profileHash].model.unavailable, true);
+    assert.equal(status[profileHash].model.busy, true);
+    assert.equal(status[profileHash].model.reason, 'busy');
+  } finally {
+    await manager.close();
+    await scheduler.close();
+  }
+});
+
+test('embedding model pool rejects multiple resident workers', async () => {
+  const { createEmbeddingWorkerPool } = await import('../src/daemon/pools.ts');
+
+  assert.throws(
+    () => createEmbeddingWorkerPool({ ...process.env, OPTSIDIAN_SEARCH_EMBEDDING_WORKERS: '2' }, {}),
+    (error) => {
+      assert.equal(error.code, 'BAD_REQUEST');
+      assert.match(error.message, /OPTSIDIAN_SEARCH_EMBEDDING_WORKERS/);
+      return true;
+    },
+  );
+});
+
 test('runtime profile canonicalizes extra language payloads', async () => {
   const { effectiveSearchRuntimeProfile, normalizeSearchRuntimeProfile, searchRuntimeProfileHash } =
     await import('../src/daemon/runtime-profile.ts');
@@ -4057,6 +4225,47 @@ test('runtime profile canonicalizes extra language payloads', async () => {
 
   assert.deepEqual(messy.analyzer.extraLangs, ['ko', 'zh']);
   assert.equal(searchRuntimeProfileHash(messy), searchRuntimeProfileHash(canonical));
+});
+
+test('runtime profile device policy splits runtime identity but not lexical identity', async () => {
+  const {
+    SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION,
+    effectiveSearchRuntimeProfile,
+    envForSearchRuntimeProfile,
+    lexicalIdentityHashForSearchRuntimeProfile,
+    normalizeSearchRuntimeProfile,
+    searchRuntimeProfileHash,
+  } = await import('../src/daemon/runtime-profile.ts');
+  const policies = ['auto', 'cpu', 'gpu'];
+  const base = effectiveSearchRuntimeProfile(repoRoot, {}, {});
+  const profiles = policies.map((devicePolicy) =>
+    normalizeSearchRuntimeProfile({
+      ...base,
+      embedding: {
+        ...base.embedding,
+        devicePolicy,
+      },
+    }),
+  );
+
+  assert.equal(SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION, 4);
+  assert.equal(new Set(profiles.map((profile) => searchRuntimeProfileHash(profile))).size, 3);
+  assert.equal(new Set(profiles.map((profile) => lexicalIdentityHashForSearchRuntimeProfile(profile))).size, 1);
+
+  for (const [index, devicePolicy] of policies.entries()) {
+    const envProfile = effectiveSearchRuntimeProfile(repoRoot, { OPTSIDIAN_SEARCH_MODEL_DEVICE: devicePolicy }, {});
+    assert.equal(envProfile.schemaVersion, 4);
+    assert.equal(envProfile.embedding.devicePolicy, devicePolicy);
+
+    const projected = envForSearchRuntimeProfile(profiles[index], {});
+    assert.equal(projected.OPTSIDIAN_SEARCH_MODEL_DEVICE, devicePolicy);
+    assert.deepEqual(effectiveSearchRuntimeProfile(repoRoot, projected, {}), profiles[index]);
+  }
+
+  assert.throws(
+    () => effectiveSearchRuntimeProfile(repoRoot, { OPTSIDIAN_SEARCH_MODEL_DEVICE: 'tpu' }, {}),
+    /search model device policy must be auto, cpu, or gpu/,
+  );
 });
 
 test('runtime profile defaults query-analysis cache to 64 and allows disabling it', async () => {

@@ -381,7 +381,7 @@ export type SearchIndexWarmVaultResult = {
 export type SearchIndexProgressPhase =
   'scanning' | 'parsing' | 'segmenting' | 'embedding' | 'vector-indexing' | 'publishing' | 'preloading';
 
-export type SearchIndexBuildPhaseTiming = {
+type SearchIndexBuildPhaseTiming = {
   phase: SearchIndexProgressPhase;
   elapsedMs: number;
   total?: number;

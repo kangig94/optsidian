@@ -172,9 +172,17 @@ sudo ldconfig
 `libcudnn9-cuda-12` is the minimal runtime package that provides
 `libcudnn.so.9`. If you also need headers or development symlinks, install
 `libcudnn9-dev-cuda-12`. cuDNN 9 must be the cu12 build to match
-`onnxruntime-node`'s CUDA execution provider. If CUDA or that cuDNN build is
-missing, optsidian falls back gracefully to CPU-only dense search. macOS uses
-the CoreML/Metal execution provider and does not require cuDNN.
+`onnxruntime-node`'s CUDA execution provider. macOS uses the CoreML/Metal
+execution provider and does not require cuDNN.
+
+`OPTSIDIAN_SEARCH_MODEL_DEVICE` controls dense model placement. The default
+`auto` policy probes real free memory (Linux GPU VRAM via `nvidia-smi`, macOS
+free system RAM for unified memory), uses GPU when the model fits with
+headroom, and otherwise uses CPU; if an auto-selected GPU load fails, it falls
+back to CPU-only dense search. Set `OPTSIDIAN_SEARCH_MODEL_DEVICE=cpu` to force CPU for
+measurements or isolation. Set `OPTSIDIAN_SEARCH_MODEL_DEVICE=gpu` for strict
+GPU mode: if CUDA/cuDNN/CoreML or GPU memory is unavailable, optsidian errors
+instead of silently using CPU.
 
 ## Native Commands And Plugins
 

@@ -61,6 +61,21 @@ test('Attempt aborts only when the last waiter leaves', async () => {
   assert.equal(producerSignal.aborted, true);
 });
 
+test('Attempt.cancel aborts the producer and rejects waiters', async () => {
+  const owner = { current: undefined };
+  let producerSignal;
+  const attempt = Attempt.start(owner, (signal) => {
+    producerSignal = signal;
+    return new Promise(() => undefined);
+  });
+  const waiter = attempt.join();
+  const reason = new AttemptCancelledError('explicit cancel');
+  assert.equal(attempt.cancel(reason), true);
+  assert.equal(attempt.cancel(reason), false);
+  assert.equal(producerSignal.aborted, true);
+  await assert.rejects(waiter.promise, (error) => error === reason);
+});
+
 test('cancelled and superseded attempts close produced values and never install', async () => {
   const owner = { current: undefined };
   const installed = [];
@@ -121,8 +136,7 @@ test('AC10 ModelSessionLifecycle closes a cancelled load and cannot resurrect it
   const terminated = [];
   let loadCalls = 0;
   const lifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: 0,
-    probeVram: () => ({ freeBytes: 0 }),
+    policy: { mode: 'cpu' },
     loadSession: async (device) => {
       loadCalls += 1;
       const session = fakeModelSession(device, `session-${loadCalls}`);
@@ -130,7 +144,7 @@ test('AC10 ModelSessionLifecycle closes a cancelled load and cannot resurrect it
       if (loadCalls === 1) await firstGate.promise;
       return session;
     },
-    terminateLoad: (device, reason) => terminated.push([device, reason]),
+    terminateLoad: (_loadId, device, reason) => terminated.push([device, reason]),
     idleMs: 1000,
   });
   const controller = new AbortController();
@@ -143,14 +157,18 @@ test('AC10 ModelSessionLifecycle closes a cancelled load and cannot resurrect it
   controller.abort();
   await assert.rejects(first, /aborted/);
 
-  const second = await lifecycle.encode(['second'], {
+  const secondPromise = lifecycle.encode(['second'], {
     deadline: Date.now() + 1000,
     origin: 'query-text',
   });
-  assert.deepEqual(second, [[6, 2]]);
-  assert.equal(lifecycle.stats().loaded, true);
+  await flushMicrotasks();
+  assert.equal(loadCalls, 1, 'replacement load must wait for the cancelled load to settle');
 
   firstGate.resolve();
+  const second = await secondPromise;
+  assert.deepEqual(second.vectors, [[6, 2]]);
+  assert.equal(lifecycle.stats().loaded, true);
+
   await flushMicrotasks();
   assert.equal(sessions[0].closed, true);
   assert.equal(sessions[1].closed, false);
@@ -164,15 +182,14 @@ test('AC10 ModelSessionLifecycle aborts a shared load only after the last waiter
   let producerSignal;
   let loadCalls = 0;
   const lifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: 0,
-    probeVram: () => ({ freeBytes: 0 }),
+    policy: { mode: 'cpu' },
     loadSession: async (device, options) => {
       loadCalls += 1;
       producerSignal = options.signal;
       await gate.promise;
       return fakeModelSession(device, 'shared');
     },
-    terminateLoad: (device, reason) => terminated.push([device, reason]),
+    terminateLoad: (_loadId, device, reason) => terminated.push([device, reason]),
     idleMs: 1000,
   });
 
@@ -292,7 +309,9 @@ function flushMicrotasks() {
 
 function fakeModelSession(device, id) {
   return {
+    requestedLoadDevice: device,
     device,
+    executionProvider: device === 'gpu' ? 'cuda' : 'cpu',
     closed: false,
     async encode(texts) {
       return texts.map((text) => [text.length, id === 'session-2' ? 2 : 1]);

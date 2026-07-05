@@ -633,6 +633,14 @@ export function createEmbeddingWorkerPool(
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env),
 ): EmbeddingWorkerPool {
   const embeddingWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_EMBEDDING_WORKERS') ?? 1;
+  if (embeddingWorkers > 1) {
+    throw Object.assign(
+      new Error(
+        `OPTSIDIAN_SEARCH_EMBEDDING_WORKERS must be 1 because the embedding model has a single resident worker slot`,
+      ),
+      { code: 'BAD_REQUEST' },
+    );
+  }
   const modelRssGuardBytes =
     envBytesForPool(env, 'OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB') ??
     envBytesForPool(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB');

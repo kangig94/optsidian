@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { Attempt, type AttemptOwner } from '../../lifecycle/conditional-commit.js';
+import { Attempt, AttemptCancelledError, type AttemptOwner } from '../../lifecycle/conditional-commit.js';
 import {
   normalizeEmbeddingVector,
   type EmbeddingInputKind,
@@ -83,6 +83,7 @@ export type LocalOnnxProviderOptions = {
   model?: LocalOnnxModelAlias | string;
   env?: NodeJS.ProcessEnv;
   executionProvider?: OnnxExecutionProviderPreference;
+  allowCpuFallback?: boolean;
   executionPolicy?: OnnxExecutionPolicy;
   ort?: LocalOnnxRuntime;
   tokenizer?: LocalOnnxTokenizer;
@@ -106,6 +107,7 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   readonly descriptor: LocalOnnxModelDescriptor;
   private readonly env: NodeJS.ProcessEnv;
   private readonly executionProviderPreference: OnnxExecutionProviderPreference;
+  private readonly allowCpuFallback: boolean;
   private readonly executionPolicy: OnnxExecutionPolicy | undefined;
   private readonly injectedOrt: LocalOnnxRuntime | undefined;
   private readonly injectedTokenizer: LocalOnnxTokenizer | undefined;
@@ -125,11 +127,13 @@ export class LocalOnnxProvider implements EmbeddingProvider {
   private selectedExecutionProvider: OnnxExecutionProvider | undefined;
   private activeOrt: LocalOnnxRuntime | undefined;
   private activeSessionSelection: LocalOnnxSessionSelection | undefined;
+  private closePromise: Promise<void> | undefined;
 
   constructor(options: LocalOnnxProviderOptions = {}) {
     this.descriptor = localOnnxModelDescriptor(options.model);
     this.env = options.env ?? process.env;
     this.executionProviderPreference = options.executionProvider ?? 'auto';
+    this.allowCpuFallback = options.allowCpuFallback ?? true;
     this.executionPolicy = normalizeOnnxExecutionPolicy(options.executionPolicy);
     this.injectedOrt = options.ort;
     this.injectedTokenizer = options.tokenizer;
@@ -154,23 +158,51 @@ export class LocalOnnxProvider implements EmbeddingProvider {
     return this.selectedExecutionProvider;
   }
 
-  async embed(text: string, options: { inputKind?: EmbeddingInputKind } = {}): Promise<EmbeddingVector> {
-    const [tokenizer, selection] = await Promise.all([this.tokenizer(), this.session()]);
+  async embed(
+    text: string,
+    options: { inputKind?: EmbeddingInputKind; signal?: AbortSignal } = {},
+  ): Promise<EmbeddingVector> {
+    const [tokenizer, selection] = await Promise.all([this.tokenizer(), this.session({ signal: options.signal })]);
+    throwIfOnnxLoadAborted(options.signal);
     const rendered = renderLocalOnnxEmbeddingInput(this.descriptor, text, options.inputKind ?? 'document');
     const encoded = truncateEncoding(
       tokenizer.encode(rendered, { add_special_tokens: true }),
       this.descriptor.maxTokens,
     );
     const feeds = this.feedsForEncoding(encoded, selection.session);
-    const output = await selection.session.run(feeds);
+    let output: Record<string, LocalOnnxTensor>;
+    try {
+      output = await selection.session.run(feeds);
+    } catch (error) {
+      if (isGpuExecutionProvider(selection.executionProvider) && isOnnxDeviceFailure(error)) {
+        await this.close().catch(() => undefined);
+      }
+      throw error;
+    }
     return meanPoolLastHiddenState(output, encoded.attention_mask, this.descriptor.dim);
   }
 
+  async load(options: { signal?: AbortSignal } = {}): Promise<void> {
+    await this.session({ signal: options.signal });
+  }
+
   async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    const closePromise = this.closeOnce().finally(() => {
+      if (this.closePromise === closePromise) this.closePromise = undefined;
+    });
+    this.closePromise = closePromise;
+    return closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     const attempt = this.sessionAttempt;
     this.sessionAttempt = undefined;
     this.sessionAttemptKey = undefined;
-    if (attempt && this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
+    if (attempt && this.sessionAttemptOwner.current === attempt) {
+      this.sessionAttemptOwner.current = undefined;
+      attempt.cancel(new AttemptCancelledError('ONNX session load was cancelled by provider close.'));
+    }
     // Await the in-flight load attempt's settlement AFTER detaching ownership. A superseded attempt
     // closes its own produced session asynchronously (the Attempt `close` callback); if close()
     // returned before that ran, a caller sequencing teardown/exit after close() could observe a
@@ -199,28 +231,37 @@ export class LocalOnnxProvider implements EmbeddingProvider {
     return attempt.wait();
   }
 
-  private async session(): Promise<LocalOnnxSessionSelection> {
+  private async session(options: { signal?: AbortSignal } = {}): Promise<LocalOnnxSessionSelection> {
+    if (this.closePromise) await this.closePromise;
     const modelPath = localOnnxSessionModelPath(this.descriptor.key, this.env);
     const sessionKey = localOnnxSessionCacheKey({
       modelPath,
       executionProvider: this.executionProviderPreference,
       executionPolicy: this.executionPolicy,
+      allowCpuFallback: this.allowCpuFallback,
     });
-    if (this.sessionAttempt && this.sessionAttemptKey === sessionKey) return this.sessionAttempt.wait();
+    if (this.sessionAttempt && this.sessionAttemptKey === sessionKey)
+      return this.sessionAttempt.wait({ signal: options.signal });
     if (this.sessionAttempt) await this.close();
     const attempt = Attempt.start(
       this.sessionAttemptOwner,
-      async () => {
-        await this.ensureArtifact();
-        const ort = await this.ort();
+      async (signal) => {
+        throwIfOnnxLoadAborted(signal);
+        await this.ensureArtifact(signal);
+        throwIfOnnxLoadAborted(signal);
+        const ort = await this.ort(signal);
+        throwIfOnnxLoadAborted(signal);
         this.activeOrt = ort;
         const selection = await createOnnxSessionWithFallback({
           ort,
           modelPath,
           executionProvider: this.executionProviderPreference,
+          allowCpuFallback: this.allowCpuFallback,
           executionPolicy: this.executionPolicy,
           platform: this.platform,
+          signal,
         });
+        throwIfOnnxLoadAborted(signal);
         return selection;
       },
       {
@@ -239,20 +280,30 @@ export class LocalOnnxProvider implements EmbeddingProvider {
       this.sessionAttemptKey = undefined;
       if (this.sessionAttemptOwner.current === attempt) this.sessionAttemptOwner.current = undefined;
     });
-    return attempt.wait();
+    return attempt.wait({ signal: options.signal });
   }
 
-  private async ort(): Promise<LocalOnnxRuntime> {
+  private async ort(signal?: AbortSignal): Promise<LocalOnnxRuntime> {
+    throwIfOnnxLoadAborted(signal);
     if (this.injectedOrt) {
       this.activeOrt = this.injectedOrt;
       return this.injectedOrt;
     }
     if (!this.ortAttempt) {
-      const attempt = Attempt.start(this.ortAttemptOwner, () => importOnnxRuntime(), {
-        install: (ort) => {
-          this.activeOrt = ort;
+      const attempt = Attempt.start(
+        this.ortAttemptOwner,
+        async (attemptSignal) => {
+          throwIfOnnxLoadAborted(attemptSignal);
+          const ort = await importOnnxRuntime();
+          throwIfOnnxLoadAborted(attemptSignal);
+          return ort;
         },
-      });
+        {
+          install: (ort) => {
+            this.activeOrt = ort;
+          },
+        },
+      );
       this.ortAttempt = attempt;
       attempt.result.catch(() => {
         if (this.ortAttempt !== attempt) return;
@@ -260,13 +311,15 @@ export class LocalOnnxProvider implements EmbeddingProvider {
         if (this.ortAttemptOwner.current === attempt) this.ortAttemptOwner.current = undefined;
       });
     }
-    this.activeOrt = await this.ortAttempt.wait();
+    this.activeOrt = await this.ortAttempt.wait({ signal });
     return this.activeOrt;
   }
 
-  private async ensureArtifact(): Promise<void> {
+  private async ensureArtifact(signal?: AbortSignal): Promise<void> {
+    throwIfOnnxLoadAborted(signal);
     if (this.injectedOrt && this.injectedTokenizer) return;
     await this.ensureArtifactImpl(this.descriptor, this.env);
+    throwIfOnnxLoadAborted(signal);
   }
 
   private feedsForEncoding(
@@ -375,13 +428,24 @@ export async function createOnnxSessionWithFallback(input: {
   ort: LocalOnnxRuntime;
   modelPath: string;
   executionProvider?: OnnxExecutionProviderPreference;
+  allowCpuFallback?: boolean;
   executionPolicy?: OnnxExecutionPolicy;
   platform?: NodeJS.Platform;
+  signal?: AbortSignal;
 }): Promise<LocalOnnxSessionSelection> {
-  const attempted = candidateExecutionProviders(input.executionProvider ?? 'auto', input.platform ?? process.platform);
+  const allowCpuFallback = input.allowCpuFallback ?? true;
+  const attempted = candidateExecutionProviders(
+    input.executionProvider ?? 'auto',
+    input.platform ?? process.platform,
+    allowCpuFallback,
+  );
   const failures: { executionProvider: OnnxExecutionProvider; message: string }[] = [];
+  if (attempted.length === 0) {
+    throw onnxSessionCreateError(failures, allowCpuFallback, input.executionProvider ?? 'auto');
+  }
   for (const executionProvider of attempted) {
     try {
+      throwIfOnnxLoadAborted(input.signal);
       const session = await input.ort.InferenceSession.create(input.modelPath, {
         executionProviders: [executionProvider],
         ...(input.executionPolicy
@@ -391,8 +455,15 @@ export async function createOnnxSessionWithFallback(input: {
             }
           : {}),
       });
+      try {
+        throwIfOnnxLoadAborted(input.signal);
+      } catch (error) {
+        if (session.release) await session.release();
+        throw error;
+      }
       return { session, executionProvider, attempted, failures };
     } catch (error) {
+      throwIfOnnxLoadAborted(input.signal);
       failures.push({
         executionProvider,
         message: error instanceof Error ? error.message : String(error),
@@ -400,8 +471,7 @@ export async function createOnnxSessionWithFallback(input: {
       if (executionProvider === 'cpu') break;
     }
   }
-  const detail = failures.map((failure) => `${failure.executionProvider}: ${failure.message}`).join('; ');
-  throw new RuntimeError(`failed to create ONNX inference session${detail ? ` (${detail})` : ''}`);
+  throw onnxSessionCreateError(failures, allowCpuFallback, input.executionProvider ?? 'auto');
 }
 
 function normalizeOnnxExecutionPolicy(policy: OnnxExecutionPolicy | undefined): OnnxExecutionPolicy | undefined {
@@ -415,23 +485,72 @@ function normalizeOnnxExecutionPolicy(policy: OnnxExecutionPolicy | undefined): 
 function localOnnxSessionCacheKey(input: {
   modelPath: string;
   executionProvider: OnnxExecutionProviderPreference;
+  allowCpuFallback: boolean;
   executionPolicy?: OnnxExecutionPolicy;
 }): string {
   return JSON.stringify({
     modelPath: input.modelPath,
     executionProvider: input.executionProvider,
+    allowCpuFallback: input.allowCpuFallback,
     executionPolicy: input.executionPolicy ?? null,
   });
 }
 
-function candidateExecutionProviders(
+export function candidateExecutionProviders(
   preference: OnnxExecutionProviderPreference = 'auto',
   platform: NodeJS.Platform = process.platform,
+  allowCpuFallback = true,
 ): OnnxExecutionProvider[] {
-  if (preference !== 'auto') return preference === 'cpu' ? ['cpu'] : [preference, 'cpu'];
-  if (platform === 'linux') return ['cuda', 'cpu'];
-  if (platform === 'darwin') return ['coreml', 'cpu'];
+  if (preference !== 'auto') {
+    if (preference === 'cpu') return ['cpu'];
+    return allowCpuFallback ? [preference, 'cpu'] : [preference];
+  }
+  if (platform === 'linux') return allowCpuFallback ? ['cuda', 'cpu'] : ['cuda'];
+  if (platform === 'darwin') return allowCpuFallback ? ['coreml', 'cpu'] : ['coreml'];
+  if (!allowCpuFallback) return [];
   return ['cpu'];
+}
+
+export function isOnnxDeviceFailure(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  if (/\b(out of memory|oom|alloc(?:ation)? failed|alloc_failed)\b/.test(message)) return true;
+  if (/\b(cuda|cudnn|cublas|cufft|coreml|metal)\b/.test(message)) return true;
+  if (/\b(ep|execution provider)\b/.test(message)) return true;
+  if (/\b(device|gpu)\b.*\b(unavailable|failed|failure|lost|reset|exhausted)\b/.test(message)) return true;
+  if (/\b(unavailable|failed|failure|lost|reset|exhausted)\b.*\b(device|gpu)\b/.test(message)) return true;
+  return false;
+}
+
+function onnxSessionCreateError(
+  failures: readonly { executionProvider: OnnxExecutionProvider; message: string }[],
+  allowCpuFallback: boolean,
+  preference: OnnxExecutionProviderPreference,
+): RuntimeError {
+  const detail = failures.map((failure) => `${failure.executionProvider}: ${failure.message}`).join('; ');
+  const error = new RuntimeError(`failed to create ONNX inference session${detail ? ` (${detail})` : ''}`);
+  if (!allowCpuFallback && preference !== 'cpu') {
+    Object.assign(error, { code: 'MODEL_DEVICE_UNAVAILABLE' });
+  }
+  return error;
+}
+
+function isGpuExecutionProvider(executionProvider: OnnxExecutionProvider): boolean {
+  return executionProvider === 'cuda' || executionProvider === 'coreml';
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = 'cause' in error && error.cause !== undefined ? ` ${errorMessage(error.cause)}` : '';
+    return `${error.message}${cause}`;
+  }
+  return String(error);
+}
+
+function throwIfOnnxLoadAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason: unknown = 'reason' in signal ? signal.reason : undefined;
+  if (reason instanceof Error) throw reason;
+  throw Object.assign(new Error('ONNX session load was cancelled'), { code: 'CANCELLED' });
 }
 
 function renderLocalOnnxEmbeddingInput(

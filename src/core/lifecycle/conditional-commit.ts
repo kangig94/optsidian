@@ -102,6 +102,13 @@ export class Attempt<T> {
     return this.resultPromise;
   }
 
+  cancel(reason: unknown = new AttemptCancelledError()): boolean {
+    if (this.settled || this.abortController.signal.aborted) return false;
+    this.abortController.abort(reason);
+    this.rejectWaiters(reason);
+    return true;
+  }
+
   join(options: { signal?: AbortSignal } = {}): AttemptWaiter<T> {
     const waiterId = this.nextWaiterId;
     this.nextWaiterId += 1;

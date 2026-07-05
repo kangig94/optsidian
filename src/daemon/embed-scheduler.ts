@@ -6,6 +6,7 @@ import {
   SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   type ModelEncodeWorkerPayload,
   type ModelEncodeWorkerResult,
+  type ModelStatsWorkerResult,
 } from './protocol.js';
 import { createEmbeddingWorkerPool, type EmbeddingWorkerPool } from './pools.js';
 import type { WorkerPoolRunOptions } from './worker-pool.js';
@@ -235,6 +236,10 @@ export class EmbedScheduler {
       this.laneScopes[lane] = Math.max(0, this.laneScopes[lane] - 1);
       this.resolveDrainWaitersIfIdle();
     }
+  }
+
+  modelStats(options: WorkerPoolRunOptions): Promise<ModelStatsWorkerResult> {
+    return this.embedding.modelStats(options);
   }
 
   cancel(cancellationId: string): void {

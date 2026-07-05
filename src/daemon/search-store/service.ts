@@ -28,6 +28,7 @@ import type {
 import { remainingDeadlineMs } from '../protocol.js';
 import type { EmbedSchedulerLane } from '../embed-scheduler.js';
 import type { OnnxExecutionPolicy } from '../../core/search/dense/local-onnx.js';
+import type { SearchModelDevicePolicy } from '../runtime-profile.js';
 import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from '../query-analysis-cache-defaults.js';
 import { QueryAnalysisCache } from '../query-analysis-cache.js';
 import {
@@ -112,6 +113,7 @@ export class DaemonSearchStoreService {
   private readonly searchSettingsHash: string;
   private readonly rankingTuning: SearchRankingTuning;
   private readonly onnxExecutionPolicy: OnnxExecutionPolicy | undefined;
+  private readonly devicePolicy: SearchModelDevicePolicy | undefined;
 
   constructor(
     store: DaemonSnapshotStore,
@@ -125,6 +127,7 @@ export class DaemonSearchStoreService {
       settings?: OptsidianSettings;
       env?: NodeJS.ProcessEnv;
       onnxExecutionPolicy?: OnnxExecutionPolicy;
+      devicePolicy?: SearchModelDevicePolicy;
     } = {},
   ) {
     this.store = store;
@@ -135,6 +138,7 @@ export class DaemonSearchStoreService {
     this.searchSettings = normalizeIndexAffectingSearchSettings(options.searchSettings);
     this.searchSettingsHash = indexAffectingSearchSettingsHash(this.searchSettings);
     this.onnxExecutionPolicy = options.onnxExecutionPolicy;
+    this.devicePolicy = options.devicePolicy;
     this.rankingTuning = normalizeRankingTuning(
       options.rankingTuning,
       options.settings ?? readOptsidianSettings(process.cwd(), options.env ?? process.env),
@@ -163,7 +167,11 @@ export class DaemonSearchStoreService {
         {
           texts: [queryText],
           inputKind: 'query',
-          provider: modelProviderPayloadForEmbeddingSet(densePin.embeddingSet, this.onnxExecutionPolicy),
+          provider: modelProviderPayloadForEmbeddingSet(
+            densePin.embeddingSet,
+            this.onnxExecutionPolicy,
+            this.devicePolicy,
+          ),
         },
         {
           deadline: context.deadline,
@@ -944,15 +952,20 @@ function assertRetrieveProviderModel(payload: RetrieveRequestPayload, activeMode
 function modelProviderPayloadForEmbeddingSet(
   embeddingSet: DenseGenerationPin['embeddingSet'],
   onnxExecutionPolicy: OnnxExecutionPolicy | undefined,
+  devicePolicy: SearchModelDevicePolicy | undefined,
 ): ModelProviderPayload {
   if (embeddingSet.recipe.provider.id === 'local-onnx') {
     if (!onnxExecutionPolicy) {
       throw new UsageError('Local ONNX query encoding requires a resolved ONNX execution policy');
     }
+    if (!devicePolicy) {
+      throw new UsageError('Local ONNX query encoding requires a resolved model device policy');
+    }
     return {
       kind: 'local-onnx',
       model: embeddingSet.recipe.provider.model === 'multilingual-e5-small' ? 'multilingual-e5-small' : 'bge-m3',
       executionPolicy: onnxExecutionPolicy,
+      devicePolicy,
     };
   }
   if (embeddingSet.recipe.provider.id === 'deterministic-hash') {

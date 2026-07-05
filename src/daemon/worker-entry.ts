@@ -2,11 +2,20 @@ import { isMainThread, parentPort, workerData, type TransferListItem } from 'nod
 import { analyzeSearchQuery } from '../core/search/analysis/query.js';
 import type { SearchTextAnalysisOptions } from '../core/search/analysis/query.js';
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from '../core/search/analyzer.js';
-import { LocalOnnxProvider } from '../core/search/dense/local-onnx.js';
+import { LocalOnnxProvider, type OnnxExecutionProvider } from '../core/search/dense/local-onnx.js';
+import { localOnnxModelDescriptor } from '../core/search/dense/artifacts.js';
 import { DeterministicHashProvider } from '../core/search/dense/provider.js';
 import type { EmbeddingProvider } from '../core/search/dense/provider.js';
 import { ModelSessionLifecycle } from './model-session/lifecycle.js';
-import type { ModelDevice, ModelSession } from './model-session/lifecycle.js';
+import type {
+  DeviceLoadPolicy,
+  ModelDevice,
+  ModelLoadTerminationReason,
+  ModelSession,
+  ModelSessionLoadOptions,
+} from './model-session/lifecycle.js';
+import { createVramProbe } from './model-session/vram-probe.js';
+import { stableProviderKey } from './model-session/provider-key.js';
 import type { IndexAffectingSearchSettings } from '../core/search/index-settings.js';
 import { readOptsidianSettings } from '../core/settings.js';
 import type {
@@ -47,7 +56,8 @@ type WorkerContext = {
 let analyzer: SearchAnalyzer | undefined;
 let embeddingLifecycle: ModelSessionLifecycle | undefined;
 let embeddingLifecycleKey: string | undefined;
-let embeddingProviderIdentity: EmbeddingProvider['identity'] | undefined;
+const embeddingVramProbe = createVramProbe();
+const inFlightLocalOnnxProviders = new Map<string, LocalOnnxProvider>();
 let searchDaemonWorkerProcessErrorHandlersInstalled = false;
 
 export async function runSearchDaemonWorker(): Promise<void> {
@@ -145,10 +155,9 @@ async function dispatch(
       await embeddingLifecycle?.unload();
       embeddingLifecycle = undefined;
       embeddingLifecycleKey = undefined;
-      embeddingProviderIdentity = undefined;
       return { unloaded: true };
     }
-    if (type === 'modelStats') return { loaded: embeddingLifecycle?.stats().loaded === true };
+    if (type === 'modelStats') return embeddingLifecycle?.stats() ?? { loaded: false };
     throw Object.assign(new Error(`unsupported embedding worker job: ${type}`), { code: 'BAD_REQUEST' });
   }
   if (context.kind === 'vector') {
@@ -228,55 +237,103 @@ async function dispatch(
 }
 
 async function modelEncode(input: ModelEncodeWorkerPayload) {
-  const lifecycle = lifecycleForPayload(input.provider);
-  const vectors = await lifecycle.encode(input.texts, {
+  const lifecycle = await lifecycleForPayload(input.provider);
+  const encoded = await lifecycle.encode(input.texts, {
     deadline: Date.now() + modelEncodeDeadlineMs(),
     origin: input.inputKind === 'query' ? 'query-text' : 'document-embed',
     suppressCpuPromotion: input.suppressCpuPromotion,
   });
-  const provider = embeddingProviderIdentity;
+  const provider = encoded.providerIdentity;
   if (!provider) throw Object.assign(new Error('embedding provider identity is unavailable'), { code: 'INTERNAL' });
   return {
     provider,
-    vectors,
+    vectors: encoded.vectors,
   };
 }
 
-function lifecycleForPayload(payload: ModelProviderPayload): ModelSessionLifecycle {
+async function lifecycleForPayload(payload: ModelProviderPayload): Promise<ModelSessionLifecycle> {
   const key = stableProviderKey(payload);
   if (embeddingLifecycle && embeddingLifecycleKey === key) return embeddingLifecycle;
-  void embeddingLifecycle?.unload().catch(() => undefined);
+  await embeddingLifecycle?.unload('superseded');
   embeddingLifecycleKey = key;
-  embeddingProviderIdentity = undefined;
   embeddingLifecycle = new ModelSessionLifecycle({
-    requiredVramBytes: modelRequiredVramBytes(),
-    probeVram: probeWorkerVram,
-    loadSession: async (device) => providerSessionForPayload(payload, device),
-    terminateLoad: async () => undefined,
+    policy: deviceLoadPolicyForPayload(payload),
+    loadSession: async (device, options) => providerSessionForPayload(payload, device, options, key),
+    terminateLoad: async (loadId, requestedDevice, reason) => terminateLoad(loadId, requestedDevice, reason),
     idleMs: modelIdleMs(),
   });
   return embeddingLifecycle;
 }
 
-async function providerSessionForPayload(payload: ModelProviderPayload, device: ModelDevice): Promise<ModelSession> {
-  const provider = providerForPayload(payload, device);
-  embeddingProviderIdentity = provider.identity;
-  return {
-    device,
-    async encode(texts, options) {
-      return Promise.all(
-        texts.map(async (text) =>
-          provider.embed(text, {
-            inputKind: options?.inputKind,
+async function providerSessionForPayload(
+  payload: ModelProviderPayload,
+  requestedDevice: ModelDevice,
+  options: ModelSessionLoadOptions,
+  residentStableProviderKey: string,
+): Promise<ModelSession> {
+  const provider = providerForPayload(payload, requestedDevice);
+  const localOnnxProvider = provider instanceof LocalOnnxProvider ? provider : undefined;
+  if (localOnnxProvider) inFlightLocalOnnxProviders.set(options.loadId, localOnnxProvider);
+  try {
+    if (localOnnxProvider) await localOnnxProvider.load({ signal: options.signal });
+    const executionProvider = localOnnxProvider?.executionProvider;
+    const device = actualDeviceForExecutionProvider(executionProvider) ?? requestedDevice;
+    const session: ModelSession = {
+      requestedLoadDevice: requestedDevice,
+      device,
+      ...(executionProvider ? { executionProvider } : {}),
+      providerIdentity: provider.identity,
+      stableProviderKey: residentStableProviderKey,
+      async encode(texts, encodeOptions) {
+        return Promise.all(
+          texts.map(async (text) => {
+            if (localOnnxProvider) {
+              return localOnnxProvider.embed(text, {
+                inputKind: encodeOptions?.inputKind,
+                signal: encodeOptions?.signal,
+              });
+            }
+            return provider.embed(text, { inputKind: encodeOptions?.inputKind });
           }),
-        ),
-      );
-    },
-    async close() {
-      const close = (provider as EmbeddingProvider & { close?: () => void | Promise<void> }).close;
-      if (close) await close.call(provider);
-    },
+        );
+      },
+      async close() {
+        const close = (provider as EmbeddingProvider & { close?: () => void | Promise<void> }).close;
+        if (close) await close.call(provider);
+      },
+    };
+    return session;
+  } catch (error) {
+    const close = (provider as EmbeddingProvider & { close?: () => void | Promise<void> }).close;
+    if (close) await Promise.resolve(close.call(provider)).catch(() => undefined);
+    throw error;
+  } finally {
+    if (localOnnxProvider && inFlightLocalOnnxProviders.get(options.loadId) === localOnnxProvider) {
+      inFlightLocalOnnxProviders.delete(options.loadId);
+    }
+  }
+}
+
+function deviceLoadPolicyForPayload(payload: ModelProviderPayload): DeviceLoadPolicy {
+  if (payload.kind !== 'local-onnx') return { mode: 'cpu' };
+  if (payload.devicePolicy === 'cpu') return { mode: 'cpu' };
+  if (payload.devicePolicy === 'gpu') return { mode: 'gpu' };
+  return {
+    mode: 'auto',
+    requiredVramBytes: localOnnxModelDescriptor(payload.model).requiredVramBytes,
+    probeVram: embeddingVramProbe,
   };
+}
+
+async function terminateLoad(
+  loadId: string,
+  _requestedDevice: ModelDevice,
+  _reason: ModelLoadTerminationReason,
+): Promise<void> {
+  const provider = inFlightLocalOnnxProviders.get(loadId);
+  if (!provider) return;
+  inFlightLocalOnnxProviders.delete(loadId);
+  await provider.close();
 }
 
 function providerForPayload(payload: ModelProviderPayload, device: ModelDevice = 'cpu'): EmbeddingProvider {
@@ -291,6 +348,7 @@ function providerForPayload(payload: ModelProviderPayload, device: ModelDevice =
     return new LocalOnnxProvider({
       model: payload.model,
       executionProvider: payload.executionProvider ?? executionProviderForDevice(device),
+      allowCpuFallback: payload.devicePolicy !== 'gpu',
       executionPolicy: payload.executionPolicy,
     });
   }
@@ -306,27 +364,11 @@ function executionProviderForDevice(device: ModelDevice) {
   return 'cuda';
 }
 
-function stableProviderKey(payload: ModelProviderPayload): string {
-  if (payload.kind === 'local-onnx') {
-    return JSON.stringify({
-      kind: payload.kind,
-      model: payload.model ?? null,
-      executionProvider: payload.executionProvider ?? null,
-      executionPolicy: {
-        intraOpNumThreads: payload.executionPolicy.intraOpNumThreads,
-        interOpNumThreads: payload.executionPolicy.interOpNumThreads,
-      },
-    });
-  }
-  return JSON.stringify(payload, (_key: string, value: unknown): unknown =>
-    value instanceof Map ? Array.from((value as ReadonlyMap<unknown, unknown>).entries()) : value,
-  );
-}
-
-export const stableProviderKeyForTests = stableProviderKey;
-
-function modelRequiredVramBytes(): number {
-  return envBytes(process.env.OPTSIDIAN_SEARCH_MODEL_REQUIRED_VRAM_MB) ?? 0;
+function actualDeviceForExecutionProvider(
+  executionProvider: OnnxExecutionProvider | undefined,
+): ModelDevice | undefined {
+  if (!executionProvider) return undefined;
+  return executionProvider === 'cpu' ? 'cpu' : 'gpu';
 }
 
 function modelIdleMs(): number {
@@ -339,17 +381,6 @@ function modelEncodeDeadlineMs(): number {
   const raw = process.env.OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS;
   if (!raw || !/^\d+$/.test(raw)) return 60_000;
   return Number(raw);
-}
-
-function probeWorkerVram() {
-  return {
-    freeBytes: envBytes(process.env.OPTSIDIAN_SEARCH_MODEL_FREE_VRAM_MB) ?? 0,
-  };
-}
-
-function envBytes(raw: string | undefined): number | undefined {
-  if (!raw || !/^\d+$/.test(raw.trim())) return undefined;
-  return Number(raw) * 1024 * 1024;
 }
 
 async function vectorUpsert(input: VectorUpsertWorkerPayload) {

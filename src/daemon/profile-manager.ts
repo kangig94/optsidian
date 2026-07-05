@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDaemonPools, type DaemonPools, type DaemonPoolsStats } from './pools.js';
-import { SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS, type PruneRequestPayload } from './protocol.js';
+import {
+  SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
+  type ModelStatsWorkerResult,
+  type PruneRequestPayload,
+} from './protocol.js';
 import { SharedReclamationAuthority, VaultPublisherRegistry } from './search-store/publisher.js';
 import { DaemonSearchStoreService } from './search-store/service.js';
 import { createDaemonSnapshotStore, createWorkerEmbeddingSetBuilder } from './search-store/snapshot-store.js';
@@ -25,8 +29,10 @@ import {
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash,
   settingsForSearchRuntimeProfile,
+  type SearchModelDevicePolicy,
   type SearchRuntimeProfile,
 } from './runtime-profile.js';
+import { stableProviderKey } from './model-session/provider-key.js';
 import {
   startRetrievalSaveWatcher,
   type RetrievalSaveWatcher,
@@ -40,10 +46,34 @@ export type ProfileRuntimeStatus = {
   profile: SearchRuntimeProfile;
   activeRequests: number;
   idleDeadline?: string;
+  model: ProfileRuntimeModelStatus;
   pools: DaemonPoolsStats;
   searchStore: ReturnType<DaemonSearchStoreService['stats']>;
   embedScheduler: EmbedSchedulerLaneStats;
   vaults: ReturnType<VaultRegistry['list']>;
+};
+
+export type ProfileRuntimeModelStatus = {
+  loaded: boolean;
+  devicePolicy: SearchModelDevicePolicy;
+  expectedStableProviderKey: string;
+  stableProviderKey?: string;
+  providerIdentity?: ModelStatsWorkerResult['providerIdentity'];
+  requestedLoadDevice?: ModelStatsWorkerResult['requestedLoadDevice'];
+  device?: ModelStatsWorkerResult['device'];
+  executionProvider?: ModelStatsWorkerResult['executionProvider'];
+  loadingDevice?: ModelStatsWorkerResult['loadingDevice'];
+  idleDeadline?: string;
+  unavailable?: boolean;
+  busy?: boolean;
+  reason?: 'not-loaded' | 'unavailable' | 'busy' | 'mismatched-resident';
+  residentStableProviderKey?: string;
+  residentProviderIdentity?: ModelStatsWorkerResult['providerIdentity'];
+  residentRequestedLoadDevice?: ModelStatsWorkerResult['requestedLoadDevice'];
+  residentDevice?: ModelStatsWorkerResult['device'];
+  residentExecutionProvider?: ModelStatsWorkerResult['executionProvider'];
+  residentDevicePolicy?: SearchModelDevicePolicy;
+  residentIdleDeadline?: string;
 };
 
 export type ProfileRuntimeLease = {
@@ -70,6 +100,12 @@ type SavePublicationState = {
   running?: Promise<void>;
 };
 
+type ResidentModelStats = ModelStatsWorkerResult & {
+  unavailable?: boolean;
+  busy?: boolean;
+  reason?: 'unavailable' | 'busy';
+};
+
 export type RuntimeSaveWatcherFactory = (options: VaultChangeProducerOptions) => RetrievalSaveWatcher;
 
 export type ProfileManagerOptions = {
@@ -81,6 +117,7 @@ export type ProfileManagerOptions = {
 };
 
 const MAX_CANCELLED_IDS = 4096;
+const MODEL_STATUS_DEADLINE_MS = 100;
 
 export class ProfileRuntime {
   readonly profile: SearchRuntimeProfile;
@@ -88,8 +125,9 @@ export class ProfileRuntime {
   readonly pools: DaemonPools;
   readonly vectorPool: VectorGenerationManager;
   readonly searchStore: DaemonSearchStoreService;
+  readonly expectedModelStableProviderKey: string;
   readonly vaults = new VaultRegistry();
-  private readonly embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats'>;
+  private readonly embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats' | 'modelStats'>;
   private readonly snapshotStore: Pick<
     DaemonSnapshotStore,
     | 'publishSaveSnapshot'
@@ -123,13 +161,15 @@ export class ProfileRuntime {
       | 'close'
     >,
     searchStore: DaemonSearchStoreService,
-    embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats'>,
+    embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats' | 'modelStats'>,
+    expectedModelStableProviderKey: string,
     options: ProfileManagerOptions,
   ) {
     this.profile = profile;
     this.profileHash = searchRuntimeProfileHash(profile);
     this.pools = pools;
     this.vectorPool = vectorPool;
+    this.expectedModelStableProviderKey = expectedModelStableProviderKey;
     this.snapshotStore = snapshotStore;
     this.searchStore = searchStore;
     this.embedScheduler = embedScheduler;
@@ -170,7 +210,9 @@ export class ProfileRuntime {
             kind: 'local-onnx' as const,
             model: normalized.embedding.model,
             executionPolicy: onnxExecutionPolicy,
+            devicePolicy: normalized.embedding.devicePolicy,
           };
+    const expectedModelStableProviderKey = stableProviderKey(providerPayload);
     const snapshotStore = createDaemonSnapshotStore({
       env,
       countCap: normalized.memory.snapshotCountCap,
@@ -225,9 +267,19 @@ export class ProfileRuntime {
         settings,
         env,
         onnxExecutionPolicy,
+        devicePolicy: normalized.embedding.devicePolicy,
       },
     );
-    return new ProfileRuntime(normalized, pools, vectorPool, snapshotStore, searchStore, embedScheduler, options);
+    return new ProfileRuntime(
+      normalized,
+      pools,
+      vectorPool,
+      snapshotStore,
+      searchStore,
+      embedScheduler,
+      expectedModelStableProviderKey,
+      options,
+    );
   }
 
   cancel(cancellationId: string): void {
@@ -273,16 +325,88 @@ export class ProfileRuntime {
   async status(
     context: { deadline: number; cancellationId: string; vault?: string },
     lifecycle: { activeRequests: number; idleDeadline?: string },
+    residentModelStats?: ResidentModelStats,
   ): Promise<ProfileRuntimeStatus> {
+    const modelStats = residentModelStats ?? (await this.modelStatsBestEffort(context));
     return {
       profileHash: this.profileHash,
       profile: this.profile,
       activeRequests: lifecycle.activeRequests,
       ...(lifecycle.idleDeadline ? { idleDeadline: lifecycle.idleDeadline } : {}),
+      model: this.projectModelStatus(modelStats),
       pools: await this.pools.stats(context),
       searchStore: this.searchStore.stats(),
       embedScheduler: this.embedScheduler.laneStats(),
       vaults: this.vaults.list(),
+    };
+  }
+
+  private async modelStatsBestEffort(context: {
+    deadline: number;
+    cancellationId: string;
+    vault?: string;
+  }): Promise<ResidentModelStats> {
+    const deadline = modelStatusDeadline(context.deadline);
+    if (deadline <= Date.now()) return unavailableModelStats('busy');
+    try {
+      return await this.embedScheduler.modelStats({
+        deadline,
+        cancellationId: context.cancellationId,
+        requestId: `${context.cancellationId}:model-status`,
+        ...(context.vault ? { vault: context.vault } : {}),
+      });
+    } catch (error) {
+      return unavailableModelStats(modelStatusUnavailableReason(error));
+    }
+  }
+
+  private projectModelStatus(resident: ResidentModelStats): ProfileRuntimeModelStatus {
+    const base: ProfileRuntimeModelStatus = {
+      loaded: false,
+      devicePolicy: this.profile.embedding.devicePolicy,
+      expectedStableProviderKey: this.expectedModelStableProviderKey,
+    };
+    if (resident.unavailable) {
+      return {
+        ...base,
+        unavailable: true,
+        ...(resident.busy ? { busy: true } : {}),
+        reason: resident.reason ?? 'unavailable',
+        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
+      };
+    }
+    if (!resident.loaded) {
+      return {
+        ...base,
+        reason: 'not-loaded',
+        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
+      };
+    }
+    if (resident.stableProviderKey === this.expectedModelStableProviderKey) {
+      return {
+        ...base,
+        loaded: true,
+        ...(resident.stableProviderKey ? { stableProviderKey: resident.stableProviderKey } : {}),
+        ...(resident.providerIdentity ? { providerIdentity: resident.providerIdentity } : {}),
+        ...(resident.requestedLoadDevice ? { requestedLoadDevice: resident.requestedLoadDevice } : {}),
+        ...(resident.device ? { device: resident.device } : {}),
+        ...(resident.executionProvider ? { executionProvider: resident.executionProvider } : {}),
+        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
+        ...(resident.idleDeadline ? { idleDeadline: resident.idleDeadline } : {}),
+      };
+    }
+    return {
+      ...base,
+      unavailable: true,
+      reason: 'mismatched-resident',
+      ...(resident.stableProviderKey ? { residentStableProviderKey: resident.stableProviderKey } : {}),
+      ...(resident.providerIdentity ? { residentProviderIdentity: resident.providerIdentity } : {}),
+      ...(resident.requestedLoadDevice ? { residentRequestedLoadDevice: resident.requestedLoadDevice } : {}),
+      ...(resident.device ? { residentDevice: resident.device } : {}),
+      ...(resident.executionProvider ? { residentExecutionProvider: resident.executionProvider } : {}),
+      ...(resident.devicePolicy ? { residentDevicePolicy: resident.devicePolicy } : {}),
+      ...(resident.idleDeadline ? { residentIdleDeadline: resident.idleDeadline } : {}),
+      ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
     };
   }
 
@@ -403,6 +527,24 @@ function drainDirtyMarks(target: Map<string, SnapshotDirtyMark>): void {
 
 function dirtyMarkKey(mark: SnapshotDirtyMark): string {
   return `${mark.docId}\0${mark.path}`;
+}
+
+function modelStatusDeadline(requestDeadline: number): number {
+  return Math.min(requestDeadline, Date.now() + MODEL_STATUS_DEADLINE_MS);
+}
+
+function unavailableModelStats(reason: 'unavailable' | 'busy'): ResidentModelStats {
+  return {
+    loaded: false,
+    unavailable: true,
+    ...(reason === 'busy' ? { busy: true } : {}),
+    reason,
+  };
+}
+
+function modelStatusUnavailableReason(error: unknown): 'unavailable' | 'busy' {
+  const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
+  return code === 'BACKPRESSURE' || code === 'DEADLINE_EXCEEDED' ? 'busy' : 'unavailable';
 }
 
 export class ProfileManager {
@@ -533,19 +675,45 @@ export class ProfileManager {
     cancellationId: string;
     vault?: string;
   }): Promise<Record<string, ProfileRuntimeStatus>> {
+    const runtimeEntries = [...this.runtimes.values()];
+    if (runtimeEntries.length === 0) return {};
+    const residentModelStats = await this.modelStatsBestEffort(context);
     const entries = await Promise.all(
-      [...this.runtimes.values()].map(
+      runtimeEntries.map(
         async (entry) =>
           [
             entry.runtime.profileHash,
-            await entry.runtime.status(context, {
-              activeRequests: entry.activeRequests,
-              ...(entry.idleDeadline ? { idleDeadline: entry.idleDeadline } : {}),
-            }),
+            await entry.runtime.status(
+              context,
+              {
+                activeRequests: entry.activeRequests,
+                ...(entry.idleDeadline ? { idleDeadline: entry.idleDeadline } : {}),
+              },
+              residentModelStats,
+            ),
           ] as const,
       ),
     );
     return Object.fromEntries(entries);
+  }
+
+  private async modelStatsBestEffort(context: {
+    deadline: number;
+    cancellationId: string;
+    vault?: string;
+  }): Promise<ResidentModelStats> {
+    const deadline = modelStatusDeadline(context.deadline);
+    if (deadline <= Date.now()) return unavailableModelStats('busy');
+    try {
+      return await this.embedScheduler.modelStats({
+        deadline,
+        cancellationId: context.cancellationId,
+        requestId: `${context.cancellationId}:model-status`,
+        ...(context.vault ? { vault: context.vault } : {}),
+      });
+    } catch (error) {
+      return unavailableModelStats(modelStatusUnavailableReason(error));
+    }
   }
 
   pruneSearchCaches(payload: PruneRequestPayload): SearchIndexPruneResult {

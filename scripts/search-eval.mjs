@@ -279,7 +279,9 @@ async function runIndexBenchmark(options) {
     daemonReady: {
       ok: daemonReady.ok,
       elapsedMs: daemonReady.elapsedMs,
-      ...(daemonReady.ok ? { memory: statusMemorySummary(daemonReady.value) } : { error: daemonReady.error }),
+      ...(daemonReady.ok
+        ? { memory: statusMemorySummary(daemonReady.value), model: statusModelSummary(daemonReady.value) }
+        : { error: daemonReady.error }),
     },
     actions: benchmarkActions,
     finalStatus: compactStatus(finalStatus, vault.root),
@@ -325,6 +327,7 @@ async function runIndexAction(client, vaultRoot, action, options) {
       vault: vaultStatus(status, vaultRoot),
       cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
       memory: statusMemorySummary(status),
+      model: statusModelSummary(status),
       searchStore: status.searchStore,
     };
   } catch (error) {
@@ -564,6 +567,22 @@ function statusMemorySummary(status) {
   };
 }
 
+function statusModelSummary(status) {
+  if (!status || status.error || !status.profiles || typeof status.profiles !== 'object') return undefined;
+  const profiles = {};
+  for (const [profileHash, profile] of Object.entries(status.profiles)) {
+    const model = profile?.model;
+    if (!model || typeof model !== 'object') continue;
+    profiles[profileHash] = {
+      devicePolicy: model.devicePolicy ?? null,
+      loaded: model.loaded === true,
+      device: model.device ?? null,
+      executionProvider: model.executionProvider ?? null,
+    };
+  }
+  return Object.keys(profiles).length > 0 ? profiles : undefined;
+}
+
 function compactStatus(status, vaultRoot) {
   if (!status || status.error) return status;
   return {
@@ -572,6 +591,7 @@ function compactStatus(status, vaultRoot) {
     metrics: status.metrics,
     vault: vaultStatus(status, vaultRoot),
     memory: statusMemorySummary(status),
+    model: statusModelSummary(status),
     searchStore: status.searchStore,
   };
 }

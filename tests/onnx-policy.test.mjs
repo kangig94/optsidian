@@ -3,8 +3,8 @@ import test from 'node:test';
 
 import { EmbedScheduler, envForDaemonOnnxExecutionPolicy } from '../src/daemon/embed-scheduler.ts';
 import { modelProviderPayloadForEmbeddingSetForTests } from '../src/daemon/search-store/service.ts';
-import { stableProviderKeyForTests } from '../src/daemon/worker-entry.ts';
-import { LocalOnnxProvider } from '../src/core/search/dense/local-onnx.ts';
+import { stableProviderKey as stableProviderKeyForTests } from '../src/daemon/model-session/provider-key.ts';
+import { candidateExecutionProviders, LocalOnnxProvider } from '../src/core/search/dense/local-onnx.ts';
 
 test('ONNX execution policy is one resolved daemon value and propagates to OpenMP env', () => {
   const embedding = {
@@ -38,7 +38,7 @@ test('ONNX execution policy is one resolved daemon value and propagates to OpenM
   );
 });
 
-test('ONNX worker key and dense query provider payload use the same execution policy', () => {
+test('ONNX worker key and dense query provider payload use the same execution and device policy', () => {
   const policy = { intraOpNumThreads: 3, interOpNumThreads: 1 };
   const embeddingSet = {
     recipe: {
@@ -52,26 +52,44 @@ test('ONNX worker key and dense query provider payload use the same execution po
     model: 'bge-m3',
     dim: 1024,
   };
-  const buildPayload = {
-    kind: 'local-onnx',
-    model: 'bge-m3',
-    executionPolicy: policy,
-  };
-  const queryPayload = modelProviderPayloadForEmbeddingSetForTests(embeddingSet, policy);
+  const keys = new Set();
+  for (const devicePolicy of ['auto', 'cpu', 'gpu']) {
+    const buildPayload = {
+      kind: 'local-onnx',
+      model: 'bge-m3',
+      executionPolicy: policy,
+      devicePolicy,
+    };
+    const queryPayload = modelProviderPayloadForEmbeddingSetForTests(embeddingSet, policy, devicePolicy);
 
-  assert.deepEqual(queryPayload, buildPayload);
-  assert.equal(stableProviderKeyForTests(queryPayload), stableProviderKeyForTests(buildPayload));
-  assert.notEqual(
-    stableProviderKeyForTests(queryPayload),
-    stableProviderKeyForTests({
-      ...buildPayload,
-      executionPolicy: { intraOpNumThreads: 4, interOpNumThreads: 1 },
-    }),
-  );
+    assert.deepEqual(queryPayload, buildPayload);
+    assert.equal(stableProviderKeyForTests(queryPayload), stableProviderKeyForTests(buildPayload));
+    keys.add(stableProviderKeyForTests(queryPayload));
+    assert.notEqual(
+      stableProviderKeyForTests(queryPayload),
+      stableProviderKeyForTests({
+        ...buildPayload,
+        executionPolicy: { intraOpNumThreads: 4, interOpNumThreads: 1 },
+      }),
+    );
+  }
+  assert.equal(keys.size, 3);
   assert.throws(
-    () => modelProviderPayloadForEmbeddingSetForTests(embeddingSet, undefined),
+    () => modelProviderPayloadForEmbeddingSetForTests(embeddingSet, undefined, 'auto'),
     /requires a resolved ONNX execution policy/,
   );
+  assert.throws(
+    () => modelProviderPayloadForEmbeddingSetForTests(embeddingSet, policy, undefined),
+    /requires a resolved model device policy/,
+  );
+});
+
+test('strict GPU ONNX execution provider candidates do not include CPU fallback', () => {
+  assert.deepEqual(candidateExecutionProviders('cuda', 'linux', false), ['cuda']);
+  assert.deepEqual(candidateExecutionProviders('coreml', 'darwin', false), ['coreml']);
+  assert.deepEqual(candidateExecutionProviders('auto', 'linux', false), ['cuda']);
+  assert.deepEqual(candidateExecutionProviders('auto', 'darwin', false), ['coreml']);
+  assert.deepEqual(candidateExecutionProviders('cpu', 'linux', false), ['cpu']);
 });
 
 test('LocalOnnxProvider keeps a single in-process session for repeated encodes under one policy', async () => {

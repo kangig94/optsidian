@@ -12,10 +12,14 @@ import type {
 } from '../core/types.js';
 import type { ExplainTrace } from '../core/search/contracts.js';
 import type { SearchAnalyzerIdentity } from '../core/search/analyzer.js';
-import type { EmbeddingInputKind, EmbeddingVector } from '../core/search/dense/provider.js';
+import type { EmbeddingInputKind, EmbeddingProviderIdentity, EmbeddingVector } from '../core/search/dense/provider.js';
 import type { LocalOnnxModelKey } from '../core/search/dense/artifacts.js';
-import type { OnnxExecutionPolicy, OnnxExecutionProviderPreference } from '../core/search/dense/local-onnx.js';
-import type { SearchRuntimeProfile } from './runtime-profile.js';
+import type {
+  OnnxExecutionPolicy,
+  OnnxExecutionProvider,
+  OnnxExecutionProviderPreference,
+} from '../core/search/dense/local-onnx.js';
+import type { SearchModelDevicePolicy, SearchRuntimeProfile } from './runtime-profile.js';
 import type { BuiltSegment, ParsedBuildDocument } from './search-store/types.js';
 import type { CoralChunkRecord, CoralEmbeddingSpec, VectorStoreKey } from './vector-store/types.js';
 
@@ -70,6 +74,7 @@ export type SearchDaemonErrorCode =
   | 'SEARCH_DAEMON_NOT_READY'
   | 'DEADLINE_EXCEEDED'
   | 'CANCELLED'
+  | 'MODEL_DEVICE_UNAVAILABLE'
   | 'BACKPRESSURE'
   | 'INTERNAL';
 
@@ -113,6 +118,7 @@ type LocalOnnxModelProviderPayload = {
   model?: LocalOnnxModelKey;
   executionProvider?: OnnxExecutionProviderPreference;
   executionPolicy: OnnxExecutionPolicy;
+  devicePolicy: SearchModelDevicePolicy;
 };
 
 export type ModelProviderPayload = DeterministicHashModelProviderPayload | LocalOnnxModelProviderPayload;
@@ -140,6 +146,14 @@ export type ModelUnloadWorkerResult = {
 
 export type ModelStatsWorkerResult = {
   loaded: boolean;
+  devicePolicy?: SearchModelDevicePolicy;
+  stableProviderKey?: string;
+  providerIdentity?: EmbeddingProviderIdentity;
+  requestedLoadDevice?: 'cpu' | 'gpu';
+  device?: 'cpu' | 'gpu';
+  executionProvider?: OnnxExecutionProvider;
+  loadingDevice?: 'cpu' | 'gpu';
+  idleDeadline?: string;
 };
 
 type VectorWorkerBasePayload = {

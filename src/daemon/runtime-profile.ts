@@ -13,9 +13,10 @@ import { DEFAULT_QUERY_ANALYSIS_CACHE_ENTRIES } from './query-analysis-cache-def
 import { defaultSearchExecutionWorkerCount } from './worker-pool.js';
 import { DEFAULT_PARTITION_BITS, INDEX_BUILD_VERSION } from './search-store/builder.js';
 
-const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 3;
+export const SEARCH_RUNTIME_PROFILE_SCHEMA_VERSION = 4;
 
 type SearchEmbeddingProviderKind = 'local-onnx' | 'deterministic-hash';
+export type SearchModelDevicePolicy = 'auto' | 'cpu' | 'gpu';
 
 type SearchRuntimeProfileIndexSettings = IndexAffectingSearchSettings & {
   partitionBits: number;
@@ -36,6 +37,7 @@ export type SearchRuntimeProfile = {
   embedding: {
     provider: SearchEmbeddingProviderKind;
     model: 'bge-m3' | 'multilingual-e5-small';
+    devicePolicy: SearchModelDevicePolicy;
   };
   ranking: {
     denseLambda: number;
@@ -97,6 +99,7 @@ export function effectiveSearchRuntimeProfile(
     embedding: {
       provider: embeddingProvider(env),
       model: embeddingModel(env, settings),
+      devicePolicy: embeddingDevice(env),
     },
     ranking: {
       denseLambda:
@@ -203,6 +206,7 @@ export function normalizeSearchRuntimeProfile(value: unknown): SearchRuntimeProf
     embedding: {
       provider: normalizeEmbeddingProvider(embedding.provider ?? 'local-onnx', 'search runtime embedding provider'),
       model: normalizeEmbeddingModel(embedding.model ?? 'bge-m3', 'search runtime embedding model'),
+      devicePolicy: normalizeDevicePolicy(embedding.devicePolicy, 'search runtime embedding device policy'),
     },
     ranking: {
       denseLambda: nonNegativeFloat(ranking.denseLambda ?? SEARCH_SCORING_LAMBDAS.dense, 'dense lambda'),
@@ -268,6 +272,7 @@ export function envForSearchRuntimeProfile(
     OPTSIDIAN_SEARCH_PARTITION_BITS: String(normalized.index.partitionBits),
     OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: normalized.embedding.provider,
     OPTSIDIAN_SEARCH_EMBEDDING_MODEL: normalized.embedding.model,
+    OPTSIDIAN_SEARCH_MODEL_DEVICE: normalized.embedding.devicePolicy,
     OPTSIDIAN_SEARCH_DENSE_LAMBDA: String(normalized.ranking.denseLambda),
     OPTSIDIAN_SEARCH_LINK_LAMBDA: String(normalized.ranking.linkLambda),
     OPTSIDIAN_SEARCH_RRF_K: String(normalized.ranking.rrfK),
@@ -355,6 +360,10 @@ function embeddingProvider(env: NodeJS.ProcessEnv): SearchEmbeddingProviderKind 
   );
 }
 
+function embeddingDevice(env: NodeJS.ProcessEnv): SearchModelDevicePolicy {
+  return normalizeDevicePolicy(env.OPTSIDIAN_SEARCH_MODEL_DEVICE, 'search model device policy');
+}
+
 function optionalRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === undefined || value === null) return {};
   return asRecord(value, label);
@@ -424,6 +433,14 @@ function normalizeEmbeddingProvider(value: unknown, label: string): SearchEmbedd
   if (raw === 'local-onnx' || raw === 'onnx') return 'local-onnx';
   if (raw === 'deterministic-hash' || raw === 'deterministic') return 'deterministic-hash';
   throw new Error(`${label} must be local-onnx or deterministic-hash`);
+}
+
+function normalizeDevicePolicy(value: unknown, label: string): SearchModelDevicePolicy {
+  if (value === undefined || value === null || value === '') return 'auto';
+  const raw = stringValue(value, label).trim().toLowerCase();
+  if (raw === '') return 'auto';
+  if (raw === 'auto' || raw === 'cpu' || raw === 'gpu') return raw;
+  throw new Error(`${label} must be auto, cpu, or gpu`);
 }
 
 function stringList(value: unknown): string[] {
