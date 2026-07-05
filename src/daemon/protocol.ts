@@ -1,7 +1,9 @@
 import { pack, unpack } from 'msgpackr';
 import type {
+  SearchIndexBuildTiming,
   SearchIndexMutationResult,
   SearchIndexPruneResult,
+  SearchIndexProgressPhase,
   SearchIndexWarmResult,
   RetrieveResult,
   RetrieveOrigin,
@@ -269,9 +271,6 @@ export type SearchDaemonPhase = 'starting' | 'ready' | 'draining';
 
 export type VaultState = 'unloaded' | 'loading' | 'ready' | 'updating';
 
-type SearchIndexProgressPhase =
-  'scanning' | 'parsing' | 'segmenting' | 'embedding' | 'vector-indexing' | 'publishing' | 'preloading';
-
 export type SearchIndexProgressUpdate = {
   phase: SearchIndexProgressPhase;
   total?: number;
@@ -377,6 +376,7 @@ export type RefreshResult = {
   action: 'refresh';
   rebuilt: boolean;
   snapshotId?: string;
+  buildTiming?: SearchIndexBuildTiming;
 };
 
 export type CompactResult = {
@@ -384,6 +384,7 @@ export type CompactResult = {
   command: 'index';
   action: 'compact';
   rebuilt: boolean;
+  buildTiming?: SearchIndexBuildTiming;
 };
 
 export type ShutdownResult = {

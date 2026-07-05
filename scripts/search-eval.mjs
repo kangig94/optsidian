@@ -219,9 +219,14 @@ async function runIndexBenchmark(options) {
   const actions = options.indexActions?.length ? options.indexActions : ['clear-load', 'rebuild', 'load'];
   const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
   const { searchStoreCachePaths } = await import('../src/daemon/search-store/cache-paths.ts');
-  const client = createSearchDaemonClient({ binaryPath: cliPath, env: searchEvalEnv(options) });
+  const { effectiveSearchRuntimeProfile, lexicalIdentityHashForSearchRuntimeProfile } =
+    await import('../src/daemon/runtime-profile.ts');
+  const evalEnv = searchEvalEnv(options);
+  const runtimeProfile = effectiveSearchRuntimeProfile(process.cwd(), evalEnv);
+  const lexicalIdentityHash = lexicalIdentityHashForSearchRuntimeProfile(runtimeProfile);
+  const client = createSearchDaemonClient({ binaryPath: cliPath, env: evalEnv, runtimeProfile });
   const vault = markdownVaultStats(vaultRoot);
-  const cachePaths = safeCachePaths(searchStoreCachePaths, vault.root);
+  const cachePaths = safeCachePaths(searchStoreCachePaths, vault.root, evalEnv, { lexicalIdentityHash });
   const cacheBefore = cachePaths ? directoryStats(cachePaths.rootDir) : undefined;
   const daemonReady = await timedPhase('daemon-ready', () =>
     client.status({ deadlineMs: options.deadlineMs ?? 15000 }),
@@ -254,7 +259,10 @@ async function runIndexBenchmark(options) {
     actionsRequested: actions,
     vault,
     cache: {
+      storeId: cachePaths?.storeId,
+      vaultDir: cachePaths?.vaultDir,
       rootDir: cachePaths?.rootDir,
+      lexicalIdentityHash: cachePaths?.lexicalIdentityHash,
       before: cacheBefore,
       after: cachePaths ? directoryStats(cachePaths.rootDir) : undefined,
     },
@@ -274,8 +282,6 @@ async function runIndexAction(client, vaultRoot, action, options) {
   const phases = [];
   const request = { vault: vaultRoot, ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}) };
   const started = performance.now();
-  const timeline = createPhaseTimeline(client, vaultRoot, options);
-  timeline.start();
   let payload;
   try {
     if (action === 'load') {
@@ -294,7 +300,7 @@ async function runIndexAction(client, vaultRoot, action, options) {
       usage(`Unknown index action: ${action}`);
     }
     const elapsedMs = roundMs(performance.now() - started);
-    timeline.stop();
+    const buildTiming = requireDaemonBuildTiming(payload?.buildTiming, action);
     const status = await client.status({ deadlineMs: options.deadlineMs ?? 15000 }).catch((error) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
@@ -303,7 +309,8 @@ async function runIndexAction(client, vaultRoot, action, options) {
       ok: true,
       elapsedMs,
       phases,
-      buildPhases: timeline.summary(),
+      buildPhases: buildTiming.phases,
+      ...indexBuildTimingFields(buildTiming),
       snapshotId: payloadSnapshotId(payload) ?? vaultStatus(status, vaultRoot)?.snapshotId,
       vault: vaultStatus(status, vaultRoot),
       cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
@@ -311,13 +318,18 @@ async function runIndexAction(client, vaultRoot, action, options) {
       searchStore: status.searchStore,
     };
   } catch (error) {
-    timeline.stop();
     return {
       action,
       ok: false,
       elapsedMs: roundMs(performance.now() - started),
       phases,
-      buildPhases: timeline.summary(),
+      buildPhases: [],
+      indexBuildMs: 0,
+      lexicalBuildMs: 0,
+      denseBuildMs: 0,
+      preloadMs: 0,
+      buildTimingSource: 'not-observed',
+      buildTimingResolutionMs: 0,
       error: error instanceof Error ? error.message : String(error),
       cache: options.cacheRoot ? directoryStats(options.cacheRoot) : undefined,
     };
@@ -355,60 +367,64 @@ async function timedPhase(name, run) {
   }
 }
 
-// Polls the daemon's build progress while an index action's RPC is in flight and records
-// the wall-clock at each build-phase transition (scanning -> parsing -> segmenting -> embedding
-// -> vector-indexing -> publishing -> preloading). This isolates the dense/vector portion
-// (embedding + vector-indexing) of a build from the lexical portion, which the coarse RPC
-// elapsed time alone cannot. Only `load`/`clear-load` await the dense build inside the RPC;
-// `rebuild`/`refresh` attach dense in the background, so their timeline ends at lexical publish.
-function createPhaseTimeline(client, vaultRoot, options) {
-  const resolvedVault = path.resolve(vaultRoot);
-  const marks = [];
-  let lastPhase;
-  let timer;
-  let polling = false;
-  let stoppedAtMs;
-
-  const sample = async () => {
-    if (polling) return;
-    polling = true;
-    try {
-      const status = await client.status({ deadlineMs: 1000 });
-      const vault = Array.isArray(status.vaults)
-        ? status.vaults.find((candidate) => path.resolve(candidate.vault) === resolvedVault)
-        : undefined;
-      const progress = vault?.progress;
-      if (progress?.phase && progress.phase !== lastPhase) {
-        marks.push({ phase: progress.phase, atMs: performance.now(), total: progress.total });
-        lastPhase = progress.phase;
-      }
-    } catch {
-      // Status can transiently fail mid-build; the next poll recovers.
-    } finally {
-      polling = false;
-    }
-  };
-
+function indexBuildTimingFields(buildTiming) {
   return {
-    start() {
-      timer = setInterval(() => void sample(), options.phasePollMs ?? 250);
-      timer.unref();
-      void sample();
-    },
-    stop() {
-      if (timer) clearInterval(timer);
-      stoppedAtMs = performance.now();
-    },
-    summary() {
-      if (marks.length === 0) return undefined;
-      const endMs = stoppedAtMs ?? performance.now();
-      return marks.map((mark, index) => ({
-        phase: mark.phase,
-        elapsedMs: roundMs((index + 1 < marks.length ? marks[index + 1].atMs : endMs) - mark.atMs),
-        ...(Number.isFinite(mark.total) ? { total: mark.total } : {}),
-      }));
-    },
+    indexBuildMs: buildTiming.indexBuildMs,
+    lexicalBuildMs: buildTiming.lexicalBuildMs,
+    denseBuildMs: buildTiming.denseBuildMs,
+    preloadMs: buildTiming.preloadMs,
+    buildTimingSource: buildTiming.source,
+    buildTimingResolutionMs: 0,
   };
+}
+
+function requireDaemonBuildTiming(value, action) {
+  const timing = normalizeDaemonBuildTiming(value);
+  if (!timing) throw new Error(`${action} did not return daemon build timing`);
+  return timing;
+}
+
+function normalizeDaemonBuildTiming(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  if (value.source !== 'daemon-progress') return undefined;
+  const phases = Array.isArray(value.phases) ? value.phases.map(normalizeBuildPhase).filter(Boolean) : [];
+  const indexBuildMs = finiteNumber(value.indexBuildMs);
+  const lexicalBuildMs = finiteNumber(value.lexicalBuildMs);
+  const denseBuildMs = finiteNumber(value.denseBuildMs);
+  const preloadMs = finiteNumber(value.preloadMs);
+  if (
+    indexBuildMs === undefined ||
+    lexicalBuildMs === undefined ||
+    denseBuildMs === undefined ||
+    preloadMs === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    source: 'daemon-progress',
+    indexBuildMs: roundMs(indexBuildMs),
+    lexicalBuildMs: roundMs(lexicalBuildMs),
+    denseBuildMs: roundMs(denseBuildMs),
+    preloadMs: roundMs(preloadMs),
+    phases,
+  };
+}
+
+function normalizeBuildPhase(value) {
+  if (!value || typeof value !== 'object' || typeof value.phase !== 'string') return undefined;
+  const elapsedMs = finiteNumber(value.elapsedMs);
+  if (elapsedMs === undefined) return undefined;
+  const total = finiteNumber(value.total);
+  return {
+    phase: value.phase,
+    elapsedMs: roundMs(elapsedMs),
+    ...(total === undefined ? {} : { total }),
+  };
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function parseBenchmark(raw) {
@@ -474,9 +490,9 @@ function safeReadDir(dir) {
   }
 }
 
-function safeCachePaths(searchStoreCachePaths, vaultRoot) {
+function safeCachePaths(searchStoreCachePaths, vaultRoot, env = process.env, identity = {}) {
   try {
-    return searchStoreCachePaths(vaultRoot);
+    return searchStoreCachePaths(vaultRoot, env, identity);
   } catch {
     return undefined;
   }
@@ -563,6 +579,7 @@ function printIndexAction(result, context) {
       `action=${result.action}`,
       status,
       `elapsed=${result.elapsedMs.toFixed(1)}ms`,
+      `indexBuild=${formatMs(result.indexBuildMs)}`,
       `files=${context.vault.fileCount}`,
       `md=${formatBytes(context.vault.byteCount)}`,
       `cache=${cache}`,
@@ -573,7 +590,17 @@ function printIndexAction(result, context) {
   );
   if (result.buildPhases?.length) {
     const build = result.buildPhases.map((phase) => `${phase.phase}=${phase.elapsedMs.toFixed(0)}ms`).join(' ');
-    console.log(`       build: ${build}`);
+    console.log(
+      [
+        '       build:',
+        `index=${formatMs(result.indexBuildMs)}`,
+        `lexical=${formatMs(result.lexicalBuildMs)}`,
+        `dense=${formatMs(result.denseBuildMs)}`,
+        `preload=${formatMs(result.preloadMs)}`,
+        `source=${result.buildTimingSource}`,
+        build,
+      ].join(' '),
+    );
   }
   if (!result.ok) console.log(`       error: ${result.error}`);
 }
@@ -589,6 +616,10 @@ function printIndexSummary(report) {
     const runs = report.actions.filter((candidate) => candidate.action === action);
     const ok = runs.filter((run) => run.ok);
     const sorted = ok.map((run) => run.elapsedMs).sort((left, right) => left - right);
+    const buildSorted = ok
+      .map((run) => run.indexBuildMs)
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right);
     console.log(
       [
         'index.summary:',
@@ -597,6 +628,9 @@ function printIndexSummary(report) {
         `median=${median(sorted).toFixed(1)}ms`,
         `avg=${average(sorted).toFixed(1)}ms`,
         `p95=${percentile(sorted, 95).toFixed(1)}ms`,
+        `indexBuildMedian=${formatMs(median(buildSorted))}`,
+        `indexBuildAvg=${formatMs(average(buildSorted))}`,
+        `indexBuildP95=${formatMs(percentile(buildSorted, 95))}`,
       ].join(' '),
     );
   }
@@ -611,6 +645,10 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)}MiB`;
+}
+
+function formatMs(value) {
+  return Number.isFinite(value) ? `${value.toFixed(1)}ms` : 'n/a';
 }
 
 function mibNumber(bytes) {

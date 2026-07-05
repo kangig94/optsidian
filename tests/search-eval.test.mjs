@@ -297,6 +297,73 @@ test('search eval workers option drives daemon worker env without raising defaul
   }
 });
 
+test('index eval reports the runtime lexical store cache path', async () => {
+  const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
+  const { effectiveSearchRuntimeProfile, lexicalIdentityHashForSearchRuntimeProfile } =
+    await import('../src/daemon/runtime-profile.ts');
+  const dir = tempRoot();
+  const vault = path.join(dir, 'vault');
+  const runtimeDir = path.join(dir, 'runtime');
+  const env = {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(dir, 'cache'),
+    XDG_CONFIG_HOME: path.join(dir, 'config'),
+    OPTSIDIAN_SEARCH_DAEMON_RUNTIME_DIR: runtimeDir,
+    OPTSIDIAN_SEARCH_DAEMON_IDLE_MS: '1000',
+    OPTSIDIAN_SEARCH_EXTRA_LANGS: '',
+    OPTSIDIAN_SEARCH_NGRAM: 'false',
+    OPTSIDIAN_SEARCH_QUERY_WORKERS: '1',
+    OPTSIDIAN_SEARCH_INDEX_WORKERS: '1',
+    OPTSIDIAN_SEARCH_EXECUTION_WORKERS: '1',
+  };
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, 'Alpha.md'), '# Alpha\n\nsearch fixture\n');
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      path.join(repoRoot, 'scripts/search-eval.mjs'),
+      vault,
+      '--benchmark=index',
+      '--index-actions=clear',
+      '--format=json',
+      '--no-progress',
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env,
+    },
+  );
+
+  try {
+    assert.equal(result.status, 0, `index eval failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    const report = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
+    const expectedLexicalIdentityHash = lexicalIdentityHashForSearchRuntimeProfile(
+      effectiveSearchRuntimeProfile(repoRoot, env),
+    );
+
+    assert.equal(report.cache.lexicalIdentityHash, expectedLexicalIdentityHash);
+    assert.equal(path.basename(report.cache.rootDir), expectedLexicalIdentityHash);
+    assert.equal(report.cache.rootDir.includes('default-lexical'), false);
+    assert.equal(report.actions[0].indexBuildMs, 0);
+    assert.equal(report.actions[0].buildTimingSource, 'daemon-progress');
+    assert.equal(report.actions[0].buildTimingResolutionMs, 0);
+  } finally {
+    const hasOwner = fs.existsSync(runtimeDir) && fs.readdirSync(runtimeDir).some((name) => name.endsWith('.owner'));
+    if (hasOwner) {
+      const client = createSearchDaemonClient({
+        runtimeDir,
+        binaryPath: path.join(repoRoot, 'dist', 'optsidian'),
+        env,
+      });
+      await client.shutdown({ deadlineMs: 5000 }).catch(() => {});
+    }
+  }
+});
+
 test('IR exporter stratified dev sampling is deterministic and auditable', () => {
   const dir = tempRoot();
   makeFakeIrDatasets(dir);

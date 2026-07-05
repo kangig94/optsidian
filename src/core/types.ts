@@ -378,6 +378,24 @@ export type SearchIndexWarmVaultResult = {
   error?: string;
 };
 
+export type SearchIndexProgressPhase =
+  'scanning' | 'parsing' | 'segmenting' | 'embedding' | 'vector-indexing' | 'publishing' | 'preloading';
+
+export type SearchIndexBuildPhaseTiming = {
+  phase: SearchIndexProgressPhase;
+  elapsedMs: number;
+  total?: number;
+};
+
+export type SearchIndexBuildTiming = {
+  source: 'daemon-progress';
+  indexBuildMs: number;
+  lexicalBuildMs: number;
+  denseBuildMs: number;
+  preloadMs: number;
+  phases: SearchIndexBuildPhaseTiming[];
+};
+
 export type SearchIndexWarmResult = {
   ok: true;
   command: 'index';
@@ -385,6 +403,7 @@ export type SearchIndexWarmResult = {
   vaults: SearchIndexWarmVaultResult[];
   warnings?: string[];
   snapshotId?: string;
+  buildTiming?: SearchIndexBuildTiming;
 };
 
 export type SearchIndexMutationResult = {
@@ -392,6 +411,7 @@ export type SearchIndexMutationResult = {
   command: 'index';
   action: 'rebuild' | 'clear';
   snapshotId?: string;
+  buildTiming?: SearchIndexBuildTiming;
 };
 
 export type SearchIndexPrunedStore = {

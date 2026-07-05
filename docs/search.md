@@ -274,8 +274,12 @@ Index benchmark actions are:
 
 The text output is for quick local comparison. JSON output records vault Markdown file/byte counts,
 cache directory size before and after the run, per-action elapsed time and phases, snapshot id,
-daemon status, and observed memory summaries. Worker RSS is reported as a maximum observed RSS value,
-not a sum, because Node worker threads share process RSS.
+daemon status, and observed memory summaries. Per-action `indexBuildMs` sums observed index build
+phases only (`scanning`, `parsing`, `segmenting`, `publishing`, `embedding`, and `vector-indexing`);
+it excludes `preloading`, which is reported separately as `preloadMs`. Index benchmark timings come
+from the daemon's internal per-phase progress stopwatch (`buildTimingSource=daemon-progress`);
+successful index actions are expected to include this timing payload. Worker RSS is reported as a
+maximum observed RSS value, not a sum, because Node worker threads share process RSS.
 
 ## Baseline
 

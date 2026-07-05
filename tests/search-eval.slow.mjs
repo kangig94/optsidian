@@ -327,6 +327,7 @@ test('search:eval index benchmark reports cache and action timings', () => {
         ...process.env,
         XDG_RUNTIME_DIR: tempRoot('optsidian-index-bench-runtime-'),
         XDG_CACHE_HOME: tempRoot('optsidian-index-bench-cache-'),
+        OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: 'deterministic-hash',
       },
     },
   );
@@ -339,6 +340,12 @@ test('search:eval index benchmark reports cache and action timings', () => {
   assert.equal(report.actions[0].action, 'clear-load');
   assert.equal(report.actions[0].ok, true);
   assert.ok(report.actions[0].elapsedMs > 0);
+  assert.equal(Number.isFinite(report.actions[0].indexBuildMs), true);
+  assert.equal(Number.isFinite(report.actions[0].lexicalBuildMs), true);
+  assert.equal(Number.isFinite(report.actions[0].denseBuildMs), true);
+  assert.equal(Number.isFinite(report.actions[0].preloadMs), true);
+  assert.equal(report.actions[0].buildTimingSource, 'daemon-progress');
+  assert.equal(report.actions[0].buildTimingResolutionMs, 0);
   assert.deepEqual(
     report.actions[0].phases.map((phase) => phase.name),
     ['clear', 'load'],

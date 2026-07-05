@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { ensurePrivateDirSync } from '../core/private-path.js';
 import {
   createProcessToken,
@@ -72,9 +73,19 @@ import { createRequestScheduler } from './scheduler.js';
 import { ProfileManager, type ProfileRuntime, type ProfileRuntimeStatus } from './profile-manager.js';
 import type { SearchExecutionCacheStats } from './search-store/search-execution-state.js';
 import { readOptsidianSettings, type OptsidianSettings } from '../core/settings.js';
+import type { SearchIndexBuildTiming } from '../core/types.js';
 import { recoverRetrievalStartupState } from './vector-store/freshness.js';
 import { createEmbedScheduler, type EmbedScheduler } from './embed-scheduler.js';
 import { logSearchDaemonProcessError, superviseBackground } from './supervise.js';
+
+const LEXICAL_INDEX_BUILD_PHASES = new Set<SearchIndexProgressUpdate['phase']>([
+  'scanning',
+  'parsing',
+  'segmenting',
+  'publishing',
+]);
+const DENSE_INDEX_BUILD_PHASES = new Set<SearchIndexProgressUpdate['phase']>(['embedding', 'vector-indexing']);
+const PRELOAD_PHASES = new Set<SearchIndexProgressUpdate['phase']>(['preloading']);
 
 export type RunSearchDaemonOptions = {
   argv?: string[];
@@ -85,6 +96,10 @@ type QueryRuntime = SearchDaemon;
 type ControlRuntime = SearchDaemon;
 type RegistryHandler<R> = (request: RpcRequestLike, runtime: R) => unknown | Promise<unknown>;
 type RejectMutatingKeys<T> = Extract<keyof T, MutatingControlDaemonMethod> extends never ? T : never;
+type BuildProgressReporter = {
+  report(progress: SearchIndexProgressUpdate): void;
+  summary(): SearchIndexBuildTiming;
+};
 
 /**
  * @lintignore Runtime-generated type tests import this contract.
@@ -538,13 +553,13 @@ class SearchDaemon {
             try {
               const result = await runtime.searchStore.loadVault(
                 request.payload.vault,
-                this.requestContext(request, progress),
+                this.requestContext(request, progress.report),
               );
               const failed = result.vaults.find((vault) => vault.status === 'failed');
               if (failed) {
                 runtime.vaults.transition(request.payload.vault, 'unloaded', { error: failed.error });
                 runtime.stopSaveWatcherForVault(request.payload.vault);
-                return result;
+                return attachBuildTiming(result, progress.summary());
               }
               const readyVault = result.vaults.find((vault) => vault.status === 'ready');
               const readyVaultRoot = readyVault?.vaultRoot ?? request.payload.vault;
@@ -552,7 +567,7 @@ class SearchDaemon {
                 snapshotId: 'snapshotId' in result ? result.snapshotId : undefined,
               });
               runtime.startSaveWatcherForVault(readyVaultRoot);
-              return result;
+              return attachBuildTiming(result, progress.summary());
             } catch (error) {
               runtime.vaults.transition(request.payload.vault, 'unloaded', { error: errorMessage(error) });
               runtime.stopSaveWatcherForVault(request.payload.vault);
@@ -600,7 +615,7 @@ class SearchDaemon {
             try {
               const result = await runtime.searchStore.clear(request.payload.vault);
               runtime.vaults.transition(request.payload.vault, 'ready', { snapshotId: undefined });
-              return result;
+              return attachBuildTiming(result, summarizeBuildTiming([]));
             } catch (error) {
               runtime.vaults.transition(request.payload.vault, 'ready', { error: errorMessage(error) });
               throw error;
@@ -631,11 +646,11 @@ class SearchDaemon {
     const progress = this.progressReporter(runtime, vault, 'updating');
     runtime.vaults.transition(vault, 'updating');
     try {
-      const result = await fn(progress);
+      const result = await fn(progress.report);
       const resultSnapshotId = snapshotId ?? snapshotIdFromResult(result);
       runtime.vaults.transition(vault, 'ready', resultSnapshotId ? { snapshotId: resultSnapshotId } : {});
       runtime.startSaveWatcherForVault(vault);
-      return result;
+      return attachBuildTiming(result, progress.summary());
     } catch (error) {
       runtime.vaults.transition(vault, 'ready', { error: errorMessage(error) });
       throw error;
@@ -923,17 +938,51 @@ class SearchDaemon {
     runtime: ProfileRuntime,
     vault: string,
     state: 'loading' | 'updating',
-  ): (progress: SearchIndexProgressUpdate) => void {
+  ): BuildProgressReporter {
     const startedAt = new Date().toISOString();
-    return (progress) => {
-      const updatedAt = this.bumpProgressPulse();
-      runtime.vaults.transition(vault, state, {
-        progress: {
-          ...progress,
-          startedAt,
-          updatedAt,
-        },
+    const phases: SearchIndexBuildTiming['phases'] = [];
+    let activePhase: SearchIndexProgressUpdate['phase'] | undefined;
+    let activePhaseStartedMs = performance.now();
+    let activePhaseTotal: number | undefined;
+    let finalized: SearchIndexBuildTiming | undefined;
+
+    const closeActivePhase = (nowMs: number) => {
+      if (!activePhase) return;
+      phases.push({
+        phase: activePhase,
+        elapsedMs: roundMs(nowMs - activePhaseStartedMs),
+        ...(Number.isFinite(activePhaseTotal) ? { total: activePhaseTotal } : {}),
       });
+      activePhase = undefined;
+    };
+
+    return {
+      report: (progress) => {
+        const nowMs = performance.now();
+        if (progress.phase !== activePhase) {
+          closeActivePhase(nowMs);
+          activePhase = progress.phase;
+          activePhaseStartedMs = nowMs;
+        }
+        activePhaseTotal = Number.isFinite(progress.total) ? progress.total : undefined;
+        finalized = undefined;
+
+        const updatedAt = this.bumpProgressPulse();
+        runtime.vaults.transition(vault, state, {
+          progress: {
+            ...progress,
+            startedAt,
+            updatedAt,
+          },
+        });
+      },
+      summary: () => {
+        if (!finalized) {
+          closeActivePhase(performance.now());
+          finalized = summarizeBuildTiming(phases);
+        }
+        return finalized;
+      },
     };
   }
 
@@ -1489,6 +1538,38 @@ function snapshotIdFromResult(result: unknown): string | undefined {
   if (!result || typeof result !== 'object' || !('snapshotId' in result)) return undefined;
   const snapshotId = (result as { snapshotId?: unknown }).snapshotId;
   return typeof snapshotId === 'string' ? snapshotId : undefined;
+}
+
+function attachBuildTiming<T>(result: T, buildTiming: SearchIndexBuildTiming): T {
+  if (!isRecord(result)) return result;
+  return { ...result, buildTiming };
+}
+
+function summarizeBuildTiming(phases: SearchIndexBuildTiming['phases']): SearchIndexBuildTiming {
+  const lexicalBuildMs = buildPhaseElapsedMs(phases, LEXICAL_INDEX_BUILD_PHASES);
+  const denseBuildMs = buildPhaseElapsedMs(phases, DENSE_INDEX_BUILD_PHASES);
+  const preloadMs = buildPhaseElapsedMs(phases, PRELOAD_PHASES);
+  return {
+    source: 'daemon-progress',
+    indexBuildMs: roundMs(lexicalBuildMs + denseBuildMs),
+    lexicalBuildMs: roundMs(lexicalBuildMs),
+    denseBuildMs: roundMs(denseBuildMs),
+    preloadMs: roundMs(preloadMs),
+    phases: [...phases],
+  };
+}
+
+function buildPhaseElapsedMs(
+  phases: SearchIndexBuildTiming['phases'],
+  phaseSet: ReadonlySet<SearchIndexProgressUpdate['phase']>,
+): number {
+  return phases
+    .filter((phase) => phaseSet.has(phase.phase))
+    .reduce((sum, phase) => sum + (Number.isFinite(phase.elapsedMs) ? phase.elapsedMs : 0), 0);
+}
+
+function roundMs(value: number): number {
+  return Number(value.toFixed(1));
 }
 
 function daemonIdleMs(env: NodeJS.ProcessEnv, settings: OptsidianSettings): number {
