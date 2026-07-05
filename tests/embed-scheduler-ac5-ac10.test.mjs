@@ -67,31 +67,42 @@ function providerPayload(model = 'same-model', dim = 3) {
 function createEmbeddingPool(options = {}) {
   const calls = [];
   const documentGates = [];
+  async function encodePayload(payload) {
+    const call = {
+      texts: [...payload.texts],
+      inputKind: payload.inputKind ?? 'document',
+      provider: payload.provider,
+    };
+    calls.push(call);
+    await options.onEncode?.(call);
+    if (call.inputKind === 'document' && options.gateDocuments !== false) {
+      const gate = deferred();
+      documentGates.push(gate);
+      await gate.promise;
+    }
+    return {
+      provider: {
+        id: payload.provider.kind,
+        model: payload.provider.model ?? 'content-hash-v1',
+        dim: payload.provider.dim ?? 3,
+        version: '1',
+      },
+      vectors: payload.texts.map((_text, index) => unitVector(payload.provider.dim ?? 3, index)),
+    };
+  }
   return {
     calls,
+    hasGpuSlot() {
+      return true;
+    },
     async encode(payload) {
-      const call = {
-        texts: [...payload.texts],
-        inputKind: payload.inputKind ?? 'document',
-        provider: payload.provider,
-        suppressCpuPromotion: payload.suppressCpuPromotion === true,
-      };
-      calls.push(call);
-      await options.onEncode?.(call);
-      if (call.inputKind === 'document' && options.gateDocuments !== false) {
-        const gate = deferred();
-        documentGates.push(gate);
-        await gate.promise;
-      }
-      return {
-        provider: {
-          id: payload.provider.kind,
-          model: payload.provider.model ?? 'content-hash-v1',
-          dim: payload.provider.dim ?? 3,
-          version: '1',
-        },
-        vectors: payload.texts.map((_text, index) => unitVector(payload.provider.dim ?? 3, index)),
-      };
+      return encodePayload(payload);
+    },
+    async encodeGpu(payload) {
+      return encodePayload(payload);
+    },
+    async encodeCpuFallback(payload) {
+      return encodePayload(payload);
     },
     releaseNextDocument() {
       const gate = documentGates.shift();
@@ -118,6 +129,29 @@ function createRuntimeEmbeddingPool() {
   const documentGates = [];
   let gateDocuments = false;
   let completedDocumentSlices = 0;
+  async function encodePayload(payload) {
+    const call = {
+      texts: [...payload.texts],
+      inputKind: payload.inputKind ?? 'document',
+      provider: payload.provider,
+    };
+    calls.push(call);
+    if (call.inputKind === 'document' && gateDocuments) {
+      const gate = deferred();
+      documentGates.push(gate);
+      await gate.promise;
+    }
+    if (call.inputKind === 'document') completedDocumentSlices += 1;
+    return {
+      provider: {
+        id: payload.provider.kind,
+        model: payload.provider.model ?? 'content-hash-v1',
+        dim: payload.provider.dim ?? 8,
+        version: '1',
+      },
+      vectors: payload.texts.map((_text, index) => unitVector(payload.provider.dim ?? 8, index)),
+    };
+  }
   return {
     calls,
     setGateDocuments(value) {
@@ -139,29 +173,17 @@ function createRuntimeEmbeddingPool() {
       while (documentGates.length > 0) documentGates.shift().resolve();
       return count;
     },
+    hasGpuSlot() {
+      return true;
+    },
     async encode(payload) {
-      const call = {
-        texts: [...payload.texts],
-        inputKind: payload.inputKind ?? 'document',
-        provider: payload.provider,
-        suppressCpuPromotion: payload.suppressCpuPromotion === true,
-      };
-      calls.push(call);
-      if (call.inputKind === 'document' && gateDocuments) {
-        const gate = deferred();
-        documentGates.push(gate);
-        await gate.promise;
-      }
-      if (call.inputKind === 'document') completedDocumentSlices += 1;
-      return {
-        provider: {
-          id: payload.provider.kind,
-          model: payload.provider.model ?? 'content-hash-v1',
-          dim: payload.provider.dim ?? 8,
-          version: '1',
-        },
-        vectors: payload.texts.map((_text, index) => unitVector(payload.provider.dim ?? 8, index)),
-      };
+      return encodePayload(payload);
+    },
+    async encodeGpu(payload) {
+      return encodePayload(payload);
+    },
+    async encodeCpuFallback(payload) {
+      return encodePayload(payload);
     },
     async unload() {
       return { unloaded: true };
@@ -207,33 +229,47 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test('AC5 scheduler lanes run query before save before refresh before rebuild', async () => {
-  const embedding = createEmbeddingPool({ gateDocuments: false });
+test('AC5 live encodes route query before save before refresh before rebuild', async () => {
+  const embedding = createEmbeddingPool();
   const scheduler = new EmbedScheduler({ embedding, ownsEmbedding: false });
-  const gate = deferred();
-  const order = [];
-
-  const active = scheduler.run(
-    'rebuild',
-    async () => {
-      order.push('active-rebuild');
-      await gate.promise;
-    },
+  const provider = providerPayload();
+  const active = scheduler.encode(
+    { texts: ['active-rebuild'], inputKind: 'document', provider },
     context('active-rebuild'),
+    'rebuild',
   );
-  await waitFor(() => order.includes('active-rebuild'));
-
+  await waitFor(() => embedding.calls.length === 1);
   const queued = [
-    scheduler.run('rebuild', async () => order.push('rebuild'), context('queued-rebuild')),
-    scheduler.run('refresh', async () => order.push('refresh'), context('queued-refresh')),
-    scheduler.run('save', async () => order.push('save'), context('queued-save')),
-    scheduler.run('query', async () => order.push('query'), context('queued-query')),
+    scheduler.encode(
+      { texts: ['queued-rebuild'], inputKind: 'document', provider },
+      context('queued-rebuild'),
+      'rebuild',
+    ),
+    scheduler.encode(
+      { texts: ['queued-refresh'], inputKind: 'document', provider },
+      context('queued-refresh'),
+      'refresh',
+    ),
+    scheduler.encode({ texts: ['queued-save'], inputKind: 'document', provider }, context('queued-save'), 'save'),
+    scheduler.encode({ texts: ['queued-query'], inputKind: 'query', provider }, context('queued-query'), 'query'),
   ];
-  gate.resolve();
+  embedding.releaseNextDocument();
   await active;
+  await waitFor(() => embedding.calls.length === 3);
+  assert.deepEqual(
+    embedding.calls.map((call) => call.texts[0]),
+    ['active-rebuild', 'queued-query', 'queued-save'],
+  );
+  embedding.releaseNextDocument();
+  await waitFor(() => embedding.calls.length === 4);
+  embedding.releaseNextDocument();
+  await waitFor(() => embedding.calls.length === 5);
+  embedding.releaseNextDocument();
   await Promise.all(queued);
-
-  assert.deepEqual(order, ['active-rebuild', 'query', 'save', 'refresh', 'rebuild']);
+  assert.deepEqual(
+    embedding.calls.map((call) => call.texts[0]),
+    ['active-rebuild', 'queued-query', 'queued-save', 'queued-refresh', 'queued-rebuild'],
+  );
   await scheduler.close();
 });
 
@@ -260,7 +296,6 @@ test('AC5 origin=text query encode completes after at most one rebuild slice', a
 
   await waitFor(() => embedding.calls.length === 1);
   assert.equal(embedding.calls[0].texts.length, 32);
-  assert.equal(embedding.calls[0].suppressCpuPromotion, true);
 
   const query = scheduler.encode(
     {
@@ -276,7 +311,6 @@ test('AC5 origin=text query encode completes after at most one rebuild slice', a
   await query;
   assert.equal(completedDocumentSlices, 1);
   assert.equal(embedding.calls[1].inputKind, 'query');
-  assert.equal(embedding.calls[1].suppressCpuPromotion, true);
 
   await waitFor(() => embedding.calls.length === 3);
   embedding.releaseNextDocument();
@@ -296,8 +330,10 @@ test('save and refresh lane document encodes suppress CPU promotion even without
   const provider = providerPayload();
   await scheduler.encode({ texts: ['saved'], inputKind: 'document', provider }, context('save-1'), 'save');
   await scheduler.encode({ texts: ['refreshed'], inputKind: 'document', provider }, context('refresh-1'), 'refresh');
-  assert.equal(embedding.calls[0].suppressCpuPromotion, true, 'save-lane encode must suppress promotion');
-  assert.equal(embedding.calls[1].suppressCpuPromotion, true, 'refresh-lane encode must suppress promotion');
+  assert.deepEqual(
+    embedding.calls.map((call) => call.inputKind),
+    ['document', 'document'],
+  );
   await scheduler.close();
 });
 

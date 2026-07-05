@@ -2024,8 +2024,10 @@ test('index rebuild defers retrieval vector build until lexical snapshot publish
   const publishReleased = new Promise((resolve) => {
     releasePublish = resolve;
   });
+  const cacheRoot = tempRoot();
   const store = createDaemonSnapshotStore(
     snapshotStoreOptions({
+      env: { ...process.env, XDG_CACHE_HOME: cacheRoot },
       analyzerIdentity: analyzer.identity,
       partitionBits: 1,
       snapshotBuilder: async () => built,
@@ -4038,9 +4040,9 @@ test('profile manager keeps no-Kiwi and Kiwi runtimes isolated', async () => {
   }
 });
 
-test('profile manager status scopes resident model stats by stable provider key', async () => {
+test('profile manager status scopes resident model stats by resident model key', async () => {
   const { EmbedScheduler } = await import('../src/daemon/embed-scheduler.ts');
-  const { stableProviderKey } = await import('../src/daemon/model-session/provider-key.ts');
+  const { residentModelKey } = await import('../src/daemon/model-session/provider-key.ts');
   const { ProfileManager } = await import('../src/daemon/profile-manager.ts');
   const { effectiveSearchRuntimeProfile, normalizeSearchRuntimeProfile, searchRuntimeProfileHash } =
     await import('../src/daemon/runtime-profile.ts');
@@ -4057,6 +4059,15 @@ test('profile manager status scopes resident model stats by stable provider key'
   const embedding = {
     async encode() {
       throw new Error('encode should not run during status');
+    },
+    async encodeGpu() {
+      throw new Error('encode should not run during status');
+    },
+    async encodeCpuFallback() {
+      throw new Error('encode should not run during status');
+    },
+    hasGpuSlot() {
+      return true;
     },
     async unload() {
       return { unloaded: true };
@@ -4081,7 +4092,7 @@ test('profile manager status scopes resident model stats by stable provider key'
       ...base.embedding,
       provider: 'local-onnx',
       model: 'bge-m3',
-      devicePolicy: 'cpu',
+      devicePolicy: 'auto',
     },
   });
   const profileB = normalizeSearchRuntimeProfile({
@@ -4093,9 +4104,19 @@ test('profile manager status scopes resident model stats by stable provider key'
       devicePolicy: 'gpu',
     },
   });
+  const profileC = normalizeSearchRuntimeProfile({
+    ...base,
+    embedding: {
+      ...base.embedding,
+      provider: 'local-onnx',
+      model: 'multilingual-e5-small',
+      devicePolicy: 'gpu',
+    },
+  });
   const hashA = searchRuntimeProfileHash(profileA);
   const hashB = searchRuntimeProfileHash(profileB);
-  const residentStableProviderKey = stableProviderKey({
+  const hashC = searchRuntimeProfileHash(profileC);
+  const residentKey = residentModelKey({
     kind: 'local-onnx',
     model: profileA.embedding.model,
     executionPolicy: scheduler.onnxExecutionPolicy,
@@ -4103,40 +4124,56 @@ test('profile manager status scopes resident model stats by stable provider key'
   });
   const residentStats = {
     loaded: true,
-    devicePolicy: 'cpu',
-    stableProviderKey: residentStableProviderKey,
+    devicePolicy: 'auto',
+    residentModelKey: residentKey,
     providerIdentity: {
       id: 'local-onnx',
       model: profileA.embedding.model,
       dim: 1024,
       version: '1',
     },
-    requestedLoadDevice: 'cpu',
-    device: 'cpu',
-    executionProvider: 'cpu',
+    requestedLoadDevice: 'gpu',
+    device: 'gpu',
+    executionProvider: 'cuda',
     idleDeadline: '2026-07-05T00:00:00.000Z',
   };
 
   try {
     await manager.withRuntimeFor({ profile: profileA }, async () => {});
     await manager.withRuntimeFor({ profile: profileB }, async () => {});
+    await manager.withRuntimeFor({ profile: profileC }, async () => {});
     const status = await manager.status({ deadline: Date.now() + 1000, cancellationId: 'profile-model-status' });
 
     assert.equal(modelStatsCalls.length, 1);
-    assert.equal(status[hashA].model.loaded, true);
-    assert.equal(status[hashA].model.devicePolicy, 'cpu');
-    assert.equal(status[hashA].model.device, 'cpu');
-    assert.equal(status[hashA].model.executionProvider, 'cpu');
-    assert.equal(status[hashA].model.requestedLoadDevice, 'cpu');
-    assert.equal(status[hashA].model.stableProviderKey, residentStableProviderKey);
-    assert.equal(status[hashB].model.loaded, false);
-    assert.equal(status[hashB].model.devicePolicy, 'gpu');
-    assert.equal(status[hashB].model.reason, 'mismatched-resident');
-    assert.equal(status[hashB].model.residentStableProviderKey, residentStableProviderKey);
-    assert.equal(status[hashB].model.residentDevice, 'cpu');
-    assert.equal(status[hashB].model.residentExecutionProvider, 'cpu');
-    assert.equal(status[hashB].model.device, undefined);
-    assert.equal(status[hashB].model.executionProvider, undefined);
+    assert.deepEqual(status[hashA].model.query, {
+      device: 'gpu',
+      executionProvider: 'cuda',
+      loaded: true,
+      mode: 'shared',
+      retryAfter: null,
+    });
+    assert.deepEqual(status[hashB].model.query, {
+      device: 'gpu',
+      executionProvider: 'cuda',
+      loaded: true,
+      mode: 'shared',
+      retryAfter: null,
+    });
+    assert.deepEqual(status[hashC].model.query, {
+      device: null,
+      executionProvider: null,
+      loaded: false,
+      mode: 'shared',
+      retryAfter: null,
+    });
+    assert.equal(status[hashA].model.bulk.queueDepth, 0);
+    assert.equal(status[hashA].model.bulk.inFlight, 0);
+    assert.equal(status[hashA].model.bulk.batchTokenBudget, null);
+    assert.equal(status[hashA].model.bulk.etaMs, null);
+    assert.equal(Array.isArray(status[hashA].model.bulk.devices), true);
+    assert.equal('loaded' in status[hashA].model, false);
+    assert.equal('devicePolicy' in status[hashA].model, false);
+    assert.equal('residentModelKey' in status[hashA].model, false);
   } finally {
     await manager.close();
     await scheduler.close();
@@ -4161,6 +4198,15 @@ test('profile manager status reports model busy without failing daemon status', 
     async encode() {
       throw new Error('encode should not run during status');
     },
+    async encodeGpu() {
+      throw new Error('encode should not run during status');
+    },
+    async encodeCpuFallback() {
+      throw new Error('encode should not run during status');
+    },
+    hasGpuSlot() {
+      return true;
+    },
     async unload() {
       return { unloaded: true };
     },
@@ -4183,27 +4229,45 @@ test('profile manager status reports model busy without failing daemon status', 
     await manager.withRuntimeFor({ profile }, async () => {});
     const status = await manager.status({ deadline: Date.now() + 1000, cancellationId: 'profile-model-busy' });
 
-    assert.equal(status[profileHash].model.loaded, false);
-    assert.equal(status[profileHash].model.unavailable, true);
-    assert.equal(status[profileHash].model.busy, true);
-    assert.equal(status[profileHash].model.reason, 'busy');
+    assert.deepEqual(status[profileHash].model.query, {
+      device: null,
+      executionProvider: null,
+      loaded: false,
+      mode: 'shared',
+      retryAfter: null,
+    });
+    assert.equal(status[profileHash].model.bulk.queueDepth, 0);
+    assert.equal(status[profileHash].model.bulk.inFlight, 0);
+    assert.equal('unavailable' in status[profileHash].model, false);
+    assert.equal('busy' in status[profileHash].model, false);
+    assert.equal('reason' in status[profileHash].model, false);
   } finally {
     await manager.close();
     await scheduler.close();
   }
 });
 
-test('embedding model pool rejects multiple resident workers', async () => {
+test('embedding model pool allows tagged GPU owner and CPU fallback slots', async () => {
   const { createEmbeddingWorkerPool } = await import('../src/daemon/pools.ts');
 
-  assert.throws(
-    () => createEmbeddingWorkerPool({ ...process.env, OPTSIDIAN_SEARCH_EMBEDDING_WORKERS: '2' }, {}),
-    (error) => {
-      assert.equal(error.code, 'BAD_REQUEST');
-      assert.match(error.message, /OPTSIDIAN_SEARCH_EMBEDDING_WORKERS/);
-      return true;
+  const pool = createEmbeddingWorkerPool(
+    {
+      ...process.env,
+      OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER: 'local-onnx',
+      OPTSIDIAN_SEARCH_EMBEDDING_WORKERS: '2',
     },
+    {},
   );
+  try {
+    const stats = pool.stats();
+    assert.equal(stats.workers, 2);
+    assert.deepEqual(
+      stats.slots.map((slot) => slot.slotDevice),
+      [{ kind: 'cuda', deviceId: 0 }, { kind: 'cpu' }],
+    );
+  } finally {
+    await pool.close();
+  }
 });
 
 test('runtime profile canonicalizes extra language payloads', async () => {

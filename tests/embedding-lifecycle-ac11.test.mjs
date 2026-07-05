@@ -131,17 +131,29 @@ function createSearchExecutionPool() {
 
 function createMarkerEmbeddingPool(provider) {
   const calls = [];
+  async function encodePayload(payload) {
+    calls.push({
+      inputKind: payload.inputKind ?? 'document',
+      texts: [...payload.texts],
+    });
+    return {
+      provider: provider.identity,
+      vectors: payload.texts.map((text) => markerVector(text)),
+    };
+  }
   return {
     calls,
+    hasGpuSlot() {
+      return true;
+    },
     async encode(payload) {
-      calls.push({
-        inputKind: payload.inputKind ?? 'document',
-        texts: [...payload.texts],
-      });
-      return {
-        provider: provider.identity,
-        vectors: payload.texts.map((text) => markerVector(text)),
-      };
+      return encodePayload(payload);
+    },
+    async encodeGpu(payload) {
+      return encodePayload(payload);
+    },
+    async encodeCpuFallback(payload) {
+      return encodePayload(payload);
     },
     async unload() {
       return { unloaded: true };
@@ -322,12 +334,9 @@ test('AC11 watcher save debounce publishes a coherent lexical revision and dense
     onDirtyMarks(marks) {
       dirtyBatches.push([...marks]);
       const runContext = context('ac11-save', 5000);
-      const job = harness.scheduler.run('save', () => harness.service.publishSaveSnapshot(harness.vault, runContext), {
-        deadline: runContext.deadline,
-        cancellationId: runContext.cancellationId,
-        requestId: runContext.requestId,
-        vault: harness.vault,
-      });
+      const job = harness.scheduler.withLaneScope('save', () =>
+        harness.service.publishSaveSnapshot(harness.vault, runContext),
+      );
       scheduledSaveJobs.push(job);
       void job.catch(() => undefined);
     },

@@ -8,6 +8,8 @@ import { logSearchDaemonProcessError } from './supervise.js';
 
 type DaemonWorkerKind = 'analyzer' | 'search' | 'embedding' | 'vector';
 
+export type DaemonWorkerSlotDevice = { kind: 'cpu' } | { kind: 'cuda'; deviceId: number } | { kind: 'coreml' };
+
 export type DaemonWorkerRequest = {
   type: string;
   payload?: unknown;
@@ -41,6 +43,7 @@ export type WorkerPoolOptions = {
   autoWarmup?: boolean;
   restartBackoffBaseMs?: number;
   restartBackoffCapMs?: number;
+  slotDevices?: readonly DaemonWorkerSlotDevice[];
 };
 
 type WorkerEnvelope = {
@@ -89,6 +92,7 @@ type QueueItem<T> = {
   reject(error: Error): void;
   crashAttempts: number;
   targetSlotId?: number;
+  targetSlotIndex?: number;
   timer?: NodeJS.Timeout;
 };
 
@@ -99,6 +103,8 @@ type ReadyCallbacks = {
 
 type WorkerSlot = {
   id: number;
+  slotIndex: number;
+  slotDevice: DaemonWorkerSlotDevice;
   worker: Worker;
   busy: QueueItem<unknown> | undefined;
   leased: boolean;
@@ -147,7 +153,9 @@ export class DaemonWorkerPool {
   private coolDownUntil = 0;
 
   constructor(options: WorkerPoolOptions) {
-    const size = Math.max(1, Math.floor(options.size));
+    const requestedSize = Math.max(1, Math.floor(options.size));
+    const size = Math.max(requestedSize, options.slotDevices?.length ?? 0);
+    const slotDevices = normalizeSlotDevices(options.slotDevices, size);
     const env = options.env ?? process.env;
     const heapGuardBytes =
       options.heapGuardBytes ??
@@ -173,9 +181,10 @@ export class DaemonWorkerPool {
         envNumber(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_STRIKES') ??
         DEFAULT_RSS_GUARD_STRIKES,
       rssGuardExempt: options.rssGuardExempt ?? false,
+      slotDevices,
       size,
     };
-    for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(0));
+    for (let index = 0; index < size; index += 1) this.slots.push(this.createSlot(index, 0));
   }
 
   get name(): string {
@@ -232,6 +241,10 @@ export class DaemonWorkerPool {
     return this.enqueue(request, options, slotId);
   }
 
+  runOnSlotIndex<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, slotIndex: number): Promise<T> {
+    return this.enqueue(request, options, undefined, slotIndex);
+  }
+
   runOnAll<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions): Promise<T[]> {
     return this.runOnSlots(request, options, this.slotIds());
   }
@@ -268,7 +281,12 @@ export class DaemonWorkerPool {
     return true;
   }
 
-  private enqueue<T>(request: DaemonWorkerRequest, options: WorkerPoolRunOptions, targetSlotId?: number): Promise<T> {
+  private enqueue<T>(
+    request: DaemonWorkerRequest,
+    options: WorkerPoolRunOptions,
+    targetSlotId?: number,
+    targetSlotIndex?: number,
+  ): Promise<T> {
     if (this.closed) return Promise.reject(poolError('INTERNAL', `${this.options.name} pool is closed`));
     if (Date.now() >= options.deadline) {
       return Promise.reject(
@@ -283,8 +301,11 @@ export class DaemonWorkerPool {
       return Promise.reject(poolError('BACKPRESSURE', `${this.options.name} queue is full`));
     }
     let target: WorkerSlot | undefined;
-    if (targetSlotId !== undefined) {
-      target = this.slots.find((slot) => slot.id === targetSlotId);
+    if (targetSlotId !== undefined || targetSlotIndex !== undefined) {
+      target =
+        targetSlotId !== undefined
+          ? this.slots.find((slot) => slot.id === targetSlotId)
+          : this.slots.find((slot) => slot.slotIndex === targetSlotIndex);
       if (!target)
         return Promise.reject(poolError('INTERNAL', `${this.options.name} target worker is no longer available`));
       this.startWarmup(target);
@@ -301,6 +322,7 @@ export class DaemonWorkerPool {
         reject,
         crashAttempts: 0,
         targetSlotId,
+        targetSlotIndex,
       };
       this.armDeadline(item);
       if (target?.leased && target.readyState && !target.busy && !target.restarting) {
@@ -350,6 +372,8 @@ export class DaemonWorkerPool {
       processMemory: process.memoryUsage(),
       slots: this.slots.map((slot) => ({
         id: slot.id,
+        slotIndex: slot.slotIndex,
+        slotDevice: slot.slotDevice,
         ready: slot.readyState,
         warmupStarted: slot.warmupStarted,
         busy: this.slotOccupied(slot),
@@ -372,8 +396,9 @@ export class DaemonWorkerPool {
     };
   }
 
-  private createSlot(restartAttempts: number): WorkerSlot {
+  private createSlot(slotIndex: number, restartAttempts: number): WorkerSlot {
     const id = this.nextSlotId++;
+    const slotDevice = this.options.slotDevices[slotIndex] ?? { kind: 'cpu' };
     let resolveReady!: () => void;
     let rejectReady!: (error: Error) => void;
     const ready = new Promise<void>((resolve, reject) => {
@@ -386,6 +411,8 @@ export class DaemonWorkerPool {
         optsidianSearchWorker: true,
         kind: this.options.kind,
         poolName: this.options.name,
+        slotIndex,
+        slotDevice,
         env: this.options.env,
         microbatchSize: this.options.microbatchSize,
       },
@@ -394,6 +421,8 @@ export class DaemonWorkerPool {
     });
     const slot: WorkerSlot = {
       id,
+      slotIndex,
+      slotDevice,
       worker,
       busy: undefined,
       leased: false,
@@ -561,7 +590,7 @@ export class DaemonWorkerPool {
               readyCallbacks?.rejectReady(restartError);
               return;
             }
-            const replacement = this.createSlot(plan.restartAttempts);
+            const replacement = this.createSlot(slot.slotIndex, plan.restartAttempts);
             this.slots[index] = replacement;
             this.retargetQueuedItems(previousSlotId, replacement.id);
             if (slot.warmupStarted) this.startWarmup(replacement);
@@ -599,7 +628,7 @@ export class DaemonWorkerPool {
         this.options.restartBackoffBaseMs,
         this.options.restartBackoffCapMs,
       );
-    for (let index = 0; index < this.options.size; index += 1) this.slots.push(this.createSlot(0));
+    for (let index = 0; index < this.options.size; index += 1) this.slots.push(this.createSlot(index, 0));
   }
 
   private recordPoolRecovery(): void {
@@ -656,27 +685,32 @@ export class DaemonWorkerPool {
     if (this.queue.length === 0) return undefined;
     const targeted = this.dequeueTargetedRunnable(slot);
     if (targeted) return targeted;
-    const runnable = this.queue.filter((item) => item.targetSlotId === undefined);
+    const runnable = this.queue.filter((item) => item.targetSlotId === undefined && item.targetSlotIndex === undefined);
     const vaults = [...new Set(runnable.map((item) => item.options.vault ?? ''))];
     const start = this.lastVault === undefined ? 0 : Math.max(0, vaults.indexOf(this.lastVault) + 1);
     const orderedVaults = [...vaults.slice(start), ...vaults.slice(0, start)];
     for (const vault of orderedVaults) {
       const index = this.queue.findIndex(
-        (item) => item.targetSlotId === undefined && (item.options.vault ?? '') === vault,
+        (item) =>
+          item.targetSlotId === undefined && item.targetSlotIndex === undefined && (item.options.vault ?? '') === vault,
       );
       if (index < 0) continue;
       const [item] = this.queue.splice(index, 1);
       this.lastVault = vault;
       return item;
     }
-    const genericIndex = this.queue.findIndex((item) => item.targetSlotId === undefined);
+    const genericIndex = this.queue.findIndex(
+      (item) => item.targetSlotId === undefined && item.targetSlotIndex === undefined,
+    );
     if (genericIndex < 0) return undefined;
     const [item] = this.queue.splice(genericIndex, 1);
     return item;
   }
 
   private dequeueTargetedRunnable(slot: WorkerSlot): QueueItem<unknown> | undefined {
-    const index = this.queue.findIndex((item) => item.targetSlotId === slot.id);
+    const index = this.queue.findIndex(
+      (item) => item.targetSlotId === slot.id || item.targetSlotIndex === slot.slotIndex,
+    );
     if (index < 0) return undefined;
     const [item] = this.queue.splice(index, 1);
     return item;
@@ -798,6 +832,21 @@ function envNumber(env: NodeJS.ProcessEnv, key: string): number | undefined {
   const raw = env[key]?.trim();
   if (!raw || !/^\d+$/.test(raw)) return undefined;
   return Math.max(1, Number(raw));
+}
+
+function normalizeSlotDevices(
+  devices: readonly DaemonWorkerSlotDevice[] | undefined,
+  size: number,
+): DaemonWorkerSlotDevice[] {
+  const normalized = [...(devices ?? [])].map((device) => normalizeSlotDevice(device));
+  while (normalized.length < size) normalized.push({ kind: 'cpu' });
+  return normalized.slice(0, size);
+}
+
+function normalizeSlotDevice(device: DaemonWorkerSlotDevice): DaemonWorkerSlotDevice {
+  if (device.kind === 'cuda') return { kind: 'cuda', deviceId: Math.max(0, Math.floor(device.deviceId)) };
+  if (device.kind === 'coreml') return { kind: 'coreml' };
+  return { kind: 'cpu' };
 }
 
 function memoryRestartReason(

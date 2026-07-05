@@ -5,8 +5,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { ANALYZER_VERSION } from '../src/core/search/constants.ts';
+import { INDEX_BUILD_VERSION } from '../src/daemon/search-store/builder.ts';
 
 const repoRoot = process.cwd();
+const PINNED_INDEX_BUILD_VERSION = 'daemon-positional-build-v7';
+const PINNED_ANALYZER_VERSION = 'router-intl-kiwi-link-render-v2';
 
 function tempRoot(prefix = 'optsidian-search-ac6-identity-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -246,6 +250,11 @@ function assertExhaustiveDispatchedEveryPlanUnit(plan, jobs, label) {
     `${label}: exhaustive scheduling must dispatch every planned shard unit`,
   );
 }
+
+test('AC8 INDEX_BUILD_VERSION and ANALYZER_VERSION are byte-pinned for AC6 fanout identity', () => {
+  assert.equal(INDEX_BUILD_VERSION, PINNED_INDEX_BUILD_VERSION);
+  assert.equal(ANALYZER_VERSION, PINNED_ANALYZER_VERSION);
+});
 
 test('AC6 exact dominance bound computation reuses cached snapshot state by snapshotId', async () => {
   const { exactDominanceBoundForSearchHandle, searchExecutionCacheStats } =

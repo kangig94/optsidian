@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 
 const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
   name: 'IR qrels warm pinned snapshot',
@@ -34,6 +35,12 @@ const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
 const INDEX_BENCHMARK_ACTIONS = new Set(['load', 'rebuild', 'clear', 'clear-load', 'clear-rebuild']);
 const SEARCH_TOKEN_CHANNELS = ['morph', 'surface', 'ngram'];
 const SPEED_MEASUREMENT_REPEAT = 3;
+const MODEL_ENCODE_P0_BENCHMARK = 'model-encode-p0';
+const MODEL_ENCODE_P0_DEFAULT_MODELS = ['bge-m3', 'multilingual-e5-small'];
+const MODEL_ENCODE_P0_DEFAULT_EXECUTION_PROVIDERS = ['cuda', 'cpu'];
+const MODEL_ENCODE_P0_DEFAULT_SEQ_LENGTHS = [32, 128, 512];
+const MODEL_ENCODE_P0_DEFAULT_BATCH_SIZES = [1, 4, 8];
+const MODEL_ENCODE_P0_DEFAULT_OVERFLOW_WIDTHS = [1, 2];
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -47,7 +54,12 @@ if (options.offlineExplainTrace) {
   process.exit(0);
 }
 const benchmark = options.benchmark ?? (options.indexActions ? 'index' : 'quality');
-if (benchmark === 'index') {
+if (benchmark === MODEL_ENCODE_P0_BENCHMARK) {
+  const report = options.p0DryRun ? modelEncodeP0DryRunReport(options) : await runModelEncodeP0Benchmark(options);
+  if (options.format === 'json' || options.p0DryRun) console.log(JSON.stringify(report, null, 2));
+  else printModelEncodeP0Summary(report);
+  process.exitCode = report.ok === false ? 1 : 0;
+} else if (benchmark === 'index') {
   const report = await runIndexBenchmark(options);
   if (options.format === 'json') console.log(JSON.stringify(report, null, 2));
   process.exitCode = report.actions.every((action) => action.ok) ? 0 : 1;
@@ -81,6 +93,36 @@ function parseOptions(argv) {
       parsed.benchmark = parseBenchmark(arg.slice('--benchmark='.length));
     } else if (arg.startsWith('--bench=')) {
       parsed.benchmark = parseBenchmark(arg.slice('--bench='.length));
+    } else if (arg.startsWith('--model=')) {
+      parsed.p0Models = parseStringList(arg.slice('--model='.length), 'model');
+    } else if (arg.startsWith('--models=')) {
+      parsed.p0Models = parseStringList(arg.slice('--models='.length), 'models');
+    } else if (arg.startsWith('--execution-providers=')) {
+      parsed.p0ExecutionProviders = parseExecutionProviders(arg.slice('--execution-providers='.length));
+    } else if (arg.startsWith('--execution-provider=')) {
+      parsed.p0ExecutionProviders = parseExecutionProviders(arg.slice('--execution-provider='.length));
+    } else if (arg.startsWith('--seq-lengths=')) {
+      parsed.p0SeqLengths = parsePositiveIntList(arg.slice('--seq-lengths='.length), 'seq-lengths');
+    } else if (arg.startsWith('--batch-sizes=')) {
+      parsed.p0BatchSizes = parsePositiveIntList(arg.slice('--batch-sizes='.length), 'batch-sizes');
+    } else if (arg.startsWith('--overflow-widths=')) {
+      parsed.p0OverflowWidths = parsePositiveIntList(arg.slice('--overflow-widths='.length), 'overflow-widths');
+    } else if (arg.startsWith('--p0-query-count=')) {
+      parsed.p0QueryCount = parsePositiveInt(arg.slice('--p0-query-count='.length), 'p0-query-count');
+    } else if (arg.startsWith('--p0-bulk-units=')) {
+      parsed.p0BulkUnits = parsePositiveInt(arg.slice('--p0-bulk-units='.length), 'p0-bulk-units');
+    } else if (arg.startsWith('--p0-fairness-units=')) {
+      parsed.p0FairnessUnits = parsePositiveInt(arg.slice('--p0-fairness-units='.length), 'p0-fairness-units');
+    } else if (arg.startsWith('--p0-turnstile-seq=')) {
+      parsed.p0TurnstileSeq = parsePositiveInt(arg.slice('--p0-turnstile-seq='.length), 'p0-turnstile-seq');
+    } else if (arg.startsWith('--p0-turnstile-batch=')) {
+      parsed.p0TurnstileBatch = parsePositiveInt(arg.slice('--p0-turnstile-batch='.length), 'p0-turnstile-batch');
+    } else if (arg.startsWith('--p0-probe-repeat=')) {
+      parsed.p0ProbeRepeat = parsePositiveInt(arg.slice('--p0-probe-repeat='.length), 'p0-probe-repeat');
+    } else if (arg.startsWith('--p0-timeout-ms=')) {
+      parsed.p0TimeoutMs = parsePositiveInt(arg.slice('--p0-timeout-ms='.length), 'p0-timeout-ms');
+    } else if (arg === '--p0-dry-run') {
+      parsed.p0DryRun = true;
     } else if (arg.startsWith('--ngram=')) {
       parsed.ngram = parseBooleanOption(arg.slice('--ngram='.length), 'ngram');
     } else if (arg.startsWith('--retrieval=')) {
@@ -176,12 +218,18 @@ async function runQualityBenchmark(options) {
   }
 
   printWarmupSummary(warmup, { mode, retrieval });
+  const fleet = await runner
+    .status?.()
+    .then(statusModelSummary)
+    .catch(() => undefined);
+  if (fleet) printFleetSummary(fleet);
 
   const runs = [];
   for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
     const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
     runs.push(run);
     printRunSummary(run, { mode, retrieval, concurrency, repeat, runIndex });
+    if (fleet) printBatchThroughputSummary(fleet, run, repeat > 1 ? `run ${runIndex}/${repeat} ` : '');
   }
 
   if (repeat > 1) {
@@ -288,6 +336,975 @@ async function runIndexBenchmark(options) {
   };
   if (!options.quiet && options.format !== 'json') printIndexSummary(report);
   return report;
+}
+
+function normalizedModelEncodeP0Options(options) {
+  return {
+    models: uniqueStrings(options.p0Models ?? MODEL_ENCODE_P0_DEFAULT_MODELS),
+    executionProviders: uniqueStrings(options.p0ExecutionProviders ?? MODEL_ENCODE_P0_DEFAULT_EXECUTION_PROVIDERS),
+    seqLengths: uniqueNumbers(options.p0SeqLengths ?? MODEL_ENCODE_P0_DEFAULT_SEQ_LENGTHS),
+    batchSizes: uniqueNumbers(options.p0BatchSizes ?? MODEL_ENCODE_P0_DEFAULT_BATCH_SIZES),
+    repeat: options.repeat ?? 2,
+    queryCount: options.p0QueryCount ?? 24,
+    bulkUnits: options.p0BulkUnits ?? 8,
+    fairnessUnitsPerVault: options.p0FairnessUnits ?? 3,
+    turnstileSeqLength: options.p0TurnstileSeq ?? 512,
+    turnstileBatchSize: options.p0TurnstileBatch ?? 4,
+    overflowWidths: uniqueNumbers(options.p0OverflowWidths ?? MODEL_ENCODE_P0_DEFAULT_OVERFLOW_WIDTHS),
+    probeRepeat: options.p0ProbeRepeat ?? 10,
+    commandTimeoutMs: options.p0TimeoutMs ?? 1000,
+  };
+}
+
+function modelEncodeP0DryRunReport(options) {
+  const config = normalizedModelEncodeP0Options(options);
+  return {
+    schemaVersion: 1,
+    benchmark: MODEL_ENCODE_P0_BENCHMARK,
+    dryRun: true,
+    generatedAt: new Date().toISOString(),
+    config,
+    plannedSections: [
+      'batchThroughputByModelProviderSeqBatch',
+      'queryLatencyIdleVsSharedTurnstileBulk',
+      'textWorkerTokenizeVsPreparedTypedArrayTransfer',
+      'oneSessionVsTwoSessionVram',
+      'nvidiaSmiProbeLatencyFailureTimeout',
+      'gpuOnlyVsGpuPlusCpuOverflow',
+      'twoConcurrentRebuildFairness',
+      'transientGpuFailureRecovery',
+    ],
+  };
+}
+
+async function runModelEncodeP0Benchmark(options) {
+  const config = normalizedModelEncodeP0Options(options);
+  if (options.format && options.format !== 'json' && options.format !== 'text') {
+    usage('--benchmark=model-encode-p0 supports --format=json or --format=text');
+  }
+  const fleet = await modelEncodeP0FleetSummary(config);
+  const sweeps = [];
+  for (const model of config.models) {
+    for (const executionProvider of config.executionProviders) {
+      sweeps.push(
+        await safeP0Section(`${model}/${executionProvider}`, () =>
+          runModelEncodeP0Sweep(model, executionProvider, config),
+        ),
+      );
+    }
+  }
+
+  const primaryModel = config.models[0] ?? 'bge-m3';
+  const cudaEnabled = config.executionProviders.includes('cuda');
+  const cpuEnabled = config.executionProviders.includes('cpu');
+  const queryLatency = cudaEnabled
+    ? await safeP0Section('query-latency-shared-turnstile', () => runModelEncodeP0QueryLatency(primaryModel, config))
+    : { ok: false, skipped: true, reason: 'cuda execution provider not requested' };
+  const transferCost = await safeP0Section('text-vs-prepared-transfer', () =>
+    runModelEncodeP0TransferCost(primaryModel, config),
+  );
+  const sessionVram = cudaEnabled
+    ? await safeP0Section('one-vs-two-session-vram', () => runModelEncodeP0SessionVram(primaryModel, config))
+    : { ok: false, skipped: true, reason: 'cuda execution provider not requested' };
+  const probe = await safeP0Section('nvidia-smi-probe', () => runModelEncodeP0NvidiaSmiProbe(config));
+  const overflow =
+    cudaEnabled && cpuEnabled
+      ? await safeP0Section('gpu-cpu-overflow', () => runModelEncodeP0Overflow(primaryModel, config))
+      : { ok: false, skipped: true, reason: 'cuda and cpu execution providers are both required' };
+  const fairness = cudaEnabled
+    ? await safeP0Section('two-rebuild-fairness', () => runModelEncodeP0Fairness(primaryModel, config))
+    : { ok: false, skipped: true, reason: 'cuda execution provider not requested' };
+  const transientRecovery = await safeP0Section('transient-gpu-failure-recovery', () =>
+    simulateModelEncodeP0TransientGpuFailureRecovery(),
+  );
+  const ok =
+    sweeps.some((section) => section.ok) &&
+    [queryLatency, transferCost, sessionVram, probe, overflow, fairness, transientRecovery].every(
+      (section) => section.ok || section.skipped,
+    );
+
+  return {
+    schemaVersion: 1,
+    benchmark: MODEL_ENCODE_P0_BENCHMARK,
+    generatedAt: new Date().toISOString(),
+    ok,
+    config,
+    fleet,
+    sweeps,
+    queryLatency,
+    transferCost,
+    sessionVram,
+    nvidiaSmiProbe: probe,
+    overflow,
+    fairness,
+    transientRecovery,
+  };
+}
+
+async function safeP0Section(name, run) {
+  const started = performance.now();
+  try {
+    const value = await run();
+    return {
+      ok: true,
+      name,
+      elapsedMs: roundMs(performance.now() - started),
+      ...value,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      name,
+      elapsedMs: roundMs(performance.now() - started),
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function modelEncodeP0FleetSummary(config) {
+  const ort = await import('onnxruntime-node').then((module) => module.default ?? module).catch(() => undefined);
+  return {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    cpu: {
+      logicalCpu: typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length,
+      model: os.cpus()[0]?.model,
+      totalMemoryBytes: os.totalmem(),
+      freeMemoryBytes: os.freemem(),
+    },
+    onnxruntimeNode: ort?.env?.versions?.node ?? ort?.env?.versions?.common ?? null,
+    nvidiaSmi: await nvidiaSmiMemorySummary(config.commandTimeoutMs).catch((error) => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    })),
+  };
+}
+
+async function runModelEncodeP0Sweep(model, executionProvider, config) {
+  const ctx = await createModelEncodeP0Context(model, executionProvider);
+  try {
+    const rows = [];
+    for (const seqLength of config.seqLengths) {
+      if (seqLength > ctx.descriptor.maxTokens) {
+        rows.push({ model: ctx.model, executionProvider, seqLength, skipped: true, reason: 'exceeds model maxTokens' });
+        continue;
+      }
+      const encoding = encodingForP0SequenceLength(ctx.tokenizer, ctx.descriptor, seqLength, 'document');
+      for (const batchSize of config.batchSizes) {
+        const feeds = feedsForP0Batch(ctx, encoding, batchSize, seqLength);
+        await runP0Session(ctx.session, feeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+        const durations = [];
+        for (let repeat = 0; repeat < config.repeat; repeat += 1) {
+          const started = performance.now();
+          await runP0Session(ctx.session, feeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+          durations.push(performance.now() - started);
+        }
+        const sorted = durations.toSorted((left, right) => left - right);
+        const medianMs = median(sorted);
+        rows.push({
+          model: ctx.model,
+          executionProvider,
+          seqLength,
+          batchSize,
+          repeat: config.repeat,
+          medianMs: roundMs(medianMs),
+          p95Ms: roundMs(percentile(sorted, 95)),
+          docsPerSec: roundNumber((batchSize / medianMs) * 1000, 2),
+          tokensPerSec: roundNumber(((batchSize * seqLength) / medianMs) * 1000, 0),
+        });
+      }
+    }
+    return { model: ctx.model, executionProvider, rows };
+  } finally {
+    await ctx.close();
+  }
+}
+
+async function runModelEncodeP0QueryLatency(model, config) {
+  const ctx = await createModelEncodeP0Context(model, 'cuda');
+  try {
+    const querySeqLength = Math.min(32, ctx.descriptor.maxTokens);
+    const bulkSeqLength = Math.min(config.turnstileSeqLength, ctx.descriptor.maxTokens);
+    const bulkBatchSize = config.turnstileBatchSize;
+    const queryFeeds = feedsForP0Batch(
+      ctx,
+      encodingForP0SequenceLength(ctx.tokenizer, ctx.descriptor, querySeqLength, 'query'),
+      1,
+      querySeqLength,
+    );
+    const bulkFeeds = feedsForP0Batch(
+      ctx,
+      encodingForP0SequenceLength(ctx.tokenizer, ctx.descriptor, bulkSeqLength, 'document'),
+      bulkBatchSize,
+      bulkSeqLength,
+    );
+    await runP0Session(ctx.session, queryFeeds, { expectedBatch: 1, expectedSeqLength: querySeqLength });
+    await runP0Session(ctx.session, bulkFeeds, { expectedBatch: bulkBatchSize, expectedSeqLength: bulkSeqLength });
+
+    const idleLatencies = [];
+    for (let index = 0; index < config.queryCount; index += 1) {
+      const started = performance.now();
+      await runP0Session(ctx.session, queryFeeds, { expectedBatch: 1, expectedSeqLength: querySeqLength });
+      idleLatencies.push(performance.now() - started);
+    }
+
+    const bulkSampleStarted = performance.now();
+    await runP0Session(ctx.session, bulkFeeds, { expectedBatch: bulkBatchSize, expectedSeqLength: bulkSeqLength });
+    const bulkUnitMs = performance.now() - bulkSampleStarted;
+    const turnstile = createP0Turnstile();
+    const rebuildQueryLatencies = [];
+    let bulkCompleted = 0;
+    const bulkRun = (async () => {
+      for (let index = 0; index < config.bulkUnits; index += 1) {
+        await turnstile.run(async () => {
+          await runP0Session(ctx.session, bulkFeeds, {
+            expectedBatch: bulkBatchSize,
+            expectedSeqLength: bulkSeqLength,
+          });
+          bulkCompleted += 1;
+        });
+        await delay(0);
+      }
+    })();
+    const queryRun = (async () => {
+      const spacingMs = Math.max(1, Math.min(25, bulkUnitMs / 2));
+      for (let index = 0; index < config.queryCount; index += 1) {
+        await delay(spacingMs);
+        const requestedAt = performance.now();
+        await turnstile.run(() =>
+          runP0Session(ctx.session, queryFeeds, { expectedBatch: 1, expectedSeqLength: querySeqLength }),
+        );
+        rebuildQueryLatencies.push(performance.now() - requestedAt);
+      }
+    })();
+    await Promise.all([bulkRun, queryRun]);
+
+    return {
+      model: ctx.model,
+      executionProvider: 'cuda',
+      querySeqLength,
+      bulkSeqLength,
+      bulkBatchSize,
+      bulkUnits: config.bulkUnits,
+      bulkCompleted,
+      bulkUnitMs: roundMs(bulkUnitMs),
+      idle: latencySummary(idleLatencies),
+      sharedTurnstileDuringBulk: latencySummary(rebuildQueryLatencies),
+    };
+  } finally {
+    await ctx.close();
+  }
+}
+
+async function runModelEncodeP0TransferCost(model, config) {
+  const ctx = await createModelEncodeP0TokenizerContext(model);
+  const seqLength = Math.min(config.turnstileSeqLength, ctx.descriptor.maxTokens);
+  const batchSize = config.turnstileBatchSize;
+  const texts = Array.from({ length: batchSize }, (_, index) => {
+    const inputKind = index % 2 === 0 ? 'document' : 'query';
+    return renderP0EmbeddingInput(
+      ctx.descriptor,
+      textForP0SequenceLength(ctx.tokenizer, ctx.descriptor, seqLength, inputKind),
+      inputKind,
+    );
+  });
+  const worker = createP0TransferWorker(ctx);
+  try {
+    await worker.request({ kind: 'text', texts, maxTokens: seqLength });
+    const textWorkerTokenize = [];
+    for (let repeat = 0; repeat < config.repeat; repeat += 1) {
+      const started = performance.now();
+      await worker.request({ kind: 'text', texts, maxTokens: seqLength });
+      textWorkerTokenize.push(performance.now() - started);
+    }
+
+    const preparedPayloads = Array.from({ length: config.repeat }, () =>
+      preparedTransferPayload(ctx, texts, seqLength, { rendered: true }),
+    );
+    const preparedTransfer = [];
+    for (const payload of preparedPayloads) {
+      const started = performance.now();
+      await worker.request(
+        {
+          kind: 'prepared',
+          batchSize: payload.batchSize,
+          seqLength: payload.seqLength,
+          inputIds: payload.inputIds,
+          attentionMask: payload.attentionMask,
+        },
+        [payload.inputIds.buffer, payload.attentionMask.buffer],
+      );
+      preparedTransfer.push(performance.now() - started);
+    }
+
+    const parentTokenize = [];
+    const parentTokenizePlusTransfer = [];
+    for (let repeat = 0; repeat < config.repeat; repeat += 1) {
+      const tokenizeStarted = performance.now();
+      const payload = preparedTransferPayload(ctx, texts, seqLength, { rendered: true });
+      parentTokenize.push(performance.now() - tokenizeStarted);
+      await worker.request(
+        {
+          kind: 'prepared',
+          batchSize: payload.batchSize,
+          seqLength: payload.seqLength,
+          inputIds: payload.inputIds,
+          attentionMask: payload.attentionMask,
+        },
+        [payload.inputIds.buffer, payload.attentionMask.buffer],
+      );
+      parentTokenizePlusTransfer.push(performance.now() - tokenizeStarted);
+    }
+
+    return {
+      model: ctx.model,
+      seqLength,
+      batchSize,
+      repeat: config.repeat,
+      textWorkerTokenizeMs: latencySummary(textWorkerTokenize),
+      preparedTransferOnlyMs: latencySummary(preparedTransfer),
+      parentTokenizeMs: latencySummary(parentTokenize),
+      parentTokenizePlusPreparedTransferMs: latencySummary(parentTokenizePlusTransfer),
+      payloadBytes: batchSize * seqLength * Int32Array.BYTES_PER_ELEMENT * 2,
+    };
+  } finally {
+    await worker.close();
+  }
+}
+
+async function runModelEncodeP0SessionVram(model, config) {
+  const tokenizerContext = await createModelEncodeP0TokenizerContext(model);
+  const ort = await import('onnxruntime-node').then((module) => module.default ?? module);
+  let firstSession;
+  let secondSession;
+  try {
+    const seqLength = Math.min(32, tokenizerContext.descriptor.maxTokens);
+    const before = await nvidiaSmiMemorySummary(config.commandTimeoutMs);
+    firstSession = await createP0OrtSession(ort, tokenizerContext.modelPath, 'cuda');
+    const ctx = {
+      ...tokenizerContext,
+      executionProvider: 'cuda',
+      ort,
+      session: firstSession,
+    };
+    const feeds = feedsForP0Batch(
+      ctx,
+      encodingForP0SequenceLength(ctx.tokenizer, ctx.descriptor, seqLength, 'query'),
+      1,
+      seqLength,
+    );
+    await runP0Session(ctx.session, feeds, { expectedBatch: 1, expectedSeqLength: seqLength });
+    const afterOne = await nvidiaSmiMemorySummary(config.commandTimeoutMs);
+    let secondOk = false;
+    let secondError;
+    try {
+      secondSession = await createP0OrtSession(ctx.ort, ctx.modelPath, 'cuda');
+      await runP0Session(secondSession, feeds, { expectedBatch: 1, expectedSeqLength: seqLength });
+      secondOk = true;
+    } catch (error) {
+      secondError = error instanceof Error ? error.message : String(error);
+    }
+    const afterTwoAttempt = await nvidiaSmiMemorySummary(config.commandTimeoutMs);
+    return {
+      model: ctx.model,
+      seqLength,
+      before,
+      afterOne,
+      afterTwoAttempt,
+      oneSessionFreeDeltaMiB: gpuFreeDeltaMiB(before, afterOne),
+      twoSessionAdditionalFreeDeltaMiB: gpuFreeDeltaMiB(afterOne, afterTwoAttempt),
+      secondSession: secondOk
+        ? { ok: true, oom: false }
+        : { ok: false, oom: /out of memory|oom/i.test(secondError ?? ''), error: secondError },
+    };
+  } finally {
+    if (secondSession?.release) await secondSession.release();
+    if (firstSession?.release) await firstSession.release();
+  }
+}
+
+async function runModelEncodeP0NvidiaSmiProbe(config) {
+  const latencies = [];
+  for (let index = 0; index < config.probeRepeat; index += 1) {
+    const result = await runCommandTimed(
+      'nvidia-smi',
+      ['--query-gpu=memory.free', '--format=csv,noheader,nounits'],
+      config.commandTimeoutMs,
+    );
+    if (!result.ok) throw new Error(result.error ?? `nvidia-smi failed with code ${result.code}`);
+    latencies.push(result.elapsedMs);
+  }
+  const invalid = await runCommandTimed(
+    'nvidia-smi',
+    ['--query-gpu=definitely.invalid', '--format=csv,noheader,nounits'],
+    config.commandTimeoutMs,
+  );
+  const timeout = await runCommandTimed('nvidia-smi', ['-l', '1'], Math.min(100, config.commandTimeoutMs));
+  return {
+    repeat: config.probeRepeat,
+    successLatencyMs: latencySummary(latencies),
+    invalidQueryFailure: compactCommandResult(invalid),
+    timeoutCase: compactCommandResult(timeout),
+  };
+}
+
+async function runModelEncodeP0Overflow(model, config) {
+  const gpu = await createModelEncodeP0Context(model, 'cuda');
+  const cpu = await createModelEncodeP0Context(model, 'cpu');
+  try {
+    const seqLength = Math.min(config.turnstileSeqLength, gpu.descriptor.maxTokens);
+    const batchSize = Math.max(1, Math.min(config.turnstileBatchSize, 4));
+    const encoding = encodingForP0SequenceLength(gpu.tokenizer, gpu.descriptor, seqLength, 'document');
+    const gpuFeeds = feedsForP0Batch(gpu, encoding, batchSize, seqLength);
+    const cpuFeeds = feedsForP0Batch(cpu, encoding, batchSize, seqLength);
+    await runP0Session(gpu.session, gpuFeeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+    await runP0Session(cpu.session, cpuFeeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+
+    const gpuOnly = await runP0Loop(gpu.session, gpuFeeds, config.bulkUnits, batchSize, seqLength);
+    const overflowRows = [];
+    for (const width of config.overflowWidths) {
+      const started = performance.now();
+      const gpuRun = runP0Loop(gpu.session, gpuFeeds, config.bulkUnits, batchSize, seqLength);
+      const cpuRuns = Array.from({ length: width }, () =>
+        runP0Loop(cpu.session, cpuFeeds, config.bulkUnits, batchSize, seqLength),
+      );
+      const completed = await Promise.all([gpuRun, ...cpuRuns]);
+      const elapsedMs = performance.now() - started;
+      const docs = completed.reduce((sum, row) => sum + row.docs, 0);
+      overflowRows.push({
+        cpuOverflowWidth: width,
+        elapsedMs: roundMs(elapsedMs),
+        docs,
+        docsPerSec: roundNumber((docs / elapsedMs) * 1000, 2),
+        tokensPerSec: roundNumber(((docs * seqLength) / elapsedMs) * 1000, 0),
+      });
+    }
+    return {
+      model: gpu.model,
+      seqLength,
+      batchSize,
+      unitsPerLane: config.bulkUnits,
+      gpuOnly,
+      gpuPlusCpuOverflow: overflowRows,
+    };
+  } finally {
+    await Promise.allSettled([gpu.close(), cpu.close()]);
+  }
+}
+
+async function runModelEncodeP0Fairness(model, config) {
+  const ctx = await createModelEncodeP0Context(model, 'cuda');
+  try {
+    const seqLength = Math.min(config.turnstileSeqLength, ctx.descriptor.maxTokens);
+    const batchSize = config.turnstileBatchSize;
+    const feeds = feedsForP0Batch(
+      ctx,
+      encodingForP0SequenceLength(ctx.tokenizer, ctx.descriptor, seqLength, 'document'),
+      batchSize,
+      seqLength,
+    );
+    await runP0Session(ctx.session, feeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+    const vaults = [
+      { key: 'vault-a', remaining: config.fairnessUnitsPerVault, completedAt: undefined },
+      { key: 'vault-b', remaining: config.fairnessUnitsPerVault, completedAt: undefined },
+    ];
+    const order = [];
+    const started = performance.now();
+    while (vaults.some((vault) => vault.remaining > 0)) {
+      for (const vault of vaults) {
+        if (vault.remaining <= 0) continue;
+        await runP0Session(ctx.session, feeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+        vault.remaining -= 1;
+        order.push(vault.key);
+        if (vault.remaining === 0) vault.completedAt = performance.now() - started;
+      }
+    }
+    const counts = Object.fromEntries(
+      vaults.map((vault) => [vault.key, config.fairnessUnitsPerVault - vault.remaining]),
+    );
+    return {
+      model: ctx.model,
+      seqLength,
+      batchSize,
+      unitsPerVault: config.fairnessUnitsPerVault,
+      order,
+      counts,
+      maxConsecutiveSameVault: maxConsecutiveSameValue(order),
+      completionSkewMs: roundMs(Math.abs((vaults[0].completedAt ?? 0) - (vaults[1].completedAt ?? 0))),
+    };
+  } finally {
+    await ctx.close();
+  }
+}
+
+async function simulateModelEncodeP0TransientGpuFailureRecovery() {
+  const { createOnnxSessionWithFallback } = await import('../src/core/search/dense/local-onnx.ts');
+  const attempts = [];
+  let cudaFailuresRemaining = 1;
+  const fakeSession = (executionProvider) => ({
+    executionProvider,
+    inputNames: ['input_ids', 'attention_mask'],
+    async run() {
+      return {};
+    },
+    async release() {},
+  });
+  const ort = {
+    Tensor: class Tensor {
+      constructor(type, data, dims) {
+        this.type = type;
+        this.data = data;
+        this.dims = dims;
+      }
+    },
+    InferenceSession: {
+      async create(_modelPath, options) {
+        const executionProvider = options.executionProviders[0];
+        attempts.push(executionProvider);
+        if (executionProvider === 'cuda' && cudaFailuresRemaining > 0) {
+          cudaFailuresRemaining -= 1;
+          throw new Error('simulated CUDA session create failure');
+        }
+        return fakeSession(executionProvider);
+      },
+    },
+  };
+  const first = await createOnnxSessionWithFallback({
+    ort,
+    modelPath: '/tmp/p0-transient.onnx',
+    executionProvider: 'auto',
+    platform: 'linux',
+    allowCpuFallback: true,
+  });
+  const second = await createOnnxSessionWithFallback({
+    ort,
+    modelPath: '/tmp/p0-transient.onnx',
+    executionProvider: 'auto',
+    platform: 'linux',
+    allowCpuFallback: true,
+  });
+  return {
+    scenario: 'first CUDA create fails, CPU fallback serves, later demand retries CUDA successfully',
+    attempts,
+    firstExecutionProvider: first.executionProvider,
+    firstFailures: first.failures,
+    secondExecutionProvider: second.executionProvider,
+    recovered: first.executionProvider === 'cpu' && second.executionProvider === 'cuda',
+  };
+}
+
+async function createModelEncodeP0Context(model, executionProvider) {
+  const tokenizerContext = await createModelEncodeP0TokenizerContext(model);
+  const ort = await import('onnxruntime-node').then((module) => module.default ?? module);
+  const session = await createP0OrtSession(ort, tokenizerContext.modelPath, executionProvider);
+  return {
+    ...tokenizerContext,
+    executionProvider,
+    ort,
+    session,
+    close: async () => {
+      if (session.release) await session.release();
+    },
+  };
+}
+
+async function createModelEncodeP0TokenizerContext(model) {
+  const artifacts = await import('../src/core/search/dense/artifacts.ts');
+  const modelKey = artifacts.resolveLocalOnnxModelKey(model);
+  const descriptor = artifacts.localOnnxModelDescriptor(modelKey);
+  const installed = await artifacts.ensureLocalOnnxModelArtifact(modelKey, process.env, { verifyFiles: 'metadata' });
+  if (installed.status === 'error') throw new Error(`failed to prepare ${modelKey} artifact: ${installed.message}`);
+  const tokenizer = await loadP0Tokenizer(
+    artifacts.localOnnxTokenizerJsonPath(modelKey, process.env),
+    artifacts.localOnnxTokenizerConfigPath(modelKey, process.env),
+  );
+  return {
+    model: modelKey,
+    descriptor,
+    tokenizer,
+    modelPath: artifacts.localOnnxSessionModelPath(modelKey, process.env),
+    tokenizerJsonPath: artifacts.localOnnxTokenizerJsonPath(modelKey, process.env),
+    tokenizerConfigPath: artifacts.localOnnxTokenizerConfigPath(modelKey, process.env),
+  };
+}
+
+async function loadP0Tokenizer(tokenizerJsonPath, tokenizerConfigPath) {
+  const imported = await import('@huggingface/tokenizers');
+  const Tokenizer = imported.Tokenizer ?? imported.default?.Tokenizer;
+  if (!Tokenizer) throw new Error('@huggingface/tokenizers did not export Tokenizer');
+  return new Tokenizer(
+    JSON.parse(fs.readFileSync(tokenizerJsonPath, 'utf8')),
+    JSON.parse(fs.readFileSync(tokenizerConfigPath, 'utf8')),
+  );
+}
+
+async function createP0OrtSession(ort, modelPath, executionProvider) {
+  return ort.InferenceSession.create(modelPath, {
+    executionProviders:
+      executionProvider === 'cuda'
+        ? [
+            {
+              name: 'cuda',
+              deviceId: 0,
+            },
+          ]
+        : ['cpu'],
+  });
+}
+
+function textForP0SequenceLength(tokenizer, descriptor, seqLength, inputKind) {
+  const phrase = 'semantic retrieval benchmark passage with enough repeated tokens';
+  let repeat = Math.max(1, Math.ceil(seqLength / 6));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const text = Array.from({ length: repeat }, () => phrase).join(' ');
+    const rendered = renderP0EmbeddingInput(descriptor, text, inputKind);
+    const encoded = tokenizer.encode(rendered, { add_special_tokens: true });
+    if (encoded.ids.length >= seqLength) return text;
+    repeat *= 2;
+  }
+  return Array.from({ length: repeat }, () => phrase).join(' ');
+}
+
+function encodingForP0SequenceLength(tokenizer, descriptor, seqLength, inputKind) {
+  const text = textForP0SequenceLength(tokenizer, descriptor, seqLength, inputKind);
+  const rendered = renderP0EmbeddingInput(descriptor, text, inputKind);
+  const encoded = tokenizer.encode(rendered, { add_special_tokens: true });
+  return truncateOrPadP0Encoding(encoded, seqLength);
+}
+
+function renderP0EmbeddingInput(descriptor, text, inputKind) {
+  const template = descriptor.inputTemplate[inputKind] ?? descriptor.inputTemplate.default;
+  return template.replace('{text}', text);
+}
+
+function truncateOrPadP0Encoding(encoding, seqLength) {
+  const ids = Array.from(encoding.ids).slice(0, seqLength);
+  const attentionMask = Array.from(encoding.attention_mask).slice(0, seqLength);
+  const tokenTypeIds = encoding.token_type_ids ? Array.from(encoding.token_type_ids).slice(0, seqLength) : undefined;
+  const padId = ids.at(-1) ?? 0;
+  while (ids.length < seqLength) ids.push(padId);
+  while (attentionMask.length < seqLength) attentionMask.push(1);
+  if (tokenTypeIds) while (tokenTypeIds.length < seqLength) tokenTypeIds.push(0);
+  return {
+    ids,
+    attention_mask: attentionMask,
+    ...(tokenTypeIds ? { token_type_ids: tokenTypeIds } : {}),
+  };
+}
+
+function feedsForP0Batch(ctx, encoding, batchSize, seqLength) {
+  const inputNames = new Set(ctx.session.inputNames ?? ['input_ids', 'attention_mask']);
+  const feeds = {};
+  if (inputNames.has('input_ids'))
+    feeds.input_ids = new ctx.ort.Tensor('int64', repeatP0Int64(encoding.ids, batchSize), [batchSize, seqLength]);
+  if (inputNames.has('attention_mask')) {
+    feeds.attention_mask = new ctx.ort.Tensor('int64', repeatP0Int64(encoding.attention_mask, batchSize), [
+      batchSize,
+      seqLength,
+    ]);
+  }
+  if (inputNames.has('token_type_ids')) {
+    feeds.token_type_ids = new ctx.ort.Tensor(
+      'int64',
+      repeatP0Int64(encoding.token_type_ids ?? new Array(seqLength).fill(0), batchSize),
+      [batchSize, seqLength],
+    );
+  }
+  return feeds;
+}
+
+function repeatP0Int64(values, batchSize) {
+  const repeated = new BigInt64Array(values.length * batchSize);
+  for (let row = 0; row < batchSize; row += 1) {
+    const offset = row * values.length;
+    for (let index = 0; index < values.length; index += 1) {
+      repeated[offset + index] = BigInt(values[index] ?? 0);
+    }
+  }
+  return repeated;
+}
+
+async function runP0Session(session, feeds, expected) {
+  const output = await session.run(feeds);
+  const tensor = output.last_hidden_state ?? Object.values(output)[0];
+  if (!tensor?.dims) return output;
+  const dims = tensor.dims.map((value) => Number(value));
+  if (dims.length >= 2 && dims[0] !== expected.expectedBatch) {
+    throw new Error(`ONNX output batch mismatch: expected ${expected.expectedBatch}, got ${dims[0]}`);
+  }
+  if (dims.length >= 2 && dims[1] !== expected.expectedSeqLength) {
+    throw new Error(`ONNX output sequence mismatch: expected ${expected.expectedSeqLength}, got ${dims[1]}`);
+  }
+  return output;
+}
+
+async function runP0Loop(session, feeds, units, batchSize, seqLength) {
+  const started = performance.now();
+  for (let index = 0; index < units; index += 1) {
+    await runP0Session(session, feeds, { expectedBatch: batchSize, expectedSeqLength: seqLength });
+  }
+  const elapsedMs = performance.now() - started;
+  const docs = units * batchSize;
+  return {
+    units,
+    docs,
+    elapsedMs: roundMs(elapsedMs),
+    docsPerSec: roundNumber((docs / elapsedMs) * 1000, 2),
+    tokensPerSec: roundNumber(((docs * seqLength) / elapsedMs) * 1000, 0),
+  };
+}
+
+function createP0Turnstile() {
+  let tail = Promise.resolve();
+  return {
+    run(task) {
+      const runAfterTail = tail.catch(() => undefined).then(task);
+      tail = runAfterTail.then(
+        () => undefined,
+        () => undefined,
+      );
+      return runAfterTail;
+    },
+  };
+}
+
+function preparedTransferPayload(ctx, texts, seqLength, options = {}) {
+  const batchSize = texts.length;
+  const inputIds = new Int32Array(batchSize * seqLength);
+  const attentionMask = new Int32Array(batchSize * seqLength);
+  texts.forEach((text, row) => {
+    const rendered = options.rendered ? text : renderP0EmbeddingInput(ctx.descriptor, text, 'document');
+    const encoding = truncateOrPadP0Encoding(ctx.tokenizer.encode(rendered, { add_special_tokens: true }), seqLength);
+    const offset = row * seqLength;
+    for (let index = 0; index < seqLength; index += 1) {
+      inputIds[offset + index] = encoding.ids[index] ?? 0;
+      attentionMask[offset + index] = encoding.attention_mask[index] ?? 0;
+    }
+  });
+  return { batchSize, seqLength, inputIds, attentionMask };
+}
+
+function createP0TransferWorker(ctx) {
+  const worker = new Worker(
+    `
+import fs from 'node:fs';
+import { parentPort, workerData } from 'node:worker_threads';
+const imported = await import('@huggingface/tokenizers');
+const Tokenizer = imported.Tokenizer ?? imported.default?.Tokenizer;
+const tokenizer = new Tokenizer(
+  JSON.parse(fs.readFileSync(workerData.tokenizerJsonPath, 'utf8')),
+  JSON.parse(fs.readFileSync(workerData.tokenizerConfigPath, 'utf8')),
+);
+parentPort.on('message', (message) => {
+  try {
+    if (message.kind === 'text') {
+      let tokenCount = 0;
+      for (const text of message.texts) {
+        const encoded = tokenizer.encode(text, { add_special_tokens: true });
+        tokenCount += Math.min(encoded.attention_mask.length, message.maxTokens);
+      }
+      parentPort.postMessage({ id: message.id, ok: true, result: { tokenCount } });
+      return;
+    }
+    if (message.kind === 'prepared') {
+      parentPort.postMessage({
+        id: message.id,
+        ok: true,
+        result: { bytes: message.inputIds.byteLength + message.attentionMask.byteLength },
+      });
+      return;
+    }
+    throw new Error('unknown P0 worker request kind');
+  } catch (error) {
+    parentPort.postMessage({ id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+`,
+    {
+      eval: true,
+      type: 'module',
+      workerData: {
+        tokenizerJsonPath: ctx.tokenizerJsonPath,
+        tokenizerConfigPath: ctx.tokenizerConfigPath,
+      },
+    },
+  );
+  let nextId = 1;
+  const pending = new Map();
+  worker.on('message', (message) => {
+    const entry = pending.get(message.id);
+    if (!entry) return;
+    pending.delete(message.id);
+    if (message.ok) entry.resolve(message.result);
+    else entry.reject(new Error(message.error));
+  });
+  worker.on('error', (error) => {
+    for (const entry of pending.values()) entry.reject(error);
+    pending.clear();
+  });
+  return {
+    request(payload, transferList = []) {
+      const id = nextId;
+      nextId += 1;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ id, ...payload }, transferList);
+      });
+    },
+    async close() {
+      await worker.terminate();
+    },
+  };
+}
+
+async function nvidiaSmiMemorySummary(timeoutMs) {
+  const result = await runCommandTimed(
+    'nvidia-smi',
+    ['--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'],
+    timeoutMs,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? `exit ${result.code}`, elapsedMs: result.elapsedMs };
+  }
+  const gpus = result.stdout
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => {
+      const [name, totalMiB, freeMiB] = line.split(',').map((part) => part.trim());
+      return { name, totalMiB: Number(totalMiB), freeMiB: Number(freeMiB) };
+    });
+  return { ok: true, elapsedMs: result.elapsedMs, gpus };
+}
+
+function gpuFreeDeltaMiB(before, after) {
+  const beforeFree = before?.gpus?.[0]?.freeMiB;
+  const afterFree = after?.gpus?.[0]?.freeMiB;
+  return Number.isFinite(beforeFree) && Number.isFinite(afterFree) ? roundNumber(beforeFree - afterFree, 1) : undefined;
+}
+
+function runCommandTimed(command, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const started = performance.now();
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = [];
+    const stderr = [];
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    timeout.unref();
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.on('error', (error) => {
+      clearTimeout(timeout);
+      resolve({
+        ok: false,
+        elapsedMs: roundMs(performance.now() - started),
+        error: error.message,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+      });
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timeout);
+      resolve({
+        ok: code === 0 && !timedOut,
+        code,
+        signal,
+        timedOut,
+        elapsedMs: roundMs(performance.now() - started),
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        ...(timedOut ? { error: `command timed out after ${timeoutMs}ms` } : {}),
+      });
+    });
+  });
+}
+
+function compactCommandResult(result) {
+  return {
+    ok: result.ok,
+    elapsedMs: result.elapsedMs,
+    ...(result.code !== undefined ? { code: result.code } : {}),
+    ...(result.signal ? { signal: result.signal } : {}),
+    ...(result.timedOut ? { timedOut: true } : {}),
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.stderr ? { stderr: result.stderr.trim().slice(0, 240) } : {}),
+  };
+}
+
+function latencySummary(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return {
+    n: values.length,
+    p50Ms: roundMs(percentile(sorted, 50)),
+    p95Ms: roundMs(percentile(sorted, 95)),
+    p99Ms: roundMs(percentile(sorted, 99)),
+    avgMs: roundMs(average(values)),
+  };
+}
+
+function maxConsecutiveSameValue(values) {
+  let max = 0;
+  let current = 0;
+  let previous;
+  for (const value of values) {
+    current = value === previous ? current + 1 : 1;
+    previous = value;
+    max = Math.max(max, current);
+  }
+  return max;
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values)];
+}
+
+function uniqueNumbers(values) {
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function roundNumber(value, digits) {
+  return Number(value.toFixed(digits));
+}
+
+function printModelEncodeP0Summary(report) {
+  console.log(
+    [
+      'model-encode-p0.summary:',
+      `ok=${report.ok}`,
+      `models=${report.config.models.join(',')}`,
+      `providers=${report.config.executionProviders.join(',')}`,
+      `seq=${report.config.seqLengths.join(',')}`,
+      `batch=${report.config.batchSizes.join(',')}`,
+    ].join(' '),
+  );
+  for (const sweep of report.sweeps) {
+    if (!sweep.ok) {
+      console.log(`model-encode-p0.sweep: ${sweep.name} failed ${sweep.error}`);
+      continue;
+    }
+    const best = sweep.rows
+      .filter((row) => !row.skipped)
+      .toSorted((left, right) => right.tokensPerSec - left.tokensPerSec)[0];
+    if (best) {
+      console.log(
+        `model-encode-p0.sweep: ${sweep.name} best seq=${best.seqLength} batch=${best.batchSize} docsPerSec=${best.docsPerSec} tokensPerSec=${best.tokensPerSec}`,
+      );
+    }
+  }
+  if (report.queryLatency.ok) {
+    console.log(
+      `model-encode-p0.query: idleP99=${formatMs(report.queryLatency.idle.p99Ms)} rebuildP99=${formatMs(report.queryLatency.sharedTurnstileDuringBulk.p99Ms)} bulkUnit=${formatMs(report.queryLatency.bulkUnitMs)}`,
+    );
+  }
 }
 
 async function runIndexAction(client, vaultRoot, action, options) {
@@ -442,8 +1459,9 @@ function finiteNumber(value) {
 
 function parseBenchmark(raw) {
   if (raw === 'search') return 'quality';
+  if (raw === 'p0' || raw === 'model-encode' || raw === MODEL_ENCODE_P0_BENCHMARK) return MODEL_ENCODE_P0_BENCHMARK;
   if (raw === 'quality' || raw === 'index') return raw;
-  usage('benchmark must be one of: quality, search, index');
+  usage('benchmark must be one of: quality, search, index, model-encode-p0');
 }
 
 function parseRetrieval(raw) {
@@ -573,14 +1591,89 @@ function statusModelSummary(status) {
   for (const [profileHash, profile] of Object.entries(status.profiles)) {
     const model = profile?.model;
     if (!model || typeof model !== 'object') continue;
+    const query = model.query && typeof model.query === 'object' ? model.query : {};
+    const bulk = model.bulk && typeof model.bulk === 'object' ? model.bulk : {};
     profiles[profileHash] = {
-      devicePolicy: model.devicePolicy ?? null,
-      loaded: model.loaded === true,
-      device: model.device ?? null,
-      executionProvider: model.executionProvider ?? null,
+      query: {
+        device: query.device ?? null,
+        executionProvider: query.executionProvider ?? null,
+        loaded: query.loaded === true,
+        mode: query.mode ?? null,
+        retryAfter: query.retryAfter ?? null,
+      },
+      bulk: {
+        devices: Array.isArray(bulk.devices)
+          ? bulk.devices.map((device) => ({
+              deviceId: device.deviceId ?? null,
+              executionProvider: device.executionProvider ?? null,
+              busy: device.busy === true,
+              docsPerSec: Number.isFinite(device.docsPerSec) ? device.docsPerSec : 0,
+            }))
+          : [],
+        queueDepth: Number.isFinite(bulk.queueDepth) ? bulk.queueDepth : 0,
+        inFlight: Number.isFinite(bulk.inFlight) ? bulk.inFlight : 0,
+        batchTokenBudget: Number.isFinite(bulk.batchTokenBudget) ? bulk.batchTokenBudget : null,
+        etaMs: Number.isFinite(bulk.etaMs) ? bulk.etaMs : null,
+      },
     };
   }
   return Object.keys(profiles).length > 0 ? profiles : undefined;
+}
+
+function printFleetSummary(modelSummary, prefix = '') {
+  if (!modelSummary || typeof modelSummary !== 'object') return;
+  for (const [profileHash, model] of Object.entries(modelSummary)) {
+    const query = model.query ?? {};
+    const bulk = model.bulk ?? {};
+    const devices = (bulk.devices ?? [])
+      .map(
+        (device) =>
+          `${device.deviceId ?? 'unknown'}/${device.executionProvider ?? 'unknown'}${device.busy ? ':busy' : ''}@${formatDocsPerSec(
+            device.docsPerSec,
+          )}`,
+      )
+      .join(',');
+    console.log(
+      [
+        `${prefix}fleet:`,
+        `profile=${shortId(profileHash)}`,
+        `query=${query.device ?? 'unknown'}/${query.executionProvider ?? 'unknown'}`,
+        `loaded=${query.loaded === true}`,
+        `mode=${query.mode ?? 'unknown'}`,
+        `retryAfter=${query.retryAfter ?? 'none'}`,
+        `bulkDevices=${devices || 'none'}`,
+        `queue=${bulk.queueDepth ?? 0}`,
+        `inFlight=${bulk.inFlight ?? 0}`,
+        `budget=${bulk.batchTokenBudget ?? 'unknown'}`,
+        `eta=${bulk.etaMs === null || bulk.etaMs === undefined ? 'unknown' : formatDuration(bulk.etaMs)}`,
+      ].join(' '),
+    );
+  }
+}
+
+function printBatchThroughputSummary(modelSummary, run, prefix = '') {
+  if (!modelSummary || typeof modelSummary !== 'object') return;
+  const batchedDocsPerSec = Object.values(modelSummary).reduce((sum, model) => {
+    const devices = model.bulk?.devices;
+    if (!Array.isArray(devices)) return sum;
+    return (
+      sum +
+      devices.reduce((deviceSum, device) => deviceSum + (Number.isFinite(device.docsPerSec) ? device.docsPerSec : 0), 0)
+    );
+  }, 0);
+  const batchOneQps = run ? Number(queriesPerSecond(run.total, run.elapsedMs)) : 0;
+  console.log(
+    [
+      `${prefix}throughput:`,
+      `batch1=${batchOneQps.toFixed(3)}qps`,
+      `batched=${batchedDocsPerSec > 0 ? `${batchedDocsPerSec.toFixed(2)}docs/s` : 'unknown'}`,
+      `ratio=${batchedDocsPerSec > 0 && batchOneQps > 0 ? (batchedDocsPerSec / batchOneQps).toFixed(2) : 'unknown'}`,
+    ].join(' '),
+  );
+}
+
+function formatDocsPerSec(value) {
+  return Number.isFinite(value) && value > 0 ? `${value.toFixed(2)}docs/s` : '0.00docs/s';
 }
 
 function compactStatus(status, vaultRoot) {
@@ -631,6 +1724,10 @@ function printIndexAction(result, context) {
         build,
       ].join(' '),
     );
+  }
+  if (result.model) {
+    printFleetSummary(result.model, '       ');
+    printBatchThroughputSummary(result.model, { total: 1, elapsedMs: result.elapsedMs }, '       ');
   }
   if (!result.ok) console.log(`       error: ${result.error}`);
 }
@@ -916,6 +2013,33 @@ function parsePositiveInt(raw, name) {
   return parsed;
 }
 
+function parsePositiveIntList(raw, name) {
+  const values = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => parsePositiveInt(value, name));
+  if (values.length === 0) usage(`${name} must include at least one positive integer`);
+  return values;
+}
+
+function parseStringList(raw, name) {
+  const values = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length === 0) usage(`${name} must include at least one value`);
+  return values;
+}
+
+function parseExecutionProviders(raw) {
+  const providers = parseStringList(raw, 'execution-providers');
+  for (const provider of providers) {
+    if (!['cuda', 'cpu'].includes(provider)) usage('execution-providers must include only cuda,cpu');
+  }
+  return providers;
+}
+
 async function searchRunner(mode, cliPath, vaultRoot, options) {
   if (mode === 'e2e') {
     return {
@@ -932,6 +2056,7 @@ async function searchRunner(mode, cliPath, vaultRoot, options) {
         buildTimingSource: 'not-applicable',
         buildTimingResolutionMs: 0,
       },
+      status: undefined,
     };
   }
   try {
@@ -947,6 +2072,7 @@ async function searchRunner(mode, cliPath, vaultRoot, options) {
     let pinnedSnapshotId = indexWarmup.snapshotId;
     return {
       indexWarmup,
+      status: () => client.status({ deadlineMs: options.deadlineMs ?? 15000 }),
       runSearch: async (queryCase) => {
         try {
           const payload = await client.search({
@@ -2081,10 +3207,13 @@ function roundMs(value) {
 function usage(message, code = 2) {
   if (message) console.error(message);
   console.error(
-    'Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index] [--mode=core|e2e] [--retrieval=lexical|vector|hybrid] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--workers=<n>] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]',
+    'Usage: npm run search:eval -- <vault-path> [--benchmark=quality|index|model-encode-p0] [--mode=core|e2e] [--retrieval=lexical|vector|hybrid] [--spec=<queries.json>] [--cli=<dist/optsidian>] [--ngram=off|on] [--quiet] [--score-only] [--measure-speed] [--workers=<n>] [--concurrency=<n>] [--repeat=<n>] [--failure-report=<path>] [--failure-inspect-limit=<n>] [--no-warmup] [--no-progress]',
   );
   console.error(
     '       npm run search:eval -- <vault-path> --benchmark=index [--index-actions=clear-load,rebuild,load] [--ngram=off|on] [--repeat=<n>] [--deadline-ms=<n>] [--format=json]',
+  );
+  console.error(
+    '       npm run search:eval -- --benchmark=model-encode-p0 [--models=bge-m3,multilingual-e5-small] [--execution-providers=cuda,cpu] [--seq-lengths=32,128,512] [--batch-sizes=1,4,8] [--format=json]',
   );
   console.error('       npm run search:eval -- --print-search-daemon-slo-fixture');
   process.exit(code);

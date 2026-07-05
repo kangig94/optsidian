@@ -190,6 +190,28 @@ function createRuntimeGatedEmbedding() {
   const calls = [];
   const documentGates = [];
   let gateDocuments = false;
+  async function encodePayload(payload) {
+    const call = {
+      texts: [...payload.texts],
+      inputKind: payload.inputKind ?? 'document',
+      provider: payload.provider,
+    };
+    calls.push(call);
+    if (call.inputKind === 'document' && gateDocuments) {
+      const gate = deferred();
+      documentGates.push(gate);
+      await gate.promise;
+    }
+    return {
+      provider: {
+        id: payload.provider.kind,
+        model: payload.provider.model ?? 'content-hash-v1',
+        dim: payload.provider.dim ?? 8,
+        version: '1',
+      },
+      vectors: payload.texts.map((text, index) => runtimeVector(text, payload.provider.dim ?? 8, index)),
+    };
+  }
   return {
     calls,
     setGateDocuments(value) {
@@ -206,27 +228,17 @@ function createRuntimeGatedEmbedding() {
     releaseAllDocuments() {
       while (documentGates.length > 0) documentGates.shift().resolve();
     },
+    hasGpuSlot() {
+      return true;
+    },
     async encode(payload) {
-      const call = {
-        texts: [...payload.texts],
-        inputKind: payload.inputKind ?? 'document',
-        provider: payload.provider,
-      };
-      calls.push(call);
-      if (call.inputKind === 'document' && gateDocuments) {
-        const gate = deferred();
-        documentGates.push(gate);
-        await gate.promise;
-      }
-      return {
-        provider: {
-          id: payload.provider.kind,
-          model: payload.provider.model ?? 'content-hash-v1',
-          dim: payload.provider.dim ?? 8,
-          version: '1',
-        },
-        vectors: payload.texts.map((text, index) => runtimeVector(text, payload.provider.dim ?? 8, index)),
-      };
+      return encodePayload(payload);
+    },
+    async encodeGpu(payload) {
+      return encodePayload(payload);
+    },
+    async encodeCpuFallback(payload) {
+      return encodePayload(payload);
     },
     async unload() {
       return { unloaded: true };

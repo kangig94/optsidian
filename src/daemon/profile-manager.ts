@@ -4,6 +4,8 @@ import { createDaemonPools, type DaemonPools, type DaemonPoolsStats } from './po
 import {
   SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
   type ModelStatsWorkerResult,
+  type ModelBulkDeviceStatus,
+  type ProfileModelStatus,
   type PruneRequestPayload,
 } from './protocol.js';
 import { SharedReclamationAuthority, VaultPublisherRegistry } from './search-store/publisher.js';
@@ -16,6 +18,7 @@ import {
   envForDaemonOnnxExecutionPolicy,
   type EmbedScheduler,
   type EmbedSchedulerLaneStats,
+  type GpuEmbeddingDeviceBulkDeviceStats,
   type VectorGenerationManager,
 } from './embed-scheduler.js';
 import type { SearchIndexPruneResult } from '../core/types.js';
@@ -29,10 +32,9 @@ import {
   normalizeSearchRuntimeProfile,
   searchRuntimeProfileHash,
   settingsForSearchRuntimeProfile,
-  type SearchModelDevicePolicy,
   type SearchRuntimeProfile,
 } from './runtime-profile.js';
-import { stableProviderKey } from './model-session/provider-key.js';
+import { residentModelKey } from './model-session/provider-key.js';
 import {
   startRetrievalSaveWatcher,
   type RetrievalSaveWatcher,
@@ -53,28 +55,7 @@ export type ProfileRuntimeStatus = {
   vaults: ReturnType<VaultRegistry['list']>;
 };
 
-export type ProfileRuntimeModelStatus = {
-  loaded: boolean;
-  devicePolicy: SearchModelDevicePolicy;
-  expectedStableProviderKey: string;
-  stableProviderKey?: string;
-  providerIdentity?: ModelStatsWorkerResult['providerIdentity'];
-  requestedLoadDevice?: ModelStatsWorkerResult['requestedLoadDevice'];
-  device?: ModelStatsWorkerResult['device'];
-  executionProvider?: ModelStatsWorkerResult['executionProvider'];
-  loadingDevice?: ModelStatsWorkerResult['loadingDevice'];
-  idleDeadline?: string;
-  unavailable?: boolean;
-  busy?: boolean;
-  reason?: 'not-loaded' | 'unavailable' | 'busy' | 'mismatched-resident';
-  residentStableProviderKey?: string;
-  residentProviderIdentity?: ModelStatsWorkerResult['providerIdentity'];
-  residentRequestedLoadDevice?: ModelStatsWorkerResult['requestedLoadDevice'];
-  residentDevice?: ModelStatsWorkerResult['device'];
-  residentExecutionProvider?: ModelStatsWorkerResult['executionProvider'];
-  residentDevicePolicy?: SearchModelDevicePolicy;
-  residentIdleDeadline?: string;
-};
+export type ProfileRuntimeModelStatus = ProfileModelStatus;
 
 export type ProfileRuntimeLease = {
   runtime: ProfileRuntime;
@@ -125,7 +106,7 @@ export class ProfileRuntime {
   readonly pools: DaemonPools;
   readonly vectorPool: VectorGenerationManager;
   readonly searchStore: DaemonSearchStoreService;
-  readonly expectedModelStableProviderKey: string;
+  readonly expectedResidentModelKey: string;
   readonly vaults = new VaultRegistry();
   private readonly embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats' | 'modelStats'>;
   private readonly snapshotStore: Pick<
@@ -162,14 +143,14 @@ export class ProfileRuntime {
     >,
     searchStore: DaemonSearchStoreService,
     embedScheduler: Pick<EmbedScheduler, 'cancel' | 'laneStats' | 'modelStats'>,
-    expectedModelStableProviderKey: string,
+    expectedResidentModelKey: string,
     options: ProfileManagerOptions,
   ) {
     this.profile = profile;
     this.profileHash = searchRuntimeProfileHash(profile);
     this.pools = pools;
     this.vectorPool = vectorPool;
-    this.expectedModelStableProviderKey = expectedModelStableProviderKey;
+    this.expectedResidentModelKey = expectedResidentModelKey;
     this.snapshotStore = snapshotStore;
     this.searchStore = searchStore;
     this.embedScheduler = embedScheduler;
@@ -212,7 +193,7 @@ export class ProfileRuntime {
             executionPolicy: onnxExecutionPolicy,
             devicePolicy: normalized.embedding.devicePolicy,
           };
-    const expectedModelStableProviderKey = stableProviderKey(providerPayload);
+    const expectedResidentModelKey = residentModelKey(providerPayload);
     const snapshotStore = createDaemonSnapshotStore({
       env,
       countCap: normalized.memory.snapshotCountCap,
@@ -241,6 +222,7 @@ export class ProfileRuntime {
         provider: embeddingProvider,
         providerPayload,
         embedding: embedScheduler,
+        profileHash,
       }),
       snapshotBuilder: (input) =>
         pools.throughputAnalyzer.buildSnapshot(
@@ -277,7 +259,7 @@ export class ProfileRuntime {
       snapshotStore,
       searchStore,
       embedScheduler,
-      expectedModelStableProviderKey,
+      expectedResidentModelKey,
       options,
     );
   }
@@ -328,15 +310,17 @@ export class ProfileRuntime {
     residentModelStats?: ResidentModelStats,
   ): Promise<ProfileRuntimeStatus> {
     const modelStats = residentModelStats ?? (await this.modelStatsBestEffort(context));
+    const pools = await this.pools.stats(context);
+    const embedScheduler = this.embedScheduler.laneStats();
     return {
       profileHash: this.profileHash,
       profile: this.profile,
       activeRequests: lifecycle.activeRequests,
       ...(lifecycle.idleDeadline ? { idleDeadline: lifecycle.idleDeadline } : {}),
-      model: this.projectModelStatus(modelStats),
-      pools: await this.pools.stats(context),
+      model: this.projectModelStatus(modelStats, embedScheduler, pools),
+      pools,
       searchStore: this.searchStore.stats(),
-      embedScheduler: this.embedScheduler.laneStats(),
+      embedScheduler,
       vaults: this.vaults.list(),
     };
   }
@@ -349,64 +333,46 @@ export class ProfileRuntime {
     const deadline = modelStatusDeadline(context.deadline);
     if (deadline <= Date.now()) return unavailableModelStats('busy');
     try {
-      return await this.embedScheduler.modelStats({
+      return await withModelStatusDeadline(
+        this.embedScheduler.modelStats({
+          deadline,
+          cancellationId: context.cancellationId,
+          requestId: `${context.cancellationId}:model-status`,
+          ...(context.vault ? { vault: context.vault } : {}),
+        }),
         deadline,
-        cancellationId: context.cancellationId,
-        requestId: `${context.cancellationId}:model-status`,
-        ...(context.vault ? { vault: context.vault } : {}),
-      });
+      );
     } catch (error) {
       return unavailableModelStats(modelStatusUnavailableReason(error));
     }
   }
 
-  private projectModelStatus(resident: ResidentModelStats): ProfileRuntimeModelStatus {
-    const base: ProfileRuntimeModelStatus = {
-      loaded: false,
-      devicePolicy: this.profile.embedding.devicePolicy,
-      expectedStableProviderKey: this.expectedModelStableProviderKey,
-    };
-    if (resident.unavailable) {
-      return {
-        ...base,
-        unavailable: true,
-        ...(resident.busy ? { busy: true } : {}),
-        reason: resident.reason ?? 'unavailable',
-        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
-      };
-    }
-    if (!resident.loaded) {
-      return {
-        ...base,
-        reason: 'not-loaded',
-        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
-      };
-    }
-    if (resident.stableProviderKey === this.expectedModelStableProviderKey) {
-      return {
-        ...base,
-        loaded: true,
-        ...(resident.stableProviderKey ? { stableProviderKey: resident.stableProviderKey } : {}),
-        ...(resident.providerIdentity ? { providerIdentity: resident.providerIdentity } : {}),
-        ...(resident.requestedLoadDevice ? { requestedLoadDevice: resident.requestedLoadDevice } : {}),
-        ...(resident.device ? { device: resident.device } : {}),
-        ...(resident.executionProvider ? { executionProvider: resident.executionProvider } : {}),
-        ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
-        ...(resident.idleDeadline ? { idleDeadline: resident.idleDeadline } : {}),
-      };
-    }
+  private projectModelStatus(
+    resident: ResidentModelStats,
+    scheduler: EmbedSchedulerLaneStats,
+    pools: DaemonPoolsStats,
+  ): ProfileRuntimeModelStatus {
+    const residentMatches = resident.loaded === true && resident.residentModelKey === this.expectedResidentModelKey;
+    const gpuRetry = scheduler.gpuDevice.retryAfterMs;
+    const usesCpuFallback = gpuRetry !== undefined && this.profile.embedding.devicePolicy !== 'gpu';
+    const fallbackResidentMatches = usesCpuFallback && residentMatches;
     return {
-      ...base,
-      unavailable: true,
-      reason: 'mismatched-resident',
-      ...(resident.stableProviderKey ? { residentStableProviderKey: resident.stableProviderKey } : {}),
-      ...(resident.providerIdentity ? { residentProviderIdentity: resident.providerIdentity } : {}),
-      ...(resident.requestedLoadDevice ? { residentRequestedLoadDevice: resident.requestedLoadDevice } : {}),
-      ...(resident.device ? { residentDevice: resident.device } : {}),
-      ...(resident.executionProvider ? { residentExecutionProvider: resident.executionProvider } : {}),
-      ...(resident.devicePolicy ? { residentDevicePolicy: resident.devicePolicy } : {}),
-      ...(resident.idleDeadline ? { residentIdleDeadline: resident.idleDeadline } : {}),
-      ...(resident.loadingDevice ? { loadingDevice: resident.loadingDevice } : {}),
+      query: {
+        device: fallbackResidentMatches
+          ? (resident.device ?? 'cpu')
+          : residentMatches
+            ? (resident.device ?? null)
+            : null,
+        executionProvider: fallbackResidentMatches
+          ? (resident.executionProvider ?? 'cpu')
+          : residentMatches
+            ? (resident.executionProvider ?? null)
+            : null,
+        loaded: residentMatches,
+        mode: scheduler.gpuDevice.queryMode,
+        retryAfter: gpuRetry ?? null,
+      },
+      bulk: projectBulkModelStatus(scheduler, pools),
     };
   }
 
@@ -545,6 +511,94 @@ function unavailableModelStats(reason: 'unavailable' | 'busy'): ResidentModelSta
 function modelStatusUnavailableReason(error: unknown): 'unavailable' | 'busy' {
   const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
   return code === 'BACKPRESSURE' || code === 'DEADLINE_EXCEEDED' ? 'busy' : 'unavailable';
+}
+
+function withModelStatusDeadline(
+  promise: Promise<ModelStatsWorkerResult>,
+  deadline: number,
+): Promise<ResidentModelStats> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return Promise.resolve(unavailableModelStats('busy'));
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<ResidentModelStats>((resolve) => {
+    timeout = setTimeout(() => {
+      resolve(unavailableModelStats('busy'));
+    }, remainingMs);
+    timeout.unref();
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+function projectBulkModelStatus(
+  scheduler: EmbedSchedulerLaneStats,
+  pools: DaemonPoolsStats,
+): ProfileRuntimeModelStatus['bulk'] {
+  const ownerBulk = scheduler.gpuDevice.bulk;
+  return {
+    devices: projectBulkDevices(ownerBulk.devices, pools.embedding),
+    queueDepth: ownerBulk.queueDepth,
+    inFlight: ownerBulk.inFlight,
+    batchTokenBudget: ownerBulk.batchTokenBudget ?? null,
+    etaMs: ownerBulk.etaMs ?? null,
+  };
+}
+
+function projectBulkDevices(
+  ownerDevices: readonly GpuEmbeddingDeviceBulkDeviceStats[],
+  embeddingStats: DaemonPoolsStats['embedding'],
+): ModelBulkDeviceStatus[] {
+  const byId = new Map<string, ModelBulkDeviceStatus>();
+  const ownerByKind = new Map(ownerDevices.map((device) => [device.kind, device]));
+  const representedOwnerKinds = new Set<'gpu' | 'cpu'>();
+  const slots = Array.isArray(embeddingStats?.slots) ? embeddingStats.slots : [];
+  for (const slot of slots) {
+    const slotDevice = slot.slotDevice;
+    const identity = slotDeviceIdentity(slotDevice);
+    if (!identity) continue;
+    const owner = ownerByKind.get(identity.kind);
+    if (owner) representedOwnerKinds.add(owner.kind);
+    const existing = byId.get(identity.deviceId);
+    const next: ModelBulkDeviceStatus = {
+      deviceId: identity.deviceId,
+      executionProvider: identity.executionProvider,
+      busy: Boolean(existing?.busy) || slot.busy || Boolean(owner?.busy),
+      docsPerSec: Math.max(existing?.docsPerSec ?? 0, owner?.docsPerSec ?? 0),
+    };
+    byId.set(identity.deviceId, next);
+  }
+  for (const owner of ownerDevices) {
+    if (representedOwnerKinds.has(owner.kind)) continue;
+    const deviceId = owner.deviceId;
+    if (byId.has(deviceId)) continue;
+    byId.set(deviceId, {
+      deviceId,
+      executionProvider: owner.executionProvider ?? null,
+      busy: owner.busy,
+      docsPerSec: owner.docsPerSec,
+    });
+  }
+  return [...byId.values()].sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+}
+
+function slotDeviceIdentity(slotDevice: unknown):
+  | {
+      kind: 'gpu' | 'cpu';
+      deviceId: string;
+      executionProvider: ModelStatsWorkerResult['executionProvider'];
+    }
+  | undefined {
+  if (!slotDevice || typeof slotDevice !== 'object') return undefined;
+  const kind = 'kind' in slotDevice ? (slotDevice as { kind?: unknown }).kind : undefined;
+  if (kind === 'cpu') return { kind: 'cpu', deviceId: 'cpu', executionProvider: 'cpu' };
+  if (kind === 'coreml') return { kind: 'gpu', deviceId: 'coreml', executionProvider: 'coreml' };
+  if (kind === 'cuda') {
+    const rawDeviceId = 'deviceId' in slotDevice ? (slotDevice as { deviceId?: unknown }).deviceId : undefined;
+    const deviceId = Number.isInteger(rawDeviceId) ? Number(rawDeviceId) : 0;
+    return { kind: 'gpu', deviceId: `cuda:${deviceId}`, executionProvider: 'cuda' };
+  }
+  return undefined;
 }
 
 export class ProfileManager {
@@ -705,12 +759,15 @@ export class ProfileManager {
     const deadline = modelStatusDeadline(context.deadline);
     if (deadline <= Date.now()) return unavailableModelStats('busy');
     try {
-      return await this.embedScheduler.modelStats({
+      return await withModelStatusDeadline(
+        this.embedScheduler.modelStats({
+          deadline,
+          cancellationId: context.cancellationId,
+          requestId: `${context.cancellationId}:model-status`,
+          ...(context.vault ? { vault: context.vault } : {}),
+        }),
         deadline,
-        cancellationId: context.cancellationId,
-        requestId: `${context.cancellationId}:model-status`,
-        ...(context.vault ? { vault: context.vault } : {}),
-      });
+      );
     } catch (error) {
       return unavailableModelStats(modelStatusUnavailableReason(error));
     }

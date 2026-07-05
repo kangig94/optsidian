@@ -22,6 +22,7 @@ import {
   defaultSearchExecutionWorkerCount,
   optionalWorkerCountFromEnv,
   workerCountFromEnv,
+  type DaemonWorkerSlotDevice,
   type DaemonWorkerPoolStats,
   type WorkerPoolRunOptions,
 } from './worker-pool.js';
@@ -435,21 +436,67 @@ export class SearchExecutionWorkerPool {
 
 export class EmbeddingWorkerPool {
   private readonly pool: DaemonWorkerPool;
+  private readonly gpuSlotIndex: number | undefined;
+  private readonly cpuFallbackSlotIndex: number;
+  private readonly slotIndexes: readonly number[];
+  private servingSlotIndex: number;
 
-  constructor(pool: DaemonWorkerPool) {
+  constructor(
+    pool: DaemonWorkerPool,
+    slots: {
+      gpuSlotIndex?: number;
+      cpuFallbackSlotIndex?: number;
+      slotCount?: number;
+    } = {},
+  ) {
     this.pool = pool;
+    this.gpuSlotIndex = slots.gpuSlotIndex;
+    this.cpuFallbackSlotIndex = slots.cpuFallbackSlotIndex ?? 0;
+    this.slotIndexes = Array.from({ length: Math.max(1, slots.slotCount ?? 1) }, (_value, index) => index);
+    this.servingSlotIndex = this.gpuSlotIndex ?? this.cpuFallbackSlotIndex;
   }
 
   encode(payload: ModelEncodeWorkerPayload, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
     return this.pool.run<ModelEncodeWorkerResult>({ type: 'modelEncode', payload }, options);
   }
 
-  unload(options: WorkerPoolRunOptions): Promise<ModelUnloadWorkerResult> {
-    return this.pool.run<ModelUnloadWorkerResult>({ type: 'modelUnload' }, options);
+  encodeGpu(payload: ModelEncodeWorkerPayload, options: WorkerPoolRunOptions): Promise<ModelEncodeWorkerResult> {
+    if (this.gpuSlotIndex === undefined) return this.encodeCpuFallback(payload, options);
+    this.servingSlotIndex = this.gpuSlotIndex;
+    return this.pool.runOnSlotIndex<ModelEncodeWorkerResult>(
+      { type: 'modelEncode', payload },
+      options,
+      this.gpuSlotIndex,
+    );
+  }
+
+  encodeCpuFallback(
+    payload: ModelEncodeWorkerPayload,
+    options: WorkerPoolRunOptions,
+  ): Promise<ModelEncodeWorkerResult> {
+    this.servingSlotIndex = this.cpuFallbackSlotIndex;
+    return this.pool.runOnSlotIndex<ModelEncodeWorkerResult>(
+      { type: 'modelEncode', payload },
+      options,
+      this.cpuFallbackSlotIndex,
+    );
+  }
+
+  hasGpuSlot(): boolean {
+    return this.gpuSlotIndex !== undefined;
+  }
+
+  async unload(options: WorkerPoolRunOptions): Promise<ModelUnloadWorkerResult> {
+    await Promise.all(
+      this.slotIndexes.map((slotIndex) =>
+        this.pool.runOnSlotIndex<ModelUnloadWorkerResult>({ type: 'modelUnload' }, options, slotIndex),
+      ),
+    );
+    return { unloaded: true };
   }
 
   modelStats(options: WorkerPoolRunOptions): Promise<ModelStatsWorkerResult> {
-    return this.pool.run<ModelStatsWorkerResult>({ type: 'modelStats' }, options);
+    return this.pool.runOnSlotIndex<ModelStatsWorkerResult>({ type: 'modelStats' }, options, this.servingSlotIndex);
   }
 
   async warmup(minimumReady?: number): Promise<void> {
@@ -632,15 +679,7 @@ export function createEmbeddingWorkerPool(
   env: NodeJS.ProcessEnv = process.env,
   settings: OptsidianSettings = readOptsidianSettings(process.cwd(), env),
 ): EmbeddingWorkerPool {
-  const embeddingWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_EMBEDDING_WORKERS') ?? 1;
-  if (embeddingWorkers > 1) {
-    throw Object.assign(
-      new Error(
-        `OPTSIDIAN_SEARCH_EMBEDDING_WORKERS must be 1 because the embedding model has a single resident worker slot`,
-      ),
-      { code: 'BAD_REQUEST' },
-    );
-  }
+  const slotPlan = embeddingSlotPlan(env);
   const modelRssGuardBytes =
     envBytesForPool(env, 'OPTSIDIAN_SEARCH_MODEL_RSS_GUARD_MB') ??
     envBytesForPool(env, 'OPTSIDIAN_SEARCH_WORKER_RSS_GUARD_MB');
@@ -649,14 +688,57 @@ export function createEmbeddingWorkerPool(
     new DaemonWorkerPool({
       name: 'embedding-model',
       kind: 'embedding',
-      size: embeddingWorkers,
+      size: slotPlan.slotDevices.length,
       env,
       microbatchSize: 1,
       rssGuardBytes: modelRssGuardBytes,
       rssGuardExempt: true,
       autoWarmup: false,
+      slotDevices: slotPlan.slotDevices,
     }),
+    {
+      gpuSlotIndex: slotPlan.gpuSlotIndex,
+      cpuFallbackSlotIndex: slotPlan.cpuFallbackSlotIndex,
+      slotCount: slotPlan.slotDevices.length,
+    },
   );
+}
+
+export function embeddingSlotPlan(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): {
+  slotDevices: DaemonWorkerSlotDevice[];
+  gpuSlotIndex?: number;
+  cpuFallbackSlotIndex: number;
+} {
+  const requestedWorkers = optionalWorkerCountFromEnv(env, 'OPTSIDIAN_SEARCH_EMBEDDING_WORKERS');
+  const provider = (env.OPTSIDIAN_SEARCH_EMBEDDING_PROVIDER ?? 'local-onnx').trim().toLowerCase();
+  if (provider !== 'local-onnx') {
+    const slotCount = requestedWorkers ?? 1;
+    return {
+      slotDevices: Array.from({ length: slotCount }, (): DaemonWorkerSlotDevice => ({ kind: 'cpu' })),
+      cpuFallbackSlotIndex: 0,
+    };
+  }
+  const slotCount = Math.max(2, requestedWorkers ?? 2);
+  // The GPU slot's device is the platform's GPU accelerator: CUDA on Linux/Windows, CoreML on macOS.
+  // The GPU device owner drives it identically; only the execution provider differs.
+  const gpuSlotDevice: DaemonWorkerSlotDevice =
+    platform === 'darwin' ? { kind: 'coreml' } : { kind: 'cuda', deviceId: cudaDeviceIdFromEnv(env) };
+  const slotDevices: DaemonWorkerSlotDevice[] = [gpuSlotDevice, { kind: 'cpu' }];
+  while (slotDevices.length < slotCount) slotDevices.push({ kind: 'cpu' });
+  return {
+    slotDevices,
+    gpuSlotIndex: 0,
+    cpuFallbackSlotIndex: 1,
+  };
+}
+
+function cudaDeviceIdFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = env.OPTSIDIAN_SEARCH_CUDA_DEVICE_ID?.trim();
+  if (!raw || !/^\d+$/u.test(raw)) return 0;
+  return Math.max(0, Math.floor(Number(raw)));
 }
 
 function envBytesForPool(env: NodeJS.ProcessEnv, key: string): number | undefined {

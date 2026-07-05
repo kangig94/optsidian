@@ -184,6 +184,22 @@ measurements or isolation. Set `OPTSIDIAN_SEARCH_MODEL_DEVICE=gpu` for strict
 GPU mode: if CUDA/cuDNN/CoreML or GPU memory is unavailable, optsidian errors
 instead of silently using CPU.
 
+Dense query and document encodes share a daemon-global GPU owner. Queries pass
+through a shared-session turnstile and are admitted before the next bulk unit;
+bulk document encode is batched by worker-owned token budget. CPU is fallback
+only, not a concurrent overflow lane. `OPTSIDIAN_SEARCH_CUDA_DEVICE_ID` selects
+the CUDA device on CUDA platforms, and `OPTSIDIAN_SEARCH_EMBEDDING_WORKERS > 1`
+is accepted without changing that fallback-only policy. Local ONNX clamps
+`OPTSIDIAN_SEARCH_EMBEDDING_WORKERS=1` to the required two slots (GPU + CPU
+fallback); values above 2 create extra worker threads that current scheduler
+dispatch does not target, so raising it does not increase bulk encode
+throughput.
+
+Scheduler state, batching, runtime device state, and `auto|cpu|gpu` routing do
+not change the dense index identity. Batched GPU/CPU fallback builds publish the
+same kind of content-addressed MVCC generation; there is no reindex or
+projection/precision change for scheduler changes.
+
 ## Native Commands And Plugins
 
 Optsidian delegates native Obsidian commands when Obsidian already handles them

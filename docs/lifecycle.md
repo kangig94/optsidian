@@ -215,121 +215,187 @@ a server-checked deadline.
 
 The model session is **separate from the daemon**: the daemon is resident, but the model loads on
 demand and unloads on idle. The daemon now creates one process-scoped `EmbedScheduler` during
-startup (`server.ts:159-163`) and passes it into `ProfileManager`; the scheduler owns the embedding
-worker pool and one `VectorGenerationManager` (`embed-scheduler.ts:57-100`). Profile runtimes lease
+startup (`SearchDaemon.initialize`) and passes it into `ProfileManager`; the scheduler owns the
+embedding worker pool, `GpuEmbeddingDevice`, and one `VectorGenerationManager`
+(`EmbedScheduler.constructor`). Profile runtimes lease
 those process owners rather than constructing their own vector/model owners
 (`ProfileRuntime.create`), while still owning their profile-specific analyzer/search resources.
 
-The model itself still lives inside the **embedding worker** (`worker-entry.ts`, `kind:
-"embedding"`), which owns a single module-level `ModelSessionLifecycle` keyed by a stable provider key
-(`worker-entry.ts:49-51, 225-239`). The scheduler is the admission and fairness layer in front of that
-worker: priority lanes are `query > save > refresh > rebuild` (`embed-scheduler.ts:54-86`), query
-encodes are single-flighted (`embed-scheduler.ts:104-140`), and daemon close drains the scheduler before
-closing the model worker and vector manager (`embed-scheduler.ts:187-207`).
+The model itself still lives inside **embedding workers** (`worker-entry.ts`, `kind: "embedding"`).
+Each worker owns a module-level `ModelSessionLifecycle` keyed by `ResidentModelKey`, which describes
+which model bytes and ONNX execution policy can serve the request. Device policy and concrete device id
+are not part of that resident key. The process-scoped scheduler is the admission/fairness layer in
+front of those workers, and daemon close drains the scheduler before closing the model workers and
+vector manager.
+
+### Two-tier encode scheduler topology
+
+Foreground query encode and background document encode share one daemon-global `GpuEmbeddingDevice`
+owner for the configured GPU slot. `EmbedScheduler` is a thin router: `origin=text` query encodes go to
+the query lane, and save/refresh/rebuild document encodes go to fair bulk lanes. The owner serializes
+ONNX execution for the shared slot. A queued query is admitted before the next bulk unit starts; an
+already-running ONNX unit is not interrupted. This bounds dense query latency under rebuild by one
+token-budget bulk unit in the shared-session design.
+
+Bulk queues are fair by `(profileHash, vault)`, so two concurrent vault rebuilds share the same owner
+instead of constructing profile-local model owners. The owner exposes a `queryMode` seam and status
+field, but the only built mode today is `shared`: there is no reserved second query session, no second
+resident ONNX session, and no reserved-session load/OOM/retry machinery. A reserved query session is a
+future extension point behind that mode seam.
+
+CPU is fallback-only in this scheduler. While the GPU slot is healthy, the owner does not run
+concurrent CPU bulk and there is no CPU-overflow throughput lane or overflow-width knob. The CPU slot
+serves query or bulk only when policy forces CPU, the configured GPU slot is absent, or the GPU owner is
+temporarily unavailable because load/probe/runtime failed.
 
 ### Load triggers — encode is the only trigger
 
-The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` -> `ensureSession`
-(`model-session/lifecycle.ts:69-136`). Every encode now enters through `EmbedScheduler.encode`
-(`embed-scheduler.ts:104-140`):
+The lifecycle loads a session lazily inside `ModelSessionLifecycle.encode` ->
+`ModelSessionLifecycle.ensureSession`. Every daemon encode enters through `EmbedScheduler.encode`:
 
 - **`origin=text` query encode** — a text retrieval query is embedded only after retrieve has pinned the
   lexical corpus and attached a usable, space-comparable dense generation. If dense cannot contribute,
   `resolveRetrieveOriginVector` returns without calling `encodeRetrieveQueryVector`
-  (`service.ts:699-716`).
-- **Document embed** during retrieval generation build — `createWorkerEmbeddingSetBuilder` batches
-  document dense text through the scheduler in 32-document slices. Load/rebuild/refresh use their
-  corresponding lanes, and save-on-write uses the `save` lane through `publishSaveSnapshot`.
+  (`DenseSearchStoreService.resolveRetrieveOriginVector`).
+- **Document embed** during retrieval generation build — `createWorkerEmbeddingSetBuilder` sends
+  candidate document windows plus `maxTokenBudget` through the scheduler. Load/rebuild/refresh use their
+  corresponding bulk lanes, and save-on-write uses the `save` lane through `publishSaveSnapshot`.
 
 **`origin=note`, `origin=pair`, and `origin=global` do NOT load the model.** They resolve source text
 from the pinned lexical corpus, then use stored vectors from the attached dense generation
-(`service.ts:631-765`). If a source vector is absent, stale by `contentHash`, or dense is not usable,
-the result is a soft `index-not-ready` with the dense signal attached, not an on-demand encode.
-`origin=pair` accepts note-path sides only; raw text in either side is rejected at the daemon boundary
-(`service.ts:659-667`).
+(`DenseSearchStoreService.resolveRetrieveOriginText` and
+`DenseSearchStoreService.resolveRetrieveOriginVector`). If a source vector is absent, stale by
+`contentHash`, or dense is not usable, the result is a soft `index-not-ready` with the dense signal
+attached, not an on-demand encode. `origin=pair` accepts note-path sides only; raw text in either side is
+rejected at the daemon boundary by `DenseSearchStoreService.resolveRetrieveOriginText`.
 
 ### Device selection: policy, probe, and observed session facts
 
 `OPTSIDIAN_SEARCH_MODEL_DEVICE=auto|cpu|gpu` is normalized into the runtime profile as
-`embedding.devicePolicy` (`runtime-profile.ts:99-103, 363-365, 438-444`) and copied into worker env as
-`OPTSIDIAN_SEARCH_MODEL_DEVICE` (`runtime-profile.ts:262-275`). The default is `auto`.
+`embedding.devicePolicy` by `embeddingDevice` / `normalizeSearchRuntimeProfile` and copied into worker
+env as `OPTSIDIAN_SEARCH_MODEL_DEVICE` by `envForSearchRuntimeProfile`. The default is `auto`.
 
 - **`cpu`**: always requests the CPU provider and does not run the VRAM/free-memory probe
-  (`worker-entry.ts:317-326`; `lifecycle.ts:362-364`).
-- **`gpu`**: requests CUDA on Linux or CoreML on macOS (`worker-entry.ts:339-365`) with ONNX CPU
-  fallback disabled (`local-onnx.ts:400-448, 472-498`). If the GPU session cannot be created because
-  CUDA/cuDNN/CoreML is unavailable, memory is exhausted, or the execution provider fails,
-  `startLoadWithFallback` raises `MODEL_DEVICE_UNAVAILABLE` and never falls back to CPU
-  (`lifecycle.ts:246-268, 558-565`). The failed provider is closed before the error escapes
-  (`worker-entry.ts:268-315`), so no resident CPU or partial GPU session is left behind.
+  (`deviceLoadPolicyForPayload`; `ModelSessionLifecycle.pickLoadDevice`).
+- **`gpu`**: requests CUDA on Linux/Windows or CoreML on macOS (`executionProviderForDevice`) with ONNX
+  CPU fallback disabled (`providerForPayload`; `LocalOnnxProvider.allowCpuFallback`). If the GPU session
+  cannot be created because CUDA/cuDNN/CoreML is unavailable, memory is exhausted, or the execution
+  provider fails, `ModelSessionLifecycle.startLoadWithFallback` raises `MODEL_DEVICE_UNAVAILABLE` via
+  `modelDeviceUnavailableError` and never falls back to CPU. The failed provider is closed before the
+  error escapes (`providerSessionForPayload`), so no resident CPU or partial GPU session is left behind.
 - **`auto`**: runs a real free-memory probe and compares `freeBytes` with the model descriptor's
   conservative `requiredVramBytes * 1.5` estimate (pending empirical peak-VRAM measurement)
-  (`worker-entry.ts:317-326`; `lifecycle.ts:362-377`). Linux probes free GPU memory through
-  `nvidia-smi --query-gpu=memory.free`; macOS uses `os.freemem()` as the unified-memory RAM proxy;
-  other platforms report zero (`vram-probe.ts:31-60, 73-98`). Auto chooses GPU only when the
+  (`deviceLoadPolicyForPayload`; `ModelSessionLifecycle.pickLoadDevice`). Linux probes free GPU memory
+  through `nvidia-smi --query-gpu=memory.free`; macOS uses `os.freemem()` as the unified-memory RAM
+  proxy; other platforms report zero (`embeddingVramProbe`). Auto chooses GPU only when the
   headroom check passes; otherwise it starts on CPU. A probe shortfall keeps CPU until
   `probeEpoch + VRAM_PROBE_TTL_MS`; an auto-selected GPU load/runtime failure or GPU-requested
   actual-CPU result gracefully uses CPU and marks GPU unavailable from the failure observation time
   (`now() + VRAM_PROBE_TTL_MS`).
 
-The probe result is cached for 60 seconds (`vram-probe.ts:4, 46-60`). Auto mode also uses the same
-60-second window as a promotion throttle: while `gpuUnavailableUntilMs` is in the future,
-`pickLoadDevice` returns CPU without re-probing (`lifecycle.ts:366-390`). Actual `device` and
-`executionProvider` are observable in daemon status at `profiles[hash].model`
-(`lifecycle.ts:185-198`; `profile-manager.ts:363-411`), and `search:eval` JSON copies the compact
-per-profile model summary (`scripts/search-eval.mjs:260-288, 570-584`).
+The embedding pool is device-tagged. For local ONNX, slot 0 is the GPU accelerator (CUDA on
+Linux/Windows, CoreML on macOS) and slot 1 is the CPU fallback. CUDA receives
+`{ name:"cuda", deviceId }`, with `OPTSIDIAN_SEARCH_CUDA_DEVICE_ID` selecting the CUDA device; CoreML
+and CPU ignore the CUDA id. `embeddingSlotPlan` clamps local ONNX worker count to at least 2, so
+`OPTSIDIAN_SEARCH_EMBEDDING_WORKERS=1` still creates the GPU + CPU-fallback pair; values above 2 create
+extra CPU worker threads that current scheduler dispatch does not target because
+`EmbeddingWorkerPool.encodeGpu` and `EmbeddingWorkerPool.encodeCpuFallback` only address the GPU and
+fallback slots. Raising the value does not increase bulk encode throughput.
+
+The probe result is cached for 60 seconds (`VRAM_PROBE_TTL_MS`). Auto mode and the GPU owner use
+that same approximate retry window: while GPU is unavailable, demand is served on CPU; after the window,
+the next query or bulk demand re-attempts the GPU. There is no detached background re-upgrade loop in
+the scheduler path. Forced `gpu` never falls back; GPU unavailability escapes as
+`MODEL_DEVICE_UNAVAILABLE`.
+
+Daemon status exposes the fleet view at `profiles[hash].model`: `query { device, executionProvider,
+loaded, mode, retryAfter }` and `bulk { devices:[{ deviceId, executionProvider, busy, docsPerSec }],
+queueDepth, inFlight, batchTokenBudget, etaMs }`. The resident model read is bounded by the
+model-status deadline (100 ms), so `Status` returns partial/busy facts instead of waiting unbounded on a
+busy encode slot.
+
+### Worker-owned token-budget batches
+
+Bulk encode is token-budgeted inside the worker-owned local ONNX path. The parent sends a candidate
+window, `inputKind:"document"`, `maxTokenBudget`, `documentIds`, and `requestIndexes`; the worker uses
+the same render/tokenize/truncate path as single-row encode and consumes the largest prefix whose
+summed token count fits the budget. A single over-budget truncated document is admitted alone.
+
+The provider builds padded `[B,seq]` feeds, runs one `session.run` when the model accepts dynamic
+batches, mean-pools rank-3 `last_hidden_state` per row with the attention mask, L2-normalizes each row,
+and returns `vectors`, `consumedCount`, `requestIndexes`, `documentIds`, and `tokenCounts`. The builder
+validates the returned row metadata, scatters vectors back by request index/document id, and prepends
+unconsumed rows for the next token-budget unit. `encodeBatch()` remains available for non-scheduler
+callers.
+
+### Identity boundary
+
+The runtime has a 3-key split. `EmbeddingSpaceKey` is the existing persisted index identity
+(`embeddingSpaceIdForRecipe`, with `embeddingRecipeFreshnessId` and
+`vectorGenerationIdForManifest` on vector metadata). `ResidentModelKey` says which loaded
+bytes/session can serve a request and deliberately excludes device id and `auto|cpu|gpu` policy.
+`AdmissionPolicy` is only runtime routing (`auto|cpu|gpu`).
+
+Only `EmbeddingSpaceKey` participates in persisted retrieval/vector identity. Batching, scheduling,
+device policy, CUDA device id, retry state, and whether rows ran on CPU or GPU are not part of the
+index identity tuple. Batched, multi-device, or heterogeneous builds are content-addressed generations
+served consistently under MVCC; there is no reindex, no precision/projection change, and
+`INDEX_BUILD_VERSION` / `ANALYZER_VERSION` are unchanged for the scheduler.
 
 ### Single-flight coalescing
 
 Query encodes single-flight in the scheduler by payload key before they reach the worker
-(`embed-scheduler.ts:123-171`). Inside the embedding worker, concurrent encodes share the current
-`loadAttempt`; `ensureSession` returns the live session if present, waits on an in-flight load when one
-exists, or starts one new load attempt (`lifecycle.ts:204-243`). Each waiter gets its own deadline and
-abort signal (`lifecycle.ts:397-464`).
+(`EmbedScheduler.querySingleFlights`). Inside the embedding worker, concurrent encodes share the
+current `loadAttempt`; `ensureSession` returns the live session if present, waits on an in-flight load
+when one exists, or starts one new load attempt. Each waiter gets its own deadline and abort signal.
 
 ### Idle unload
 
 After every encode, `armIdleUnload()` schedules `unload()` on an `unref`'d timer
-(`lifecycle.ts:151-157, 471-481`). The idle window is `idleMs`, default `5 * 60 * 1000`
-(`ModelSessionLifecycle` default `lifecycle.ts:120-126`; supplied by `worker-entry.ts:254-264,
-372-376` from `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, default 5 min). If `idleMs <= 0` the session unloads
-**immediately** after each encode (`lifecycle.ts:471-475`). `unload()` clears the timer, cancels active
-load/promotion attempts, terminates in-flight provider loads, and closes the resident session
-(`lifecycle.ts:160-182`). This is why "zero footprint at rest" applies to the _model_, not the daemon.
+(`ModelSessionLifecycle.armIdleUnload`). The idle window is `idleMs`, default `5 * 60 * 1000`
+(`ModelSessionLifecycle.constructor`); `worker-entry` supplies it from `modelIdleMs()` /
+`OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, default 5 min. If `idleMs <= 0` the session unloads **immediately**
+after each encode. `unload()` clears the timer, cancels active load/promotion attempts, terminates
+in-flight provider loads through `terminateLoad()`, and closes the resident session
+(`ModelSessionLifecycle.unload`). This is why "zero footprint at rest" applies to the _model_, not the
+daemon.
 
-### CPU → GPU promotion
+### Demand-driven GPU recovery
 
-Promotion exists only in `auto`. After a successful foreground query encode on a CPU session,
-`promoteCpuSessionIfGpuAvailable` runs in the background after the vectors and resident facts are
-captured; if the real probe now has headroom, it loads a GPU session, swaps it in, and closes the CPU
-session (`lifecycle.ts:129-157, 308-359`). Promotion failures do not fail or delay the completed
-query; they mark GPU unavailable for the same 60-second throttle window (`lifecycle.ts:353-359,
-388-390`). The scheduler suppresses promotion outside the query lane and while rebuild-lane work is
-active (`embed-scheduler.ts:173-186`).
+The scheduler path suppresses worker CPU-to-GPU promotion and lets the GPU owner drive recovery. Under
+`auto`, a GPU load/runtime failure marks the owner unavailable for roughly 60 seconds and routes demand
+to the CPU fallback slot. After the retry window, the next query or bulk unit tries the GPU again. This
+keeps recovery demand-driven: there is no background probe/reload loop, and the first recovered demand
+may pay load/probe cost before later demand uses the GPU again.
 
 ### Load deadline, cancellation, per-waiter cancellation
 
 - **Encode deadline**: `Date.now() + modelEncodeDeadlineMs()` (default `60_000`,
-  `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts:239-245, 378-381`). If the request
-  deadline is within 100 ms the daemon **skips** dense encode entirely and warns instead of failing
-  (`service.ts:154-194`).
-- **GPU load failures**: `auto` can fall back to CPU after a GPU-picked load failure; forced `gpu`
-  converts the failure to `MODEL_DEVICE_UNAVAILABLE` and does not retry CPU at the lifecycle or ONNX
-  layer (`lifecycle.ts:246-268`; `local-onnx.ts:472-498`).
+  `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`) is set by worker `modelEncode()` before dispatching to
+  `ModelSessionLifecycle`. If the request deadline is within 100 ms, `encodeRetrieveQueryVector`
+  **skips** dense encode entirely and warns instead of failing.
+- **GPU load failures**: `auto` falls back to CPU only through the scheduler owner. Forced `gpu`
+  converts the failure to `MODEL_DEVICE_UNAVAILABLE` and does not retry CPU at the lifecycle, owner, or
+  ONNX layer (`GpuEmbeddingDevice.canFallbackToCpu`; `ModelSessionLifecycle.startLoadWithFallback`;
+  `LocalOnnxProvider.allowCpuFallback`).
 - **Deadline / abort**: `waitForLoadAttempt` creates a per-waiter signal that races the wait against a
   deadline timer and caller `AbortSignal`; it rejects `DEADLINE_EXCEEDED` / `CANCELLED` without
-  changing the device policy (`lifecycle.ts:397-464, 525-536`). Unload/supersession closes active
-  attempts and any in-flight provider load (`lifecycle.ts:160-182, 271-306`; `worker-entry.ts:328-337`).
+  changing the device policy (`ModelSessionLifecycle.waitForLoadAttempt`;
+  `ModelSessionLifecycle.createWaiterSignal`). Unload/supersession closes active attempts and any
+  in-flight provider load (`ModelSessionLifecycle.unload`; `ModelSessionLifecycle.startOwnedLoad`;
+  `terminateLoad()`).
 
-| Name                     | Value                                              | Source                                                                 |
-| ------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------- |
-| Device policy            | `auto` (default) / `cpu` / `gpu`                   | `OPTSIDIAN_SEARCH_MODEL_DEVICE`, `runtime-profile.ts:363-365`          |
-| Model idle unload        | `5 min` (`0` ⇒ unload immediately)                 | `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, `worker-entry.ts:372-376`            |
-| Encode deadline          | `60_000` ms                                        | `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts:378-381` |
-| VRAM headroom multiplier | `1.5×`                                             | `lifecycle.ts:373-374`                                                 |
-| VRAM probe / throttle    | Real free memory, cached/throttled for `60_000` ms | `vram-probe.ts:4, 46-60`; `lifecycle.ts:366-390`                       |
-| GPU execution provider   | CUDA on Linux, CoreML on macOS                     | `worker-entry.ts:361-365`; `local-onnx.ts:472-484`                     |
-| Embedding workers        | `1` required                                       | `OPTSIDIAN_SEARCH_EMBEDDING_WORKERS`, `pools.ts:631-660`               |
+| Name                      | Value                                                            | Source                                                         |
+| ------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| Device policy             | `auto` (default) / `cpu` / `gpu`                                 | `OPTSIDIAN_SEARCH_MODEL_DEVICE`, `runtime-profile.ts`          |
+| CUDA device id            | non-negative integer, default `0`                                | `OPTSIDIAN_SEARCH_CUDA_DEVICE_ID`, `pools.ts`                  |
+| Model idle unload         | `5 min` (`0` ⇒ unload immediately)                               | `OPTSIDIAN_SEARCH_MODEL_IDLE_MS`, `worker-entry.ts`            |
+| Encode deadline           | `60_000` ms                                                      | `OPTSIDIAN_SEARCH_MODEL_ENCODE_DEADLINE_MS`, `worker-entry.ts` |
+| VRAM headroom multiplier  | `1.5×`                                                           | `lifecycle.ts`                                                 |
+| VRAM probe / retry window | Real free memory, cached/throttled for `60_000` ms               | `vram-probe.ts`; `lifecycle.ts`; `embed-scheduler.ts`          |
+| GPU execution provider    | CUDA on Linux/Windows, CoreML on macOS                           | `pools.ts`; `worker-entry.ts`; `local-onnx.ts`                 |
+| Embedding workers         | local ONNX clamps to >=2; only GPU + CPU fallback slots dispatch | `embeddingSlotPlan`; `encodeGpu`; `encodeCpuFallback`          |
+| Bulk token budget         | `8192` tokens by default                                         | `DEFAULT_EMBEDDING_TOKEN_BUDGET`, `snapshot-store.ts`          |
 
 ---
 
@@ -682,7 +748,7 @@ changed/new docs simply ride lexical-only because their dense records are absent
 - **Model cold but dense usable**: `origin=text` encode triggers `ensureSession` -> `pickLoadDevice`
   (`auto` by default: real probe, then GPU if it fits or CPU otherwise) -> `startLoadWithFallback` ->
   session cached -> post-encode idle unload (`lifecycle.ts`). Query encodes are single-flighted by
-  the scheduler (`embed-scheduler.ts:104-140`).
+  the scheduler (`EmbedScheduler.querySingleFlights`).
 - **Dense cold/stale/rebuilding/unreadable**: no model load is attempted for `origin=text`; the query is
   served lexical/link-only with `dense.state` explaining why dense did not contribute
   (`resolveRetrieveOriginVector`).
@@ -703,8 +769,8 @@ changed/new docs simply ride lexical-only because their dense records are absent
 
 After the last encode, `armIdleUnload` schedules `unload` at `idleMs` (5 min default) on an `unref`'d
 timer; when it fires the session closes and VRAM/CPU memory is released
-(`lifecycle.ts:86, 336-352`). The **daemon stays up** — only the model session is freed. A later
-encode re-loads on demand.
+(`ModelSessionLifecycle.armIdleUnload`; `ModelSessionLifecycle.unload`). The **daemon stays up** — only
+the model session is freed. A later encode re-loads on demand.
 
 ### (f) Daemon restart with a dirty index
 

@@ -405,6 +405,12 @@ test('index eval reports the runtime lexical store cache path', async () => {
     assert.equal(report.actions[0].indexBuildMs, 0);
     assert.equal(report.actions[0].buildTimingSource, 'daemon-progress');
     assert.equal(report.actions[0].buildTimingResolutionMs, 0);
+    const actionModel = Object.values(report.actions[0].model ?? {})[0];
+    assert.ok(actionModel, 'index eval action should include a fleet model summary');
+    assert.deepEqual(Object.keys(actionModel).sort(), ['bulk', 'query']);
+    assert.equal(typeof actionModel.query.loaded, 'boolean');
+    assert.equal(Array.isArray(actionModel.bulk.devices), true);
+    assert.equal(typeof actionModel.bulk.queueDepth, 'number');
   } finally {
     const hasOwner = fs.existsSync(runtimeDir) && fs.readdirSync(runtimeDir).some((name) => name.endsWith('.owner'));
     if (hasOwner) {

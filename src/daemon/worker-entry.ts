@@ -3,7 +3,6 @@ import { analyzeSearchQuery } from '../core/search/analysis/query.js';
 import type { SearchTextAnalysisOptions } from '../core/search/analysis/query.js';
 import { resolveSearchAnalyzer, withSearchAnalyzerLease, type SearchAnalyzer } from '../core/search/analyzer.js';
 import { LocalOnnxProvider, type OnnxExecutionProvider } from '../core/search/dense/local-onnx.js';
-import { localOnnxModelDescriptor } from '../core/search/dense/artifacts.js';
 import { DeterministicHashProvider } from '../core/search/dense/provider.js';
 import type { EmbeddingProvider } from '../core/search/dense/provider.js';
 import { ModelSessionLifecycle } from './model-session/lifecycle.js';
@@ -14,8 +13,8 @@ import type {
   ModelSession,
   ModelSessionLoadOptions,
 } from './model-session/lifecycle.js';
-import { createVramProbe } from './model-session/vram-probe.js';
-import { stableProviderKey } from './model-session/provider-key.js';
+import type { DaemonWorkerSlotDevice } from './worker-pool.js';
+import { residentModelKey } from './model-session/provider-key.js';
 import type { IndexAffectingSearchSettings } from '../core/search/index-settings.js';
 import { readOptsidianSettings } from '../core/settings.js';
 import type {
@@ -50,13 +49,14 @@ type WorkerEnvelope = {
 type WorkerContext = {
   optsidianSearchWorker?: boolean;
   kind?: 'analyzer' | 'search' | 'embedding' | 'vector';
+  slotIndex?: number;
+  slotDevice?: DaemonWorkerSlotDevice;
   env?: NodeJS.ProcessEnv;
 };
 
 let analyzer: SearchAnalyzer | undefined;
 let embeddingLifecycle: ModelSessionLifecycle | undefined;
-let embeddingLifecycleKey: string | undefined;
-const embeddingVramProbe = createVramProbe();
+let embeddingLifecycleResidentModelKey: string | undefined;
 const inFlightLocalOnnxProviders = new Map<string, LocalOnnxProvider>();
 let searchDaemonWorkerProcessErrorHandlersInstalled = false;
 
@@ -150,11 +150,11 @@ async function dispatch(
     throw Object.assign(new Error(`unsupported search worker job: ${type}`), { code: 'BAD_REQUEST' });
   }
   if (context.kind === 'embedding') {
-    if (type === 'modelEncode') return modelEncode(payload as ModelEncodeWorkerPayload);
+    if (type === 'modelEncode') return modelEncode(payload as ModelEncodeWorkerPayload, context);
     if (type === 'modelUnload') {
       await embeddingLifecycle?.unload();
       embeddingLifecycle = undefined;
-      embeddingLifecycleKey = undefined;
+      embeddingLifecycleResidentModelKey = undefined;
       return { unloaded: true };
     }
     if (type === 'modelStats') return embeddingLifecycle?.stats() ?? { loaded: false };
@@ -236,13 +236,33 @@ async function dispatch(
   throw Object.assign(new Error(`unsupported analyzer worker job: ${type}`), { code: 'BAD_REQUEST' });
 }
 
-async function modelEncode(input: ModelEncodeWorkerPayload) {
-  const lifecycle = await lifecycleForPayload(input.provider);
-  const encoded = await lifecycle.encode(input.texts, {
+async function modelEncode(input: ModelEncodeWorkerPayload, context: WorkerContext) {
+  const lifecycle = await lifecycleForPayload(input.provider, context);
+  const encodeOptions = {
     deadline: Date.now() + modelEncodeDeadlineMs(),
-    origin: input.inputKind === 'query' ? 'query-text' : 'document-embed',
-    suppressCpuPromotion: input.suppressCpuPromotion,
-  });
+    origin: input.inputKind === 'query' ? ('query-text' as const) : ('document-embed' as const),
+    suppressCpuPromotion: true,
+    policy: deviceLoadPolicyForPayload(input.provider, context),
+  };
+  if (input.maxTokenBudget !== undefined) {
+    const encoded = await lifecycle.encodeTokenBudgetBatch(input.texts, {
+      ...encodeOptions,
+      maxTokenBudget: input.maxTokenBudget,
+      requestIndexes: input.requestIndexes,
+      documentIds: input.documentIds,
+    });
+    const provider = encoded.providerIdentity;
+    if (!provider) throw Object.assign(new Error('embedding provider identity is unavailable'), { code: 'INTERNAL' });
+    return {
+      provider,
+      vectors: encoded.vectors,
+      consumedCount: encoded.consumedCount,
+      requestIndexes: encoded.requestIndexes,
+      documentIds: encoded.documentIds,
+      tokenCounts: encoded.tokenCounts,
+    };
+  }
+  const encoded = await lifecycle.encode(input.texts, encodeOptions);
   const provider = encoded.providerIdentity;
   if (!provider) throw Object.assign(new Error('embedding provider identity is unavailable'), { code: 'INTERNAL' });
   return {
@@ -251,14 +271,17 @@ async function modelEncode(input: ModelEncodeWorkerPayload) {
   };
 }
 
-async function lifecycleForPayload(payload: ModelProviderPayload): Promise<ModelSessionLifecycle> {
-  const key = stableProviderKey(payload);
-  if (embeddingLifecycle && embeddingLifecycleKey === key) return embeddingLifecycle;
+async function lifecycleForPayload(
+  payload: ModelProviderPayload,
+  context: WorkerContext,
+): Promise<ModelSessionLifecycle> {
+  const key = residentModelKey(payload);
+  if (embeddingLifecycle && embeddingLifecycleResidentModelKey === key) return embeddingLifecycle;
   await embeddingLifecycle?.unload('superseded');
-  embeddingLifecycleKey = key;
+  embeddingLifecycleResidentModelKey = key;
   embeddingLifecycle = new ModelSessionLifecycle({
-    policy: deviceLoadPolicyForPayload(payload),
-    loadSession: async (device, options) => providerSessionForPayload(payload, device, options, key),
+    policy: deviceLoadPolicyForPayload(payload, context),
+    loadSession: async (device, options) => providerSessionForPayload(payload, device, options, key, context),
     terminateLoad: async (loadId, requestedDevice, reason) => terminateLoad(loadId, requestedDevice, reason),
     idleMs: modelIdleMs(),
   });
@@ -269,9 +292,10 @@ async function providerSessionForPayload(
   payload: ModelProviderPayload,
   requestedDevice: ModelDevice,
   options: ModelSessionLoadOptions,
-  residentStableProviderKey: string,
+  residentKey: string,
+  context: WorkerContext,
 ): Promise<ModelSession> {
-  const provider = providerForPayload(payload, requestedDevice);
+  const provider = providerForPayload(payload, requestedDevice, options.policy.mode, context);
   const localOnnxProvider = provider instanceof LocalOnnxProvider ? provider : undefined;
   if (localOnnxProvider) inFlightLocalOnnxProviders.set(options.loadId, localOnnxProvider);
   try {
@@ -283,19 +307,43 @@ async function providerSessionForPayload(
       device,
       ...(executionProvider ? { executionProvider } : {}),
       providerIdentity: provider.identity,
-      stableProviderKey: residentStableProviderKey,
+      residentModelKey: residentKey,
       async encode(texts, encodeOptions) {
+        if (localOnnxProvider) {
+          return localOnnxProvider.encodeBatch(texts, {
+            inputKind: encodeOptions?.inputKind,
+            signal: encodeOptions?.signal,
+          });
+        }
         return Promise.all(
           texts.map(async (text) => {
-            if (localOnnxProvider) {
-              return localOnnxProvider.embed(text, {
-                inputKind: encodeOptions?.inputKind,
-                signal: encodeOptions?.signal,
-              });
-            }
             return provider.embed(text, { inputKind: encodeOptions?.inputKind });
           }),
         );
+      },
+      async encodeTokenBudgetBatch(texts, encodeOptions) {
+        if (localOnnxProvider) {
+          return localOnnxProvider.encodeTokenBudgetBatch(texts, {
+            inputKind: encodeOptions?.inputKind,
+            signal: encodeOptions?.signal,
+            maxTokenBudget: encodeOptions.maxTokenBudget,
+            requestIndexes: encodeOptions.requestIndexes,
+            documentIds: encodeOptions.documentIds,
+          });
+        }
+        const vectors = await Promise.all(
+          texts.map((text) => Promise.resolve(provider.embed(text, { inputKind: encodeOptions?.inputKind }))),
+        );
+        const requestIndexes = texts.map((_text, index) => encodeOptions.requestIndexes?.[index] ?? index);
+        return {
+          vectors,
+          consumedCount: vectors.length,
+          requestIndexes,
+          documentIds: requestIndexes.map(
+            (requestIndex, index) => encodeOptions.documentIds?.[index] ?? String(requestIndex),
+          ),
+          tokenCounts: vectors.map(() => 0),
+        };
       },
       async close() {
         const close = (provider as EmbeddingProvider & { close?: () => void | Promise<void> }).close;
@@ -314,15 +362,16 @@ async function providerSessionForPayload(
   }
 }
 
-function deviceLoadPolicyForPayload(payload: ModelProviderPayload): DeviceLoadPolicy {
+function deviceLoadPolicyForPayload(payload: ModelProviderPayload, context?: WorkerContext): DeviceLoadPolicy {
   if (payload.kind !== 'local-onnx') return { mode: 'cpu' };
-  if (payload.devicePolicy === 'cpu') return { mode: 'cpu' };
-  if (payload.devicePolicy === 'gpu') return { mode: 'gpu' };
-  return {
-    mode: 'auto',
-    requiredVramBytes: localOnnxModelDescriptor(payload.model).requiredVramBytes,
-    probeVram: embeddingVramProbe,
-  };
+  const slotDevice = requireEmbeddingSlotDevice(context);
+  switch (slotDevice.kind) {
+    case 'cpu':
+      return { mode: 'cpu' };
+    case 'cuda':
+    case 'coreml':
+      return { mode: 'gpu' };
+  }
 }
 
 async function terminateLoad(
@@ -336,7 +385,12 @@ async function terminateLoad(
   await provider.close();
 }
 
-function providerForPayload(payload: ModelProviderPayload, device: ModelDevice = 'cpu'): EmbeddingProvider {
+function providerForPayload(
+  payload: ModelProviderPayload,
+  device: ModelDevice = 'cpu',
+  resolvedPolicyMode: DeviceLoadPolicy['mode'] = 'cpu',
+  context?: WorkerContext,
+): EmbeddingProvider {
   if (payload.kind === 'deterministic-hash') {
     return new DeterministicHashProvider({
       model: payload.model,
@@ -345,11 +399,14 @@ function providerForPayload(payload: ModelProviderPayload, device: ModelDevice =
     });
   }
   if (payload.kind === 'local-onnx') {
+    const slotDevice = requireEmbeddingSlotDevice(context);
+    const executionProvider = executionProviderForDevice(device, slotDevice);
     return new LocalOnnxProvider({
       model: payload.model,
-      executionProvider: payload.executionProvider ?? executionProviderForDevice(device),
-      allowCpuFallback: payload.devicePolicy !== 'gpu',
+      executionProvider,
+      allowCpuFallback: resolvedPolicyMode !== 'gpu',
       executionPolicy: payload.executionPolicy,
+      deviceId: slotDevice.kind === 'cuda' ? slotDevice.deviceId : undefined,
     });
   }
   throw Object.assign(
@@ -358,7 +415,34 @@ function providerForPayload(payload: ModelProviderPayload, device: ModelDevice =
   );
 }
 
-function executionProviderForDevice(device: ModelDevice) {
+function requireEmbeddingSlotDevice(context: WorkerContext | undefined): DaemonWorkerSlotDevice {
+  if (context?.slotDevice) return context.slotDevice;
+  throw Object.assign(new Error('embedding worker is missing its slot device'), { code: 'INTERNAL' });
+}
+
+export function workerEntryDeviceLoadForTests(
+  payload: ModelProviderPayload,
+  slotDevice: DaemonWorkerSlotDevice,
+): {
+  policy: DeviceLoadPolicy;
+  executionProvider: OnnxExecutionProvider;
+  deviceId?: number;
+} {
+  const context: WorkerContext = { kind: 'embedding', slotDevice };
+  const policy = deviceLoadPolicyForPayload(payload, context);
+  const requestedDevice = policy.mode === 'cpu' ? 'cpu' : 'gpu';
+  const executionProvider = executionProviderForDevice(requestedDevice, slotDevice);
+  return {
+    policy,
+    executionProvider,
+    ...(slotDevice.kind === 'cuda' ? { deviceId: slotDevice.deviceId } : {}),
+  };
+}
+
+function executionProviderForDevice(device: ModelDevice, slotDevice?: DaemonWorkerSlotDevice) {
+  if (slotDevice?.kind === 'cpu') return 'cpu';
+  if (slotDevice?.kind === 'cuda') return 'cuda';
+  if (slotDevice?.kind === 'coreml') return 'coreml';
   if (device === 'cpu') return 'cpu';
   if (process.platform === 'darwin') return 'coreml';
   return 'cuda';

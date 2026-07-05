@@ -437,6 +437,7 @@ const DEFAULT_BYTE_CAP = 128 * 1024 * 1024;
 const DEFAULT_RETENTION_COUNT = 8;
 const TMP_STALE_MS = 5 * 60 * 1000;
 const EMBEDDING_DOCUMENT_SLICE_SIZE = 32;
+const DEFAULT_EMBEDDING_TOKEN_BUDGET = 8192;
 const BACKGROUND_EMBEDDING_BUILD_LANES: readonly RetrievalEmbeddingBuildLane[] = ['save', 'refresh', 'rebuild'];
 
 export class DaemonSnapshotStore implements SnapshotStore {
@@ -2692,8 +2693,11 @@ export function createWorkerEmbeddingSetBuilder(input: {
   providerPayload: ModelProviderPayload;
   embedding: ScheduledEmbeddingEncoder;
   batchSize?: number;
+  maxTokenBudget?: number;
+  profileHash?: string;
 }): RetrievalEmbeddingSetBuilder {
   const batchSize = Math.max(1, Math.floor(input.batchSize ?? EMBEDDING_DOCUMENT_SLICE_SIZE));
+  const maxTokenBudget = Math.max(1, Math.floor(input.maxTokenBudget ?? DEFAULT_EMBEDDING_TOKEN_BUDGET));
   const recipe = embeddingRecipeIdentityForProvider(input.provider);
   const activeWorkSets = new Map<RetrievalEmbeddingBuildLane, DocIdKeyedEmbeddingWorkSet>();
   const nextIncremental = new Map<RetrievalEmbeddingBuildLane, DocIdKeyedDocumentSet>();
@@ -2755,12 +2759,16 @@ export function createWorkerEmbeddingSetBuilder(input: {
         const total = workSet.totalCount;
         builderInput.progress?.({ phase: 'embedding', total, completed: 0 });
         while (workSet.hasQueuedDocuments()) {
-          const batch = workSet.takeBatch(batchSize);
+          const candidateWindow = workSet.takeCandidateWindow(batchSize);
           const encoded = await input.embedding.encode(
             {
-              texts: batch.map((document) => document.text),
+              texts: candidateWindow.map((document) => document.text),
               inputKind: 'document',
               provider: input.providerPayload,
+              maxTokenBudget,
+              documentIds: candidateWindow.map((document) => document.documentId),
+              requestIndexes: candidateWindow.map((_document, index) => index),
+              ...(input.profileHash ? { profileHash: input.profileHash } : {}),
             },
             {
               deadline: builderInput.deadline ?? Date.now() + SEARCH_DAEMON_DEFAULT_MUTATION_DEADLINE_MS,
@@ -2771,17 +2779,42 @@ export function createWorkerEmbeddingSetBuilder(input: {
             lane,
           );
           assertProviderIdentityMatches(encoded.provider, input.provider.identity);
-          if (encoded.vectors.length !== batch.length) {
+          const consumedCount = encoded.consumedCount ?? encoded.vectors.length;
+          if (consumedCount <= 0) {
+            throw new Error('embedding worker token-budget batch did not consume any documents');
+          }
+          if (encoded.vectors.length !== consumedCount) {
             throw new Error(
-              `embedding worker returned ${encoded.vectors.length} vectors for ${batch.length} documents`,
+              `embedding worker returned ${encoded.vectors.length} vectors for ${consumedCount} consumed documents`,
             );
           }
-          workSet.completeBatch(batch, encoded.vectors);
+          const requestIndexes = encoded.requestIndexes ?? encoded.vectors.map((_vector, index) => index);
+          const documentIds =
+            encoded.documentIds ??
+            requestIndexes.map((requestIndex) => candidateWindow[requestIndex]?.documentId ?? '');
+          if (requestIndexes.length !== encoded.vectors.length || documentIds.length !== encoded.vectors.length) {
+            throw new Error('embedding worker returned inconsistent consumed row metadata');
+          }
+          const rows = encoded.vectors.map((vector, rowIndex) => {
+            const requestIndex = requestIndexes[rowIndex];
+            const document = candidateWindow[requestIndex];
+            if (!document) {
+              throw new Error(`embedding worker returned out-of-range request index ${requestIndex}`);
+            }
+            const documentId = documentIds[rowIndex];
+            if (documentId !== document.documentId) {
+              throw new Error(
+                `embedding worker returned document id ${documentId} for request index ${requestIndex}, expected ${document.documentId}`,
+              );
+            }
+            return { requestIndex, document, vector };
+          });
+          workSet.completeCandidateWindow(candidateWindow, rows);
           builderInput.progress?.({
             phase: 'embedding',
             total,
             completed: workSet.completedCount,
-            current: batch[batch.length - 1]?.path,
+            current: rows[rows.length - 1]?.document.path,
             message: `${workSet.completedCount} vectors`,
           });
         }
@@ -2857,6 +2890,15 @@ class DocIdKeyedDocumentSet {
     return batch;
   }
 
+  prepend(documents: readonly EmbeddingSetDocumentInput[]): void {
+    for (let index = documents.length - 1; index >= 0; index -= 1) {
+      const document = documents[index];
+      if (!document) continue;
+      if (!this.byDocId.has(document.documentId)) this.order.unshift(document.documentId);
+      this.byDocId.set(document.documentId, { ...document });
+    }
+  }
+
   has(documentId: string): boolean {
     return this.byDocId.has(documentId);
   }
@@ -2904,23 +2946,37 @@ class DocIdKeyedEmbeddingWorkSet {
     return this.queued.size > 0;
   }
 
-  takeBatch(limit: number): EmbeddingSetDocumentInput[] {
+  takeCandidateWindow(limit: number): EmbeddingSetDocumentInput[] {
     const batch = this.queued.takeBatch(limit);
     for (const document of batch) this.inFlight.add(document.documentId);
     return batch;
   }
 
-  completeBatch(batch: readonly EmbeddingSetDocumentInput[], vectors: readonly EmbeddingVector[]): void {
-    if (batch.length !== vectors.length) {
-      throw new Error(
-        `embedding work-set vector count ${vectors.length} does not match document count ${batch.length}`,
-      );
+  completeCandidateWindow(
+    candidateWindow: readonly EmbeddingSetDocumentInput[],
+    rows: readonly {
+      requestIndex: number;
+      document: EmbeddingSetDocumentInput;
+      vector: EmbeddingVector;
+    }[],
+  ): void {
+    const consumedDocumentIds = new Set<string>();
+    for (const row of rows) {
+      const expected = candidateWindow[row.requestIndex];
+      if (!expected || expected.documentId !== row.document.documentId) {
+        throw new Error(`embedding work-set consumed row does not match request index ${row.requestIndex}`);
+      }
+      if (consumedDocumentIds.has(row.document.documentId)) {
+        throw new Error(`embedding work-set completed document twice: ${row.document.documentId}`);
+      }
+      consumedDocumentIds.add(row.document.documentId);
     }
-    for (let index = 0; index < batch.length; index += 1) {
-      const document = batch[index];
-      const vector = vectors[index];
-      if (!document || !vector) continue;
-      this.inFlight.delete(document.documentId);
+    for (const document of candidateWindow) this.inFlight.delete(document.documentId);
+    const unconsumed = candidateWindow.filter((document) => !consumedDocumentIds.has(document.documentId));
+    this.queued.prepend(unconsumed);
+    const sortedRows = [...rows].sort((left, right) => left.requestIndex - right.requestIndex);
+    for (const row of sortedRows) {
+      const { document, vector } = row;
       this.embedded.add(document.documentId);
       this.documents.push(document);
       this.vectors.push(vector);

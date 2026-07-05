@@ -994,6 +994,86 @@ test('P4 CPU policy picks CPU', async () => {
   await lifecycle.unload();
 });
 
+test('AC5 GPU admission shares a compatible auto-loaded resident slot by resident model key', async () => {
+  const loadCalls = [];
+  const autoPolicy = {
+    mode: 'auto',
+    requiredVramBytes: 1,
+    probeVram: () => ({ freeBytes: 1024, atMs: Date.now(), fresh: true }),
+  };
+  const lifecycle = new ModelSessionLifecycle({
+    policy: autoPolicy,
+    loadSession: async (device, options) => {
+      loadCalls.push({ device, policy: options.policy.mode });
+      return {
+        ...fakeSession(device),
+        residentModelKey: 'resident-key-bge-m3',
+      };
+    },
+    idleMs: 1000,
+  });
+
+  const autoEncoded = await lifecycle.encode(['auto'], {
+    deadline: Date.now() + 1000,
+    origin: 'query-text',
+    policy: autoPolicy,
+  });
+  const gpuEncoded = await lifecycle.encode(['gpu'], {
+    deadline: Date.now() + 1000,
+    origin: 'query-text',
+    policy: { mode: 'gpu' },
+  });
+
+  assert.deepEqual(loadCalls, [{ device: 'gpu', policy: 'auto' }]);
+  assert.equal(autoEncoded.device, 'gpu');
+  assert.equal(gpuEncoded.device, 'gpu');
+  assert.equal(gpuEncoded.residentModelKey, 'resident-key-bge-m3');
+  assert.equal(lifecycle.stats().residentModelKey, 'resident-key-bge-m3');
+  await lifecycle.unload();
+});
+
+test('AC5 admission policy can replace an incompatible loaded resident device without changing resident key', async () => {
+  const loadCalls = [];
+  const autoCpuPolicy = {
+    mode: 'auto',
+    requiredVramBytes: 1024,
+    probeVram: () => ({ freeBytes: 0, atMs: Date.now(), fresh: true }),
+  };
+  const lifecycle = new ModelSessionLifecycle({
+    policy: autoCpuPolicy,
+    loadSession: async (device, options) => {
+      loadCalls.push({ device, policy: options.policy.mode });
+      return {
+        ...fakeSession(device),
+        residentModelKey: 'resident-key-bge-m3',
+      };
+    },
+    idleMs: 1000,
+  });
+
+  const autoEncoded = await lifecycle.encode(['auto'], {
+    deadline: Date.now() + 1000,
+    origin: 'query-text',
+    policy: autoCpuPolicy,
+    suppressCpuPromotion: true,
+  });
+  const gpuEncoded = await lifecycle.encode(['gpu'], {
+    deadline: Date.now() + 1000,
+    origin: 'query-text',
+    policy: { mode: 'gpu' },
+  });
+
+  assert.deepEqual(loadCalls, [
+    { device: 'cpu', policy: 'auto' },
+    { device: 'gpu', policy: 'gpu' },
+  ]);
+  assert.equal(autoEncoded.residentModelKey, 'resident-key-bge-m3');
+  assert.equal(gpuEncoded.residentModelKey, 'resident-key-bge-m3');
+  assert.equal(gpuEncoded.device, 'gpu');
+  assert.equal(lifecycle.stats().device, 'gpu');
+  await lifecycle.unload();
+});
+
 test('P7 idleMs=0 encode returns vectors and resident provider facts before unload', async () => {
   const providerIdentity = { id: 'local-onnx', model: 'bge-m3', dim: 1024, version: '1' };
   const lifecycle = new ModelSessionLifecycle({
@@ -1001,7 +1081,7 @@ test('P7 idleMs=0 encode returns vectors and resident provider facts before unlo
     loadSession: async (device) => ({
       ...fakeSession(device),
       providerIdentity,
-      stableProviderKey: 'stable-key-idle-zero',
+      residentModelKey: 'resident-key-idle-zero',
     }),
     idleMs: 0,
   });
@@ -1010,7 +1090,7 @@ test('P7 idleMs=0 encode returns vectors and resident provider facts before unlo
 
   assert.deepEqual(encoded.vectors, [[4, 0, 0]]);
   assert.deepEqual(encoded.providerIdentity, providerIdentity);
-  assert.equal(encoded.stableProviderKey, 'stable-key-idle-zero');
+  assert.equal(encoded.residentModelKey, 'resident-key-idle-zero');
   assert.equal(encoded.requestedLoadDevice, 'cpu');
   assert.equal(encoded.device, 'cpu');
   assert.equal(encoded.executionProvider, 'cpu');
@@ -1272,7 +1352,7 @@ test('P7 lifecycle stats are resident session facts', async () => {
     loadSession: async (device) => ({
       ...fakeSession(device),
       providerIdentity,
-      stableProviderKey: 'stable-key-a',
+      residentModelKey: 'resident-key-a',
     }),
     idleMs: 1000,
   });
@@ -1281,7 +1361,7 @@ test('P7 lifecycle stats are resident session facts', async () => {
     {
       loaded: lifecycle.stats().loaded,
       devicePolicy: lifecycle.stats().devicePolicy,
-      stableProviderKey: lifecycle.stats().stableProviderKey,
+      residentModelKey: lifecycle.stats().residentModelKey,
       providerIdentity: lifecycle.stats().providerIdentity,
       requestedLoadDevice: lifecycle.stats().requestedLoadDevice,
       device: lifecycle.stats().device,
@@ -1290,7 +1370,7 @@ test('P7 lifecycle stats are resident session facts', async () => {
     {
       loaded: true,
       devicePolicy: 'cpu',
-      stableProviderKey: 'stable-key-a',
+      residentModelKey: 'resident-key-a',
       providerIdentity,
       requestedLoadDevice: 'cpu',
       device: 'cpu',

@@ -127,7 +127,10 @@ export type ModelEncodeWorkerPayload = {
   texts: readonly string[];
   provider: ModelProviderPayload;
   inputKind?: EmbeddingInputKind;
-  suppressCpuPromotion?: boolean;
+  maxTokenBudget?: number;
+  documentIds?: readonly string[];
+  requestIndexes?: readonly number[];
+  profileHash?: string;
 };
 
 export type ModelEncodeWorkerResult = {
@@ -138,6 +141,10 @@ export type ModelEncodeWorkerResult = {
     version: string;
   };
   vectors: EmbeddingVector[];
+  consumedCount?: number;
+  documentIds?: string[];
+  requestIndexes?: number[];
+  tokenCounts?: number[];
 };
 
 export type ModelUnloadWorkerResult = {
@@ -147,13 +154,41 @@ export type ModelUnloadWorkerResult = {
 export type ModelStatsWorkerResult = {
   loaded: boolean;
   devicePolicy?: SearchModelDevicePolicy;
-  stableProviderKey?: string;
+  residentModelKey?: string;
   providerIdentity?: EmbeddingProviderIdentity;
   requestedLoadDevice?: 'cpu' | 'gpu';
   device?: 'cpu' | 'gpu';
   executionProvider?: OnnxExecutionProvider;
   loadingDevice?: 'cpu' | 'gpu';
   idleDeadline?: string;
+};
+
+type ModelQueryStatus = {
+  device: ModelStatsWorkerResult['device'] | null;
+  executionProvider: ModelStatsWorkerResult['executionProvider'] | null;
+  loaded: boolean;
+  mode: 'shared';
+  retryAfter: number | null;
+};
+
+export type ModelBulkDeviceStatus = {
+  deviceId: string;
+  executionProvider: ModelStatsWorkerResult['executionProvider'] | null;
+  busy: boolean;
+  docsPerSec: number;
+};
+
+type ModelBulkStatus = {
+  devices: ModelBulkDeviceStatus[];
+  queueDepth: number;
+  inFlight: number;
+  batchTokenBudget: number | null;
+  etaMs: number | null;
+};
+
+export type ProfileModelStatus = {
+  query: ModelQueryStatus;
+  bulk: ModelBulkStatus;
 };
 
 type VectorWorkerBasePayload = {
@@ -353,7 +388,7 @@ export type StatusResult = {
   };
   pools: unknown;
   searchStore: unknown;
-  profiles?: unknown;
+  profiles?: Record<string, { model: ProfileModelStatus } & Record<string, unknown>>;
   concurrency: DaemonConcurrencyStatus;
   vaults: Array<{
     vault: string;

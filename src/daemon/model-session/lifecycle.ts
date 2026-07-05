@@ -31,7 +31,7 @@ export type ModelSession = {
   readonly device: ModelDevice;
   readonly executionProvider?: OnnxExecutionProvider;
   readonly providerIdentity?: EmbeddingProviderIdentity;
-  readonly stableProviderKey?: string;
+  readonly residentModelKey?: string;
   encode(
     texts: readonly string[],
     options?: {
@@ -39,6 +39,16 @@ export type ModelSession = {
       inputKind?: 'query' | 'document';
     },
   ): Promise<readonly (readonly number[])[]>;
+  encodeTokenBudgetBatch?(
+    texts: readonly string[],
+    options: {
+      signal?: AbortSignal;
+      inputKind?: 'query' | 'document';
+      maxTokenBudget: number;
+      requestIndexes?: readonly number[];
+      documentIds?: readonly string[];
+    },
+  ): Promise<ModelSessionTokenBudgetBatchResult>;
   close(): void | Promise<void>;
 };
 
@@ -46,12 +56,13 @@ export type ModelSessionLoadOptions = {
   signal?: AbortSignal;
   loadId: string;
   purpose: ModelLoadPurpose;
+  policy: DeviceLoadPolicy;
 };
 
 export type ModelSessionLifecycleStats = {
   loaded: boolean;
   devicePolicy: DeviceLoadPolicy['mode'];
-  stableProviderKey?: string;
+  residentModelKey?: string;
   providerIdentity?: EmbeddingProviderIdentity;
   requestedLoadDevice?: ModelDevice;
   device?: ModelDevice;
@@ -62,7 +73,7 @@ export type ModelSessionLifecycleStats = {
 
 type ModelSessionFacts = {
   providerIdentity?: EmbeddingProviderIdentity;
-  stableProviderKey?: string;
+  residentModelKey?: string;
   requestedLoadDevice: ModelDevice;
   device: ModelDevice;
   executionProvider?: OnnxExecutionProvider;
@@ -72,6 +83,16 @@ export type ModelSessionEncodeResult = ModelSessionFacts & {
   vectors: readonly (readonly number[])[];
 };
 
+export type ModelSessionTokenBudgetBatchResult = {
+  vectors: readonly (readonly number[])[];
+  consumedCount: number;
+  requestIndexes: readonly number[];
+  documentIds: readonly string[];
+  tokenCounts: readonly number[];
+};
+
+export type ModelSessionTokenBudgetEncodeResult = ModelSessionFacts & ModelSessionTokenBudgetBatchResult;
+
 export type ModelSessionLifecycleOptions = {
   policy: DeviceLoadPolicy;
   loadSession: (device: ModelDevice, options: ModelSessionLoadOptions) => Promise<ModelSession>;
@@ -80,6 +101,14 @@ export type ModelSessionLifecycleOptions = {
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
   clearTimer?: (timer: NodeJS.Timeout) => void;
+};
+
+type ModelSessionOperationOptions = {
+  deadline: number;
+  signal?: AbortSignal;
+  origin: ModelEncodeOrigin;
+  suppressCpuPromotion?: boolean;
+  policy?: DeviceLoadPolicy;
 };
 
 type LoadDeviceSelection = {
@@ -117,12 +146,15 @@ export class ModelSessionLifecycle {
   private readonly promotionAttemptOwner: AttemptOwner<ModelSession> = { current: undefined };
   private readonly activeLoads = new Map<string, ActiveOwnedLoad>();
   private session: ModelSession | undefined;
+  private sessionPolicy: DeviceLoadPolicy | undefined;
   private loadAttempt: Attempt<ModelSession> | undefined;
   private promotionAttempt: Attempt<ModelSession> | undefined;
   private loadingDevice: ModelDevice | undefined;
   private idleTimer: NodeJS.Timeout | undefined;
   private nextLoadId = 1;
   private gpuUnavailableUntilMs: number | undefined;
+  private activePolicyMode: DeviceLoadPolicy['mode'] | undefined;
+  private activePolicyModeCount = 0;
 
   constructor(options: ModelSessionLifecycleOptions) {
     this.policy = options.policy;
@@ -141,37 +173,72 @@ export class ModelSessionLifecycle {
       signal?: AbortSignal;
       origin: ModelEncodeOrigin;
       suppressCpuPromotion?: boolean;
+      policy?: DeviceLoadPolicy;
     },
   ): Promise<ModelSessionEncodeResult> {
-    let session = await this.ensureSession({
-      deadline: options.deadline,
-      signal: options.signal,
-    });
-    let suppressPromotion =
-      options.suppressCpuPromotion === true ||
-      (this.policy.mode === 'auto' && session.requestedLoadDevice === 'gpu' && session.device === 'cpu');
+    const encoded = await this.withGpuRetryAndPromotion(options, (session) =>
+      this.encodeWithSession(session, texts, options),
+    );
+    return { vectors: encoded.result, ...encoded.facts };
+  }
+
+  async encodeTokenBudgetBatch(
+    texts: readonly string[],
+    options: {
+      deadline: number;
+      signal?: AbortSignal;
+      origin: ModelEncodeOrigin;
+      suppressCpuPromotion?: boolean;
+      policy?: DeviceLoadPolicy;
+      maxTokenBudget: number;
+      requestIndexes?: readonly number[];
+      documentIds?: readonly string[];
+    },
+  ): Promise<ModelSessionTokenBudgetEncodeResult> {
+    const encoded = await this.withGpuRetryAndPromotion(options, (session) =>
+      this.encodeTokenBudgetBatchWithSession(session, texts, options),
+    );
+    return { ...encoded.result, ...encoded.facts };
+  }
+
+  private async withGpuRetryAndPromotion<T>(
+    options: ModelSessionOperationOptions,
+    run: (session: ModelSession) => Promise<T>,
+  ): Promise<{ result: T; facts: ModelSessionFacts }> {
+    const policy = options.policy ?? this.policy;
+    const releasePolicyMode = this.enterPolicyMode(policy.mode);
     try {
-      let vectors: readonly (readonly number[])[];
+      let session = await this.ensureSession({
+        deadline: options.deadline,
+        signal: options.signal,
+        policy,
+      });
+      let suppressPromotion =
+        options.suppressCpuPromotion === true ||
+        (policy.mode === 'auto' && session.requestedLoadDevice === 'gpu' && session.device === 'cpu');
+      let result: T;
       try {
-        vectors = await this.encodeWithSession(session, texts, options);
+        result = await run(session);
       } catch (error) {
-        if (!this.isGpuRuntimeDeviceFailure(session, error)) throw error;
+        if (!this.isGpuRuntimeDeviceFailure(session, error, policy)) throw error;
         await this.retireResidentSession(session);
-        if (this.policy.mode === 'gpu') throw modelDeviceUnavailableError(error);
-        this.markGpuUnavailableFromNow();
+        if (policy.mode === 'gpu') throw modelDeviceUnavailableError(error);
+        this.markGpuUnavailableFromNow(policy);
         session = await this.ensureSession({
           deadline: options.deadline,
           signal: options.signal,
+          policy,
         });
         suppressPromotion = true;
-        vectors = await this.encodeWithSession(session, texts, options);
+        result = await run(session);
       }
       const facts = modelSessionFacts(session);
       if (options.origin === 'query-text' && !suppressPromotion) {
-        void this.promoteCpuSessionIfGpuAvailable(options.signal).catch(() => undefined);
+        void this.promoteCpuSessionIfGpuAvailable(policy, options.signal).catch(() => undefined);
       }
-      return { vectors, ...facts };
+      return { result, facts };
     } finally {
+      releasePolicyMode();
       if (this.session) this.armIdleUnload();
     }
   }
@@ -198,6 +265,7 @@ export class ModelSessionLifecycle {
 
     const session = this.session;
     this.session = undefined;
+    this.sessionPolicy = undefined;
     if (session) await session.close();
   }
 
@@ -205,8 +273,8 @@ export class ModelSessionLifecycle {
     const session = this.session;
     return {
       loaded: session !== undefined,
-      devicePolicy: this.policy.mode,
-      ...(session?.stableProviderKey ? { stableProviderKey: session.stableProviderKey } : {}),
+      devicePolicy: (this.sessionPolicy ?? this.policy).mode,
+      ...(session?.residentModelKey ? { residentModelKey: session.residentModelKey } : {}),
       ...(session?.providerIdentity ? { providerIdentity: session.providerIdentity } : {}),
       ...(session?.requestedLoadDevice ? { requestedLoadDevice: session.requestedLoadDevice } : {}),
       ...(session?.device ? { device: session.device } : {}),
@@ -220,31 +288,44 @@ export class ModelSessionLifecycle {
     return this.session;
   }
 
-  private async ensureSession(options: { deadline: number; signal?: AbortSignal }): Promise<ModelSession> {
+  private async ensureSession(options: {
+    deadline: number;
+    signal?: AbortSignal;
+    policy: DeviceLoadPolicy;
+  }): Promise<ModelSession> {
     if (this.session) {
       this.clearIdleUnload();
-      return this.session;
+      if (sessionAdmittedByPolicy(this.session, options.policy)) return this.session;
+      await this.retireResidentSession(this.session);
     }
     const current = this.loadAttempt;
     if (current) {
-      if (!current.aborted) return this.waitForLoadAttempt(current, options.deadline, options.signal);
-      await this.waitForAttemptSettlement(current, options.deadline, options.signal);
+      if (!current.aborted) {
+        const loaded = await this.waitForLoadAttempt(current, options.deadline, options.signal);
+        if (sessionAdmittedByPolicy(loaded, options.policy)) return loaded;
+        await this.retireResidentSession(loaded);
+        this.clearLoadAttempt(current);
+      } else {
+        await this.waitForAttemptSettlement(current, options.deadline, options.signal);
+      }
       if (this.session) {
         this.clearIdleUnload();
-        return this.session;
+        if (sessionAdmittedByPolicy(this.session, options.policy)) return this.session;
+        await this.retireResidentSession(this.session);
       }
     }
 
     const attempt = Attempt.start(
       this.loadAttemptOwner,
       async (signal) => {
-        const selection = await this.pickLoadDevice();
+        const selection = await this.pickLoadDevice(options.policy);
         throwIfLoadAborted(signal);
-        return this.startLoadWithFallback(selection, signal, 'initial');
+        return this.startLoadWithFallback(selection, signal, 'initial', options.policy);
       },
       {
         install: (session) => {
           this.session = session;
+          this.sessionPolicy = options.policy;
         },
         close: (session) => session.close(),
       },
@@ -265,24 +346,25 @@ export class ModelSessionLifecycle {
     selection: LoadDeviceSelection,
     signal: AbortSignal,
     purpose: ModelLoadPurpose,
+    policy: DeviceLoadPolicy,
   ): Promise<ModelSession> {
-    if (selection.device !== 'gpu') return this.startOwnedLoad('cpu', signal, purpose);
+    if (selection.device !== 'gpu') return this.startOwnedLoad('cpu', signal, purpose, policy);
 
     try {
-      const session = await this.startOwnedLoad('gpu', signal, purpose);
-      if (this.policy.mode === 'gpu' && session.device !== 'gpu') {
+      const session = await this.startOwnedLoad('gpu', signal, purpose, policy);
+      if (policy.mode === 'gpu' && session.device !== 'gpu') {
         await session.close();
         throw modelDeviceUnavailableError(new Error('forced GPU load produced a CPU session'));
       }
-      this.noteGpuRequestedLoadResult(session, selection);
+      this.noteGpuRequestedLoadResult(session, selection, policy);
       return session;
     } catch (error) {
       throwIfLoadAborted(signal);
       if (isLifecycleCancellation(error)) throw error;
-      if (this.policy.mode === 'gpu') throw modelDeviceUnavailableError(error);
-      if (this.policy.mode !== 'auto') throw error;
-      this.markGpuUnavailableFromNow();
-      return this.startOwnedLoad('cpu', signal, 'fallback');
+      if (policy.mode === 'gpu') throw modelDeviceUnavailableError(error);
+      if (policy.mode !== 'auto') throw error;
+      this.markGpuUnavailableFromNow(policy);
+      return this.startOwnedLoad('cpu', signal, 'fallback', policy);
     }
   }
 
@@ -290,6 +372,7 @@ export class ModelSessionLifecycle {
     requestedDevice: ModelDevice,
     signal: AbortSignal,
     purpose: ModelLoadPurpose,
+    policy: DeviceLoadPolicy,
   ): Promise<ModelSession> {
     const loadId = `model-load-${this.nextLoadId++}`;
     let terminationPromise: Promise<void> | undefined;
@@ -314,7 +397,7 @@ export class ModelSessionLifecycle {
     }
     signal.addEventListener('abort', terminateOnAbort, { once: true });
     try {
-      return await this.loadSession(requestedDevice, { signal, loadId, purpose });
+      return await this.loadSession(requestedDevice, { signal, loadId, purpose, policy });
     } finally {
       signal.removeEventListener('abort', terminateOnAbort);
       this.activeLoads.delete(loadId);
@@ -322,8 +405,11 @@ export class ModelSessionLifecycle {
     }
   }
 
-  private async promoteCpuSessionIfGpuAvailable(signal: AbortSignal | undefined): Promise<void> {
-    if (this.policy.mode !== 'auto') return;
+  private async promoteCpuSessionIfGpuAvailable(
+    policy: DeviceLoadPolicy,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (policy.mode !== 'auto') return;
     const current = this.session;
     if (!current || current.device !== 'cpu') return;
     if (this.promotionAttempt) {
@@ -332,15 +418,15 @@ export class ModelSessionLifecycle {
       });
       return;
     }
-    const selection = await this.pickLoadDevice();
+    const selection = await this.pickLoadDevice(policy);
     if (selection.device !== 'gpu') return;
 
     const attempt = Attempt.start(
       this.promotionAttemptOwner,
       async (attemptSignal) => {
-        const promoted = await this.startOwnedLoad('gpu', attemptSignal, 'promotion');
+        const promoted = await this.startOwnedLoad('gpu', attemptSignal, 'promotion', policy);
         if (promoted.device !== 'gpu') {
-          this.markGpuUnavailableFromNow();
+          this.markGpuUnavailableFromNow(policy);
           await promoted.close();
           throw new GpuPromotionUnavailableError();
         }
@@ -352,6 +438,7 @@ export class ModelSessionLifecycle {
           if (this.session !== current) throw new AttemptSupersededError();
           await current.close();
           this.session = promoted;
+          this.sessionPolicy = policy;
         },
         close: (session) => session.close(),
       },
@@ -371,43 +458,47 @@ export class ModelSessionLifecycle {
     } catch (error) {
       if (signal?.aborted && errorCode(error) === 'CANCELLED') throw error;
       if (isLifecycleCancellation(error) || error instanceof GpuPromotionUnavailableError) return;
-      this.markGpuUnavailableFromNow();
+      this.markGpuUnavailableFromNow(policy);
     }
   }
 
-  private async pickLoadDevice(): Promise<LoadDeviceSelection> {
-    if (this.policy.mode === 'cpu') return { device: 'cpu' };
-    if (this.policy.mode === 'gpu') return { device: 'gpu' };
+  private async pickLoadDevice(policy: DeviceLoadPolicy): Promise<LoadDeviceSelection> {
+    if (policy.mode === 'cpu') return { device: 'cpu' };
+    if (policy.mode === 'gpu') return { device: 'gpu' };
 
     const nowMs = this.now();
     if (this.gpuUnavailableUntilMs !== undefined && nowMs < this.gpuUnavailableUntilMs) {
       return { device: 'cpu' };
     }
-    const probe = await this.policy.probeVram();
+    const probe = await policy.probeVram();
     const probeEpochMs = probe.atMs ?? nowMs;
     if (probe.fresh !== false) this.clearGpuUnavailable();
-    if (probe.freeBytes >= this.policy.requiredVramBytes * 1.5) {
+    if (probe.freeBytes >= policy.requiredVramBytes * 1.5) {
       return { device: 'gpu', probeEpochMs };
     }
-    this.markGpuUnavailableFromProbe(probeEpochMs);
+    this.markGpuUnavailableFromProbe(policy, probeEpochMs);
     return { device: 'cpu', probeEpochMs };
   }
 
-  private noteGpuRequestedLoadResult(session: ModelSession, _selection: LoadDeviceSelection): void {
+  private noteGpuRequestedLoadResult(
+    session: ModelSession,
+    _selection: LoadDeviceSelection,
+    policy: DeviceLoadPolicy,
+  ): void {
     if (session.device === 'gpu') {
       this.clearGpuUnavailable();
       return;
     }
-    if (this.policy.mode === 'auto') this.markGpuUnavailableFromNow();
+    if (policy.mode === 'auto') this.markGpuUnavailableFromNow(policy);
   }
 
-  private markGpuUnavailableFromProbe(probeEpochMs: number | undefined): void {
-    if (this.policy.mode !== 'auto') return;
+  private markGpuUnavailableFromProbe(policy: DeviceLoadPolicy, probeEpochMs: number | undefined): void {
+    if (policy.mode !== 'auto') return;
     this.gpuUnavailableUntilMs = (probeEpochMs ?? this.now()) + VRAM_PROBE_TTL_MS;
   }
 
-  private markGpuUnavailableFromNow(): void {
-    if (this.policy.mode !== 'auto') return;
+  private markGpuUnavailableFromNow(policy: DeviceLoadPolicy): void {
+    if (policy.mode !== 'auto') return;
     this.gpuUnavailableUntilMs = this.now() + VRAM_PROBE_TTL_MS;
   }
 
@@ -433,8 +524,48 @@ export class ModelSessionLifecycle {
     );
   }
 
-  private isGpuRuntimeDeviceFailure(session: ModelSession, error: unknown): boolean {
-    if (this.policy.mode === 'cpu') return false;
+  private async encodeTokenBudgetBatchWithSession(
+    session: ModelSession,
+    texts: readonly string[],
+    options: {
+      signal?: AbortSignal;
+      origin: ModelEncodeOrigin;
+      maxTokenBudget: number;
+      requestIndexes?: readonly number[];
+      documentIds?: readonly string[];
+    },
+  ): Promise<ModelSessionTokenBudgetBatchResult> {
+    return abortable(
+      (async () => {
+        const inputKind = options.origin === 'query-text' ? 'query' : 'document';
+        if (session.encodeTokenBudgetBatch) {
+          return session.encodeTokenBudgetBatch(texts, {
+            signal: options.signal,
+            inputKind,
+            maxTokenBudget: options.maxTokenBudget,
+            requestIndexes: options.requestIndexes,
+            documentIds: options.documentIds,
+          });
+        }
+        const vectors = await session.encode(texts, { signal: options.signal, inputKind });
+        const requestIndexes = texts.map((_text, index) => options.requestIndexes?.[index] ?? index);
+        return {
+          vectors,
+          consumedCount: vectors.length,
+          requestIndexes,
+          documentIds: requestIndexes.map(
+            (requestIndex, index) => options.documentIds?.[index] ?? String(requestIndex),
+          ),
+          tokenCounts: vectors.map(() => 0),
+        };
+      })(),
+      options.signal,
+      () => undefined,
+    );
+  }
+
+  private isGpuRuntimeDeviceFailure(session: ModelSession, error: unknown, policy: DeviceLoadPolicy): boolean {
+    if (policy.mode === 'cpu') return false;
     if (session.device !== 'gpu' && session.executionProvider !== 'cuda' && session.executionProvider !== 'coreml') {
       return false;
     }
@@ -443,7 +574,29 @@ export class ModelSessionLifecycle {
 
   private async retireResidentSession(session: ModelSession): Promise<void> {
     if (this.session === session) this.session = undefined;
+    if (this.session === undefined) this.sessionPolicy = undefined;
     await Promise.resolve(session.close()).catch(() => undefined);
+  }
+
+  private enterPolicyMode(mode: DeviceLoadPolicy['mode']): () => void {
+    if (this.activePolicyModeCount > 0 && this.activePolicyMode !== mode) {
+      throw Object.assign(new Error('ModelSessionLifecycle received concurrent divergent device policies'), {
+        code: 'INTERNAL',
+      });
+    }
+    this.activePolicyMode = mode;
+    this.activePolicyModeCount += 1;
+    return () => {
+      this.activePolicyModeCount = Math.max(0, this.activePolicyModeCount - 1);
+      if (this.activePolicyModeCount === 0) this.activePolicyMode = undefined;
+    };
+  }
+
+  private clearLoadAttempt(attempt: Attempt<ModelSession>): void {
+    if (this.loadAttempt !== attempt) return;
+    this.loadAttempt = undefined;
+    if (this.loadAttemptOwner.current === attempt) this.loadAttemptOwner.current = undefined;
+    this.refreshLoadingDevice();
   }
 
   private async waitForLoadAttempt(
@@ -610,11 +763,17 @@ function isLifecycleCancellation(error: unknown): boolean {
 function modelSessionFacts(session: ModelSession): ModelSessionFacts {
   return {
     ...(session.providerIdentity ? { providerIdentity: session.providerIdentity } : {}),
-    ...(session.stableProviderKey ? { stableProviderKey: session.stableProviderKey } : {}),
+    ...(session.residentModelKey ? { residentModelKey: session.residentModelKey } : {}),
     requestedLoadDevice: session.requestedLoadDevice,
     device: session.device,
     ...(session.executionProvider ? { executionProvider: session.executionProvider } : {}),
   };
+}
+
+function sessionAdmittedByPolicy(session: ModelSession, policy: DeviceLoadPolicy): boolean {
+  if (policy.mode === 'gpu') return session.device === 'gpu';
+  if (policy.mode === 'cpu') return session.device === 'cpu';
+  return true;
 }
 
 function modelDeviceUnavailableError(error: unknown): Error {

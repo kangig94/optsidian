@@ -96,9 +96,10 @@ There is exactly **one** search daemon process. It is started by the shared daem
 single bind-backed protocol-v4 RPC socket, and serves multiple vaults. The bind is the tenancy commit:
 the daemon writes its record only after `listen()` succeeds, with a monotonic `epoch` and random
 `incarnationId`. The daemon is resident until the no-request idle timer expires. The daemon constructs
-one process-scoped `EmbedScheduler`; that scheduler owns the single embedding worker/model-session lane
-and one `VectorGenerationManager`, while profile runtimes hold leases and own only profile-scoped search
-and analyzer resources. Embedding model sessions have their own idle unload lifecycle inside workers, so
+one process-scoped `EmbedScheduler`; for local ONNX it owns a device-tagged embedding pool with a GPU
+slot and a CPU-fallback slot under the daemon-global `GpuEmbeddingDevice` owner, plus one
+`VectorGenerationManager`. Profile runtimes hold leases and own only profile-scoped search and analyzer
+resources. Embedding model sessions have their own idle unload lifecycle inside workers, so
 zero-footprint-at-rest applies to loaded model sessions rather than to the daemon process. Background
 embed/watch/scheduler activity does not reset the daemon idle timer; idle expiry runs
 `drain("draining")`, which relinquishes the socket and owner record before closing profile,
@@ -153,8 +154,9 @@ The search subsystem spans `src/core/search/*`, `src/daemon/search-store/*`, and
 - **Worker pools and embed scheduling.** Query analyzer workers serve latency-sensitive query
   tokenization; index analyzer workers serve snapshot builds. Search execution runs in a dedicated pool
   with request deadlines and cancellation. Embedding encode/build work goes through the process
-  `EmbedScheduler` lanes `query > save > refresh > rebuild`; document embedding yields at 32-document
-  slices, and query encodes are single-flighted.
+  `EmbedScheduler` lanes `query > save > refresh > rebuild`; document embedding reads 32-document
+  candidate windows, but the worker consumes a token-budgeted prefix of each window as the GPU unit
+  boundary (one dynamic `session.run` when supported), and query encodes are single-flighted.
 - **Idle-ready search leases.** Query sessions lease only ready, idle search-execution slots. Leasing is
   atomic, targeted `runOnSlot` consumes the lease, and busy/leased slots are excluded from later leases.
   Scheduler fairness is single-source: active sessions share idle capacity first, then any otherwise
