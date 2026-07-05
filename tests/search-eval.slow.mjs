@@ -285,6 +285,10 @@ test('search:eval failure report summarizes failure classifications', () => {
 
   const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
   assert.equal(report.schemaVersion, 2);
+  assert.equal(report.retrieval, 'lexical');
+  assert.equal(report.warmup.index.buildTimingSource, 'daemon-progress');
+  assert.equal(Number.isFinite(report.warmup.index.indexBuildMs), true);
+  assert.equal(report.warmup.search, undefined);
   assert.equal(report.failureSummary.total, 3);
   assert.equal(report.failureSummary.byTask.toy.total, 3);
   assert.equal(report.failureSummary.byKind['top1-miss'], 1);

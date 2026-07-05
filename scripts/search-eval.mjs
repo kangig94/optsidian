@@ -33,6 +33,7 @@ const SEARCH_DAEMON_SLO_FIXTURE = Object.freeze({
 });
 const INDEX_BENCHMARK_ACTIONS = new Set(['load', 'rebuild', 'clear', 'clear-load', 'clear-rebuild']);
 const SEARCH_TOKEN_CHANNELS = ['morph', 'surface', 'ngram'];
+const SPEED_MEASUREMENT_REPEAT = 3;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -162,22 +163,29 @@ async function runQualityBenchmark(options) {
 
   const spec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
   if (!Array.isArray(spec.queries)) usage(`Query spec must contain a queries array: ${specPath}`);
-  const repeat = options.repeat ?? 1;
-  const runSearch = await searchRunner(mode, cliPath, vaultRoot, options);
+  const repeat = options.repeat ?? (measureSpeed ? SPEED_MEASUREMENT_REPEAT : 1);
+  const runner = await searchRunner(mode, cliPath, vaultRoot, options);
+  const runSearch = runner.runSearch;
+  const warmup = {
+    index: runner.indexWarmup,
+    search: undefined,
+  };
 
   if (!options.noWarmup && spec.queries.length > 0) {
-    await runSearch({ ...spec.queries[0], limit: 1 });
+    warmup.search = await runSearchWarmup(runSearch, spec.queries[0]);
   }
+
+  printWarmupSummary(warmup, { mode, retrieval });
 
   const runs = [];
   for (let runIndex = 1; runIndex <= repeat; runIndex += 1) {
     const run = await runEvaluation(spec.queries, concurrency, runSearch, options, runIndex);
     runs.push(run);
-    printRunSummary(run, { mode, retrieval, concurrency, repeat, runIndex, measureSpeed });
+    printRunSummary(run, { mode, retrieval, concurrency, repeat, runIndex });
   }
 
   if (repeat > 1) {
-    printRepeatSummary(runs, { mode, retrieval, concurrency, measureSpeed });
+    printRepeatSummary(runs, { mode, retrieval, concurrency });
   }
 
   if (options.failureReport) {
@@ -185,11 +193,13 @@ async function runQualityBenchmark(options) {
       options.failureReport,
       createFailureReport({
         mode,
+        retrieval,
         concurrency,
         measureSpeed,
         repeat,
         specPath,
         vaultRoot,
+        warmup,
         inspectLimit: options.failureInspectLimit ?? 50,
         runs,
       }),
@@ -684,7 +694,7 @@ async function runEvaluation(queryCases, concurrency, runSearch, options, runInd
         recordTaskMetrics(taskMetrics, queryCase, undefined, elapsed);
         failures.push(createFailure({ queryCase, caseIndex, elapsed, error: result.error }));
         if (shouldPrintCase(options, 'FAIL')) {
-          printCase('FAIL', options.measureSpeed ? elapsed : undefined, queryLabel(queryCase), result.error);
+          printCase('FAIL', elapsed, queryLabel(queryCase), result.error);
         }
         progress.finish({ passed, failed });
         return;
@@ -699,23 +709,13 @@ async function runEvaluation(queryCases, concurrency, runSearch, options, runInd
       if (ok) {
         passed += 1;
         if (shouldPrintCase(options, 'OK')) {
-          printCase(
-            'OK',
-            options.measureSpeed ? elapsed : undefined,
-            queryLabel(queryCase),
-            paths.slice(0, 3).join(' | '),
-          );
+          printCase('OK', elapsed, queryLabel(queryCase), paths.slice(0, 3).join(' | '));
         }
       } else {
         failed += 1;
         failures.push(createFailure({ queryCase, caseIndex, elapsed, paths, rank }));
         if (shouldPrintCase(options, 'FAIL')) {
-          printCase(
-            'FAIL',
-            options.measureSpeed ? elapsed : undefined,
-            queryLabel(queryCase),
-            paths.slice(0, 3).join(' | '),
-          );
+          printCase('FAIL', elapsed, queryLabel(queryCase), paths.slice(0, 3).join(' | '));
           const expected = expectedPaths(queryCase).join(', ') || '(no expectation)';
           console.log(`      expected: ${expected}`);
         }
@@ -897,29 +897,49 @@ function parsePositiveInt(raw, name) {
 }
 
 async function searchRunner(mode, cliPath, vaultRoot, options) {
-  if (mode === 'e2e') return (queryCase) => runE2eSearch(cliPath, vaultRoot, queryCase, options);
+  if (mode === 'e2e') {
+    return {
+      runSearch: (queryCase) => runE2eSearch(cliPath, vaultRoot, queryCase, options),
+      indexWarmup: {
+        mode,
+        ok: true,
+        elapsedMs: 0,
+        buildPhases: [],
+        indexBuildMs: 0,
+        lexicalBuildMs: 0,
+        denseBuildMs: 0,
+        preloadMs: 0,
+        buildTimingSource: 'not-applicable',
+        buildTimingResolutionMs: 0,
+      },
+    };
+  }
   try {
     const { createSearchDaemonClient } = await import('../src/daemon/client.ts');
     const client = createSearchDaemonClient({
       binaryPath: cliPath,
       env: searchEvalEnv(options),
     });
-    let pinnedSnapshotId = await loadPinnedSnapshotId(client, vaultRoot, {
+    const indexWarmup = await loadPinnedSnapshot(client, vaultRoot, {
       progress: shouldRenderProgress(options),
       deadlineMs: options.deadlineMs,
     });
-    return async (queryCase) => {
-      try {
-        const payload = await client.search({
-          vault: vaultRoot,
-          ...(pinnedSnapshotId ? { snapshotId: pinnedSnapshotId } : {}),
-          ...coreSearchParams(queryCase, options.retrieval),
-        });
-        if (!pinnedSnapshotId && payload.snapshotId) pinnedSnapshotId = payload.snapshotId;
-        return { ok: true, payload };
-      } catch (error) {
-        return { ok: false, error: error.message };
-      }
+    let pinnedSnapshotId = indexWarmup.snapshotId;
+    return {
+      indexWarmup,
+      runSearch: async (queryCase) => {
+        try {
+          const payload = await client.search({
+            vault: vaultRoot,
+            ...(pinnedSnapshotId ? { snapshotId: pinnedSnapshotId } : {}),
+            ...coreSearchParams(queryCase, options.retrieval),
+          });
+          if (!pinnedSnapshotId && payload.snapshotId) pinnedSnapshotId = payload.snapshotId;
+          return { ok: true, payload };
+        } catch (error) {
+          return { ok: false, error: error.message };
+        }
+      },
     };
   } catch (error) {
     usage(`Core mode failed to prepare the search daemon: ${error.message}`);
@@ -1182,15 +1202,29 @@ function sha256(raw) {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-async function loadPinnedSnapshotId(client, vaultRoot, options = {}) {
-  const loadResult = await withWarmupProgress(client, vaultRoot, options, () =>
-    client.loadVault({
-      vault: vaultRoot,
-      ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
-    }),
+async function loadPinnedSnapshot(client, vaultRoot, options = {}) {
+  const loadPhase = await timedPhase('warmup-load', () =>
+    withWarmupProgress(client, vaultRoot, options, () =>
+      client.loadVault({
+        vault: vaultRoot,
+        ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
+      }),
+    ),
   );
+  if (!loadPhase.ok) throw new Error(loadPhase.error);
+  const loadResult = loadPhase.value;
+  const buildTiming = requireDaemonBuildTiming(loadResult?.buildTiming, 'warmup-load');
   const loadedSnapshotId = payloadSnapshotId(loadResult);
-  if (loadedSnapshotId) return loadedSnapshotId;
+  const warmup = {
+    mode: 'core',
+    ok: true,
+    elapsedMs: loadPhase.elapsedMs,
+    buildPhases: buildTiming.phases,
+    ...indexBuildTimingFields(buildTiming),
+    ...(loadedSnapshotId ? { snapshotId: loadedSnapshotId } : {}),
+  };
+
+  if (loadedSnapshotId) return warmup;
 
   const failed = loadResult?.vaults?.find(
     (vault) => path.resolve(vault.vaultRoot) === path.resolve(vaultRoot) && vault.status === 'failed',
@@ -1206,7 +1240,14 @@ async function loadPinnedSnapshotId(client, vaultRoot, options = {}) {
     const error = vault?.error ? `: ${vault.error}` : '';
     throw new Error(`warm LoadVault did not produce a snapshot${error}`);
   }
-  return vault.snapshotId;
+  return { ...warmup, snapshotId: vault.snapshotId };
+}
+
+async function runSearchWarmup(runSearch, queryCase) {
+  const phase = await timedPhase('warmup-search', () => runSearch({ ...queryCase, limit: 1 }));
+  return phase.ok
+    ? { ok: true, elapsedMs: phase.elapsedMs }
+    : { ok: false, elapsedMs: phase.elapsedMs, error: phase.error };
 }
 
 async function withWarmupProgress(client, vaultRoot, options, run) {
@@ -1525,7 +1566,7 @@ function recordMetrics(metrics, ranking, elapsed) {
   }
 }
 
-function metricsLine(label, metrics, { includeTiming = true } = {}) {
+function metricsLine(label, metrics) {
   const sortedTimings = [...metrics.timings].sort((a, b) => a - b);
   const denominator = metrics.total || 1;
   const parts = [
@@ -1548,14 +1589,34 @@ function metricsLine(label, metrics, { includeTiming = true } = {}) {
       `ndcg@10=${ratio(metrics.ndcg10, qrelDenominator)}`,
     );
   }
-  if (includeTiming) {
-    parts.push(
-      `avg=${average(metrics.timings).toFixed(1)}ms`,
-      `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
-      `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`,
-    );
-  }
+  parts.push(
+    `avg=${average(metrics.timings).toFixed(1)}ms`,
+    `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
+    `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`,
+  );
   return parts.join(' ');
+}
+
+function printWarmupSummary(warmup, context) {
+  const index = warmup.index ?? {};
+  const search = warmup.search;
+  const summary = [
+    `warmup: mode=${context.mode}`,
+    `retrieval=${context.retrieval}`,
+    `indexElapsed=${formatMs(index.elapsedMs)}`,
+    `indexBuild=${formatMs(index.indexBuildMs)}`,
+    `lexical=${formatMs(index.lexicalBuildMs)}`,
+    `dense=${formatMs(index.denseBuildMs)}`,
+    `preload=${formatMs(index.preloadMs)}`,
+    `source=${index.buildTimingSource ?? 'n/a'}`,
+    `search=${search ? (search.ok ? formatMs(search.elapsedMs) : `fail:${search.error}`) : 'skipped'}`,
+    `snapshot=${shortId(index.snapshotId) || 'none'}`,
+  ];
+  console.log(summary.join(' '));
+  if (index.buildPhases?.length) {
+    const phases = index.buildPhases.map((phase) => `${phase.phase}=${phase.elapsedMs.toFixed(0)}ms`).join(' ');
+    console.log(`        build: ${phases}`);
+  }
 }
 
 function printRunSummary(run, context) {
@@ -1566,26 +1627,22 @@ function printRunSummary(run, context) {
     `retrieval=${context.retrieval}`,
     `concurrency=${context.concurrency}`,
     `${run.passed}/${run.total} passed`,
+    `total=${run.elapsedMs.toFixed(1)}ms`,
+    `qps=${queriesPerSecond(run.total, run.elapsedMs)}`,
+    `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
+    `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`,
   ];
-  if (context.measureSpeed) {
-    summary.push(
-      `total=${run.elapsedMs.toFixed(1)}ms`,
-      `qps=${queriesPerSecond(run.total, run.elapsedMs)}`,
-      `p50=${percentile(sortedTimings, 50).toFixed(1)}ms`,
-      `p95=${percentile(sortedTimings, 95).toFixed(1)}ms`,
-    );
-  }
   console.log(summary.join(' '));
-  printPrefixedMetrics('score', run.overallMetrics, prefix, { includeTiming: context.measureSpeed });
+  printPrefixedMetrics('score', run.overallMetrics, prefix);
   if (run.taskMetrics.size > 0) {
     for (const [task, metrics] of [...run.taskMetrics.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-      printPrefixedMetrics(`score.${task}`, metrics, prefix, { includeTiming: context.measureSpeed });
+      printPrefixedMetrics(`score.${task}`, metrics, prefix);
     }
   }
 }
 
-function printPrefixedMetrics(label, metrics, prefix, options) {
-  const line = metricsLine(label, metrics, options);
+function printPrefixedMetrics(label, metrics, prefix) {
+  const line = metricsLine(label, metrics);
   console.log(prefix ? `${prefix}${line}` : line);
 }
 
@@ -1601,14 +1658,10 @@ function printRepeatSummary(runs, context) {
     `top1Median=${median(scoreSummaries.map((score) => score.top1)).toFixed(3)}`,
     `recall@10Median=${median(scoreSummaries.map((score) => score.recall10)).toFixed(3)}`,
     `mrr@10Median=${median(scoreSummaries.map((score) => score.mrr10)).toFixed(3)}`,
+    `avgMedian=${median(scoreSummaries.map((score) => score.avgMs)).toFixed(1)}ms`,
+    `p50Median=${median(scoreSummaries.map((score) => score.p50Ms)).toFixed(1)}ms`,
+    `p95Median=${median(scoreSummaries.map((score) => score.p95Ms)).toFixed(1)}ms`,
   ];
-  if (context.measureSpeed) {
-    summary.push(
-      `avgMedian=${median(scoreSummaries.map((score) => score.avgMs)).toFixed(1)}ms`,
-      `p50Median=${median(scoreSummaries.map((score) => score.p50Ms)).toFixed(1)}ms`,
-      `p95Median=${median(scoreSummaries.map((score) => score.p95Ms)).toFixed(1)}ms`,
-    );
-  }
   console.log(summary.join(' '));
 }
 
@@ -1675,18 +1728,31 @@ function failureExpectationKind(queryCase) {
   return 'none';
 }
 
-function createFailureReport({ mode, concurrency, measureSpeed, repeat, specPath, vaultRoot, inspectLimit, runs }) {
+function createFailureReport({
+  mode,
+  retrieval,
+  concurrency,
+  measureSpeed,
+  repeat,
+  specPath,
+  vaultRoot,
+  warmup,
+  inspectLimit,
+  runs,
+}) {
   const allFailures = runs.flatMap((run) => run.failures);
 
   return {
     schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     mode,
+    retrieval,
     concurrency,
     measureSpeed,
     repeat,
     specPath,
     vaultRoot,
+    warmup: serializeWarmup(warmup),
     inspectLimit,
     repeatSummary: summarizeRuns(runs),
     failureSummary: summarizeFailures(allFailures),
@@ -1705,6 +1771,29 @@ function createFailureReport({ mode, concurrency, measureSpeed, repeat, specPath
       failureSummary: summarizeFailures(run.failures),
       failures: run.failures.map(serializeFailure),
     })),
+  };
+}
+
+function serializeWarmup(warmup) {
+  return {
+    index: warmup.index ? serializeIndexWarmup(warmup.index) : undefined,
+    search: warmup.search ? { ...warmup.search } : undefined,
+  };
+}
+
+function serializeIndexWarmup(warmup) {
+  return {
+    mode: warmup.mode,
+    ok: warmup.ok,
+    elapsedMs: warmup.elapsedMs,
+    indexBuildMs: warmup.indexBuildMs,
+    lexicalBuildMs: warmup.lexicalBuildMs,
+    denseBuildMs: warmup.denseBuildMs,
+    preloadMs: warmup.preloadMs,
+    buildTimingSource: warmup.buildTimingSource,
+    buildTimingResolutionMs: warmup.buildTimingResolutionMs,
+    buildPhases: warmup.buildPhases ?? [],
+    ...(warmup.snapshotId ? { snapshotId: warmup.snapshotId } : {}),
   };
 }
 
@@ -1941,7 +2030,7 @@ function queryLabel(queryCase) {
 
 function shouldPrintCase(options, status) {
   if (options.quiet) return false;
-  if (options.verbose || options.measureSpeed) return true;
+  if (options.verbose) return true;
   return status !== 'OK';
 }
 

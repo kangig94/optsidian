@@ -282,7 +282,11 @@ test('search eval workers option drives daemon worker env without raising defaul
   );
 
   assert.equal(result.status, 0, `search eval failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(result.stdout, /summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed/);
+  assert.match(
+    result.stdout,
+    /summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed total=\d+\.\dms qps=\d+\.\d{3} p50=\d+\.\dms p95=\d+\.\dms/,
+  );
+  assert.match(result.stdout, /score: n=2 .* avg=\d+\.\dms p50=\d+\.\dms p95=\d+\.\dms/);
   const calls = fs
     .readFileSync(logPath, 'utf8')
     .trim()
@@ -295,6 +299,56 @@ test('search eval workers option drives daemon worker env without raising defaul
     assert.equal(call.env.queryWorkers, '1');
     assert.equal(call.env.indexWorkers, '1');
   }
+});
+
+test('search eval speed flag changes default repeat without changing summary shape', () => {
+  const dir = tempRoot();
+  const vault = path.join(dir, 'vault');
+  const specDir = path.join(vault, 'SearchEval');
+  fs.mkdirSync(specDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(specDir, 'queries.json'),
+    JSON.stringify({
+      queries: [
+        { query: 'alpha', expected: 'Expected.md' },
+        { query: 'beta', expected: 'Expected.md' },
+      ],
+    }),
+  );
+  const fakeCli = makeFakeSearchCli(dir);
+  const logPath = path.join(dir, 'search-cli.log');
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      path.join(repoRoot, 'scripts/search-eval.mjs'),
+      vault,
+      '--mode=e2e',
+      `--cli=${fakeCli}`,
+      '--measure-speed',
+      '--ngram=off',
+      '--no-progress',
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, FAKE_SEARCH_CLI_LOG: logPath },
+    },
+  );
+
+  assert.equal(result.status, 0, `search eval failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stdout, /run 1\/3 summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed total=/);
+  assert.match(result.stdout, /run 2\/3 summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed total=/);
+  assert.match(result.stdout, /run 3\/3 summary: mode=e2e retrieval=lexical concurrency=1 2\/2 passed total=/);
+  assert.match(result.stdout, /repeat: runs=3 .* avgMedian=\d+\.\dms p50Median=\d+\.\dms p95Median=\d+\.\dms/);
+  const calls = fs
+    .readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(calls.length, 7);
 });
 
 test('index eval reports the runtime lexical store cache path', async () => {

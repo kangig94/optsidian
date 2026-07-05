@@ -228,13 +228,14 @@ The daemon reports lifecycle progress through `index status` and daemon `Status`
 current phase, completed count, total count when known, and current file. Pass `--no-progress` to
 disable the interactive line. This progress output does not change stdout JSON/text results.
 
-By default, quality evaluation runs queries with concurrency 1 and prints score metrics only. Use
+By default, quality evaluation runs queries with concurrency 1 and prints score and timing metrics. Use
 `--workers=<n>` as the normal daemon worker control: it sets `OPTSIDIAN_SEARCH_WORKERS` and
 `OPTSIDIAN_SEARCH_EXECUTION_WORKERS`, while eval concurrency stays at 1 unless `--concurrency=<n>`
 is passed. Query and index analyzer worker counts stay at 1 unless explicitly overridden, because
-the current analyzer path is not a useful concurrency target. Use `--measure-speed` when measuring
-latency or throughput; without it, CLI summaries do not print total time, QPS, average latency, or
-latency percentiles.
+the current analyzer path is not a useful concurrency target. Quality evaluation always prints the
+warmup/index timing line, query total time, QPS, average latency, and latency percentiles. Use
+`--measure-speed` when comparing latency or throughput; without an explicit `--repeat=<n>`, it runs
+three repeats and prints the same summary shape for each run.
 
 Progress is always rendered to stderr for quality evaluation unless `--no-progress` is explicitly
 passed. This applies to full, sampled, and judged-only fixtures. Warmup/index progress reports the
@@ -244,8 +245,9 @@ TTY output updates one line in place; non-TTY output writes periodic progress li
 evals remain observable in logs.
 
 Use `--repeat=<n>` when comparing latency changes. It reuses the same warm pinned snapshot, runs the
-same spec repeatedly, prints every run, and ends with a median repeat summary. Prefer the median over
-a single run when deciding whether a speed or memory change is real.
+same spec repeatedly, prints every run, and ends with a median repeat summary. `--measure-speed`
+defaults this to 3 when `--repeat` is omitted. Prefer the median over a single run when deciding
+whether a speed or memory change is real.
 
 Use `--failure-report=<path>` when analyzing ranking misses. The report records each failed query,
 expected path, rank within the scored limit, top matches, per-task scores, and a follow-up inspection
@@ -296,9 +298,9 @@ OPTSIDIAN_SEARCH_EXTRA_LANGS=ko npm run search:eval -- /path/to/test_search --mo
 ```
 
 The baseline table should include Top1, Recall@3/5/10, MRR@10, Precision@1/3/5/10, MAP, and
-nDCG@10. Record latency percentiles, total time, and QPS only for explicit `--measure-speed` runs.
-Keep old single-expected fixture numbers out of this file; they are not comparable to qrels-based IR
-results.
+nDCG@10. Record the warmup/index timing, latency percentiles, total time, and QPS from the standard
+summary output. Keep old single-expected fixture numbers out of this file; they are not comparable
+to qrels-based IR results.
 
 ## Worker Pools
 
