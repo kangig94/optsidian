@@ -158,17 +158,23 @@ optsidian cache root.
 ## Dense Search GPU Runtime
 
 Dense semantic search uses ONNX Runtime. On Linux, GPU acceleration requires the
-CUDA 12.x runtime and cuDNN 9 built for CUDA 12. For example:
+CUDA 12.x runtime and cuDNN 9 built for CUDA 12. Install cuDNN from NVIDIA's
+CUDA repository, not the default Ubuntu package set. For Ubuntu 24.04 x86_64:
 
 ```bash
-sudo apt install cudnn9-cuda-12
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get install -y libcudnn9-cuda-12
 sudo ldconfig
 ```
 
-cuDNN 9 must be the cu12 build to match `onnxruntime-node`'s CUDA execution
-provider. If CUDA or that cuDNN build is missing, optsidian falls back
-gracefully to CPU-only dense search. macOS uses the CoreML/Metal execution
-provider and does not require cuDNN.
+`libcudnn9-cuda-12` is the minimal runtime package that provides
+`libcudnn.so.9`. If you also need headers or development symlinks, install
+`libcudnn9-dev-cuda-12`. cuDNN 9 must be the cu12 build to match
+`onnxruntime-node`'s CUDA execution provider. If CUDA or that cuDNN build is
+missing, optsidian falls back gracefully to CPU-only dense search. macOS uses
+the CoreML/Metal execution provider and does not require cuDNN.
 
 ## Native Commands And Plugins
 
